@@ -4,6 +4,10 @@
 # crates/eryx-runtime/ (python, javascript and shell), "custom" uses pre-built
 # .cwasm files. In CI, use RUNTIME_SOURCE=custom with the build-runtime-* artifacts.
 ARG RUNTIME_SOURCE=default
+# The guest languages to build in, comma-separated. Python is always
+# included; with only `python` the image is Python-only, without the
+# JavaScript and shell runtimes or their code.
+ARG ERYX_LANGUAGES=python,javascript,shell
 
 # ---------- Stage 1: Precompile WASM runtime (only when RUNTIME_SOURCE=default) ----------
 FROM rust:1.100-bookworm AS precompile
@@ -58,9 +62,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --no-verify
 
 # The JavaScript and shell runtimes have no preinit.
+ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=/build/target \
-  for lang in javascript shell; do \
+  for lang in $(echo "$ERYX_LANGUAGES" | tr , ' '); do \
+  [ "$lang" = python ] && continue; \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   "crates/eryx-runtime/runtime-$lang.wasm" \
@@ -75,12 +81,10 @@ FROM precompile AS runtime-default
 
 # Runtime provider: custom (from build context file)
 FROM scratch AS runtime-custom
+# The JavaScript and shell runtimes come with the source copy below, from
+# crates/eryx-runtime/runtime-{javascript,shell}.cwasm in the build context.
 ARG RUNTIME_CWASM=runtime-python.cwasm
-ARG RUNTIME_CWASM_JAVASCRIPT=crates/eryx-runtime/runtime-javascript.cwasm
-ARG RUNTIME_CWASM_SHELL=crates/eryx-runtime/runtime-shell.cwasm
 COPY ${RUNTIME_CWASM} /build/crates/eryx-runtime/runtime-python.cwasm
-COPY ${RUNTIME_CWASM_JAVASCRIPT} /build/crates/eryx-runtime/runtime-javascript.cwasm
-COPY ${RUNTIME_CWASM_SHELL} /build/crates/eryx-runtime/runtime-shell.cwasm
 
 # Select runtime based on RUNTIME_SOURCE arg
 FROM runtime-${RUNTIME_SOURCE} AS runtime
@@ -100,17 +104,20 @@ COPY . .
 
 # Copy the runtimes from the selected runtime stage AFTER the source copy so
 # they aren't overwritten by any that exist in the source tree.
-COPY --from=runtime /build/crates/eryx-runtime/runtime-python.cwasm crates/eryx-runtime/runtime-python.cwasm
-COPY --from=runtime /build/crates/eryx-runtime/runtime-javascript.cwasm crates/eryx-runtime/runtime-javascript.cwasm
-COPY --from=runtime /build/crates/eryx-runtime/runtime-shell.cwasm crates/eryx-runtime/runtime-shell.cwasm
+COPY --from=runtime /build/crates/eryx-runtime/runtime-*.cwasm crates/eryx-runtime/
 
 # Build the server with preinit support using BuildKit cache mounts.
 # - cargo registry cache: avoids re-downloading crates
 # - target dir cache: enables incremental compilation across builds
 # We copy the final binary out of the cache mount since it disappears after RUN.
+# Only the languages in ERYX_LANGUAGES are compiled in (cargo features
+# `javascript` and `shell`), so a Python-only image embeds no other runtime.
+ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,target=/build/target \
-  cargo build --release -p eryx-server --features eryx/embedded,eryx/preinit \
+  features=$(echo "$ERYX_LANGUAGES" | tr , '\n' | grep -v '^python$' | sed 's|^|eryx-server/|' | paste -sd, -) \
+  && cargo build --release -p eryx-server --no-default-features \
+  --features "eryx/embedded,eryx/preinit${features:+,$features}" \
   && cp target/release/eryx-server /usr/local/bin/eryx-server
 
 # ---------- Stage 3: Runtime image ----------

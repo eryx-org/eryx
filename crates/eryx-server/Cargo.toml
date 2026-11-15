@@ -9,10 +9,17 @@ authors.workspace = true
 description = "gRPC server for sandboxed Python execution via eryx"
 publish = false
 
+[features]
+default = ["javascript", "shell"]
+# Serve the JavaScript and shell guests, embedding their runtimes. Without
+# them the server is Python-only: smaller, and with no JS/shell runtime code.
+javascript = ["eryx/javascript"]
+shell = ["eryx/shell"]
+
 [dependencies]
 clap = { workspace = true } #unified
 dashmap.workspace = true
-eryx = { workspace = true, features = ["embedded", "javascript", "shell", "unstable-vfs", "unstable-internals"] }
+eryx = { workspace = true, features = ["embedded", "unstable-vfs", "unstable-internals"] }
 hex.workspace = true
 hmac.workspace = true
 metrics.workspace = true

@@ -1661,6 +1661,52 @@ jobs:
   # Build Docker image for the gRPC server.
   # Uses the pre-built runtime-python.cwasm from build-runtime-python to skip the
   # expensive WASM precompilation step inside Docker. Only pushes on main.
+  # The Python-only server image (ERYX_LANGUAGES=python): built, never
+  # pushed, to check it still builds and to report its size, which should
+  # match the image before the JavaScript and shell guests.
+  docker-python-only:
+    name: Docker (Python only)
+    runs-on: ubuntu-latest
+    needs: [changes, build-runtime-python]
+    if: >-
+      github.event.pull_request.head.repo.fork != true
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.server == 'true')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Prepare runtime-python.cwasm for Docker build context
+        run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: crates/eryx-server/Dockerfile
+          build-args: |
+            RUNTIME_SOURCE=custom
+            RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
+            ERYX_LANGUAGES=python
+          push: false
+          load: true
+          tags: eryx-server:python-only
+
+      - name: Report image size
+        run: |
+          size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
+          echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+
   docker:
     name: Docker
     runs-on: ubuntu-latest

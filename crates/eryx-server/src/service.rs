@@ -170,6 +170,21 @@ impl ServerLimits {
 /// Default for how long a signed callback journal can be replayed (7 days).
 pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Why a request for `language`, which has no pool, is rejected.
+fn unserved_language(language: eryx::Language) -> String {
+    let feature = match language {
+        eryx::Language::JavaScript if !cfg!(feature = "javascript") => Some("javascript"),
+        eryx::Language::Shell if !cfg!(feature = "shell") => Some("shell"),
+        _ => None,
+    };
+    match feature {
+        Some(feature) => format!(
+            "this server was built without {language} support (the `{feature}` cargo feature)"
+        ),
+        None => format!("this server doesn't serve {language} (see --languages)"),
+    }
+}
+
 /// Creates a language's sandbox pool on its first request.
 pub type PoolFactory = Arc<
     dyn Fn() -> futures::future::BoxFuture<'static, Result<Arc<SandboxPool>, eryx::PoolError>>
@@ -353,9 +368,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let pool = self
             .pools
             .get(&language)
-            .ok_or_else(|| {
-                Status::invalid_argument(format!("this server doesn't serve {language}"))
-            })?
+            .ok_or_else(|| Status::invalid_argument(unserved_language(language)))?
             .get()
             .await
             .map_err(|e| {

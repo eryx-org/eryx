@@ -61,6 +61,15 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   than it did. Pass `--languages python` to reject the others.
   `--runtime-cwasm` and `--stdlib` still configure Python only.
 - The pool metrics (`eryx_sandbox_pool_*`) have a `language` label.
+- Cargo features `javascript` and `shell` (on by default). Built without
+  them, the server has no JavaScript or shell code or runtimes, and a request
+  for one gets `INVALID_ARGUMENT` naming the missing feature.
+- The Dockerfile takes `--build-arg ERYX_LANGUAGES=python,javascript,shell`
+  (the default). `ERYX_LANGUAGES=python` builds a Python-only image the size
+  of the previous release's: 170,232,862 bytes against 170,212,172 for
+  `sd2k/eryx-server:0.15.0`, of which this change adds 2,832. The
+  all-languages image is 193,330,478 bytes (the JavaScript and shell
+  runtimes add about 23 MB).
 - `EryxService::with_pool(language, pool)` and
   `with_lazy_pool(language, factory)` add a pool; `EryxService::new` and
   `with_signer` take the Python pool as before.

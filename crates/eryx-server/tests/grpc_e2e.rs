@@ -158,8 +158,26 @@ async fn execute_in(
     panic!("never received ExecuteResult");
 }
 
+/// A server built without the `javascript` feature rejects JavaScript,
+/// naming the feature.
+#[cfg(not(feature = "javascript"))]
+#[tokio::test]
+async fn a_server_without_javascript_rejects_it() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let status = execute_in(start_server().await, Language::Javascript, "1")
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("`javascript` cargo feature"),
+        "{status:?}"
+    );
+}
+
 /// A request picks its pool by language, created on first use; a language
 /// without one is rejected.
+#[cfg(feature = "javascript")]
 #[tokio::test]
 async fn execute_selects_the_language_pool() {
     use eryx_server::proto::eryx::v1::Language;

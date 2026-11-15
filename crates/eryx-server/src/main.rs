@@ -214,6 +214,28 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
 
 /// Spawn a background task that periodically evicts idle sandboxes and
 /// records pool gauge metrics.
+/// Build the sandbox pool for a language other than Python, from its
+/// embedded runtime.
+async fn create_language_pool(
+    language: eryx::Language,
+    config: PoolConfig,
+) -> Result<SandboxPool, eryx::PoolError> {
+    match language {
+        #[cfg(feature = "javascript")]
+        eryx::Language::JavaScript => {
+            SandboxPool::new(Sandbox::embedded().javascript(), config).await
+        }
+        #[cfg(feature = "shell")]
+        eryx::Language::Shell => SandboxPool::new(Sandbox::embedded().shell(), config).await,
+        other => {
+            let _ = config;
+            Err(eryx::PoolError::Creation(format!(
+                "this server has no {other} runtime"
+            )))
+        }
+    }
+}
+
 fn spawn_pool_maintenance(language: eryx::Language, pool: Arc<SandboxPool>) {
     tokio::spawn(async move {
         let language = language.as_str();
@@ -391,7 +413,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut lazy_pools = Vec::new();
     for &language in &args.languages {
-        if language == eryx::Language::Python {
+        let built_in = match language {
+            eryx::Language::Python => continue,
+            eryx::Language::JavaScript => cfg!(feature = "javascript"),
+            eryx::Language::Shell => cfg!(feature = "shell"),
+            _ => false,
+        };
+        if !built_in {
+            tracing::info!(%language, "not serving {language}: built without its cargo feature");
             continue;
         }
         let config = pool_config.clone();
@@ -399,19 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = config.clone();
             Box::pin(async move {
                 tracing::info!(%language, "creating sandbox pool on first request");
-                let pool = match language {
-                    eryx::Language::JavaScript => {
-                        SandboxPool::new(Sandbox::embedded().javascript(), config).await?
-                    }
-                    eryx::Language::Shell => {
-                        SandboxPool::new(Sandbox::embedded().shell(), config).await?
-                    }
-                    other => {
-                        return Err(eryx::PoolError::Creation(format!(
-                            "unsupported language {other}"
-                        )));
-                    }
-                };
+                let pool = create_language_pool(language, config).await?;
                 let pool = Arc::new(pool);
                 spawn_pool_maintenance(language, Arc::clone(&pool));
                 Ok(pool)
