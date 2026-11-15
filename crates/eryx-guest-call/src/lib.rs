@@ -1,8 +1,15 @@
-//! The wit-dylib value stack.
+//! The wit-dylib value stack shared by the eryx guest runtimes.
 //!
-//! Copied verbatim from `eryx-guest-python` (the CPython guest). It only
-//! marshals WIT values and knows nothing about the embedded language, so a
-//! production JS guest should lift it into a crate shared by both guests.
+//! wit-dylib lowers and lifts WIT values through a [`Call`] context: it pushes
+//! the arguments of an export (or the results of an import) and pops what the
+//! guest returns. [`EryxCall`] implements that with a stack of [`Value`]s. It
+//! only marshals WIT values and knows nothing about the embedded language, so
+//! the CPython guest (`eryx-guest-python`) and the QuickJS guest
+//! (`eryx-guest-js`) share it.
+//!
+//! Records are pushed as one [`Value::Record`] with their fields in definition
+//! order. A field of type `option<T>` is an [`Value::OptionDiscriminant`]
+//! followed, when it is `some`, by the payload.
 
 use std::alloc::Layout;
 use wit_dylib_ffi::{
@@ -10,12 +17,12 @@ use wit_dylib_ffi::{
     WitResult,
 };
 
-/// Our call context - holds a stack for passing values between wit-dylib and our code.
+/// The call context: a stack for passing values between wit-dylib and a guest.
 #[derive(Debug)]
 pub struct EryxCall {
     /// Stack of values being passed.
     /// For simplicity, we use a `Vec<Value>` where `Value` is an enum of possible types.
-    pub(crate) stack: Vec<Value>,
+    pub stack: Vec<Value>,
     /// Deferred deallocations
     deferred: Vec<(*mut u8, Layout)>,
     /// Iterators for list iteration via pop_list/pop_list_iter_next/pop_list_iter.
@@ -24,20 +31,35 @@ pub struct EryxCall {
 
 /// A value on the call stack.
 #[derive(Debug, Clone)]
-pub(crate) enum Value {
+pub enum Value {
+    /// A `bool`.
     Bool(bool),
+    /// A `u8`.
     U8(u8),
+    /// A `u16`.
     U16(u16),
+    /// A `u32`. Also how enums, flags, variant discriminants and resource
+    /// handles travel.
     U32(u32),
+    /// A `u64`.
     U64(u64),
+    /// An `s8`.
     S8(i8),
+    /// An `s16`.
     S16(i16),
+    /// An `s32`.
     S32(i32),
+    /// An `s64`.
     S64(i64),
+    /// An `f32`.
     F32(f32),
+    /// An `f64`.
     F64(f64),
+    /// A `char`.
     Char(char),
+    /// A `string`.
     String(String),
+    /// A `list<u8>`, lowered and lifted without copying element by element.
     Bytes(Vec<u8>),
     /// A record with its fields collected in definition order.
     Record(Vec<Value>),
@@ -52,7 +74,9 @@ pub(crate) enum Value {
 }
 
 impl EryxCall {
-    pub(crate) fn new() -> Self {
+    /// An empty call context.
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             stack: Vec::new(),
             deferred: Vec::new(),
@@ -444,7 +468,9 @@ impl Call for EryxCall {
 
     fn list_append(&mut self, _ty: List) {
         // Pop the element and append to the list being built.
-        let elem = self.stack.pop().expect("list_append: missing element");
+        let Some(elem) = self.stack.pop() else {
+            panic!("list_append: missing element");
+        };
         match self.stack.last_mut() {
             Some(Value::Bytes(bytes)) => {
                 if let Value::U8(b) = elem {
@@ -460,5 +486,11 @@ impl Call for EryxCall {
                 panic!("list_append: expected Bytes or GenericList at stack top, got {other:?}")
             }
         }
+    }
+}
+
+impl Default for EryxCall {
+    fn default() -> Self {
+        Self::new()
     }
 }

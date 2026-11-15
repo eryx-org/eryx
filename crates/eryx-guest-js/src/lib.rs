@@ -1,19 +1,24 @@
-//! Eryx WASM guest runtime — QuickJS edition (SPIKE).
+//! The eryx JavaScript guest runtime.
 //!
-//! A second implementation of the eryx `sandbox` world, running JavaScript on
-//! QuickJS (quickjs-ng, via `rquickjs`) instead of CPython. It links into a
-//! component exactly like `eryx-guest-python` does, so the unmodified eryx host
-//! can run it; see `BUILD_ERYX_JS_RUNTIME` in `eryx-runtime/build.rs`.
+//! An implementation of the eryx `sandbox` world that runs JavaScript on
+//! QuickJS (quickjs-ng, via `rquickjs`). It links into a component the same
+//! way `eryx-guest-python` does, with the same value stack
+//! (`eryx-guest-call`), and runs through the same host; see
+//! `BUILD_ERYX_JS_RUNTIME` in `eryx-runtime/build.rs` and
+//! `mise run build-runtime-javascript`.
 //!
 //! JS surface:
 //! - `await invoke(name, args)` and one global function per host callback
 //!   (`await get_time()`, `await http.get({url})`), plus `listCallbacks()`.
 //! - `console.log/info/debug` (stdout) and `console.error/warn` (stderr).
-//! - Top-level `await`; top-level declarations persist across executes.
+//! - Top-level `await`; top-level declarations persist across a session's
+//!   executes. Declaring a `let`/`const` again in a later execute throws a
+//!   `SyntaxError`, as in Node's REPL; `var` and plain assignment can repeat.
 //! - The result variable (default `result`) is JSON-serialized and consumed.
 //!
-//! Not implemented: `snapshot-state`/`restore-state`, tracing, networking,
-//! task cancellation, preinit.
+//! Not implemented yet: `snapshot-state`/`restore-state` (#823), trace events
+//! (#824), networking (#825), preinit (#826), and subtask cancellation, which
+//! the host does by interrupting the guest instead.
 
 #![allow(unsafe_code)]
 // Same convention as the CPython guest: a broken invariant in FFI glue is a
@@ -21,13 +26,12 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
-mod call;
 mod js;
 mod wit;
 
 use wit_dylib_ffi::{ExportFunction, Interpreter, Resource, Wit};
 
-use crate::call::{EryxCall, Value};
+use eryx_guest_call::{EryxCall, Value};
 
 /// Export function indices (must match the order in runtime.wit).
 const EXPORT_EXECUTE: usize = 0;

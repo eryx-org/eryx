@@ -31,10 +31,34 @@
         warn: line(1),
     };
 
-    // `await invoke("name", {arg: 1})` — the JS analog of Python's
-    // `await invoke("name", arg=1)`. Resolves to the parsed JSON result.
-    globalThis.invoke = async (name, args = {}) => {
-        const json = await native.invoke(String(name), JSON.stringify(args));
+    // A call's arguments as the JSON object the host takes. A single plain
+    // object is keyword arguments: `add({a: 1, b: 2})`, like Python's
+    // `add(a=1, b=2)`. Anything else is positional, `add(1, 2)`, sent under
+    // POSITIONAL for the host to bind to the callback's schema in order, as
+    // the Python guest does itself (see `POSITIONAL_ARGS_KEY` in eryx).
+    const POSITIONAL = '__eryx_args__';
+    const isPlainObject = (v) =>
+        v !== null &&
+        typeof v === 'object' &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(v));
+    const callArgs = (name, args) => {
+        if (args.length === 1 && isPlainObject(args[0])) {
+            if (Object.hasOwn(args[0], POSITIONAL)) {
+                throw new TypeError(
+                    `${name}() got the keyword argument '${POSITIONAL}', which is reserved for positional arguments`,
+                );
+            }
+            return args[0];
+        }
+        return args.length === 0 ? {} : { [POSITIONAL]: args };
+    };
+
+    // `await invoke("name", {arg: 1})` (or `invoke("name", 1, 2)`) — the JS
+    // analog of Python's `await invoke("name", arg=1)`. Resolves to the parsed
+    // JSON result.
+    globalThis.invoke = async (name, ...args) => {
+        const payload = JSON.stringify(callArgs(String(name), args));
+        const json = await native.invoke(String(name), payload);
         return json === '' ? null : JSON.parse(json);
     };
 
@@ -62,7 +86,7 @@
             for (const part of parts.slice(0, -1)) {
                 target = target[part] ??= {};
             }
-            target[parts[parts.length - 1]] = (args = {}) => globalThis.invoke(name, args);
+            target[parts[parts.length - 1]] = (...args) => globalThis.invoke(name, ...args);
         }
     };
 

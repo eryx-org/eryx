@@ -167,6 +167,27 @@ def search_users(
 
 <!-- langtabs-end -->
 
+## Positional Arguments
+
+Sandboxed code can pass a callback's arguments by name or by position. Positional
+arguments bind to the callback's parameters in the order of its schema's
+`properties` (the order `list_callbacks()` shows), the way a Python function
+binds them:
+
+- In Python, `await add(1, 2)` and `await add(a=1, b=2)` are the same call.
+- In JavaScript, a single plain object is keyword arguments, `await add({a: 1, b: 2})`,
+  and anything else is positional, `await add(1, 2)`. The two can't be mixed.
+- The shell guest follows the same rule once #808 lands: `add 1 2` is positional.
+
+More positional arguments than parameters, or one that is also passed by name,
+fail the call without running the callback: `add() takes 2 positional arguments
+but 3 were given`, `add() got multiple values for argument 'a'`.
+
+The Python guest binds positional arguments itself. The other guests send them
+to the host under the reserved key `__eryx_args__` (`eryx::POSITIONAL_ARGS_KEY`),
+and the host binds them with the same rules. A prefix callback (`a.b.*`) gets
+its positional arguments unbound instead (see `PrefixCallback`).
+
 ## Error Handling
 
 Return errors to indicate failures to the sandbox.

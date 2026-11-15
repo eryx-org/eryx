@@ -433,6 +433,8 @@ sources = [
   "crates/eryx-guest-python/src/**/*.rs",
   "crates/eryx-guest-python/clock_stubs.c",
   "crates/eryx-guest-python/Cargo.toml",
+  "crates/eryx-guest-call/src/**/*.rs",
+  "crates/eryx-guest-call/Cargo.toml",
   "crates/wit-dylib-ffi/src/**/*.rs",
   "crates/wit-dylib-ffi/Cargo.toml",
   "crates/eryx-runtime/wit/**/*.wit",
@@ -449,6 +451,8 @@ BUILD_ERYX_JS_RUNTIME=1 cargo build --package eryx-runtime --release
 sources = [
   "crates/eryx-guest-js/src/**/*",
   "crates/eryx-guest-js/Cargo.toml",
+  "crates/eryx-guest-call/src/**/*.rs",
+  "crates/eryx-guest-call/Cargo.toml",
   "crates/eryx-guest-python/clock_stubs.c",
   "crates/wit-dylib-ffi/src/**/*.rs",
   "crates/wit-dylib-ffi/Cargo.toml",

@@ -1,13 +1,14 @@
 //! Component Model intrinsics and the host imports the JS guest uses.
 //!
 //! Same imports and marshalling as the CPython guest (`eryx-guest-python`),
-//! minus tracing and networking, which the spike doesn't expose to JS.
+//! minus tracing and networking, which the JS guest doesn't expose yet (#824,
+//! #825).
 
 use std::cell::Cell;
 
 use wit_dylib_ffi::Wit;
 
-use crate::call::{EryxCall, Value};
+use eryx_guest_call::{EryxCall, Value};
 
 #[link(wasm_import_module = "$root")]
 unsafe extern "C" {
