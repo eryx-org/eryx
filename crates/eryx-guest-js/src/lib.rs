@@ -25,7 +25,8 @@
 //!
 //! - `snapshot-state` serializes the session's top-level variables (global
 //!   properties and `let`/`const` bindings) with QuickJS's `JS_WriteObject`;
-//!   ones it can't serialize (functions, classes, promises) are skipped by
+//!   ones it can't serialize (functions, classes, promises, and values
+//!   holding a class instance, which would lose their class) are skipped by
 //!   name. See `js::snapshot_state`.
 //!
 //! - Trace events: every callback call reports `callback_start` (with its

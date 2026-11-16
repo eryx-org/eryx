@@ -135,10 +135,26 @@ export const types = {
 };
 
 export const isArray = Array.isArray;
+// Plain objects, arrays, Dates, RegExps, Maps, Sets and typed arrays.
+// Map keys and Set members match by identity (SameValueZero), not deeply.
 export const isDeepStrictEqual = (a, b) => {
     if (Object.is(a, b)) return true;
     if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
     if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+    if (a instanceof Date) return Object.is(a.getTime(), b.getTime());
+    if (a instanceof RegExp) return String(a) === String(b) && a.lastIndex === b.lastIndex;
+    if (a instanceof Map) {
+        if (a.size !== b.size) return false;
+        for (const [key, value] of a) {
+            if (!b.has(key) || !isDeepStrictEqual(value, b.get(key))) return false;
+        }
+    } else if (a instanceof Set) {
+        if (a.size !== b.size) return false;
+        for (const value of a) if (!b.has(value)) return false;
+    } else if (ArrayBuffer.isView(a) && !(a instanceof DataView)) {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
+    }
     const keys = Object.keys(a);
     return (
         keys.length === Object.keys(b).length &&

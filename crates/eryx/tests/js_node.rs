@@ -62,11 +62,26 @@ async fn text_encoder_and_decoder() {
         const decoder = new TextDecoder();
         console.log(decoder.decode(bytes.slice(0, 2), { stream: true }) + decoder.decode(bytes.slice(2)));
         console.log(new TextDecoder().decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x61])));
+        // Lone surrogates encode as U+FFFD.
+        console.log(new TextEncoder().encode('a\uD800b').join(), new TextEncoder().encode('🌍'.slice(0, 1)).join());
+        // encodeInto stops before a sequence that doesn't fit whole.
+        const into = new Uint8Array(4);
+        console.log(JSON.stringify(new TextEncoder().encodeInto('abc€', into)), into.join());
+        console.log(JSON.stringify(new TextEncoder().encodeInto('a\uD800', new Uint8Array(8))));
+        // Only the stream's first bytes can be a BOM, even a BOM-only chunk.
+        const bom = new TextDecoder();
+        const twice = bom.decode(new Uint8Array([0xef, 0xbb, 0xbf]), { stream: true }) + bom.decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x62]));
+        console.log(twice.length, twice.charCodeAt(0));
         try { new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([0xff])); } catch (e) { console.log(e.name); }
         try { new TextDecoder('latin1'); } catch (e) { console.log(e.name); }
         ")
     .await;
-    assert_eq!(out, "11 héllo 🌍\nhéllo 🌍\na\nTypeError\nRangeError\n");
+    assert_eq!(
+        out,
+        "11 héllo 🌍\nhéllo 🌍\na\n97,239,191,189,98 239,191,189\n\
+         {\"read\":3,\"written\":3} 97,98,99,0\n{\"read\":2,\"written\":4}\n\
+         2 65279\nTypeError\nRangeError\n"
+    );
 }
 
 #[tokio::test]
@@ -112,6 +127,12 @@ async fn util_and_crypto_modules() {
         function Base() {} Base.prototype.hi = () => 'hi';
         function Child() {} util.inherits(Child, Base);
         console.log(new Child().hi(), util.types.isPromise(Promise.resolve()), util.isDeepStrictEqual({ a: [1] }, { a: [1] }));
+        const same = (a, b) => util.isDeepStrictEqual(a, b);
+        console.log(
+            same(new Date(1), new Date(2)), same(new Map([[1, 'a']]), new Map([[1, 'b']])),
+            same(new Set([1]), new Set([2])), same(/a/g, /a/i), same(new Uint8Array([1]), new Uint8Array([2])),
+            same(new Map([[1, { x: 1 }]]), new Map([[1, { x: 1 }]])), same(new Date(1), new Date(1)),
+        );
         const bytes = randomBytes(70000);
         console.log(bytes.length, Buffer.isBuffer(bytes), randomInt(5, 6));
         try { createHash('sha256'); } catch (e) { console.log(e.message); }
@@ -119,7 +140,8 @@ async fn util_and_crypto_modules() {
     .await;
     assert_eq!(
         out,
-        "n=42 {\"a\":[1]} { a: 'x', b: [ 1, { c: null } ] }\n42\nhi true true\n70000 true 5\n\
+        "n=42 {\"a\":[1]} { a: 'x', b: [ 1, { c: null } ] }\n42\nhi true true\n\
+         false false false false false true true\n70000 true 5\n\
          crypto.createHash isn't available in eryx yet (only random values are)\n"
     );
 }
@@ -158,6 +180,23 @@ async fn snapshots_keep_builtin_imports() {
         .unwrap();
     let snapshot = session.snapshot_state().await.unwrap();
     assert_eq!(snapshot.skipped(), &[] as &[String]);
+
+    // Class instances would come back as plain objects, so they're skipped
+    // (and named) instead; plain data around Dates and Maps is kept.
+    let mut classes = SessionExecutor::new(executor.clone(), &[]).await.unwrap();
+    classes
+        .execute(
+            "import { Buffer } from 'node:buffer'\n\
+             var bytes = Buffer.from('x'), bus = new Bus(), decoder = new TextDecoder()\n\
+             var nested = { list: [bytes] }, plain = { when: new Date(0), map: new Map([[1, [2]]]) }\n\
+             function Bus() {}",
+        )
+        .run()
+        .await
+        .unwrap();
+    let mut skipped = classes.snapshot_state().await.unwrap().skipped().to_vec();
+    skipped.sort();
+    assert_eq!(skipped, ["Bus", "bus", "bytes", "decoder", "nested"]);
 
     let mut restored = SessionExecutor::new(executor, &[]).await.unwrap();
     restored.restore_state(&snapshot).await.unwrap();

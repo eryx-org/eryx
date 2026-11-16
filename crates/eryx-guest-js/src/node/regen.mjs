@@ -23,6 +23,7 @@ const builtins = {
 };
 
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+const ESBUILD = '0.28.2';
 
 const licenceFile = (pkg) => {
     const dir = join(modulesDir, pkg);
@@ -33,9 +34,11 @@ const licenceFile = (pkg) => {
 
 const versions = [];
 for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
-    const code = execFileSync(
-        'esbuild',
+    let code = execFileSync(
+        'npx',
         [
+            '--yes',
+            `esbuild@${ESBUILD}`,
             join(modulesDir, entry),
             '--bundle',
             '--format=iife',
@@ -47,6 +50,15 @@ for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
         ],
         { encoding: 'utf8' },
     );
+    // An external built-in is a `node:` import, not a call to the global
+    // `require`, which an environment's own package of that name would win.
+    const imports = external.map((name) => {
+        const calls = code.match(new RegExp(`[A-Za-z_$][\\w$]*\\("${name}"\\)`, 'g')) ?? [];
+        if (calls.length !== 1) throw new Error(`expected one require("${name}"), found ${calls.length}`);
+        const local = `__node_${name}`;
+        code = code.replace(calls[0], local);
+        return `import ${local} from "node:${name}";`;
+    });
     // Named exports, so a static `import { Buffer } from "node:buffer"` (as
     // bundled environment modules have) links.
     const names = Object.keys(require(join(modulesDir, entry))).filter(
@@ -62,6 +74,7 @@ for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
     });
     const out = [
         `/*! node:${name}, vendored by regen.sh. It contains:\n\n${notices.join('\n\n---\n\n')}\n*/`,
+        ...imports,
         code.trim(),
         'export default __m;',
         names.length > 0 ? `export const { ${names.join(', ')} } = __m;` : '',

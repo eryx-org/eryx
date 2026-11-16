@@ -16,7 +16,7 @@ their packages' full licences in a comment at the top of the module.
 
 - `licenses/`: each vendored package's licence file, from its npm tarball.
 - `regen.sh` (with `regen.mjs`) installs the pinned versions above and
-  rebuilds the vendored modules with esbuild (0.28.2 when last run): each
+  rebuilds the vendored modules with esbuild 0.28.2 (pinned in `regen.mjs`): each
   package bundled into one minified ES module, with named exports so static
   imports link, and its licences in front. Needs the npm registry and node.
 

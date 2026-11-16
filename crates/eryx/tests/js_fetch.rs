@@ -204,6 +204,9 @@ async fn post_body_chunked_response_and_redirects() {
         console.log(sent.startsWith('POST /echo HTTP/1.1\r\n'), sent.includes('x-custom: yes'),
             sent.includes('content-type: text/plain;charset=UTF-8'), sent.endsWith('{"n":1}'));
         console.log(await (await fetch('https://api.test/chunked')).text());
+        // A lone surrogate is sent as U+FFFD, not refused.
+        const lone = await (await fetch('https://api.test/echo', { method: 'POST', body: 'a\uD800b' })).text();
+        console.log(lone.endsWith('a\uFFFDb'));
         const followed = await fetch('https://api.test/redirect');
         console.log(followed.status, followed.redirected, followed.url);
         const manual = await fetch('https://api.test/redirect', { redirect: 'manual' });
@@ -222,6 +225,7 @@ async fn post_body_chunked_response_and_redirects() {
         out,
         "true true true true\n\
          chunk-ed!!\n\
+         true\n\
          200 true https://api.test/json\n\
          302 /json\n\
          GET /echo HTTP/1.1\n\

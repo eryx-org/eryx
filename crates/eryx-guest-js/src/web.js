@@ -21,20 +21,24 @@
         get encoding() {
             return 'utf-8';
         }
+        // Lone surrogates become U+FFFD, as the spec's USVString conversion
+        // does (the native side only takes well-formed strings).
         encode(input = '') {
-            return new Uint8Array(native.encodeUtf8(String(input)));
+            return new Uint8Array(native.encodeUtf8(String(input).toWellFormed()));
         }
         encodeInto(source, destination) {
-            let read = 0;
-            let written = 0;
-            for (const char of String(source)) {
-                const bytes = new Uint8Array(native.encodeUtf8(char));
-                if (written + bytes.length > destination.length) break;
-                destination.set(bytes, written);
-                written += bytes.length;
-                read += char.length;
+            const text = String(source).toWellFormed();
+            const bytes = new Uint8Array(native.encodeUtf8(text));
+            if (bytes.length <= destination.length) {
+                destination.set(bytes);
+                return { read: text.length, written: bytes.length };
             }
-            return { read, written };
+            // Cut before the sequence that doesn't fit whole.
+            let cut = destination.length;
+            while (cut > 0 && (bytes[cut] & 0xc0) === 0x80) cut--;
+            const fits = bytes.subarray(0, cut);
+            destination.set(fits);
+            return { read: native.decodeUtf8(fits.slice().buffer, false).length, written: cut };
         }
     }
 
@@ -88,7 +92,9 @@
             if (!this.#started && !this.#ignoreBOM && text.startsWith('﻿')) {
                 text = text.slice(1);
             }
-            this.#started = stream && (this.#started || text.length > 0);
+            // Only the stream's first bytes may be a BOM, even when a chunk
+            // was nothing but one.
+            this.#started = stream && (this.#started || complete.length > 0);
             return text;
         }
     }

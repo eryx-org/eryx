@@ -88,7 +88,10 @@ when it was loaded, as pools and factories do for every sandbox they make.
   Running the same import again in a session is fine. A session snapshot
   records these imports rather than the modules, and restoring it imports
   them again (so the restoring sandbox needs the same environment); a
-  variable reassigned since its import keeps its new value. Only imports
+  variable reassigned since its import keeps its new value. Values that hold
+  a class instance (a `Buffer`, an `EventEmitter`, a `TextDecoder`) can't be
+  kept with their class, so they're left out and named in the snapshot's
+  `skipped()`, like functions. Only imports
   from executes that succeeded are recorded: if an execute throws after its
   imports ran, run those imports again after a restore.
 - **`await import("…")`** works anywhere.

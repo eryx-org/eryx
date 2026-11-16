@@ -127,7 +127,7 @@
             const end = body.byteOffset + body.byteLength;
             return [new Uint8Array(body.buffer.slice(body.byteOffset, end)), null];
         }
-        return [new Uint8Array(native.encodeUtf8(String(body))), 'text/plain;charset=UTF-8'];
+        return [new Uint8Array(native.encodeUtf8(String(body).toWellFormed())), 'text/plain;charset=UTF-8'];
     };
 
     let bodyBytes;

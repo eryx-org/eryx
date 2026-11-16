@@ -6,7 +6,8 @@
 # notices ship inside the runtime wasm.
 #
 # Usage: crates/eryx-guest-js/src/node/regen.sh
-# Needs network (the npm registry), node and esbuild. Run from anywhere.
+# Needs network (the npm registry) and node; npx fetches the pinned esbuild.
+# Run from anywhere.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 
