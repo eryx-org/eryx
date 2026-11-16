@@ -196,3 +196,25 @@ async fn open_host_file_limit_is_enforced() {
     let result = sandbox.execute(HOLD_OPEN_FILES).await.unwrap();
     assert_eq!(result.stdout_text().trim(), "5 EDQUOT");
 }
+
+/// Times can be set through a descriptor opened read-only, as `touch` does,
+/// for a directory or a file on a writable volume.
+#[tokio::test]
+async fn times_can_be_set_through_a_read_only_descriptor() {
+    let host = tempfile::tempdir().unwrap();
+    let stdout = run_with_volume(
+        VolumeMount::new(host.path(), "/vol"),
+        r#"
+import os
+os.makedirs('/vol/d')
+open('/vol/d/f', 'w').close()
+for p in ['/vol/d', '/vol/d/f']:
+    fd = os.open(p, os.O_RDONLY)
+    os.utime(fd, (1_000_000, 2_000_000))
+    os.close(fd)
+    print(int(os.stat(p).st_mtime))
+"#,
+    )
+    .await;
+    assert_eq!(stdout.trim(), "2000000\n2000000");
+}

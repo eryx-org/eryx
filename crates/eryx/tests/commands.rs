@@ -643,6 +643,10 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
             "mkdir /tmp/d && y=$(date -r /tmp/d +%Y) && [ \"$y\" != 1970 ] && echo dated",
             "dated\n",
         ),
+        (
+            "mkdir /tmp/e && touch -d @100000 /tmp/e && date -r /tmp/e +%s",
+            "100000\n",
+        ),
     ])
     .await;
 }

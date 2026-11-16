@@ -714,7 +714,9 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 Ok(done(()))
             }
             HybridDescriptor::RealFile { file, .. } => {
-                if !file.writable {
+                // Like futimens, this needs the mount to allow writing, not
+                // a descriptor opened for writing.
+                if !file.perms.contains(FilePerms::WRITE) {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 file.file.set_times(file_times(atime, mtime))?;
@@ -1079,6 +1081,13 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                         if !created {
                             let meta = storage.stat(&full_path).await?;
                             if meta.is_dir {
+                                // As on POSIX, a directory opens without
+                                // O_DIRECTORY unless the open would change it.
+                                if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                                    return Ok(HybridDescriptor::Vfs(
+                                        vfs_desc.child_dir(full_path),
+                                    ));
+                                }
                                 return Err(crate::VfsError::NotFile(full_path).into());
                             }
                             if truncate {

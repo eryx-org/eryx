@@ -376,9 +376,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             };
 
             if !created {
-                // Check it's not a directory
                 let meta = self.ctx.storage.stat(&full_path).await?;
                 if meta.is_dir {
+                    // As on POSIX, a directory opens without O_DIRECTORY
+                    // unless the open would change it.
+                    if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                        let resource = self.table.push(descriptor.child_dir(full_path))?;
+                        return Ok(resource);
+                    }
                     return Err(crate::VfsError::NotFile(full_path).into());
                 }
                 if truncate {
