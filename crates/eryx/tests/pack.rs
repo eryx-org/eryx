@@ -402,3 +402,100 @@ async fn defaulted_entries_skip_packages_with_nothing_to_import() {
     let named = options("named").entry("@types/cjs-pkg");
     assert!(pack(&app, &dir.path().join("env2"), &named).await.is_err());
 }
+
+/// A pnpm workspace member: its package links into the root's `.pnpm`
+/// store, where its own dependencies are siblings. They resolve, as for
+/// Node, from the package's real path.
+#[tokio::test]
+async fn packs_a_pnpm_workspace_member_with_transitive_deps() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let store = repo.join("node_modules/.pnpm");
+    copy_package("esm-pkg", &store.join("esm-pkg@1.0.0/node_modules/esm-pkg"));
+    copy_package("cjs-pkg", &store.join("cjs-pkg@1.0.0/node_modules/cjs-pkg"));
+    symlink(
+        "../../cjs-pkg@1.0.0/node_modules/cjs-pkg",
+        store.join("esm-pkg@1.0.0/node_modules/cjs-pkg"),
+    )
+    .unwrap();
+    let app = repo.join("apps/web");
+    std::fs::create_dir_all(app.join("node_modules")).unwrap();
+    symlink(
+        "../../../node_modules/.pnpm/esm-pkg@1.0.0/node_modules/esm-pkg",
+        app.join("node_modules/esm-pkg"),
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{"dependencies": {"esm-pkg": "^1"}}"#,
+    )
+    .unwrap();
+
+    let environment = pack(
+        &app,
+        &dir.path().join("env"),
+        &options("pnpm-ws").root(&repo),
+    )
+    .await
+    .unwrap();
+    assert!(
+        environment.manifest().warnings.is_empty(),
+        "{:?}",
+        environment.manifest().warnings
+    );
+    imports(
+        &environment,
+        r#"import { doubled } from "esm-pkg"; console.log(doubled);"#,
+        "42\n",
+    )
+    .await;
+}
+
+/// An import the installed packages don't provide fails the pack, rather
+/// than leaving an environment that fails when imported.
+#[tokio::test]
+async fn unresolved_imports_fail_the_pack() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    copy_package("needs-missing", &app.join("node_modules/needs-missing"));
+    let out = dir.path().join("env");
+    let err = pack(&app, &out, &options("missing").entry("needs-missing"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("can't be resolved") && err.contains("not-installed"),
+        "{err}"
+    );
+    assert!(!out.exists());
+}
+
+/// A node_modules that's a link is followed like a package link: inside the
+/// root it packs, and to a directory holding the tree it's refused.
+#[tokio::test]
+async fn a_linked_node_modules_is_checked_and_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    copy_package("cjs-pkg", &repo.join("store/node_modules/cjs-pkg"));
+    let app = repo.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    symlink("../store/node_modules", app.join("node_modules")).unwrap();
+    let options = options("linked").entry("cjs-pkg");
+    let environment = pack(&app, &dir.path().join("env"), &options.clone().root(&repo))
+        .await
+        .unwrap();
+    imports(
+        &environment,
+        r#"import { helper } from "cjs-pkg"; console.log(helper(1));"#,
+        "2\n",
+    )
+    .await;
+
+    std::fs::remove_file(app.join("node_modules")).unwrap();
+    symlink("..", app.join("node_modules")).unwrap();
+    let err = pack(&app, &dir.path().join("env"), &options.root(&repo))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("holding the tree"), "{err}");
+}

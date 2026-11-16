@@ -102,6 +102,11 @@ eryx-precompile env pack . --name data-tools --entry date-fns/format \
   Nothing else of the tree or the root is visible: a package that imports
   the app's own files (a `../../service-account.json`), or a workspace
   member that imports a file beside its directory, fails the pack instead.
+  (The bundler reads a mirror of just those paths, hard-linked next to the
+  output, so links resolve from packages' real paths as Node's do.)
+- **Unresolved imports fail the pack:** an import the installed packages
+  don't provide (a missing dependency or optional peer) is an error listing
+  each one, rather than an environment that fails when imported.
   Nothing is fetched, and pass `--ignore-scripts` to the install so no
   package code runs there either.
 - `--lockfile` copies the given file into the environment and records it

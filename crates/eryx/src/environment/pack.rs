@@ -111,8 +111,8 @@ impl PackOptions {
 /// [`EnvironmentError::Build`] if there's no `node_modules` from the tree up
 /// to the root, nothing to export, or a package symlink that's absolute,
 /// leads outside the root or to a directory holding the tree, or if
-/// bundling fails (including a package importing a file outside what the
-/// bundler sees).
+/// bundling fails: a package importing a file outside what the bundler
+/// sees, or anything the installed packages don't provide.
 pub async fn pack(
     tree: &Path,
     out: &Path,
@@ -171,20 +171,44 @@ pub async fn pack(
     std::fs::create_dir(&modules).map_err(io("creating the modules directory"))?;
     // `modules` is new and empty: the bundler doesn't clear its output dir,
     // so a fresh staging dir is what keeps stale chunks out of the hash.
-    // Only the node_modules dirs and the packages they link to are mounted,
-    // over an empty skeleton holding the directories down to them: never the
-    // rest of the tree or the root, so a package can't import the app's
-    // files (a `../../service-account.json`) into the environment.
-    let skeleton = tempfile::tempdir().map_err(io("creating the bundler's skeleton"))?;
-    for guest in layout.mounts.iter().map(|(_, guest)| guest).chain([&cwd]) {
-        let dir = skeleton
-            .path()
-            .join(guest.trim_start_matches("/src").trim_start_matches('/'));
-        std::fs::create_dir_all(&dir).map_err(io("creating the bundler's skeleton"))?;
-    }
-    let mut sources = vec![(skeleton.path().to_path_buf(), "/src".to_string())];
-    sources.extend(layout.mounts.iter().cloned());
+    // The bundler mounts a mirror of just the node_modules dirs and the
+    // packages they link to, at their places relative to the root: never
+    // the rest of the tree or the root, so a package can't import the
+    // app's files (a `../../service-account.json`) into the environment,
+    // and every link stays inside the one mount (the sandbox won't follow a
+    // link out of a mount), with Node's real-path resolution for pnpm's
+    // store and workspace members. Hard links, so it costs next to nothing
+    // on the same filesystem; it's beside the staging dir for that reason.
+    let source = tempfile::Builder::new()
+        .prefix(".eryx-pack-")
+        .tempdir_in(staging.path().parent().unwrap_or(Path::new(".")))
+        .map_err(io("creating the bundler's source dir"))?;
+    mirror(&layout, &root, source.path())?;
+    let cwd_dir = source
+        .path()
+        .join(tree.strip_prefix(&root).unwrap_or(Path::new("")));
+    std::fs::create_dir_all(&cwd_dir).map_err(io("creating the bundler's source dir"))?;
+    let sources = [(source.path().to_path_buf(), "/src".to_string())];
     let mut report = run_bundler(&sources, &cwd, &modules, &entries).await?;
+    drop(source);
+    // An import the bundler couldn't resolve would be left external, and
+    // fail when the environment is imported, so it fails the pack.
+    let unresolved: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|w| w.starts_with("Could not resolve"))
+        .collect();
+    if !unresolved.is_empty() {
+        return Err(build(format!(
+            "some imports can't be resolved from the installed packages, so they'd be \
+             missing at run time:\n  {}",
+            unresolved
+                .iter()
+                .map(|w| w.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        )));
+    }
     std::fs::remove_file(modules.join("bundle.json")).map_err(io("removing bundle.json"))?;
     let exports = std::mem::take(&mut report.entries)
         .into_iter()
@@ -304,16 +328,16 @@ fn importable(dir: &Path) -> bool {
             .any(|index| dir.join(index).is_file())
 }
 
-/// What the bundler's sandbox sees, read-only, over an empty `/src`.
+/// What the bundler's sandbox sees: a mirror of these paths, at their
+/// places relative to the root.
 struct Layout {
-    /// The `node_modules` dirs from the tree up to the root, nearest first,
-    /// where Node resolution looks for the tree's packages.
+    /// The `node_modules` dirs from the tree up to the root, nearest first
+    /// (where Node resolution looks for the tree's packages), as real paths.
     node_modules: Vec<PathBuf>,
-    /// Host directories and the guest paths they're mounted at: those
-    /// `node_modules`, and every package a link leads to outside the mount
-    /// it's in (a workspace member, a `file:` dependency), at the link's
-    /// own path, since the sandbox never follows a link out of a mount.
-    mounts: Vec<(PathBuf, String)>,
+    /// What's mirrored: those `node_modules` (or the links to them), and
+    /// every package directory a link leads to outside them (a workspace
+    /// member, a `file:` dependency), whole.
+    stage: Vec<PathBuf>,
 }
 
 impl Layout {
@@ -323,6 +347,11 @@ impl Layout {
             .iter()
             .map(|dir| dir.join(name))
             .find(|dir| dir.is_dir())
+    }
+
+    /// Whether `path` is inside something already staged.
+    fn covers(&self, path: &Path) -> bool {
+        self.stage.iter().any(|staged| path.starts_with(staged))
     }
 }
 
@@ -335,15 +364,29 @@ impl Layout {
 /// and other dot entries, and links that lead nowhere (which nothing can
 /// import), are skipped.
 fn layout(tree: &Path, root: &Path) -> Result<Layout, EnvironmentError> {
-    let mut node_modules = Vec::new();
+    let mut layout = Layout {
+        node_modules: Vec::new(),
+        stage: Vec::new(),
+    };
     for dir in tree.ancestors().take_while(|dir| dir.starts_with(root)) {
-        if let Ok(found) = dir.join("node_modules").canonicalize()
-            && found.is_dir()
-        {
-            node_modules.push(found);
+        let path = dir.join("node_modules");
+        // A node_modules that's itself a link is checked like a package's.
+        let real = match check_link(&path, tree, root)? {
+            Some(target) => {
+                layout.stage.push(path.clone());
+                target
+            }
+            None if path.is_dir() => path,
+            None => continue,
+        };
+        if real.is_dir() {
+            layout.node_modules.push(real.clone());
+            if !layout.covers(&real) {
+                layout.stage.push(real);
+            }
         }
     }
-    if node_modules.is_empty() {
+    if layout.node_modules.is_empty() {
         return Err(EnvironmentError::Build(format!(
             "no node_modules in {} or above it in the root {}: install the packages first \
              (e.g. `npm ci --ignore-scripts --omit=dev`)",
@@ -351,69 +394,108 @@ fn layout(tree: &Path, root: &Path) -> Result<Layout, EnvironmentError> {
             root.display()
         )));
     }
-    let mut mounts = Vec::new();
-    for dir in &node_modules {
-        let guest = guest_path(root, dir).ok_or_else(|| {
-            EnvironmentError::Build(format!("{} leads outside the root", dir.display()))
-        })?;
-        mounts.push((dir.clone(), guest));
-    }
 
-    // (node_modules dir, its guest path, the mount it's in)
-    let mut pending: Vec<(PathBuf, String, usize)> = mounts
-        .iter()
-        .enumerate()
-        .map(|(i, (host, guest))| (host.clone(), guest.clone(), i))
-        .collect();
+    let mut pending = layout.node_modules.clone();
     let mut seen = BTreeSet::new();
-    while let Some((dir, guest, mount)) = pending.pop() {
-        if !seen.insert((dir.clone(), guest.clone())) {
+    while let Some(dir) = pending.pop() {
+        if !seen.insert(dir.clone()) {
             continue;
         }
-        let (mount_host, mount_guest) = mounts[mount].clone();
-        let mut nested = |host: &Path, guest: String, mount: usize| {
-            let host = host.join("node_modules");
-            if host.is_dir() {
-                pending.push((host, format!("{guest}/node_modules"), mount));
+        let mut nested = |package: &Path| {
+            let dir = package.join("node_modules");
+            if dir.is_dir() {
+                pending.push(dir);
             }
         };
         for package in packages_in(&dir)? {
-            let package_guest = join_guest(&guest, package.strip_prefix(&dir).unwrap_or(&package));
             match check_link(&package, tree, root)? {
-                Some(target) => match target.strip_prefix(&mount_host) {
-                    // It stays in its mount (pnpm's store): followed there.
-                    Ok(inside) => nested(&target, join_guest(&mount_guest, inside), mount),
-                    Err(_) => {
-                        mounts.push((target.clone(), package_guest.clone()));
-                        nested(&target, package_guest, mounts.len() - 1);
+                Some(target) => {
+                    if !layout.covers(&target) {
+                        layout.stage.push(target.clone());
                     }
-                },
-                None if package.is_dir() => nested(&package, package_guest, mount),
+                    nested(&target);
+                }
+                None if package.is_dir() => nested(&package),
                 None => {}
             }
         }
         let pnpm = dir.join(".pnpm");
         if pnpm.is_dir() {
             for id in read_dir(&pnpm)? {
-                let name = id.file_name().unwrap_or_default().to_string_lossy();
-                nested(&id, format!("{guest}/.pnpm/{name}"), mount);
+                nested(&id);
             }
         }
     }
-    Ok(Layout {
-        node_modules,
-        mounts,
-    })
+    // A package staged before a directory that holds it is mirrored with it.
+    let stage = layout.stage.clone();
+    layout.stage.retain(|path| {
+        !stage
+            .iter()
+            .any(|other| other != path && path.starts_with(other) && !other.is_symlink())
+    });
+    Ok(layout)
 }
 
-/// `guest` with `relative`'s components appended, `/`-separated.
-fn join_guest(guest: &str, relative: &Path) -> String {
-    let mut joined = guest.to_string();
-    for component in relative.components() {
-        joined.push('/');
-        joined.push_str(&component.as_os_str().to_string_lossy());
+/// Mirror `layout`'s paths from under `root` into `dest`: directories made,
+/// files hard-linked (copied where that fails, e.g. across filesystems),
+/// symlinks recreated as they are. So every link the bundler follows stays
+/// inside the one directory it mounts, and nothing else of `root` is there.
+fn mirror(layout: &Layout, root: &Path, dest: &Path) -> Result<(), EnvironmentError> {
+    for path in &layout.stage {
+        let relative = path.strip_prefix(root).map_err(|_| {
+            EnvironmentError::Build(format!("{} is outside the root", path.display()))
+        })?;
+        let target = dest.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(io(format!("creating {}", parent.display())))?;
+        }
+        mirror_entry(path, &target)?;
     }
-    joined
+    Ok(())
+}
+
+fn mirror_entry(from: &Path, to: &Path) -> Result<(), EnvironmentError> {
+    let kind = std::fs::symlink_metadata(from)
+        .map_err(io(format!("reading {}", from.display())))?
+        .file_type();
+    if kind.is_symlink() {
+        if to.symlink_metadata().is_ok() {
+            return Ok(());
+        }
+        let link = std::fs::read_link(from).map_err(io(format!("reading {}", from.display())))?;
+        return symlink(&link, to).map_err(io(format!("linking {}", to.display())));
+    }
+    if kind.is_dir() {
+        std::fs::create_dir_all(to).map_err(io(format!("creating {}", to.display())))?;
+        for entry in read_dir(from)? {
+            let name = entry.file_name().unwrap_or_default();
+            mirror_entry(&entry, &to.join(name))?;
+        }
+        return Ok(());
+    }
+    if kind.is_file() && to.symlink_metadata().is_err() {
+        std::fs::hard_link(from, to)
+            .or_else(|_| std::fs::copy(from, to).map(|_| ()))
+            .map_err(io(format!("copying {}", from.display())))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink(link: &Path, to: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(link, to)
+}
+
+/// Windows needs to know whether a link is to a directory.
+#[cfg(windows)]
+fn symlink(link: &Path, to: &Path) -> std::io::Result<()> {
+    let target = to.parent().unwrap_or(Path::new(".")).join(link);
+    if target.is_dir() {
+        std::os::windows::fs::symlink_dir(link, to)
+    } else {
+        std::os::windows::fs::symlink_file(link, to)
+    }
 }
 
 /// The package positions in a `node_modules` directory: `name` and
@@ -547,29 +629,36 @@ mod tests {
 
         let layout = layout(&app, &root).unwrap();
         assert_eq!(layout.node_modules, [nm.clone(), root.join("node_modules")]);
-        let mounts: Vec<(&Path, &str)> = layout
-            .mounts
+        let staged: Vec<&Path> = layout
+            .stage
             .iter()
-            .map(|(host, guest)| (host.strip_prefix(&root).unwrap(), guest.as_str()))
+            .map(|path| path.strip_prefix(&root).unwrap())
             .collect();
-        // The node_modules dirs; the workspace package at its link's path;
-        // and the hoisted package its own link leads to, at that link's
-        // path. pnpm's links stay in their mount. Nothing else of the root.
+        // The node_modules dirs and the workspace package its link leads
+        // to; the hoisted package the member links to is already in the
+        // root's node_modules, and pnpm's links stay in theirs. Nothing
+        // else of the root.
         assert_eq!(
-            mounts,
+            staged,
             [
-                (
-                    Path::new("apps/web/node_modules"),
-                    "/src/apps/web/node_modules"
-                ),
-                (Path::new("node_modules"), "/src/node_modules"),
-                (Path::new("packages/w"), "/src/apps/web/node_modules/w"),
-                (
-                    Path::new("node_modules/hoisted"),
-                    "/src/apps/web/node_modules/w/node_modules/h"
-                ),
+                Path::new("apps/web/node_modules"),
+                Path::new("node_modules"),
+                Path::new("packages/w"),
             ]
         );
+        let mirrored = tempfile::tempdir().unwrap();
+        mirror(&layout, &root, mirrored.path()).unwrap();
+        let m = mirrored.path();
+        assert!(
+            m.join("apps/web/node_modules/.pnpm/b@1/node_modules/b/package.json")
+                .is_file()
+        );
+        assert!(
+            m.join("apps/web/node_modules/w/node_modules/h/package.json")
+                .is_file(),
+            "through the mirror's own links"
+        );
+        assert!(!m.join("secret.json").exists());
         assert_eq!(
             layout.package_dir("hoisted"),
             Some(root.join("node_modules/hoisted"))
