@@ -116,7 +116,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |
 | `files` | [Supporting files](./vfs.md) written into the sandbox VFS — `FILE_KIND_MODULE` files go on `sys.path`, `FILE_KIND_DATA` files are readable but not importable. |
 | `persist_state` / `state_snapshot` | [Session state](./sessions.md): when `persist_state` is true the server snapshots state into `ExecuteResult.state_snapshot`; supplying `state_snapshot` restores it before execution. |
-| `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid` and `exit_code`). |
+| `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid` and `exit_code`). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |
 

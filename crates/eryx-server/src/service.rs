@@ -1534,7 +1534,7 @@ fn classify_failure(error: &Error) -> FailureKind {
 }
 
 /// Convert a guest trace event to its proto form, scrubbing secret
-/// placeholders from its text fields.
+/// placeholders from its text fields and context.
 ///
 /// The event JSON uses serde's internally-tagged format with a `"type"` key
 /// (`{"type":"line"}`, `{"type":"call","function":"foo"}`, ...); each proto
@@ -1557,6 +1557,7 @@ fn trace_event(
         return crate::proto::eryx::v1::TraceEvent {
             lineno: req.lineno,
             event_type: scrub(&req.event_json),
+            context_json: scrub(&req.context_json),
             ..Default::default()
         };
     };
@@ -1580,7 +1581,7 @@ fn trace_event(
         message,
         name: text("name"),
         duration_ms: number("duration_ms").unwrap_or(0),
-        context_json: String::new(),
+        context_json: scrub(&req.context_json),
         pid: number("pid")
             .and_then(|pid| u32::try_from(pid).ok())
             .unwrap_or(0),
@@ -1614,6 +1615,26 @@ mod tests {
         assert_eq!(event.event_type, "exception");
         assert!(!event.message.contains(&placeholder), "{}", event.message);
         assert!(event.message.starts_with("bad "), "{}", event.message);
+    }
+
+    #[test]
+    fn trace_context_is_forwarded_and_scrubbed() {
+        let secret = SecretConfig::new("real", vec![]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+        let req = TraceRequest {
+            lineno: 0,
+            event_json: serde_json::json!({"type": "process_start", "name": "curl", "pid": 1})
+                .to_string(),
+            context_json: serde_json::json!({"args": ["-H", format!("token: {placeholder}")]})
+                .to_string(),
+        };
+        let event = trace_event(&req, &secrets);
+        let context: serde_json::Value = serde_json::from_str(&event.context_json).unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!({"args": ["-H", "token: [REDACTED]"]})
+        );
     }
 
     #[test]

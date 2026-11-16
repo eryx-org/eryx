@@ -551,7 +551,11 @@ message TraceEvent {
   // Duration in milliseconds (for "callback_end" and "process_end" events).
   uint64 duration_ms = 6;
 
-  // Optional JSON-encoded context data (e.g., local variables).
+  // JSON-encoded context, with secret placeholders replaced by [REDACTED];
+  // empty when the event has none. A "callback_start" carries the callback's
+  // arguments (the JSON object it's called with), and a "process_start" the
+  // child's arguments as {"args": [...]}, argv[0] excluded. Context counts
+  // against the execution's trace stream budget along with the event.
   string context_json = 7;
 
   // Numbers an execution's child processes, pairing each "process_start"
