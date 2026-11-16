@@ -161,15 +161,19 @@ outputs = ["eryx/eryx-coreutils.js"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-# A plain WASI 0.2 command: no JSPI, since shims/process.js runs it to
-# completion in one call. Typings are dropped, as for the guests.
+# A WASI 0.2 command, run with JSPI so that blocking on a pollable (`sleep`)
+# suspends it; without, jco drops the wait and the child runs on. Typings are
+# dropped, as for the guests.
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 jco transpile ../crates/eryx-runtime/coreutils.wasm \
   --name eryx-coreutils \
   --out-dir "$out" \
   --quiet \
-  --instantiation async
+  --instantiation async \
+  --async-mode jspi \
+  --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' \
+  --async-exports 'wasi:cli/run#run'
 rm -f eryx/eryx-coreutils.js eryx/eryx-coreutils.*.wasm
 cp "$out"/eryx-coreutils.js "$out"/eryx-coreutils.*.wasm eryx/
 """

@@ -46,6 +46,8 @@ jobs:
               - 'crates/eryx-runtime/**'
               - 'clis/coreutils.toml'
               - 'clis/patches/patch-uucore-wasip2.sh'
+              - 'crates/eryx-build/**'
+              - 'mise.toml'
               - 'js/**'
               - 'Cargo.lock'
               - 'Cargo.toml'

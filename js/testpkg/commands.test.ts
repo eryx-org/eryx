@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { COREUTILS_TOOLS, PythonExceptionError, Sandbox } from "@eryx-org/eryx";
 
+const failingUrl = new URL("./fixtures/failing-command.js", import.meta.url).href;
+
 // The bundled coreutils' jco output, registered again under another name.
 const coreutilsUrl = pathToFileURL(
   createRequire(import.meta.url).resolve("@eryx-org/eryx/coreutils"),
@@ -46,6 +48,24 @@ describe.each([undefined, 30000])("shell commands (timeoutMs %s)", (timeoutMs) =
     expect(Number(size)).toBeLessThanOrEqual(16 * 1024 * 1024);
     expect(Number(size)).toBeGreaterThan(15 * 1024 * 1024);
   }, 60_000);
+
+  it("runs sleep for as long as it's asked", async () => {
+    using sandbox = new Sandbox({ language: "shell", timeoutMs });
+    const start = performance.now();
+    const result = await sandbox.execute('sleep 1; echo "rc=$?"');
+    expect(result.stdout).toBe("rc=0\n");
+    expect(performance.now() - start).toBeGreaterThan(900);
+  });
+
+  it("refuses more than 16 MiB of stdin", async () => {
+    using sandbox = new Sandbox({ language: "shell", timeoutMs });
+    const result = await sandbox.execute(
+      // About 20 MiB, appended by the shell from three children's output.
+      'mkdir /tmp; for i in 1 2 3; do seq 1 1000000 >> /tmp/a; done; wc -c < /tmp/a; echo "wc=$?"',
+    );
+    expect(result.stdout).toContain("wc=134");
+    expect(result.stderr).toContain("wc: limit-exceeded");
+  }, 60_000);
 });
 
 describe("shell command options", () => {
@@ -60,6 +80,22 @@ describe("shell command options", () => {
     const error = await sandbox.execute("echo a | sort").catch((e) => e);
     expect(error).toBeInstanceOf(PythonExceptionError);
     expect(error.exitCode).toBe(127);
+  });
+
+  it("gives exit status 1 to a command whose run returns its error", async () => {
+    using sandbox = new Sandbox({ language: "shell", commands: { fails: failingUrl } });
+    const result = await sandbox.execute('fails; echo "fails=$?"');
+    expect(result.stdout).toBe("fails=1\n");
+  });
+
+  it("reports a command that can't load as crashed, and goes on", async () => {
+    using sandbox = new Sandbox({
+      language: "shell",
+      commands: { gone: new URL("./fixtures/missing.js", import.meta.url).href },
+    });
+    const result = await sandbox.execute('gone; echo "gone=$?"; echo still | cat');
+    expect(result.stdout).toBe("gone=134\nstill\n");
+    expect(result.stderr).toContain("gone: spawn-failed");
   });
 
   it("checks its options", () => {

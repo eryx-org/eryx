@@ -337,7 +337,8 @@ function shellCommands(language, options) {
  * @property {Record<string, string | URL>} [commands] - The shell only: more
  *   external commands, by name, each the URL of a WASI 0.2 command component
  *   transpiled with `jco transpile --instantiation async` (its `.js`, with its
- *   core `.wasm` files beside it). One URL may serve several names, for a
+ *   core `.wasm` files beside it; see the README for the flags a command that
+ *   waits needs). One URL may serve several names, for a
  *   multicall binary that picks its tool by `argv[0]`. They replace bundled
  *   coreutils tools of the same name.
  * @property {boolean} [coreutils] - The shell only: whether to include the

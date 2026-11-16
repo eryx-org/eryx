@@ -176,7 +176,10 @@ export interface SandboxOptions {
   /**
    * The shell only: more external commands, by name, each the URL of a WASI
    * 0.2 command component transpiled with `jco transpile --instantiation
-   * async` (its `.js`, with its core `.wasm` files beside it). One URL may
+   * async` (its `.js`, with its core `.wasm` files beside it). Add
+   * `--async-mode jspi --async-imports 'wasi:io/poll#[method]pollable.block'
+   * 'wasi:io/poll#poll' --async-exports 'wasi:cli/run#run'` for one that
+   * waits (sleeps, or polls); without them its waits return at once. One URL may
    * serve several names, for a multicall binary that picks its tool by
    * `argv[0]`. They replace bundled coreutils tools of the same name. In
    * Node.js the URLs must be absolute (e.g. from `pathToFileURL`).
@@ -185,8 +188,11 @@ export interface SandboxOptions {
    * and only then is its output passed on, so an endless producer (`yes |
    * head`) runs until {@link timeoutMs}, and a CPU-bound one blocks the
    * thread it runs on (use `timeoutMs` to bound it). Each child may write up
-   * to 16 MiB to stdout and to stderr (past that it's stopped, status 134),
-   * shares the sandbox's filesystem, and has no network.
+   * to 16 MiB to stdout and to stderr (past that it's stopped, status 134)
+   * and is given up to 16 MiB of stdin (past that it fails, `limit-exceeded`,
+   * 134). A sandbox has at most 64 children spawned and not finished, holding
+   * at most 64 MiB of stdin and unread output between them. Children share
+   * the sandbox's filesystem, and have no network.
    */
   commands?: Record<string, string | URL>;
   /**

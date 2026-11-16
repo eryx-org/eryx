@@ -38,7 +38,7 @@ Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the f
 
 #### Shell commands
 
-A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 6.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js):
+A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 6.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js). A command that waits (`sleep`, polling) also needs `--async-mode jspi --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' --async-exports 'wasi:cli/run#run'`, as the bundled coreutils has; without them its waits return at once:
 
 ```js
 const sh = new Sandbox({
@@ -51,7 +51,8 @@ await sh.execute("printf 'pear\napple\n' | sort | head -n 1"); // "apple\n"
 A command runs in batch: it reads all of its stdin, runs to completion, and only then is its output passed on.
 - An endless producer (`yes | head`) runs until `timeoutMs`.
 - A CPU-bound command blocks the thread it runs on, so use `timeoutMs`, which runs the sandbox in a Worker.
-- Each command may write 16 MiB to stdout and to stderr; past that it's stopped (status 134).
+- Each command may write 16 MiB to stdout and to stderr; past that it's stopped (status 134). It's given up to 16 MiB of stdin; past that it fails with `limit-exceeded` (134).
+- A sandbox has at most 64 commands spawned and not finished, holding at most 64 MiB of stdin and unread output between them. Their own memory isn't bounded beyond what the JavaScript engine allows a WebAssembly memory.
 - Commands share the sandbox's filesystem, and have no network.
 - Data moves through pipes at about 4–10 MiB/s, limited by jco's handling of component-model streams.
 

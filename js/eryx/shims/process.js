@@ -33,26 +33,68 @@ export const COREUTILS_TOOLS = Object.freeze([
 /** Most bytes a child may write to stdout, and to stderr, as the Rust host's per-stream cap. */
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
+/** Most bytes of stdin a child is given; past that its spawn fails with `limit-exceeded`. */
+const MAX_STDIN_BYTES = 16 * 1024 * 1024;
+
+/** Most children of a sandbox spawned and not yet finished, as the Rust host's. */
+const MAX_LIVE_CHILDREN = 64;
+
+/**
+ * Most bytes a sandbox's children hold at once in this host: their stdin
+ * buffers, and output the shell hasn't read yet.
+ */
+const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+
 /** Bytes asked for per read of a child's stdin. */
 const STDIN_READ_BYTES = 64 * 1024;
 
+/** A failure to report to the guest as `process-error` `payload`. */
+const fail = (payload) => ({ payload });
+
+/** A count with a limit: what a sandbox's children hold. */
+class Budget {
+  used = 0;
+  constructor(limit) {
+    this.limit = limit;
+  }
+  /** Take `n`, if that stays within the limit. */
+  take(n) {
+    if (this.used + n > this.limit) return false;
+    this.used += n;
+    return true;
+  }
+  give(n) {
+    this.used -= n;
+  }
+}
+
 /**
- * Read a stream the guest passed in to its end.
+ * Read a stream the guest passed in to its end, charging `bytes` for what it
+ * holds.
  *
  * With `read(count)`, not `for await`: jco's async iterator over a
  * `stream<u8>` yields one byte per step, which runs at about 0.1 MiB/s and
  * exhausts the heap on a few MiB.
  * @param {{ read(count: number): Promise<{ value?: Uint8Array, done: boolean }> }} stream
- * @returns {Promise<Uint8Array>}
+ * @param {Budget} bytes
+ * @returns {Promise<Uint8Array>} Charged to `bytes` (give back its length when done)
  */
-async function readAll(stream) {
+async function readAll(stream, bytes) {
   const chunks = [];
   let size = 0;
-  for (;;) {
-    const { value, done } = await stream.read(STDIN_READ_BYTES);
-    if (done) break;
-    chunks.push(value);
-    size += value.byteLength;
+  try {
+    for (;;) {
+      const { value, done } = await stream.read(STDIN_READ_BYTES);
+      if (done) break;
+      if (size + value.byteLength > MAX_STDIN_BYTES || !bytes.take(value.byteLength)) {
+        throw fail("limit-exceeded");
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } catch (e) {
+    bytes.give(size);
+    throw e?.payload ? e : fail("io-error");
   }
   const out = new Uint8Array(size);
   let offset = 0;
@@ -61,6 +103,139 @@ async function readAll(stream) {
     offset += chunk.byteLength;
   }
   return out;
+}
+
+/**
+ * A child's stdout or stderr: a stream the shell reads, fed by the child's
+ * writes. Each write is charged to `bytes` until the shell reads it, and a
+ * write past {@link MAX_OUTPUT_BYTES} in all, or past the budget, stops the
+ * child, which the shell reports as crashed (`<name>: spawn-failed`, 134).
+ * @param {Budget} bytes
+ */
+function outputPipe(bytes) {
+  const queue = [];
+  let written = 0;
+  let closed = false;
+  let wake = () => {};
+  const stream = new ReadableStream(
+    {
+      async pull(controller) {
+        while (queue.length === 0 && !closed) await new Promise((resolve) => (wake = resolve));
+        if (queue.length === 0) return controller.close();
+        const chunk = queue.shift();
+        bytes.give(chunk.byteLength);
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        for (const chunk of queue.splice(0)) bytes.give(chunk.byteLength);
+      },
+    },
+    // Pulled only when the shell reads, so unread output stays in `queue`.
+    { highWaterMark: 0 },
+  );
+  const handler = {
+    write(buf) {
+      written += buf.byteLength;
+      if (written > MAX_OUTPUT_BYTES || !bytes.take(buf.byteLength)) {
+        throw new Error("a command's output is over its limit");
+      }
+      // Copied: the buffer is a view of the child's memory.
+      queue.push(buf.slice());
+      wake();
+    },
+  };
+  const close = () => {
+    closed = true;
+    wake();
+  };
+  return { stream, handler, close };
+}
+
+/**
+ * @typedef {Object} CommandModule
+ * @property {Function} instantiate - The jco-generated `instantiate(getCoreModule, imports)`
+ * @property {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} getCoreModule
+ */
+
+/**
+ * The `eryx:process` imports for one sandbox.
+ * @param {Object} fileTree - The sandbox's file tree, which children share
+ * @param {Map<string, () => Promise<CommandModule>>} commands - Loaders by command name
+ * @returns {{ Child: Function, listCommands: () => string[] }}
+ */
+export function createProcessHost(fileTree, commands) {
+  const live = new Budget(MAX_LIVE_CHILDREN);
+  const bytes = new Budget(MAX_BUFFERED_BYTES);
+
+  class Child {
+    /** @type {(() => Promise<number>) | null} */
+    #run;
+    #released = false;
+
+    constructor(run) {
+      this.#run = run;
+    }
+
+    static spawn(cmd, args, env, cwd, stdin) {
+      const load = commands.get(cmd);
+      if (!load) throw fail("command-not-found");
+      if (!live.take(1)) throw fail("limit-exceeded");
+      const stdout = outputPipe(bytes);
+      const stderr = outputPipe(bytes);
+      let child;
+      const run = async () => {
+        let input;
+        try {
+          let command;
+          try {
+            command = await load();
+          } catch {
+            // A bad URL, or a download that failed: as a command that can't start.
+            throw fail("spawn-failed");
+          }
+          input = await readAll(stdin, bytes);
+          return await runChild(command, fileTree, {
+            argv: [cmd, ...args],
+            env,
+            cwd,
+            stdin: input,
+            stdout: stdout.handler,
+            stderr: stderr.handler,
+          });
+        } finally {
+          if (input) bytes.give(input.byteLength);
+          stdout.close();
+          stderr.close();
+          child.release();
+        }
+      };
+      child = new Child(run);
+      return { child, stdout: stdout.stream, stderr: stderr.stream };
+    }
+
+    /** Give back the child's live slot, once. */
+    release() {
+      if (!this.#released) live.give(1);
+      this.#released = true;
+    }
+
+    async wait() {
+      const run = this.#run;
+      if (!run) throw fail("io-error");
+      this.#run = null;
+      return run();
+    }
+
+    // The shell dropped the child: one never waited for frees its slot.
+    [Symbol.dispose ?? Symbol.for("dispose")]() {
+      if (this.#run) this.release();
+    }
+  }
+
+  // The shell's own `grep` builtin runs only when it's listed; with no
+  // allow-list here, it always is.
+  const listCommands = () => [...commands.keys(), "grep"];
+  return { Child, listCommands };
 }
 
 /**
@@ -80,86 +255,6 @@ function bufferedStdin(bytes) {
     },
     subscribe: () => pollableCreate(),
   };
-}
-
-/**
- * An output stream for a child: what it writes goes to `controller`, up to
- * {@link MAX_OUTPUT_BYTES}. The write past that stops the child, which the
- * shell reports as crashed (`<name>: spawn-failed`, status 134).
- * @param {ReadableStreamDefaultController<Uint8Array>} controller
- */
-function cappedOutput(controller) {
-  let written = 0;
-  return {
-    write(buf) {
-      written += buf.byteLength;
-      if (written > MAX_OUTPUT_BYTES) {
-        throw new Error(`a command's output is limited to ${MAX_OUTPUT_BYTES} bytes`);
-      }
-      // Copied: the buffer is a view of the child's memory.
-      controller.enqueue(buf.slice());
-    },
-  };
-}
-
-/**
- * @typedef {Object} CommandModule
- * @property {Function} instantiate - The jco-generated `instantiate(getCoreModule, imports)`
- * @property {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} getCoreModule
- */
-
-/**
- * The `eryx:process` imports for one sandbox.
- * @param {Object} fileTree - The sandbox's file tree, which children share
- * @param {Map<string, () => Promise<CommandModule>>} commands - Loaders by command name
- * @returns {{ Child: Function, listCommands: () => string[] }}
- */
-export function createProcessHost(fileTree, commands) {
-  class Child {
-    /** @type {(() => Promise<number>) | null} */
-    #run;
-
-    constructor(run) {
-      this.#run = run;
-    }
-
-    static spawn(cmd, args, env, cwd, stdin) {
-      const load = commands.get(cmd);
-      if (!load) throw { payload: "command-not-found" };
-      let stdoutController;
-      let stderrController;
-      const stdout = new ReadableStream({ start: (c) => (stdoutController = c) });
-      const stderr = new ReadableStream({ start: (c) => (stderrController = c) });
-      const run = async () => {
-        try {
-          return await runChild(await load(), fileTree, {
-            argv: [cmd, ...args],
-            env,
-            cwd,
-            stdin: await readAll(stdin),
-            stdout: cappedOutput(stdoutController),
-            stderr: cappedOutput(stderrController),
-          });
-        } finally {
-          stdoutController.close();
-          stderrController.close();
-        }
-      };
-      return { child: new Child(run), stdout, stderr };
-    }
-
-    async wait() {
-      const run = this.#run;
-      if (!run) throw { payload: "io-error" };
-      this.#run = null;
-      return run();
-    }
-  }
-
-  // The shell's own `grep` builtin runs only when it's listed; with no
-  // allow-list here, it always is.
-  const listCommands = () => [...commands.keys(), "grep"];
-  return { Child, listCommands };
 }
 
 /**
@@ -208,14 +303,18 @@ async function runChild(command, fileTree, io) {
   } catch {
     // Not a WASI 0.2 command, or it needs imports children don't get
     // (network): the shell reports it as a crashed command.
-    throw { payload: "spawn-failed" };
+    throw fail("spawn-failed");
   }
   try {
-    instance.run.run();
+    await instance.run.run();
   } catch (e) {
-    // `exit(n)` throws to unwind the child; anything else is a crash.
+    // `exit(n)` throws to unwind the child.
     if (e?.exitError) return e.code;
-    throw { payload: "spawn-failed" };
+    // `run` returning its error (a C `main` returning nonzero, for one) is
+    // jco's ComponentError, with the (empty) error as `payload`: exit status
+    // 1, as the Rust host gives it. Anything else is a crash.
+    if (e instanceof Error && Object.hasOwn(e, "payload")) return 1;
+    throw fail("spawn-failed");
   }
   return 0;
 }
