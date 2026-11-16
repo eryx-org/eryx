@@ -136,9 +136,9 @@ struct EpochTicker {
 }
 
 impl EpochTicker {
-    fn start(engine: &Engine) -> std::result::Result<Self, Error> {
-        let ticker_engine = engine.clone();
-
+    /// Start the ticker thread, advancing every engine in `engines` (which
+    /// can grow while it runs) once per tick.
+    fn start(engines: Arc<Mutex<Vec<Engine>>>) -> std::result::Result<Self, Error> {
         // Use a dedicated OS thread because guest execution can block the Tokio
         // runtime. Epochs must continue advancing independently of async scheduling.
         let handle = std::thread::Builder::new()
@@ -146,7 +146,12 @@ impl EpochTicker {
             .spawn(move || {
                 loop {
                     std::thread::sleep(EPOCH_TICK_INTERVAL);
-                    ticker_engine.increment_epoch();
+                    let engines = engines
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for engine in engines.iter() {
+                        engine.increment_epoch();
+                    }
                 }
             })
             .map_err(|error| {
@@ -201,11 +206,28 @@ pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
     token.is_some_and(CancellationToken::is_cancelled)
 }
 
-/// Start or restart the process-lifetime epoch ticker for the shared engine.
+/// Start or restart the process-lifetime epoch ticker, and have it advance
+/// `engine` from now on.
+///
+/// One thread ticks every engine it has been given (the shared engine and
+/// the child engine), so a store on any of them gets its deadline callbacks,
+/// fuel charging and timeouts. A restarted ticker keeps the engines.
 pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
-    // Per process, so a forked child never waits on a lock it inherited.
+    // Per process, so a forked child never waits on a lock it inherited, and
+    // ticks its own engines.
     static EPOCH_TICKER: ForkLocal<Mutex<Option<EpochTicker>>> =
         ForkLocal::new(|| Mutex::new(None));
+    static TICKED_ENGINES: ForkLocal<Arc<Mutex<Vec<Engine>>>> = ForkLocal::new(Arc::default);
+
+    let engines = TICKED_ENGINES.get();
+    {
+        let mut engines = engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !engines.iter().any(|e| Engine::same(e, engine)) {
+            engines.push(engine.clone());
+        }
+    }
 
     let mut ticker = EPOCH_TICKER
         .get()
@@ -216,7 +238,7 @@ pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Er
     }
 
     // Spawn errors are deliberately not cached. A later execution can retry.
-    *ticker = Some(EpochTicker::start(engine)?);
+    *ticker = Some(EpochTicker::start(Arc::clone(engines))?);
     Ok(())
 }
 
@@ -2748,6 +2770,32 @@ impl Executor {
         static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
 
         SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
+    }
+
+    /// The engine external commands (shell children) are compiled for and run
+    /// on: the shared engine's configuration with on-demand allocation, so
+    /// children never take the pooling allocator's slots, which stay sized
+    /// for sandboxes (#833). Created on first use; when the shared engine is
+    /// already on-demand (`ERYX_ALLOCATOR=on-demand`, or Windows), it's that
+    /// engine.
+    ///
+    /// Both engines' compiled code is interchangeable: the allocator isn't
+    /// part of wasmtime's compatibility check, so a command precompiled by
+    /// [`Self::precompile`] loads on either.
+    pub(crate) fn child_engine() -> std::result::Result<Engine, Error> {
+        static CHILD_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
+
+        CHILD_ENGINE
+            .get_or_try_init(|| {
+                let shared = Self::shared_engine()?;
+                if shared.pooling_allocator_metrics().is_none() {
+                    return Ok(shared);
+                }
+                let mut config = Self::engine_config_with_target(None)?;
+                config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
+                Engine::new(&config).map_err(|e| Error::from(ErrorKind::WasmEngine(e.to_string())))
+            })
+            .cloned()
     }
 
     /// Create a new executor by loading a WASM component from bytes.
