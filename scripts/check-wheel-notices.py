@@ -7,8 +7,8 @@ wheel) or under its root directory (an sdist).
 
 NOTICES is the notices file every PACKAGE must hold: host.notices.md for
 pyeryx, runtime-<language>.notices.md for pyeryx-runtime-<language>. A
-musllinux pyeryx wheel's notices must also carry the GCC runtime library
-exception, for the libgcc_s auditwheel bundles in it (#996).
+musllinux pyeryx wheel's notices must also carry the GPL-3.0 and the GCC
+runtime library exception, for the libgcc_s auditwheel bundles in it (#996).
 """
 
 import re
@@ -17,7 +17,8 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-GCC_EXCEPTION = b"GCC RUNTIME LIBRARY EXCEPTION"
+# libgcc_s's licence: the GPL-3.0 and GCC's runtime library exception.
+GCC_TEXTS = [b"GNU GENERAL PUBLIC LICENSE", b"Version 3, 29 June 2007", b"GCC RUNTIME LIBRARY EXCEPTION"]
 # Text each licence file must hold: a symlink checked out as a file, or any
 # other stand-in, fails.
 LICENCE_TEXT = {"LICENSE-MIT": b"Permission is hereby granted", "LICENSE-APACHE": b"Apache License"}
@@ -51,8 +52,9 @@ def problems(package: Path, notices: str) -> list[str]:
         elif want in LICENCE_TEXT and LICENCE_TEXT[want] not in files[want]:
             found.append(f"{want} isn't the licence text")
     if notices == "host.notices.md" and "musllinux" in package.name:
-        if GCC_EXCEPTION not in files.get(f"notices/{notices}", b""):
-            found.append("its notices don't carry libgcc_s's GCC runtime library exception")
+        text = files.get(f"notices/{notices}", b"")
+        if not all(t in text for t in GCC_TEXTS):
+            found.append("its notices don't carry libgcc_s's GPL-3.0 and GCC runtime library exception")
     return found
 
 
