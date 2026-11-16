@@ -465,6 +465,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             })
             .transpose()?;
 
+        if language != eryx::Language::Shell && execute_req.allowed_commands.is_some() {
+            return Err(Status::invalid_argument(format!(
+                "allowed_commands is only for the shell, not {language}"
+            )));
+        }
+        let allowed_commands = execute_req.allowed_commands.map(|allowed| allowed.names);
+
         // Python and JavaScript get the secrets' placeholders from a preamble
         // (`os.environ`, `process.env`); the shell takes none.
         if language == eryx::Language::Shell && !execute_req.secrets.is_empty() {
@@ -725,6 +732,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_ttl,
                     declarations: &declarations,
                     max_output_bytes,
+                    allowed_commands,
                 };
 
                 // Race execution against client disconnection: either the
@@ -968,6 +976,8 @@ struct SessionParams<'a> {
     declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
     /// Cap on stdout plus stderr bytes kept and streamed.
     max_output_bytes: usize,
+    /// The commands the execution may spawn (shell); `None` allows all.
+    allowed_commands: Option<Vec<String>>,
 }
 
 /// Execute Python code using a session executor.
@@ -1238,6 +1248,9 @@ async fn execute_with_session(
     }
     if let Some(tx) = net_tx {
         builder = builder.with_network(tx);
+    }
+    if let Some(names) = &params.allowed_commands {
+        builder = builder.with_allowed_commands(names.iter().cloned());
     }
     let exec_result = builder.run().await;
 

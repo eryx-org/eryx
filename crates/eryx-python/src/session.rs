@@ -83,9 +83,22 @@ pub struct Session {
     _factory_files: Option<crate::preinit::FactoryFiles>,
     /// Limits passed to callback handlers for this session.
     callback_limits: eryx::ResourceLimits,
+    /// The guest language, for the shell-only `allowed_commands`.
+    language: eryx::Language,
 }
 
 impl Session {
+    /// Check a call's `allowed_commands`, which only the shell takes.
+    fn allowed_commands(&self, allowed: Option<Vec<String>>) -> PyResult<Option<Vec<String>>> {
+        if allowed.is_some() && self.language != eryx::Language::Shell {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "allowed_commands= is only for language=\"shell\", not {}",
+                self.language
+            )));
+        }
+        Ok(allowed)
+    }
+
     /// Build a session from a preconfigured executor. Factory sessions use this
     /// path so ordinary `Session` construction remains unchanged.
     #[allow(clippy::too_many_arguments)]
@@ -104,6 +117,7 @@ impl Session {
         on_stderr: Option<Py<PyAny>>,
         factory_files: Option<crate::preinit::FactoryFiles>,
     ) -> PyResult<Self> {
+        let language = executor.language();
         let net_config: Option<eryx::NetConfig> = network.map(Into::into);
         if let Some(net) = &net_config {
             net.validate().map_err(InitializationError::new_err)?;
@@ -198,6 +212,7 @@ impl Session {
             output_handler,
             _factory_files: factory_files,
             callback_limits,
+            language,
         })
     }
 }
@@ -314,6 +329,9 @@ impl Session {
     ///
     /// Args:
     ///     code: Python source code to execute.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout and execution statistics.
@@ -334,15 +352,17 @@ impl Session {
     ///     session.execute('y = 2')
     ///     result = session.execute('print(x + y)')
     ///     print(result.stdout)  # "3"
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute(
         &self,
         py: Python<'_>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ExecuteResult> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let token = call_token(cancel);
-        let run = self.run(code, self.callbacks.clone(), None, token.clone());
+        let run = self.run(code, self.callbacks.clone(), None, allowed, token.clone());
         flatten_run(run_blocking(py, &self.runtime, &token, run)??)
     }
 
@@ -358,6 +378,9 @@ impl Session {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
@@ -365,17 +388,19 @@ impl Session {
     /// Example:
     ///     await session.execute_async('x = 1')
     ///     result = await session.execute_async('print(x)')
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute_async<'py>(
         &self,
         py: Python<'py>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let token = call_token(cancel);
         let run_token = token.clone();
         run_async(py, &self.runtime, token, || {
-            let run = self.run(code, self.callbacks.clone(), None, run_token);
+            let run = self.run(code, self.callbacks.clone(), None, allowed, run_token);
             async move { flatten_run(run.await?) }
         })
     }
@@ -388,6 +413,9 @@ impl Session {
     ///     code: Python source code to execute.
     ///     journal: Optional journal from a previous `ReplayOutcome.journal`.
     ///         Trusted input: replayed results are returned verbatim.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
     ///
     /// If the run halts (a callback suspends, or it times out or runs out of
     /// fuel), the session is rolled back to its state from before the call, so
@@ -400,18 +428,26 @@ impl Session {
     ///
     /// Raises:
     ///     ValueError: If `journal` is not a valid journal.
-    #[pyo3(signature = (code, journal=None))]
+    #[pyo3(signature = (code, journal=None, *, allowed_commands=None))]
     fn execute_with_journal(
         &self,
         py: Python<'_>,
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ReplayOutcome> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let journal = crate::result::journal_from_py(journal)?;
         let state = eryx::ReplayState::shared(code, journal);
         let wrapped = eryx::replay::wrap_callbacks(&self.callbacks, &state);
         let token = call_token(None);
-        let run = self.run(code, Arc::new(wrapped), Some(state.clone()), token.clone());
+        let run = self.run(
+            code,
+            Arc::new(wrapped),
+            Some(state.clone()),
+            allowed,
+            token.clone(),
+        );
         match run_blocking(py, &self.runtime, &token, run)?? {
             Ok(result) => ReplayOutcome::from_state(
                 py,
@@ -649,6 +685,7 @@ impl Session {
         code: &str,
         callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
         replay: Option<Arc<Mutex<eryx::ReplayState>>>,
+        allowed_commands: Option<Vec<String>>,
         token: CancellationToken,
     ) -> impl Future<Output = PyResult<RunOutcome>> + Send + 'static {
         let code = code.to_string();
@@ -731,6 +768,10 @@ impl Session {
 
                 if let Some(tx) = output_tx {
                     builder = builder.with_output_streaming(tx);
+                }
+
+                if let Some(names) = &allowed_commands {
+                    builder = builder.with_allowed_commands(names.iter().cloned());
                 }
 
                 let result = builder.run().await;
