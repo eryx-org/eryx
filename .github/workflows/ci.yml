@@ -71,6 +71,7 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
       bundler: ${{ steps.filter.outputs.bundler }}
+      shell: ${{ steps.filter.outputs.shell }}
       notices: ${{ steps.filter.outputs.notices }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,6 +126,27 @@ jobs:
             bundler:
               - 'crates/eryx-bundler/**'
               - 'mise.toml'
+              - '.github/workflows/ci.yml'
+            # What the Test job's shell-only step (no unstable-vfs) checks: the
+            # shell guest, VFS, child processes and environments. Pull
+            # requests touching none of it skip that step; pushes always run it.
+            shell:
+              - 'crates/eryx-guest-shell/**'
+              - 'crates/eryx-vfs/**'
+              - 'crates/eryx-packages/**'
+              - 'crates/eryx/Cargo.toml'
+              - 'crates/eryx/build.rs'
+              - 'crates/eryx/src/process.rs'
+              - 'crates/eryx/src/process/**'
+              - 'crates/eryx/src/session/**'
+              - 'crates/eryx/src/environment/**'
+              - 'crates/eryx/src/embedded.rs'
+              - 'crates/eryx/tests/shell_guest.rs'
+              - 'crates/eryx/tests/commands.rs'
+              - 'crates/eryx/tests/p3_guest.rs'
+              - 'crates/eryx/tests/environment.rs'
+              - 'crates/eryx/tests/js_environment.rs'
+              - 'crates/eryx/tests/fixtures/**'
               - '.github/workflows/ci.yml'
             # What the third-party notices are made from (#837).
             notices:
@@ -913,8 +935,11 @@ jobs:
       # environment mount) only show up here. (`packages` implies
       # `environment`.) Only the suites that exercise
       # that path, reusing this job's artifacts and compiled dependencies, so
-      # it costs about the eryx crate's own rebuild plus a minute of tests.
+      # it costs about the eryx crate's own rebuild plus a minute of tests
+      # (5.4 min on #941). Pull requests run it only when the `shell` paths
+      # change; pushes and tags always do.
       - name: Run the shell suites without unstable-vfs
+        if: github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true'
         run: |
           df -h .
           cargo nextest run -p eryx --profile ci \

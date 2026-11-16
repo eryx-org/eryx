@@ -118,6 +118,12 @@ impl Sandbox {
     ///         `eryx.Command`. They replace the uutils coreutils tools
     ///         (cat, head, ls, sort, ...) of the same name, which the shell
     ///         gets by default from the `pyeryx-runtime-shell` package.
+    ///     child_network: For the shell only, with `network`: how its
+    ///         external commands reach the network, through a proxy on the
+    ///         host. None (the default) keeps them offline; "inherit" gives
+    ///         them `network`'s policy; a `NetConfig` only what both it and
+    ///         `network` allow. Children see secrets only as their
+    ///         placeholders, which the proxy replaces for the secrets' hosts.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -163,7 +169,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -183,8 +189,10 @@ impl Sandbox {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
         commands: Option<crate::command::Commands<'_>>,
+        child_network: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let language = parse_language(language)?;
+        let child_network = parse_child_network(language, network.is_some(), child_network)?;
         let runtime = crate::error::make_runtime()?;
 
         // Build the eryx sandbox with embedded runtime. Trace collection
@@ -251,7 +259,7 @@ impl Sandbox {
             });
         }
 
-        let inner = build_for(py, (builder, source), language, commands)?;
+        let inner = build_for(py, (builder, source), language, commands, child_network)?;
 
         Ok(Self {
             inner,
@@ -489,6 +497,7 @@ pub(crate) fn build_for(
     ),
     language: eryx::Language,
     commands: Option<crate::command::Commands<'_>>,
+    child_network: eryx::ChildNetwork,
 ) -> PyResult<eryx::Sandbox> {
     if language != eryx::Language::Shell && commands.as_ref().is_some_and(|c| !c.is_empty()) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -506,7 +515,7 @@ pub(crate) fn build_for(
             for (name, command) in commands.into_iter().flatten() {
                 builder = builder.with_command(name, command.inner.clone());
             }
-            builder.build()
+            builder.with_child_network(child_network).build()
         }
         other => {
             return Err(InitializationError::new_err(format!(
@@ -556,6 +565,40 @@ fn find_runtime(
          `pip install pyeryx[{language}]`, or run `eryx-precompile setup --language \
          {language}`, set {var}, or pass runtime_path="
     )))
+}
+
+/// `child_network=`: None, "inherit" or a narrowing `NetConfig`, for a
+/// shell sandbox with `network=`.
+pub(crate) fn parse_child_network(
+    language: eryx::Language,
+    has_network: bool,
+    value: Option<Bound<'_, PyAny>>,
+) -> PyResult<eryx::ChildNetwork> {
+    let Some(value) = value.filter(|v| !v.is_none()) else {
+        return Ok(eryx::ChildNetwork::None);
+    };
+    if language != eryx::Language::Shell {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_network= is only for language=\"shell\", not {language}"
+        )));
+    }
+    if !has_network {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "child_network= needs network=: children only get what it allows",
+        ));
+    }
+    if let Ok(narrow) = value.extract::<NetConfig>() {
+        return Ok(eryx::ChildNetwork::Narrow(Box::new(narrow.into())));
+    }
+    match value.extract::<String>() {
+        Ok(mode) if mode == "inherit" => Ok(eryx::ChildNetwork::Inherit),
+        Ok(mode) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_network= must be None, \"inherit\" or a NetConfig, not {mode:?}"
+        ))),
+        Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(
+            "child_network= must be None, \"inherit\" or a NetConfig",
+        )),
+    }
 }
 
 /// Parse the `language` argument; `None` is Python.
