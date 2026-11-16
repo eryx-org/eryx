@@ -2,7 +2,9 @@
 //! [`Command`]s run as child processes of the embedded shell runtime.
 //!
 //! Most tests use a tiny command built by the test itself
-//! (tests/fixtures/test-cmd, which needs `rustup target add wasm32-wasip2`).
+//! (tests/fixtures/test-cmd, which needs `rustup target add wasm32-wasip2`),
+//! and the `p3_` ones the same command built for WASI 0.3 (`rustup target
+//! add wasm32-wasip3`).
 //!
 //! ```sh
 //! mise run precompile-runtime-shell
@@ -25,24 +27,31 @@ fn test_cmd() -> Command {
 
 fn test_cmd_wasm() -> Vec<u8> {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    WASM.get_or_init(|| {
-        let manifest =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-cmd/Cargo.toml");
-        let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-cmd");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--release", "--locked"])
-            .args(["--target", "wasm32-wasip2", "--manifest-path"])
-            .arg(&manifest)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .status()
-            .expect("running cargo");
-        assert!(
-            status.success(),
-            "building the test command failed; is the wasm32-wasip2 target installed?"
-        );
-        std::fs::read(target_dir.join("wasm32-wasip2/release/eryx-test-cmd.wasm")).unwrap()
-    })
-    .clone()
+    WASM.get_or_init(|| build_test_cmd("wasm32-wasip2")).clone()
+}
+
+/// The test command built for WASI 0.3: a p3 command component.
+fn test_cmd_p3() -> Command {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    Command::from_bytes(WASM.get_or_init(|| build_test_cmd("wasm32-wasip3"))).unwrap()
+}
+
+fn build_test_cmd(target: &str) -> Vec<u8> {
+    let manifest =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-cmd/Cargo.toml");
+    let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-cmd");
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "--release", "--locked"])
+        .args(["--target", target, "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .status()
+        .expect("running cargo");
+    assert!(
+        status.success(),
+        "building the test command failed; is the {target} target installed?"
+    );
+    std::fs::read(target_dir.join(format!("{target}/release/eryx-test-cmd.wasm"))).unwrap()
 }
 
 fn shell() -> SandboxBuilder<Shell, state::Has> {
@@ -739,6 +748,137 @@ async fn coreutils_see_the_root_and_dev() {
     }
 }
 
+/// A WASI 0.3 command runs as a child like a 0.2 one: argv, env, stdin,
+/// stdout, stderr and exit status, and pipes to and from 0.2 stages.
+#[tokio::test]
+async fn p3_commands_run_as_children() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_commands(["tc3", "other3"], test_cmd_p3())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "tc3 argv0; other3 argv0; FOO=bar tc3 env FOO; tc3 exit 3; echo \"status=$?\"; \
+             printf 'hi\\n' | tc3 | tc; echo lo | tc | tc3",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "tc3\nother3\nbar\nstatus=3\nHI\nLO\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "bye\n");
+}
+
+/// A WASI 0.3 child streams through its pipes: an endless producer stops
+/// at `head`, and bulk and line-at-a-time output pass through.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn p3_children_stream_through_pipes() {
+    let sandbox = shell()
+        .with_command("tc3", test_cmd_p3())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(30)),
+        )
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "tc3 yes | head -n 2; tc3 yes | head -c 20000000 | wc -c; \
+             tc3 lines | cat | head -c 100000 | wc -c; x=$(tc3 yes | head -c 1000000); echo ${#x}",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "y\ny\n20000000\n100000\n999999\n"
+    );
+}
+
+/// A WASI 0.3 child burns the parent's fuel, stops at its timeout and
+/// cancellation, and draws on the children's memory pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn p3_children_are_limited_like_p2_ones() {
+    let sandbox = shell()
+        .with_command("tc3", test_cmd_p3())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(100_000_000))
+        .build()
+        .unwrap();
+    sandbox.execute("tc3 argv0").await.unwrap();
+    let err = sandbox.execute("tc3 spin").await.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+
+    let sandbox = shell()
+        .with_command("tc3", test_cmd_p3())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let err = sandbox.execute("tc3 spin").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+
+    let sandbox = shell().with_command("tc3", test_cmd_p3()).build().unwrap();
+    let handle = sandbox.execute_cancellable("tc3 spin");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.cancel();
+    let err = tokio::time::timeout(Duration::from_secs(3), handle.wait())
+        .await
+        .expect("cancellation stops the child")
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+
+    // 160 MiB fits the 256 MiB pool alone, not twice over.
+    let out = sandbox.execute("echo hi | tc3 alloc 160").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\n");
+    let out = sandbox
+        .execute("echo hi | tc3 alloc 160 | tc3 alloc 160; true")
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("error: OutOfMemory"),
+        "{out:?}"
+    );
+}
+
+/// A WASI 0.3 child sees the session's VFS, as 0.2 children do, and no
+/// host files.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn p3_children_share_the_sessions_vfs() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let out = session
+        .execute(
+            "echo from-shell > /data/a.txt; tc3 cat /data/a.txt; \
+             tc3 write /data/b.txt from-p3; tc cat /data/b.txt; echo; \
+             tc3 cat /etc/passwd; echo \"status=$?\"",
+        )
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "from-shell\nfrom-p3\nerror: NotFound\nstatus=1\n"
+    );
+    assert_eq!(storage.read("/data/b.txt").await.unwrap(), b"from-p3");
+}
+
 /// A line-at-a-time producer moves data at a useful rate (#890). The bound
 /// is ~10x a debug build's time alone (0.3 s), to catch only a return to
 /// ~100 µs per line (about 6 s); `pipe_throughput` has the real numbers.
@@ -765,6 +905,7 @@ async fn line_at_a_time_pipes_are_not_slow() {
 async fn pipe_throughput() {
     let sandbox = shell()
         .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
         .with_resource_limits(
             ResourceLimits::default().with_execution_timeout(Duration::from_secs(120)),
         )
@@ -790,6 +931,32 @@ async fn pipe_throughput() {
         (
             "first lines -> cat -> head",
             "tc lines | cat | head -c 10 | wc -c",
+            10,
+        ),
+        // The same, from a WASI 0.3 child.
+        (
+            "p3 lines -> head",
+            "tc3 lines | head -c 100000 | wc -c",
+            100_000,
+        ),
+        (
+            "p3 lines -> cat -> head",
+            "tc3 lines | cat | head -c 10000 | wc -c",
+            10_000,
+        ),
+        (
+            "p3 yes -> head",
+            "tc3 yes | head -c 20000000 | wc -c",
+            20_000_000,
+        ),
+        (
+            "p3 first lines -> head",
+            "tc3 lines | head -c 10 | wc -c",
+            10,
+        ),
+        (
+            "p3 first lines -> cat -> head",
+            "tc3 lines | cat | head -c 10 | wc -c",
             10,
         ),
     ] {

@@ -184,7 +184,7 @@ struct Args {
 
     /// An external command for the shell, `NAME=PATH`; repeat for more.
     /// `NAME1,NAME2=PATH` registers one multicall binary (e.g. busybox-style)
-    /// under several names, compiled once. PATH is a WASI 0.2 command
+    /// under several names, compiled once. PATH is a WASI 0.2 or 0.3 command
     /// component (`.wasm`), or one precompiled by this eryx version's
     /// `eryx-precompile compile` (`.cwasm`, trusted like --runtime-cwasm). A
     /// name overrides the embedded coreutils tool of the same name. In the
