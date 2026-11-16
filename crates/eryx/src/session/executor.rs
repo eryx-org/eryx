@@ -358,6 +358,7 @@ pub struct SessionExecuteBuilder<'a> {
     fuel_limit: Option<u64>,
     cancellation_token: Option<CancellationToken>,
     child_net: Option<crate::process::ChildNet>,
+    allowed_commands: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -390,7 +391,25 @@ impl<'a> SessionExecuteBuilder<'a> {
             fuel_limit: None,
             cancellation_token: None,
             child_net: None,
+            allowed_commands: None,
         }
+    }
+
+    /// Let this execution spawn only the named host-registered commands
+    /// (shell only): the guest lists just those, and any other spawn fails
+    /// with `command-not-found`. An empty list allows none; names that aren't
+    /// registered are ignored. Without this, every registered command is
+    /// allowed, whatever an earlier execution allowed. Shell builtins
+    /// (including `grep`) and callbacks aren't commands, so this doesn't
+    /// affect them.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
     }
 
     unstable_pub! {
@@ -526,6 +545,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.fuel_limit,
                 self.cancellation_token,
                 self.child_net,
+                self.allowed_commands.as_deref(),
             )
             .await
     }
@@ -1534,6 +1554,7 @@ impl SessionExecutor {
         per_execute_fuel_limit: Option<u64>,
         cancellation_token: Option<CancellationToken>,
         child_net: Option<crate::process::ChildNet>,
+        allowed_commands: Option<&[String]>,
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
@@ -1581,6 +1602,9 @@ impl SessionExecutor {
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
             state.child_net = child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net)));
+            // From the full set every time, so one execution's narrowing
+            // doesn't carry into the next.
+            state.commands = self.executor.commands().only(allowed_commands);
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.stream_budget = StreamBudget::default();

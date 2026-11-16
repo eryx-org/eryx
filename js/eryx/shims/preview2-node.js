@@ -32,5 +32,5 @@ export const {
 export const { monotonicClock, wallClock } = await load("clocks");
 export const { preopens, types, _setFileData, createFilesystem, InMemoryFilesystemAdapter } =
   await load("filesystem");
-export const { error, poll, streams } = await load("io");
+export const { error, poll, pollableCreate, streams } = await load("io");
 export const { insecureSeed, random } = await load("random");

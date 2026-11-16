@@ -65,18 +65,26 @@ async fn timers_fire_in_order_and_the_execute_waits() {
 #[tokio::test]
 async fn intervals_and_clearing() {
     let out = run(r"
+        // Before the interval, so it's due first however slow the runner.
         let ticks = 0;
-        const interval = setInterval(() => {
-            if (++ticks === 3) clearInterval(interval);
-        }, 5);
+        const again = setTimeout(() => console.log('refreshed', ticks), 1);
+        again.refresh();
+        const cleared = new Promise((resolve) => {
+            const interval = setInterval(() => {
+                if (++ticks === 3) {
+                    clearInterval(interval);
+                    resolve(interval);
+                }
+            }, 5);
+        });
         const never = setTimeout(() => console.log('never'), 10);
         clearTimeout(never);
         const byId = setTimeout(() => console.log('never either'), 10);
         clearTimeout(Number(byId));
         clearTimeout(undefined);
-        const again = setTimeout(() => console.log('refreshed', ticks), 1);
-        again.refresh();
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        const interval = await cleared;
+        // No tick after the clear.
+        await new Promise((resolve) => setTimeout(resolve, 30));
         console.log(ticks, typeof interval.hasRef, interval.hasRef());
         ")
     .await

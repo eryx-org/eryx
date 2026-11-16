@@ -505,6 +505,12 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 "network_config.child_network is only for shell requests, not {language}"
             )));
         }
+        if language != eryx::Language::Shell && execute_req.allowed_commands.is_some() {
+            return Err(Status::invalid_argument(format!(
+                "allowed_commands is only for the shell, not {language}"
+            )));
+        }
+        let allowed_commands = execute_req.allowed_commands.map(|allowed| allowed.names);
 
         // Parse and validate secrets, generating their placeholders.
         let secrets = {
@@ -765,6 +771,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_ttl,
                     declarations: &declarations,
                     max_output_bytes,
+                    allowed_commands,
                 };
 
                 // Race execution against client disconnection: either the
@@ -1012,6 +1019,8 @@ struct SessionParams<'a> {
     declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
     /// Cap on stdout plus stderr bytes kept and streamed.
     max_output_bytes: usize,
+    /// The commands the execution may spawn (shell); `None` allows all.
+    allowed_commands: Option<Vec<String>>,
 }
 
 /// Longest an execution waits for its trace events to reach the client
@@ -1276,6 +1285,9 @@ async fn execute_with_session(
             config.clone(),
             params.secrets.clone(),
         );
+    }
+    if let Some(names) = &params.allowed_commands {
+        builder = builder.with_allowed_commands(names.iter().cloned());
     }
     let exec_result = builder.run().await;
 

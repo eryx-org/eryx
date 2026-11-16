@@ -1044,6 +1044,25 @@ impl Commands {
         Arc::make_mut(&mut self.0).insert(name, command);
     }
 
+    /// Just the commands named in `allowed`, for one execution; `None`
+    /// keeps them all, and `Some` of an empty list leaves none. Names that
+    /// aren't registered are ignored.
+    pub(crate) fn only(&self, allowed: Option<&[String]>) -> Self {
+        let Some(allowed) = allowed else {
+            return self.clone();
+        };
+        let mut kept = HashMap::new();
+        for name in allowed {
+            match self.0.get(name) {
+                Some(command) => {
+                    kept.insert(name.clone(), command.clone());
+                }
+                None => tracing::debug!(command = %name, "allowed command isn't registered"),
+            }
+        }
+        Self(Arc::new(kept))
+    }
+
     /// Register `command` as `name` unless something already is.
     #[cfg(all(feature = "embedded", feature = "coreutils"))]
     pub(crate) fn insert_if_absent(&mut self, name: &str, command: &Command) {

@@ -1351,3 +1351,96 @@ async fn nested_children_report_trace_events() {
     };
     assert_eq!(events, [killed(1), killed(2)].concat());
 }
+
+/// `with_allowed_commands` narrows one execution's commands: the guest sees
+/// only those, others exit 127, an empty list allows none, and names that
+/// aren't registered are ignored. The next execution without it gets them
+/// all back.
+#[tokio::test]
+async fn allowed_commands_narrow_one_session_execution() {
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let mut session = SessionExecutor::new_with_limits(executor, &[], &ResourceLimits::default())
+        .await
+        .unwrap();
+    let both = "upper argv0; echo \"upper=$?\"; tc argv0; echo \"tc=$?\"";
+
+    let out = session
+        .execute(both)
+        .with_allowed_commands(["upper", "missing"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "upper\nupper=0\ntc=127\n"
+    );
+
+    let out = session.execute(both).run().await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "upper\nupper=0\ntc\ntc=0\n"
+    );
+
+    let out = session
+        .execute(both)
+        .with_allowed_commands(Vec::<String>::new())
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "upper=127\ntc=127\n");
+}
+
+/// The one-shot executor applies `with_allowed_commands` the same way.
+#[tokio::test]
+async fn allowed_commands_narrow_a_one_shot_execution() {
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let out = executor
+        .execute("tc argv0; echo \"tc=$?\"; upper argv0; echo \"upper=$?\"")
+        .with_allowed_commands(["tc"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "tc\ntc=0\nupper=127\n"
+    );
+}
+
+/// Nested children are held to their execution's `with_allowed_commands`
+/// too: a command it narrowed away can't be reached through one that may
+/// spawn.
+#[tokio::test]
+async fn nested_spawns_respect_allowed_commands() {
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let out = executor
+        .execute("echo hi | tc spawn upper; tc spawn tc argv0")
+        .with_allowed_commands(["tc"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "error: command-not-found\ntc\n"
+    );
+    let out = executor
+        .execute("echo hi | tc spawn upper")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "HI\n");
+}
