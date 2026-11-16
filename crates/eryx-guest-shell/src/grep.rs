@@ -47,6 +47,37 @@ impl builtins::ParseArgs for GrepCommand {
     }
 }
 
+/// `grep` in an execution whose allowed commands leave it out: it fails as
+/// an uninstalled command would. A stub rather than a disabled builtin, which
+/// is state a script could change back (bash's `enable`).
+pub struct GrepRefused;
+
+impl builtins::ParseArgs for GrepRefused {
+    fn content(
+        name: &str,
+        content_type: builtins::ContentType,
+        options: &builtins::ContentOptions,
+    ) -> Result<String, brush_core::Error> {
+        GrepCommand::content(name, content_type, options)
+    }
+
+    fn parse(_invocation: builtins::Invocation<'_>) -> Result<Self, builtins::UsageError> {
+        Ok(Self)
+    }
+}
+
+impl<SE: ShellExtensions> builtins::Builtin<SE> for GrepRefused {
+    type Error = brush_core::Error;
+
+    async fn execute(
+        self,
+        context: ExecutionContext<'_, SE>,
+    ) -> Result<ExecutionResult, Self::Error> {
+        writeln!(context.stderr(), "grep: command not found")?;
+        Ok(ExecutionResult::new(127))
+    }
+}
+
 impl<SE: ShellExtensions> builtins::Builtin<SE> for GrepCommand {
     type Error = brush_core::Error;
 

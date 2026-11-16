@@ -185,8 +185,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   The guest sees only those, and the others exit 127 as if not installed. An
   empty list allows none, unset allows all, and unknown names are ignored. It
   lasts one execution: a session's next call without it gets every command
-  back. It narrows host-registered commands only: shell builtins (including
-  the in-guest `grep`) and callbacks aren't commands and keep working. In a
+  back. The shell's `grep` builtin counts as a command here (allow `grep` to
+  keep it); other builtins and callbacks aren't commands and keep working. In a
   session, a command an earlier call allowed still shows in the shell's
   `hash` table, but running it is refused.
 - **Lookup:** the shell looks for functions first, then builtins, then
