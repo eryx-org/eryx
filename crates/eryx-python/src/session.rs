@@ -350,6 +350,7 @@ impl Session {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the session's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         Shell builtins (including grep) and callbacks aren't affected.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout and execution statistics.
@@ -399,6 +400,7 @@ impl Session {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the session's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         Shell builtins (including grep) and callbacks aren't affected.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
@@ -434,6 +436,7 @@ impl Session {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the session's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         Shell builtins (including grep) and callbacks aren't affected.
     ///
     /// If the run halts (a callback suspends, or it times out or runs out of
     /// fuel), the session is rolled back to its state from before the call, so

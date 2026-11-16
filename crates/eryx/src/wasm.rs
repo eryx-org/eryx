@@ -2259,11 +2259,12 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
-    /// Let this execution spawn only the named commands (shell only): the
-    /// guest lists just those, and any other spawn fails with
-    /// `command-not-found`. An empty list allows none; names that aren't
+    /// Let this execution spawn only the named host-registered commands
+    /// (shell only): the guest lists just those, and any other spawn fails
+    /// with `command-not-found`. An empty list allows none; names that aren't
     /// registered are ignored. Without this, every registered command is
-    /// allowed.
+    /// allowed. Shell builtins (including `grep`) and callbacks aren't
+    /// commands, so this doesn't affect them.
     #[must_use]
     pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
     where

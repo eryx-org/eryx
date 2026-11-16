@@ -129,7 +129,9 @@ message ExecuteRequest {
   // Shell only: the commands this execution may spawn, out of those the
   // server registered. Unset allows them all; set with no names allows none.
   // Names the server doesn't have are ignored. Other commands exit 127, as
-  // if not installed. Setting it for another language is INVALID_ARGUMENT.
+  // if not installed. Shell builtins (including grep) and callbacks aren't
+  // registered commands, so this doesn't restrict them. Setting it for
+  // another language is INVALID_ARGUMENT.
   AllowedCommands allowed_commands = 16;
 }
 

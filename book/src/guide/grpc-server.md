@@ -119,7 +119,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |
-| `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. Setting it for another language is `INVALID_ARGUMENT`. |
+| `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. Shell builtins (including `grep`) and callbacks aren't registered commands, so it doesn't restrict them. Setting it for another language is `INVALID_ARGUMENT`. |
 
 ## Reading the result
 
