@@ -107,3 +107,50 @@ fn runtime_from_before_eryx_versions_were_stored_is_rejected() {
         "{message}"
     );
 }
+
+/// A precompiled command from this eryx version built with a wasm feature
+/// this engine doesn't enable (as from a development build with other engine
+/// settings) passes the version check, then fails wasmtime's feature check:
+/// that's `IncompatiblePrecompiled` too, so it gets rebuilt like any other.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn command_built_with_other_engine_features_is_rejected() {
+    // eryx's engine settings, target-pinned as `CpuFeatureLevel::Baseline`
+    // builds are (see tests/cpu_feature_portability.rs), plus a feature eryx
+    // doesn't enable.
+    let mut config = wasmtime::Config::new();
+    config
+        .module_version(wasmtime::ModuleVersionStrategy::Custom(module_version()))
+        .unwrap();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_more_async_builtins(true);
+    config.epoch_interruption(true);
+    config.consume_fuel(true);
+    config.memory_init_cow(true);
+    config.cranelift_opt_level(wasmtime::OptLevel::SpeedAndSize);
+    config.async_stack_size(1024 * 1024);
+    config
+        .target(&target_lexicon::Triple::host().to_string())
+        .unwrap();
+    config.wasm_custom_page_sizes(true);
+    let precompiled = wasmtime::Engine::new(&config)
+        .unwrap()
+        .precompile_component(&wat::parse_str("(component)").unwrap())
+        .unwrap();
+
+    #[allow(unsafe_code)]
+    // SAFETY: built just above by wasmtime.
+    let err = unsafe { eryx::Command::from_precompiled(&precompiled) }.unwrap_err();
+    assert!(
+        matches!(err.kind(), eryx::ErrorKind::IncompatiblePrecompiled { .. }),
+        "unexpected error: {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains(
+            "with other engine settings (it uses WebAssembly feature `custom_page_sizes`)"
+        ),
+        "{message}"
+    );
+}

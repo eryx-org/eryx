@@ -274,6 +274,33 @@ fn create_p3_tcp_socket(
     }
 }
 
+/// The interface holding WASI 0.3's `tcp-socket.create`, as wasmtime-wasi
+/// links it.
+const P3_SOCKETS: &str = "wasi:sockets/types@0.3.0";
+/// That function's name in it.
+const P3_TCP_CREATE: &str = "[static]tcp-socket.create";
+
+/// Replace wasmtime-wasi's WASI 0.3 `tcp-socket.create` in `linker` with
+/// [`create_p3_tcp_socket`].
+///
+/// Fails unless wasmtime-wasi defined it under [`P3_SOCKETS`]: after a
+/// wasmtime-wasi upgrade moves the interface to another version, children
+/// would otherwise create sockets through it uncounted.
+fn count_p3_sockets(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
+    linker.allow_shadowing(false);
+    let defined = linker
+        .instance(P3_SOCKETS)?
+        .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
+        .is_err();
+    linker.allow_shadowing(true);
+    if !defined {
+        wasmtime::bail!("wasmtime-wasi no longer links `{P3_TCP_CREATE}` in `{P3_SOCKETS}`");
+    }
+    linker
+        .instance(P3_SOCKETS)?
+        .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
+}
+
 /// Where a child finds the proxy's CA certificate (see [`ChildNet`]).
 const CA_DIR: &str = "/etc/ssl/certs";
 /// The CA bundle's file name in [`CA_DIR`].
@@ -801,10 +828,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
         },
     )
     .map_err(wasm_err)?;
-    linker
-        .instance("wasi:sockets/types@0.3.0")
-        .and_then(|mut types| types.func_wrap("[static]tcp-socket.create", create_p3_tcp_socket))
-        .map_err(wasm_err)?;
+    count_p3_sockets(&mut linker).map_err(wasm_err)?;
     #[cfg(feature = "unstable-vfs")]
     {
         eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
@@ -1372,6 +1396,17 @@ mod tests {
             .unwrap();
         assert!(status.success(), "building tests/fixtures/test-cmd failed");
         std::fs::read(target_dir.join(format!("{target}/release/eryx-test-cmd.wasm"))).unwrap()
+    }
+
+    /// The socket counter only goes in where wasmtime-wasi linked WASI 0.3's
+    /// `tcp-socket.create`, so a version it no longer links fails loudly.
+    #[test]
+    fn p3_sockets_are_counted_only_where_wasmtime_wasi_links_them() {
+        let engine = crate::Executor::shared_engine().unwrap();
+        let mut linker = Linker::<ChildState>::new(&engine);
+        assert!(count_p3_sockets(&mut linker).is_err());
+        wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
+        count_p3_sockets(&mut linker).unwrap();
     }
 
     /// A command is linked for the WASI version whose `wasi:cli/run` it

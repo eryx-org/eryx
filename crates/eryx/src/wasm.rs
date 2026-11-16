@@ -4190,15 +4190,31 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
 #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
 pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
-    // wasmtime only reports the stored version as text. If the wording ever
-    // changes, callers just get the raw error again.
+    // wasmtime only reports these as text. If the wording ever changes,
+    // callers just get the raw error again.
     const PREFIX: &str = "Module was compiled with incompatible version '";
+    // The same eryx version with other engine settings (a development build
+    // from before or after a wasm feature was switched on) passes the
+    // version check, then fails this one.
+    const FEATURE: &str = "Module was compiled with support for WebAssembly feature `";
     let message = format!("{err:#}");
     if let Some((_, rest)) = message.split_once(PREFIX)
         && let Some((built_by, _)) = rest.split_once('\'')
     {
         return ErrorKind::IncompatiblePrecompiled {
             built_by: built_by.to_owned(),
+            expected: Executor::module_version(),
+        }
+        .into();
+    }
+    if let Some((_, rest)) = message.split_once(FEATURE)
+        && let Some((feature, _)) = rest.split_once('`')
+    {
+        return ErrorKind::IncompatiblePrecompiled {
+            built_by: format!(
+                "{} with other engine settings (it uses WebAssembly feature `{feature}`)",
+                Executor::module_version()
+            ),
             expected: Executor::module_version(),
         }
         .into();
