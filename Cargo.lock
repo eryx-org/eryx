@@ -1185,6 +1185,8 @@ dependencies = [
  "wasmtime-wasi-io",
  "wat",
  "webpki-roots",
+ "wit-component 0.261.0",
+ "wit-parser 0.261.0",
  "zip",
  "zstd 0.14.4",
 ]
@@ -5578,6 +5580,7 @@ dependencies = [
  "wasm-encoder 0.261.0",
  "wasm-metadata 0.261.0",
  "wasmparser 0.261.0",
+ "wat",
  "wit-parser 0.261.0",
 ]
 

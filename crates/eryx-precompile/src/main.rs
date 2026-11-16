@@ -34,6 +34,9 @@
 //! eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
 //!   --site-packages ./my-site-packages --import jinja2
 //!
+//! # Check a WASI CLI before registering it as a shell command
+//! eryx-precompile commands inspect rg.wasm
+//!
 //! # Verify packages work (not just import)
 //! eryx-precompile compile runtime-python.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-wasi.tar.gz --import numpy \
@@ -96,9 +99,32 @@ enum Command {
 
     /// Build and manage environments: package sets built ahead of time for
     /// sandboxes to mount.
+    /// Check shell commands: what a `.wasm` CLI imports, and whether eryx
+    /// can run it.
+    #[command(subcommand)]
+    Commands(CommandsCommand),
+
     #[cfg(feature = "env")]
     #[command(subcommand)]
     Env(EnvCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum CommandsCommand {
+    /// Print a command's WASI version, its imports (and whether shell
+    /// children get each), its exports, and whether eryx can run it. Exits 1
+    /// if it can't.
+    Inspect(InspectArgs),
+}
+
+#[derive(Parser, Debug)]
+struct InspectArgs {
+    /// The command component (`.wasm`)
+    file: PathBuf,
+
+    /// Print JSON instead
+    #[arg(long)]
+    json: bool,
 }
 
 #[cfg(feature = "env")]
@@ -393,9 +419,74 @@ async fn main() -> Result<()> {
         Command::Setup(args) => run_setup(args).await,
         Command::Compile(args) => run_compile(*args).await,
         Command::Upgrade(args) => run_upgrade(args).await,
+        Command::Commands(CommandsCommand::Inspect(args)) => run_inspect(&args),
         #[cfg(feature = "env")]
         Command::Env(EnvCommand::Build(args)) => run_env_build(args).await,
     }
+}
+
+fn run_inspect(args: &InspectArgs) -> Result<()> {
+    let wasm = std::fs::read(&args.file)
+        .with_context(|| format!("Failed to read {}", args.file.display()))?;
+    if wasm.starts_with(b"\x7fELF") || wasm.starts_with(b"\xcf\xfa\xed\xfe") {
+        anyhow::bail!(
+            "{} is precompiled: inspect the .wasm it was compiled from",
+            args.file.display()
+        );
+    }
+    let info = eryx::Command::inspect(&wasm)?;
+    if args.json {
+        let imports: Vec<_> = info
+            .imports
+            .iter()
+            .map(|i| {
+                let (support, why) = match &i.support {
+                    eryx::ImportSupport::Provided => ("provided", None),
+                    eryx::ImportSupport::NeedsSpawn => ("needs-spawn", None),
+                    eryx::ImportSupport::Missing(why) => ("missing", Some(why)),
+                    _ => ("unknown", None),
+                };
+                serde_json::json!({ "name": i.name, "support": support, "why": why })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "wasi": info.wasi,
+            "runnable": info.runnable(),
+            "problem": info.problem,
+            "imports": imports,
+            "exports": info.exports,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        match info.wasi {
+            Some(version) => println!("{}: WASI {version} command", args.file.display()),
+            None => println!("{}: not a command", args.file.display()),
+        }
+        println!("imports:");
+        for import in &info.imports {
+            println!("  {import}");
+        }
+        println!("exports:");
+        for export in &info.exports {
+            println!("  {export}");
+        }
+        match &info.problem {
+            None => println!("eryx can run it as a shell command"),
+            Some(_)
+                if info
+                    .imports
+                    .iter()
+                    .any(|i| matches!(i.support, eryx::ImportSupport::Missing(_))) =>
+            {
+                println!("eryx can't run it: it imports what children don't get (above)");
+            }
+            Some(problem) => println!("eryx can't run it: {problem}"),
+        }
+    }
+    if !info.runnable() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "env")]
@@ -1018,6 +1109,19 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         wasm_bytes.len(),
         wasm_bytes.len() as f64 / 1_000_000.0
     );
+
+    // A command (a component exporting wasi:cli/run) that imports what
+    // children don't get would only fail once registered: refuse it now.
+    if args.language.is_none()
+        && let Ok(info) = eryx::Command::inspect(&wasm_bytes)
+        && info.wasi.is_some()
+        && let Some(problem) = info.problem
+    {
+        anyhow::bail!(
+            "{} can't run as a shell command: {problem}",
+            args.input.display()
+        );
+    }
 
     // What an upgrade needs to rebuild the output; only stored with
     // --preinit, since without it there's nothing to rebuild from.

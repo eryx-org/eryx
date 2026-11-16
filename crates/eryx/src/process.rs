@@ -54,8 +54,12 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::error::{Error, ErrorKind};
 use crate::wasm::ExecutorState;
 
+mod imports;
 mod pipe;
 mod vmctx;
+
+pub(crate) use imports::missing_message;
+pub use imports::{CommandImport, CommandInfo, ImportSupport};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -458,6 +462,20 @@ impl Command {
         let engine = crate::Executor::child_engine()?;
         let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
         Self::from_component(&engine, &component, vmctx::estimate(wasm))
+    }
+
+    /// Inspect a command's `.wasm` bytes before registering it: which WASI
+    /// version it runs as, each interface it imports and whether children get
+    /// it, what it exports, and why it can't run, if it can't
+    /// (`eryx-precompile commands inspect` prints this). It reads the
+    /// component without compiling it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes aren't a component. One that can't run as
+    /// a command is reported in [`CommandInfo::problem`] instead.
+    pub fn inspect(wasm: &[u8]) -> Result<CommandInfo, Error> {
+        imports::inspect(wasm)
     }
 
     /// Stamp `precompiled`, the output of
@@ -1029,16 +1047,16 @@ impl Pre {
             .any(|(name, _)| name.starts_with("wasi:cli/run@0.3."));
         let pre = linker
             .instantiate_pre(component)
-            .map_err(ErrorKind::wasm_component)?;
+            .map_err(|e| imports::explain(engine, component, e))?;
         Ok(if p3 {
             Self::P3(
                 wasmtime_wasi::p3::bindings::CommandPre::new(pre)
-                    .map_err(ErrorKind::wasm_component)?,
+                    .map_err(|e| imports::explain(engine, component, e))?,
             )
         } else {
             Self::P2(
                 wasmtime_wasi::p2::bindings::CommandPre::new(pre)
-                    .map_err(ErrorKind::wasm_component)?,
+                    .map_err(|e| imports::explain(engine, component, e))?,
             )
         })
     }
@@ -2250,6 +2268,185 @@ mod tests {
         let engine = crate::Executor::child_engine().unwrap();
         let empty = Component::new(&engine, "(component)").unwrap();
         assert!(Command::from_component(&engine, &empty, 0).is_err());
+    }
+
+    /// A command importing what children don't get is refused at load with
+    /// each such import named, and one exporting no `wasi:cli/run` is told
+    /// it isn't a command; `inspect` reports every import.
+    #[test]
+    fn unsupported_imports_are_named_at_load() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (import "wasi:http/outgoing-handler@0.2.0" (instance))
+                (import "wasi:cli/environment@0.2.0" (instance))
+                (import "wasi:cli/stdout@0.1.0" (instance))
+            )"#,
+        )
+        .unwrap();
+        let err = Command::from_bytes(&wasm).unwrap_err();
+        let ErrorKind::CommandImports { missing } = err.kind() else {
+            panic!("{err}");
+        };
+        let names: Vec<_> = missing.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["wasi:http/outgoing-handler@0.2.0", "wasi:cli/stdout@0.1.0"]
+        );
+        assert!(
+            err.to_string().contains("children get no wasi:http"),
+            "{err}"
+        );
+
+        let info = Command::inspect(&wasm).unwrap();
+        assert_eq!(info.problem.as_deref(), Some(err.to_string().as_str()));
+        assert_eq!(info.wasi, None);
+        assert_eq!(info.imports.len(), 3);
+        assert_eq!(info.imports[1].support, ImportSupport::Provided);
+
+        let empty = wat::parse_str("(component)").unwrap();
+        let err = Command::from_bytes(&empty).unwrap_err();
+        assert!(err.to_string().contains("not a WASI command"), "{err}");
+        let info = Command::inspect(&empty).unwrap();
+        assert!(info.problem.unwrap().contains("not a WASI command"));
+        let module = wat::parse_str("(module)").unwrap();
+        assert!(Command::inspect(&module).is_err());
+
+        let info = Command::inspect(&test_cmd_wasm()).unwrap();
+        assert!(info.runnable(), "{:?}", info.problem);
+        assert_eq!(info.wasi, Some("0.2"));
+        assert!(
+            info.imports
+                .iter()
+                .all(|i| !matches!(i.support, ImportSupport::Missing(_))),
+            "{:?}",
+            info.imports
+        );
+    }
+
+    /// The table of what children get agrees with the real child linker:
+    /// a probe component importing each interface of the WIT wasmtime-wasi
+    /// links (with its real types) links exactly when `support` says
+    /// children get it, and so do probes children don't get.
+    #[test]
+    fn import_support_matches_the_child_linker() {
+        use wit_component_wasmtime::{ComponentEncoder, StringEncoding};
+        use wit_parser_wasmtime::{LiftLowerAbi, ManglingAndAbi, Resolve};
+
+        // The WIT of the wasmtime-wasi in Cargo.lock, from cargo's registry
+        // sources (where the build got it).
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let lock = std::fs::read_to_string(manifest.join("../../Cargo.lock"))
+            .expect("reading the workspace Cargo.lock");
+        let version = lock
+            .split("\n[[package]]\n")
+            .find_map(|p| p.strip_prefix("name = \"wasmtime-wasi\"\nversion = \""))
+            .and_then(|v| v.split('"').next())
+            .expect("wasmtime-wasi in Cargo.lock");
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo")))
+            .expect("CARGO_HOME or HOME");
+        let registry = cargo_home.join("registry/src");
+        let src = std::fs::read_dir(&registry)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", registry.display()))
+            .flatten()
+            .map(|index| index.path().join(format!("wasmtime-wasi-{version}/src")))
+            .find(|src| src.join("p2/wit").is_dir())
+            .unwrap_or_else(|| {
+                panic!(
+                    "wasmtime-wasi {version}'s sources aren't in {}",
+                    registry.display()
+                )
+            });
+
+        // A component importing `interface` from the WIT in `dir`, plus
+        // `extra` WIT defining packages of its own.
+        let probe = |dir: &Path, interface: &str, extra: Option<&str>, abi| {
+            let mut resolve = Resolve::default();
+            resolve.push_dir(dir).unwrap();
+            if let Some(extra) = extra {
+                resolve.push_str("extra.wit", extra).unwrap();
+            }
+            let world = format!("package eryx:probe;\nworld probe {{ import {interface}; }}\n");
+            let package = resolve.push_str("probe.wit", &world).unwrap();
+            let world = resolve.select_world(&[package], Some("probe")).unwrap();
+            let mut module = wit_component_wasmtime::dummy_module(&resolve, world, abi);
+            wit_component_wasmtime::embed_component_metadata(
+                &mut module,
+                &resolve,
+                world,
+                StringEncoding::UTF8,
+                false,
+            )
+            .unwrap();
+            ComponentEncoder::default()
+                .module(&module)
+                .unwrap()
+                .encode()
+                .unwrap()
+        };
+
+        let mut probes = Vec::new();
+        for (dir, abi) in [
+            ("p2/wit", ManglingAndAbi::Legacy(LiftLowerAbi::Sync)),
+            (
+                "p3/wit",
+                ManglingAndAbi::Legacy(LiftLowerAbi::AsyncCallback),
+            ),
+        ] {
+            let dir = src.join(dir);
+            let mut resolve = Resolve::default();
+            resolve.push_dir(&dir).unwrap();
+            for (_, package) in &resolve.packages {
+                if package.name.namespace != "wasi" {
+                    continue;
+                }
+                let version = package.name.version.as_ref().unwrap();
+                for name in package.interfaces.keys() {
+                    let interface = format!("wasi:{}/{name}@{version}", package.name.name);
+                    probes.push((interface.clone(), probe(&dir, &interface, None, abi)));
+                }
+            }
+        }
+        assert!(probes.len() > 40, "{}", probes.len());
+        // What children don't get, with real types: another version of an
+        // interface they do get, a prerelease, and a package they don't.
+        let p2 = src.join("p2/wit");
+        let sync = ManglingAndAbi::Legacy(LiftLowerAbi::Sync);
+        for (interface, wit) in [
+            (
+                "wasi:cli/environment@0.1.0",
+                "package wasi:cli@0.1.0;\ninterface environment { get-arguments: func() -> list<string>; }",
+            ),
+            (
+                "wasi:random/random@0.3.0-rc-2025-09-16",
+                "package wasi:random@0.3.0-rc-2025-09-16;\ninterface random { get-random-u64: func() -> u64; }",
+            ),
+            (
+                "wasi:http/outgoing-handler@0.2.0",
+                "package wasi:http@0.2.0;\ninterface outgoing-handler { handle: func(); }",
+            ),
+        ] {
+            probes.push((interface.to_owned(), probe(&p2, interface, Some(wit), sync)));
+        }
+
+        let engine = crate::Executor::child_engine().unwrap();
+        let linker = child_linker(&engine).unwrap();
+        let mut disagree = Vec::new();
+        for (name, wasm) in &probes {
+            let component = Component::new(&engine, wasm).unwrap();
+            let links = linker
+                .instantiate_pre(&component)
+                .map(drop)
+                .map_err(|e| format!("{e:#}"));
+            let provided = !matches!(imports::support(name), ImportSupport::Missing(_));
+            if links.is_ok() != provided {
+                disagree.push(format!(
+                    "{name}: support says {provided}, linking: {links:?}"
+                ));
+            }
+        }
+        assert!(disagree.is_empty(), "{disagree:#?}");
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or

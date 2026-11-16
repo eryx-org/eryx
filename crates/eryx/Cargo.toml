@@ -232,6 +232,8 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # can check aarch64 configuration from an x86 runner (eryx has no ARM test job).
 wasmtime = { workspace = true, features = ["all-arch"] }
 wat = "1"
+wit-component-wasmtime = { workspace = true, features = ["dummy-module"] }
+wit-parser-wasmtime.workspace = true
 
 [lints]
 workspace = true

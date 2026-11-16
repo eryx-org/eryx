@@ -206,6 +206,16 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   also its WASI initial working directory. Children built with `eryx-build`
   start in that directory; other wasi-libc programs start in `/`, because
   wasi-libc ignores both (WebAssembly/wasi-libc#915).
+- **What children get:** WASI 0.2.x and 0.3.x `wasi:cli`, `wasi:clocks`,
+  `wasi:filesystem`, `wasi:random` and `wasi:sockets` (and 0.2's `wasi:io`),
+  plus `eryx:process/run@0.1` for commands registered with `allow_spawn`.
+  Nothing else: no `wasi:http` (children reach the network over sockets,
+  through the proxy below), and no WASI prereleases. A command importing
+  anything else is refused when it's loaded (`Command::from_file` and
+  friends, or `eryx-precompile compile`), with each such import named. Check
+  a CLI before registering it with `eryx-precompile commands inspect cli.wasm`
+  (`--json` for a script; `Command::inspect` in Rust), which lists its
+  imports and whether children get each, and exits 1 if eryx can't run it.
 - **Files:** a child sees the shell's filesystem (above): the read-only root,
   `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
   nothing else of the host. Files a child writes are the shell's, and last as
