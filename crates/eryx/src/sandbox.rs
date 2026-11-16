@@ -302,6 +302,9 @@ impl Sandbox {
     /// source** (e.g. a previous run of the same sandbox, or a journal verified
     /// via HMAC signature). See the [`replay`](crate::replay) module docs for
     /// details.
+    ///
+    /// Use [`execute_journaled`](Self::execute_journaled) when you need
+    /// [`ExecuteOptions`].
     pub async fn execute_with_journal(
         &self,
         code: &str,
@@ -312,8 +315,8 @@ impl Sandbox {
     }
 
     /// [`execute_with_journal`](Self::execute_with_journal) with per-call
-    /// [`ExecuteOptions`]. The same security note applies: only replay
-    /// journals from a trusted source.
+    /// [`ExecuteOptions`]: use this one when you need options. The same
+    /// security note applies: only replay journals from a trusted source.
     pub async fn execute_journaled(
         &self,
         code: &str,
@@ -938,6 +941,10 @@ impl Sandbox {
 /// A copy sharing the compiled runtime, callbacks and handlers, so a clone is
 /// cheap, and an execution can run on a spawned task. Executions of a sandbox
 /// and of its clones are independent, as executions of one sandbox are.
+///
+/// A clone of a [`SandboxPool`](crate::pool::SandboxPool) lease doesn't
+/// belong to the pool: it keeps that lease's callbacks, secrets and network
+/// config after the lease goes back, and isn't reset or reused with it.
 impl Clone for Sandbox {
     fn clone(&self) -> Self {
         Self {
@@ -1126,9 +1133,10 @@ impl ExecuteOptions {
         Self::default()
     }
 
-    /// Let this execution spawn only the named commands (shell only): the
-    /// guest lists just those, and any other spawn fails with
-    /// `command-not-found`. An empty list allows none; names that aren't
+    /// Let this execution spawn only the named commands: the guest lists
+    /// just those, and any other spawn fails with `command-not-found`. Only
+    /// the shell spawns commands; for other guests it changes nothing (no
+    /// error). An empty list allows none; names that aren't
     /// registered are ignored. The shell's `grep` builtin counts as a
     /// command here; other builtins and callbacks aren't affected. Sessions
     /// take the same option on [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
