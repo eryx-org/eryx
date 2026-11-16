@@ -565,3 +565,27 @@ async fn p3_gh_reaches_github_through_the_proxy() {
     let out = run(&sandbox, &format!("{env} GH_TOKEN=placeholder gh api /zen")).await;
     assert!(out.contains("HTTP 401"), "{out}");
 }
+
+/// A nested child (see `Command::allow_spawn`) gets the same network as the
+/// shell's children: the proxy only, with the secret substituted, and the
+/// same socket limits.
+#[tokio::test]
+async fn nested_children_get_the_same_network() {
+    let (port, seen) = upstream(None).await;
+    let sandbox = shell(network().allow_plaintext_secrets(true))
+        .with_command("tc", test_cmd().allow_spawn())
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!("tc spawn tc proxy-get http://api.test:{port}/x"),
+    )
+    .await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(seen.lock().unwrap().contains(&format!("Bearer {REAL}")));
+    assert!(!out.contains(REAL), "{out}");
+    let out = run(&sandbox, &format!("tc spawn tc connect 127.0.0.1:{port}")).await;
+    assert!(!out.contains("connected"), "{out}");
+    let out = run(&sandbox, "tc spawn tc hold 100").await;
+    assert!(out.starts_with("held 32 error:"), "{out}");
+}

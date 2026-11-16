@@ -20,6 +20,10 @@
 //!   else. Without it, no filesystem.
 //! - **Network:** through the child proxy only, when the sandbox has one
 //!   (#812); otherwise none.
+//! - **Commands:** a child whose command was registered with
+//!   [`Command::allow_spawn`] runs commands itself through
+//!   `eryx:process/run`, to completion, with the same commands, filesystem,
+//!   network and execution limits, at most `MAX_SPAWN_DEPTH` deep.
 //! - **Limits:** children burn the parent execution's fuel as they run (at
 //!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
 //!   work per running child, and stop at its timeout and cancellation. The
@@ -63,9 +67,17 @@ mod bindings {
     });
 }
 
+mod child_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "eryx:process/child",
+    });
+}
+
 use bindings::eryx::process::process::{
     Host, HostChild, HostChildWithStore, ProcessError, Spawned,
 };
+use child_bindings::eryx::process::run::{Output, RunError};
 
 /// Bytes each of a child's stdin, stdout and stderr pipes holds before its
 /// writer has to wait for the reader.
@@ -83,6 +95,12 @@ const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 const MAX_LIVE_CHILDREN: usize = 64;
 /// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
+/// How deep children may spawn children: the shell's are depth 1, so a
+/// command it runs may start commands three levels down (git running `git`
+/// running a hook, say).
+const MAX_SPAWN_DEPTH: usize = 4;
+/// Most of each of stdout and stderr a nested `run` keeps.
+const MAX_RUN_OUTPUT: usize = 16 * 1024 * 1024;
 /// TCP sockets one child may hold open at once. Creating one opens a host
 /// socket before any address is checked, so this, with
 /// [`MAX_EXECUTION_SOCKETS`] and the process-wide limit, keeps a script from
@@ -321,10 +339,13 @@ pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
 /// guest's memory limit. The shell spawns every pipeline stage before running
 /// any, so without this a script could make the host hold many large
 /// argument lists at once. (Their stdio pipes are `PIPE_CAPACITY` each.)
+///
+/// Clones share it: nested children (see [`Spawner`]) draw on their
+/// execution's.
 #[derive(Debug, Clone)]
 pub(crate) struct ChildBudget {
     limit: u64,
-    used: u64,
+    used: Arc<AtomicU64>,
     /// Children spawned and not yet finished (or dropped), out of
     /// [`MAX_LIVE_CHILDREN`].
     live: Arc<AtomicUsize>,
@@ -343,30 +364,37 @@ impl ChildBudget {
     pub(crate) fn new(limit: Option<u64>) -> Self {
         Self {
             limit: limit.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
-            used: 0,
+            used: Arc::default(),
             live: Arc::default(),
             memory: Arc::default(),
         }
     }
 
     /// Take `bytes` from the budget, or fail if that would overdraw it.
-    fn charge(&mut self, bytes: u64) -> Result<(), ProcessError> {
-        let used = self.used.saturating_add(bytes);
-        if used > self.limit {
+    fn charge(&self, bytes: u64) -> Result<(), ProcessError> {
+        let charged = self
+            .used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|&u| u <= self.limit)
+            });
+        if let Err(used) = charged {
             tracing::warn!(
                 limit = self.limit,
-                used = self.used,
+                used,
                 bytes,
                 "child host-memory budget exhausted"
             );
             return Err(ProcessError::LimitExceeded);
         }
-        self.used = used;
         Ok(())
     }
 
-    fn release(&mut self, bytes: u64) {
-        self.used = self.used.saturating_sub(bytes);
+    fn release(&self, bytes: u64) {
+        let _ = self
+            .used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(bytes))
+            });
     }
 }
 
@@ -387,6 +415,8 @@ pub struct Command {
     pre: Pre,
     /// Whether its children's `CONNECT`s are blind tunnels.
     tunnels: bool,
+    /// Whether its children may run commands themselves.
+    spawns: bool,
 }
 
 impl std::fmt::Debug for Command {
@@ -480,6 +510,7 @@ impl Command {
         Ok(Self {
             pre,
             tunnels: false,
+            spawns: false,
         })
     }
 
@@ -499,6 +530,21 @@ impl Command {
     #[must_use]
     pub fn allow_tunnels(mut self) -> Self {
         self.tunnels = true;
+        self
+    }
+
+    /// Let this command's children run commands themselves, through
+    /// `eryx:process/run`, as git runs `git` for `stash` or `worktree add`.
+    ///
+    /// They resolve names against the same commands, see the same filesystem
+    /// and get the same child network as the shell's children, and share
+    /// their execution's limits: its fuel, child memory, live children and
+    /// host memory. Children nest at most 4 deep (the shell's are the
+    /// first), and each nested run's stdout and stderr are capped at 16 MiB.
+    /// A command spawns only if it was registered with this too.
+    #[must_use]
+    pub fn allow_spawn(mut self) -> Self {
+        self.spawns = true;
         self
     }
 }
@@ -592,6 +638,203 @@ impl ChildLink {
     }
 }
 
+/// What a child needs to run commands of its own (see
+/// [`Command::allow_spawn`]): its execution's commands, budget and network.
+#[derive(Clone)]
+struct Spawner {
+    commands: Commands,
+    budget: ChildBudget,
+    /// Weak, so a child left unwaited can't keep the execution's proxies
+    /// (and its secrets) alive after it ends.
+    net: Option<std::sync::Weak<std::sync::Mutex<ChildNet>>>,
+    /// How deep the children it spawns are (the shell's are 1).
+    depth: usize,
+    /// Where its children's process events go, for the shell's `wait` to
+    /// report: shared by every descendant of one of the shell's children.
+    traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
+}
+
+/// Nested children's process events, queued for the `wait` of the shell's
+/// child they descend from: only it can reach the execution's trace.
+#[derive(Default)]
+struct NestedTraces {
+    next: u64,
+    events: Vec<NestedEvent>,
+}
+
+enum NestedEvent {
+    Start {
+        id: u64,
+        argv: Vec<String>,
+    },
+    End {
+        id: u64,
+        outcome: Result<i32, String>,
+    },
+}
+
+impl NestedTraces {
+    fn push(traces: &std::sync::Mutex<NestedTraces>, event: NestedEvent) {
+        traces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .push(event);
+    }
+}
+
+/// A nested child's process events: its start when made, its end when
+/// [`end`](Self::end)ed, or `killed` if it's dropped first (its caller was
+/// killed, or the execution ended, midway).
+struct NestedTrace {
+    traces: Arc<std::sync::Mutex<NestedTraces>>,
+    id: u64,
+    ended: bool,
+}
+
+impl NestedTrace {
+    fn start(traces: Arc<std::sync::Mutex<NestedTraces>>, argv: Vec<String>) -> Self {
+        let id = {
+            let mut queue = traces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue.next += 1;
+            queue.next
+        };
+        NestedTraces::push(&traces, NestedEvent::Start { id, argv });
+        Self {
+            traces,
+            id,
+            ended: false,
+        }
+    }
+
+    fn end(mut self, outcome: Result<i32, String>) {
+        self.ended = true;
+        NestedTraces::push(
+            &self.traces,
+            NestedEvent::End {
+                id: self.id,
+                outcome,
+            },
+        );
+    }
+}
+
+impl Drop for NestedTrace {
+    fn drop(&mut self) {
+        if !self.ended {
+            NestedTraces::push(
+                &self.traces,
+                NestedEvent::End {
+                    id: self.id,
+                    outcome: Err("killed".to_owned()),
+                },
+            );
+        }
+    }
+}
+
+/// A child ready to run, with what it holds of the execution's budget and
+/// the parent's ends of its pipes.
+struct Prepared {
+    run: ChildRun,
+    charged: u64,
+    stdin: pipe::Writer,
+    stdout: pipe::Reader,
+    stderr: pipe::Reader,
+}
+
+impl Spawner {
+    /// Set up a child running `cmd`: its command, environment, proxy, live
+    /// slot and pipes, and its argv and env charged to the budget.
+    fn prepare(
+        &self,
+        cmd: String,
+        args: Vec<String>,
+        mut env: Vec<(String, String)>,
+        cwd: String,
+        #[cfg(feature = "unstable-vfs")] vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+    ) -> Result<Prepared, ProcessError> {
+        let command = self
+            .commands
+            .get(&cmd)
+            .ok_or(ProcessError::CommandNotFound)?
+            .clone();
+        // WASI 0.2 has no working directory; tell the child where it is.
+        if !env.iter().any(|(k, _)| k == "PWD") {
+            env.push(("PWD".to_owned(), cwd));
+        }
+        // With network, children get the proxy. (Secrets' placeholders come
+        // from the shell, which exports them.)
+        let network = match &self.net {
+            Some(net) => match net
+                .upgrade()
+                .ok_or_else(|| std::io::Error::other("the execution has ended"))
+                .and_then(|net| {
+                    net.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .link(command.tunnels)
+                }) {
+                Ok(link) => Some(link),
+                Err(e) => {
+                    tracing::warn!(error = %e, "starting the child proxy failed");
+                    return Err(ProcessError::SpawnFailed);
+                }
+            },
+            None => None,
+        };
+        let mut argv = vec![cmd];
+        argv.extend(args);
+        let args_bytes = argv.iter().map(String::len).sum::<usize>()
+            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        let live = (args_bytes <= MAX_ARGS_BYTES)
+            .then(|| LiveSlot::take(&self.budget.live))
+            .flatten();
+        let Some(live) = live else {
+            tracing::warn!(
+                args_bytes,
+                live = self.budget.live.load(Ordering::Relaxed),
+                "child spawn over the argument or live-child limit"
+            );
+            return Err(ProcessError::LimitExceeded);
+        };
+        let charged = args_bytes as u64;
+        self.budget.charge(charged)?;
+
+        let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stderr_tx, stderr_rx) = pipe::pipe(PIPE_CAPACITY);
+        let run = ChildRun {
+            pre: command.pre,
+            argv,
+            env,
+            stdin: stdin_rx,
+            stdout: stdout_tx,
+            stderr: stderr_tx,
+            fuel: 0,
+            fuel_used: Arc::default(),
+            memory: Arc::clone(&self.budget.memory),
+            _live: live,
+            network,
+            spawner: command.spawns.then(|| Spawner {
+                depth: self.depth + 1,
+                traces: Some(self.traces.clone().unwrap_or_default()),
+                ..self.clone()
+            }),
+            #[cfg(feature = "unstable-vfs")]
+            vfs,
+        };
+        Ok(Prepared {
+            run,
+            charged,
+            stdin: stdin_tx,
+            stdout: stdout_rx,
+            stderr: stderr_rx,
+        })
+    }
+}
+
 /// A host directory an isolated command sees, at `guest`.
 #[cfg(feature = "packages")]
 pub(crate) struct Mount<'a> {
@@ -636,6 +879,7 @@ impl Command {
         Ok(Self {
             pre,
             tunnels: false,
+            spawns: false,
         })
     }
 
@@ -688,6 +932,10 @@ impl Command {
                 },
                 // No network: TCP is off.
                 sockets: ChildSockets::default(),
+                fuel: limits.fuel,
+                fuel_used: Arc::default(),
+                // Isolated commands run nothing else.
+                spawner: None,
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             },
@@ -885,6 +1133,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     )
     .map_err(wasm_err)?;
     count_p3_sockets(&mut linker).map_err(wasm_err)?;
+    add_run_to_linker(&mut linker).map_err(wasm_err)?;
     #[cfg(feature = "unstable-vfs")]
     {
         eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
@@ -915,6 +1164,12 @@ pub(crate) struct ChildState {
     table: ResourceTable,
     limits: ChildMemory,
     sockets: ChildSockets,
+    /// Fuel it may burn, and has burned as of its last epoch tick or
+    /// nested run (which charges it its own children's).
+    fuel: u64,
+    fuel_used: Arc<AtomicU64>,
+    /// How it runs commands of its own, if its command may.
+    spawner: Option<Spawner>,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -1037,6 +1292,8 @@ struct ChildRun {
     _live: LiveSlot,
     /// Its proxy, if children have network.
     network: Option<ChildLink>,
+    /// How it runs commands of its own, if its command may.
+    spawner: Option<Spawner>,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -1124,6 +1381,9 @@ impl ChildRun {
                         .map(|link| Arc::clone(&link.sockets))
                         .unwrap_or_default(),
                 ),
+                fuel: self.fuel,
+                fuel_used: Arc::clone(&self.fuel_used),
+                spawner: self.spawner,
                 #[cfg(feature = "unstable-vfs")]
                 vfs,
             },
@@ -1230,6 +1490,17 @@ impl<D> StreamProducer<D> for PipeProducer {
 }
 
 impl ExecutorState {
+    /// How the guest spawns children: the shell's are depth 1.
+    fn spawner(&self) -> Spawner {
+        Spawner {
+            commands: self.commands.clone(),
+            budget: self.child_budget.clone(),
+            net: self.child_net.as_ref().map(Arc::downgrade),
+            depth: 1,
+            traces: None,
+        }
+    }
+
     /// Start waiting on `child`: what to run it with, given `fuel` left in
     /// the parent.
     fn take_child_run(
@@ -1274,7 +1545,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         mut host: Access<'_, T, Self>,
         cmd: String,
         args: Vec<String>,
-        mut env: Vec<(String, String)>,
+        env: Vec<(String, String)>,
         cwd: String,
         stdin: StreamReader<u8>,
     ) -> Result<Spawned, ProcessError> {
@@ -1282,70 +1553,25 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         if state.suspended.is_some() {
             return Err(ProcessError::SpawnFailed);
         }
-        let command = state
-            .commands
-            .get(&cmd)
-            .ok_or(ProcessError::CommandNotFound)?
-            .clone();
-        // WASI 0.2 has no working directory; tell the child where it is. The
-        // rest of a POSIX-ish environment (HOME, TMPDIR, /dev/null) is #832.
-        if !env.iter().any(|(k, _)| k == "PWD") {
-            env.push(("PWD".to_owned(), cwd));
-        }
-        // With network, children get the proxy. (Secrets' placeholders come
-        // from the shell, which exports them.)
-        let network = match state
-            .child_net
-            .as_mut()
-            .map(|net| net.link(command.tunnels))
-        {
-            Some(Ok(link)) => Some(link),
-            Some(Err(e)) => {
-                tracing::warn!(error = %e, "starting the child proxy failed");
-                return Err(ProcessError::SpawnFailed);
-            }
-            None => None,
-        };
-        let mut argv = vec![cmd];
-        argv.extend(args);
-        let args_bytes = argv.iter().map(String::len).sum::<usize>()
-            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
-        let live = (args_bytes <= MAX_ARGS_BYTES)
-            .then(|| LiveSlot::take(&state.child_budget.live))
-            .flatten();
-        let Some(live) = live else {
-            tracing::warn!(
-                args_bytes,
-                live = state.child_budget.live.load(Ordering::Relaxed),
-                "child spawn over the argument or live-child limit"
-            );
-            return Err(ProcessError::LimitExceeded);
-        };
-        let charged = args_bytes as u64;
-        state.child_budget.charge(charged)?;
-
-        let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
-        let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
-        let (stderr_tx, stderr_rx) = pipe::pipe(PIPE_CAPACITY);
+        let Prepared {
+            run,
+            charged,
+            stdin: stdin_tx,
+            stdout: stdout_rx,
+            stderr: stderr_rx,
+        } = state.spawner().prepare(
+            cmd,
+            args,
+            env,
+            cwd,
+            #[cfg(feature = "unstable-vfs")]
+            state
+                .hybrid_vfs_ctx
+                .as_ref()
+                .map(eryx_vfs::HybridVfsCtx::fork),
+        )?;
         let child = ChildProcess {
-            run: Some(ChildRun {
-                pre: command.pre,
-                argv,
-                env,
-                stdin: stdin_rx,
-                stdout: stdout_tx,
-                stderr: stderr_tx,
-                fuel: 0,
-                fuel_used: Arc::default(),
-                memory: Arc::default(),
-                _live: live,
-                network,
-                #[cfg(feature = "unstable-vfs")]
-                vfs: state
-                    .hybrid_vfs_ctx
-                    .as_ref()
-                    .map(eryx_vfs::HybridVfsCtx::fork),
-            }),
+            run: Some(run),
             charged,
         };
         let spawned = (|| -> wasmtime::Result<Spawned> {
@@ -1389,6 +1615,38 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
         }
         let trace = accessor.with(|mut access| access.get().trace_process_start(&run.argv));
+        // Its descendants' process events, reported as they come.
+        let nested = run.spawner.as_ref().and_then(|s| s.traces.clone());
+        let mut reported = HashMap::new();
+        let mut report_nested = || {
+            let Some(nested) = &nested else { return };
+            let events = std::mem::take(
+                &mut nested
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .events,
+            );
+            if events.is_empty() {
+                return;
+            }
+            accessor.with(|mut access| {
+                let state = access.get();
+                for event in events {
+                    match event {
+                        NestedEvent::Start { id, argv } => {
+                            if let Some(trace) = state.trace_process_start(&argv) {
+                                reported.insert(id, trace);
+                            }
+                        }
+                        NestedEvent::End { id, outcome } => {
+                            if let Some(trace) = reported.remove(&id) {
+                                trace.end(state, outcome.as_ref().copied().map_err(String::as_str));
+                            }
+                        }
+                    }
+                }
+            });
+        };
         let fuel_used = Arc::clone(&run.fuel_used);
         let mut charged = 0;
         // Move what the child has burned since the last charge to the parent;
@@ -1404,14 +1662,23 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 left > 0
             })
         };
-        let mut running = std::pin::pin!(run.run());
-        let finished = std::future::poll_fn(|cx| match running.as_mut().poll(cx) {
-            Poll::Ready(done) => Poll::Ready(Some(done)),
-            // The child yielded (an epoch tick) or is waiting on a pipe.
-            Poll::Pending if charge(fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
-            Poll::Pending => Poll::Ready(None),
+        // Boxed, so it can be dropped (killing its descendants) before the
+        // last report.
+        let mut running = Box::pin(run.run());
+        let finished = std::future::poll_fn(|cx| {
+            let polled = running.as_mut().poll(cx);
+            report_nested();
+            match polled {
+                Poll::Ready(done) => Poll::Ready(Some(done)),
+                // The child yielded (an epoch tick) or is waiting on a pipe.
+                Poll::Pending if charge(fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
+                Poll::Pending => Poll::Ready(None),
+            }
         })
         .await;
+        // A child killed midway left its descendants' ends queued.
+        drop(running);
+        report_nested();
         const OUT_OF_FUEL: &str = "the parent ran out of fuel";
         let outcome = match finished {
             Some((code, used)) if charge(used) => code,
@@ -1435,6 +1702,226 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         }
         outcome.map_err(|_| ProcessError::SpawnFailed)
     }
+}
+
+/// Link `eryx:process/run` for children (see [`run_nested`]).
+fn add_run_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
+    type Params = (String, Vec<String>, Vec<(String, String)>, String, Vec<u8>);
+    linker.instance("eryx:process/run@0.1.0")?.func_wrap_async(
+        "run",
+        |store, (cmd, args, env, cwd, stdin): Params| {
+            Box::new(async move {
+                let ran = run_nested(store, cmd, args, env, cwd, stdin).await;
+                Ok((ran.map_err(|e| match e {
+                    ProcessError::CommandNotFound => RunError::CommandNotFound,
+                    ProcessError::LimitExceeded => RunError::LimitExceeded,
+                    ProcessError::SpawnFailed | ProcessError::IoError => RunError::SpawnFailed,
+                }),))
+            })
+        },
+    )
+}
+
+/// What a nested run holds of its execution's [`ChildBudget`], given back
+/// when it's dropped: when `run` returns, or when its caller is killed
+/// midway.
+struct Held {
+    budget: ChildBudget,
+    bytes: u64,
+}
+
+impl Held {
+    fn charge(&mut self, bytes: u64) -> Result<(), ProcessError> {
+        self.budget.charge(bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
+}
+
+/// One of a nested run's output streams, read into memory as it's written.
+struct Capture {
+    reader: Option<pipe::Reader>,
+    data: Vec<u8>,
+}
+
+impl Capture {
+    /// Read what's there into `data`, charging it to `held`: `Ready(Ok)` at
+    /// end of file, an error past `MAX_RUN_OUTPUT` or the budget.
+    fn poll(&mut self, cx: &Context<'_>, held: &mut Held) -> Poll<Result<(), ProcessError>> {
+        let Some(reader) = &self.reader else {
+            return Poll::Ready(Ok(()));
+        };
+        let mut buf = [0; 16 * 1024];
+        loop {
+            match reader.poll_read(cx, &mut buf) {
+                Poll::Ready(0) => {
+                    self.reader = None;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(n) => {
+                    if self.data.len() + n > MAX_RUN_OUTPUT {
+                        tracing::warn!("nested command's output over the limit");
+                        return Poll::Ready(Err(ProcessError::LimitExceeded));
+                    }
+                    held.charge(n as u64)?;
+                    self.data.extend_from_slice(&buf[..n]);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// `eryx:process/run`: run `cmd` to completion for the child whose store
+/// this is, as `wait` does for the guest's children.
+///
+/// The nested child gets the caller's fuel left (at most `CHILD_FUEL`), and
+/// what it burns is charged to the caller as it runs, so it rolls up to the
+/// execution. Its argv, env, stdin and captured output are held against
+/// the execution's [`ChildBudget`] until this returns (or is dropped).
+async fn run_nested(
+    mut store: StoreContextMut<'_, ChildState>,
+    cmd: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: String,
+    input: Vec<u8>,
+) -> Result<Output, ProcessError> {
+    let state = store.data_mut();
+    let Some(spawner) = state.spawner.clone() else {
+        tracing::warn!(
+            cmd,
+            "a child whose command may not spawn tried to run a command"
+        );
+        return Err(ProcessError::SpawnFailed);
+    };
+    if spawner.depth > MAX_SPAWN_DEPTH {
+        tracing::warn!(cmd, depth = spawner.depth, "nested spawns too deep");
+        return Err(ProcessError::LimitExceeded);
+    }
+    let Prepared {
+        mut run,
+        charged,
+        stdin,
+        stdout,
+        stderr,
+    } = spawner.prepare(
+        cmd,
+        args,
+        env,
+        cwd,
+        #[cfg(feature = "unstable-vfs")]
+        state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
+    )?;
+    let trace = spawner
+        .traces
+        .clone()
+        .map(|traces| NestedTrace::start(traces, run.argv.clone()));
+    let mut held = Held {
+        budget: spawner.budget,
+        bytes: charged,
+    };
+    held.charge(input.len() as u64)?;
+    run.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
+    let fuel_used = Arc::clone(&run.fuel_used);
+    let mut running = std::pin::pin!(run.run());
+    let mut done = None;
+    let mut stdin = Some(stdin);
+    let mut fed = 0;
+    let mut out = Capture {
+        reader: Some(stdout),
+        data: Vec::new(),
+    };
+    let mut err = Capture {
+        reader: Some(stderr),
+        data: Vec::new(),
+    };
+    let mut charged_fuel = 0;
+    // Move what the child has burned since the last charge to the caller
+    // (and publish the caller's total, for its own parent to charge);
+    // false once the caller has none left.
+    let mut charge = |store: &mut StoreContextMut<'_, ChildState>, used: u64| {
+        let delta = used.saturating_sub(charged_fuel);
+        charged_fuel = charged_fuel.max(used);
+        let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
+        // Fuel is always enabled on the shared engine.
+        let _ = store.set_fuel(left);
+        let state = store.data();
+        state
+            .fuel_used
+            .store(state.fuel.saturating_sub(left), Ordering::Relaxed);
+        left > 0
+    };
+    let result = std::future::poll_fn(|cx| {
+        while let Some(writer) = &stdin {
+            if fed == input.len() {
+                // Closing its stdin ends the child's input.
+                stdin = None;
+                break;
+            }
+            match writer.poll_write(cx, &input[fed..]) {
+                Poll::Ready(Some(n)) => fed += n,
+                // It exited, or closed its stdin.
+                Poll::Ready(None) => stdin = None,
+                Poll::Pending => break,
+            }
+        }
+        if let Poll::Ready(Err(e)) = out.poll(cx, &mut held) {
+            return Poll::Ready(Err(e));
+        }
+        if let Poll::Ready(Err(e)) = err.poll(cx, &mut held) {
+            return Poll::Ready(Err(e));
+        }
+        if done.is_none()
+            && let Poll::Ready(finished) = running.as_mut().poll(cx)
+        {
+            done = Some(finished);
+        }
+        match &done {
+            Some(_) if out.reader.is_none() && err.reader.is_none() => Poll::Ready(Ok(done.take())),
+            // Output is still draining; the child's exit closed its pipes.
+            Some(_) => Poll::Pending,
+            None if charge(&mut store, fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
+            None => Poll::Ready(Ok(None)),
+        }
+    })
+    .await;
+    drop(held);
+    // Charge what it burned however it ended, before any error returns.
+    let used = match &result {
+        Ok(Some((_, used))) => *used,
+        _ => fuel_used.load(Ordering::Relaxed),
+    };
+    let fuel_left = charge(&mut store, used);
+    if let Some(trace) = trace {
+        trace.end(match &result {
+            Ok(Some((code, _))) => code.clone(),
+            Ok(None) => Err("its caller ran out of fuel".to_owned()),
+            Err(e) => Err(format!("{e:?}")),
+        });
+    }
+    let Some((code, _)) = result? else {
+        tracing::warn!("caller ran out of fuel; killed its nested child");
+        return Err(ProcessError::SpawnFailed);
+    };
+    if !fuel_left {
+        return Err(ProcessError::SpawnFailed);
+    }
+    let status = code.map_err(|e| {
+        tracing::warn!(error = %e, "nested command failed");
+        ProcessError::SpawnFailed
+    })?;
+    Ok(Output {
+        status,
+        stdout: out.data,
+        stderr: err.data,
+    })
 }
 
 #[cfg(test)]
@@ -1474,6 +1961,22 @@ mod tests {
         assert!(count_p3_sockets(&mut linker).is_err());
         wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
         count_p3_sockets(&mut linker).unwrap();
+    }
+
+    /// What a nested run holds of the budget comes back however it ends,
+    /// including when it's dropped midway (a timeout, or its caller killed).
+    #[test]
+    fn nested_runs_give_back_their_budget() {
+        let budget = ChildBudget::new(Some(100));
+        let mut held = Held {
+            budget: budget.clone(),
+            bytes: 0,
+        };
+        held.charge(60).unwrap();
+        assert!(held.charge(60).is_err());
+        assert_eq!(budget.used.load(Ordering::Relaxed), 60);
+        drop(held);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
     }
 
     /// A command is linked for the WASI version whose `wasi:cli/run` it
@@ -1516,6 +2019,7 @@ mod tests {
                 memory: Arc::default(),
                 _live: LiveSlot::take(&Arc::default()).unwrap(),
                 network: None,
+                spawner: None,
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             };
