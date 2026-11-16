@@ -41,9 +41,17 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
+    let cwd_obj = super::cwd_from_pwd_obj(&output_dir)?;
     eprintln!("=== [{}] cargo build → wasip2 component ===", manifest.name);
+    // `cargo rustc`, to link the start-in-$PWD constructor (#978) into the
+    // binary alone without replacing the project's own RUSTFLAGS.
+    // `cargo rustc` needs the package, which a workspace root (jaq's) doesn't
+    // imply.
+    let package = package_of(&source_dir, bin)?;
     let mut args: Vec<String> = vec![
-        "build".into(),
+        "rustc".into(),
+        "--package".into(),
+        package,
         "--release".into(),
         // Build exactly the pinned lockfile (after any vendor_patch updates it).
         "--locked".into(),
@@ -53,6 +61,7 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         bin.to_string(),
     ];
     args.extend(manifest.build.cargo_flags.iter().cloned());
+    args.extend(["--".into(), "-C".into(), format!("link-arg={cwd_obj}")]);
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     // Pin the target dir to the source tree: a `.cargo/config.toml` or
     // CARGO_TARGET_DIR inherited from the eryx checkout would otherwise send
@@ -87,4 +96,41 @@ pub fn build(manifest: &Manifest) -> Result<()> {
 
     eprintln!("=== [{}] done → {} ===", manifest.name, component.display());
     Ok(())
+}
+
+/// The package in the workspace at `source_dir` that has the binary `bin`.
+fn package_of(source_dir: &std::path::Path, bin: &str) -> Result<String> {
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .current_dir(source_dir)
+        .output()
+        .context("running cargo metadata")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing cargo metadata")?;
+    let packages = metadata["packages"].as_array().into_iter().flatten();
+    for package in packages {
+        let has_bin = package["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|t| {
+                t["name"] == bin
+                    && t["kind"]
+                        .as_array()
+                        .is_some_and(|k| k.iter().any(|k| k == "bin"))
+            });
+        if has_bin && let Some(name) = package["name"].as_str() {
+            return Ok(name.to_owned());
+        }
+    }
+    bail!(
+        "no package in {} has a binary named '{bin}'",
+        source_dir.display()
+    )
 }

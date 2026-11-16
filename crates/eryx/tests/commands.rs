@@ -1619,13 +1619,34 @@ async fn allowed_commands_cover_the_grep_builtin() {
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
 }
 
+/// A child starts in the shell's directory: after `cd`, the embedded
+/// coreutils (built by eryx-build, which links in the start-in-`$PWD`
+/// constructor) resolve relative paths against it (#978).
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn children_start_in_the_shells_directory() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
+
+    let executor = shell().build().unwrap().executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+        .await
+        .unwrap();
+    let out = session
+        .execute("mkdir -p /data/d/sub && cd /data/d && echo hi > f && cat f && ls && cd sub && cat ../f")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\nf\nsub\nhi\n");
+}
+
 /// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash` (and aliases), through
 /// `eryx:process/run`, when registered with `allow_spawn`. Set
 /// ERYX_TEST_GIT_WASM to its component, e.g. from
 /// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
 /// artifact of the CLI components workflow. git needs a filesystem, which
-/// children only get from the VFS. (Other children don't start in the
-/// shell's directory, #978, so `cat` gets absolute paths.)
+/// children only get from the VFS.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 #[ignore = "needs ERYX_TEST_GIT_WASM"]
@@ -1655,10 +1676,10 @@ echo one > f.txt
 git add f.txt && git commit -q -m one
 echo two > f.txt
 git stash
-echo "after stash: $(cat /data/repo/f.txt)"
+echo "after stash: $(cat f.txt)"
 git stash list
 git stash pop
-echo "after pop: $(cat /data/repo/f.txt)"
+echo "after pop: $(cat f.txt)"
 echo "list after pop: [$(git stash list)]"
 git config alias.st "status --short"
 git st

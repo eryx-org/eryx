@@ -84,7 +84,9 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
-    // The main build's own glue: WIT bindings, then shims.
+    // The main build's own glue: the start-in-$PWD constructor, WIT
+    // bindings, then shims.
+    shim_objs.push(super::cwd_from_pwd_obj(&output_dir)?);
     if let Some(wit) = &manifest.build.wit {
         shim_objs.extend(build_wit(manifest, wit, &clang, &output_dir, &repo_root)?);
     }
@@ -371,7 +373,9 @@ fn build_autotools(
     };
     let cflags = subst(&manifest.build.cflags)?.join(" ");
     let mut ldflags = subst(&manifest.build.link_flags)?;
-    ldflags.extend(shim_objs.iter().cloned());
+    // As `-Wl,` linker inputs: libtool refuses a bare object in LDFLAGS when
+    // it links a library (jq's libjq.la), and passes these through.
+    ldflags.extend(shim_objs.iter().map(|obj| format!("-Wl,{obj}")));
     let ldflags = ldflags.join(" ");
     let configure_flags = subst(&manifest.build.configure_flags)?;
 
