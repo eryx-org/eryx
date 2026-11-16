@@ -143,9 +143,14 @@ this, but the VFS API stays behind `unstable-vfs`.
 
 ### External Commands
 
-A shell sandbox can run WASI 0.2 command components (programs built for
-`wasm32-wasip2`, such as uutils coreutils, ripgrep or curl) as external
-commands. Register them by name on a shell builder:
+A shell sandbox can run WASI command programs as external commands: WASI
+0.2 and 0.3 command components (built for `wasm32-wasip2` or
+`wasm32-wasip3`, such as uutils coreutils, ripgrep or curl), and WASI preview
+1 command modules (`wasm32-wasip1`, or any `wasi_snapshot_preview1` CLI),
+which eryx adapts into 0.2 components when it loads them, with the adapter
+of the wasmtime it links. A preview 1 command's exit status reaches the
+shell only as success (0) or failure (1). Register them by name on a shell
+builder:
 
 ```rust,ignore
 use eryx::{Command, Sandbox};
@@ -215,7 +220,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   friends, or `eryx-precompile compile`), with each such import named. Check
   a CLI before registering it with `eryx-precompile commands inspect cli.wasm`
   (`--json` for a script; `Command::inspect` in Rust), which lists its
-  imports and whether children get each, and exits 1 if eryx can't run it.
+  imports and whether children get each, and exits 1 if eryx can't run it
+  (2 if it can't read the file as a command at all).
 - **Files:** a child sees the shell's filesystem (above): the read-only root,
   `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
   nothing else of the host. Files a child writes are the shell's, and last as

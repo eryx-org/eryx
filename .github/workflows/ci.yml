@@ -927,10 +927,11 @@ jobs:
       # Tests build small guests of their own: a wasm32-wasip3 probe
       # (crates/eryx-vfs/tests/p3_filesystem.rs), a wasm32-wasip3 guest
       # (crates/eryx/tests/p3_guest.rs) and a command built for both
-      # (crates/eryx/tests/commands.rs, child_network.rs).
-      - name: Install wasm32-wasip2 and wasm32-wasip3 targets
+      # (crates/eryx/tests/commands.rs, child_network.rs), and for
+      # wasm32-wasip1, which eryx adapts into a component (#993).
+      - name: Install wasm32-wasip1, wasm32-wasip2 and wasm32-wasip3 targets
         id: targets
-        run: rustup target add wasm32-wasip2 wasm32-wasip3
+        run: rustup target add wasm32-wasip1 wasm32-wasip2 wasm32-wasip3
 
       # The opt-in CLI child tests: a Go-built gh (WASI 0.3) reaching
       # api.github.com through the child proxy (#927), and C git running

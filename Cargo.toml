@@ -106,7 +106,8 @@ webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhr
 wit-component = "0.263"
 # The wit-component and wit-parser wasmtime itself builds with (its
 # wasmparser/wasm-encoder), so components they encode are ones wasmtime
-# parses: eryx's tests probe the child linker with them. Bump with wasmtime.
+# parses: eryx adapts WASI preview 1 modules with wit-component (#993), and
+# its tests probe the child linker with both. Bump with wasmtime.
 wit-component-wasmtime = { package = "wit-component", version = "=0.261.0" }
 wit-parser-wasmtime = { package = "wit-parser", version = "=0.261.0" }
 wit-dylib = "0.263"

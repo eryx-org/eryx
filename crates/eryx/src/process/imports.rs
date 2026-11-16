@@ -28,6 +28,9 @@ const WASI_P3: &[&str] = &[
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CommandInfo {
+    /// Whether it's a WASI preview 1 module, which eryx adapts into a 0.2
+    /// command component on load (what the rest describes).
+    pub preview1: bool,
     /// The WASI version it runs as: `"0.3"` if it exports 0.3's
     /// `wasi:cli/run`, `"0.2"` if 0.2's, `None` if neither (not a command).
     pub wasi: Option<&'static str>,
@@ -36,12 +39,26 @@ pub struct CommandInfo {
     /// The names it exports.
     pub exports: Vec<String>,
     /// Why it can't be registered as a command, if it can't: an import
-    /// children don't get, or no `wasi:cli/run` export. Loading it is still
-    /// the final word: it also checks each interface's functions and types.
+    /// children don't get, no `wasi:cli/run` export, or a WASI preview 1
+    /// module eryx can't adapt (a reactor, say; then nothing else is filled
+    /// in). Loading it is still the final word: it also checks each
+    /// interface's functions and types.
     pub problem: Option<String>,
 }
 
 impl CommandInfo {
+    /// A WASI preview 1 module eryx couldn't adapt into a command component,
+    /// and why: nothing past that is known.
+    pub(super) fn unadaptable(problem: String) -> Self {
+        Self {
+            preview1: true,
+            wasi: None,
+            imports: Vec::new(),
+            exports: Vec::new(),
+            problem: Some(problem),
+        }
+    }
+
     /// Whether it loads as a command.
     pub fn runnable(&self) -> bool {
         self.problem.is_none()
@@ -170,6 +187,7 @@ fn info<'a>(
         None
     };
     CommandInfo {
+        preview1: false,
         wasi,
         imports,
         exports,
