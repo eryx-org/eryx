@@ -67,6 +67,15 @@ jobs:
           python3 scripts/notices.py generate crates/eryx-runtime \
             runtime-python runtime-javascript runtime-shell coreutils eryx-bundler
 
+      # upload-artifact's if-no-files-found only fails when none match.
+      - name: Check every runtime asset exists
+        run: |
+          for name in runtime-python runtime-javascript runtime-shell coreutils eryx-bundler; do
+            for file in "$name.wasm" "$name.wasm.sha256" "$name.notices.md"; do
+              test -s "crates/eryx-runtime/$file" || { echo "::error::missing crates/eryx-runtime/$file"; exit 1; }
+            done
+          done
+
       - name: Upload runtime assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

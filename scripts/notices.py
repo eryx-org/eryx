@@ -363,31 +363,14 @@ def manual_section(artifact):
 
 
 def bin_package(checkout, bin_name):
-    """The Cargo.toml of the package in `checkout` that builds `bin_name`:
-    the root package, or a workspace member's.
-
-    A package builds it if it declares a [[bin]] of that name or, with no
-    [[bin]]s, is named for it and has a src/main.rs (cargo's default binary).
-    Explicit [[bin]]s win, so a library sharing the binary's name (sd's `sd`,
-    whose binary is in `sd-cli`) isn't taken for it.
-    """
-    root = checkout / "Cargo.toml"
-    data = tomllib.loads(root.read_text())
-    candidates = [root] if "package" in data else []
-    for member in data.get("workspace", {}).get("members", []):
-        dirs = checkout.glob(member) if any(c in member for c in "*?[") else [checkout / member]
-        candidates += sorted(d / "Cargo.toml" for d in dirs if (d / "Cargo.toml").is_file())
-    packages = [(path, tomllib.loads(path.read_text())) for path in candidates]
-    for path, package in packages:
-        if bin_name in [b["name"] for b in package.get("bin", [])]:
-            return path
-    for path, package in packages:
-        if (
-            not package.get("bin")
-            and package.get("package", {}).get("name") == bin_name
-            and (path.parent / "src" / "main.rs").is_file()
-        ):
-            return path
+    """The Cargo.toml of the package in `checkout` that builds `bin_name`,
+    found the way eryx-build's Rust lane finds it (`package_of`)."""
+    metadata = json.loads(run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=checkout,
+    ))
+    for package in metadata["packages"]:
+        if any(t["name"] == bin_name and "bin" in t["kind"] for t in package["targets"]):
+            return Path(package["manifest_path"])
     sys.exit(f"no package in {checkout} builds the binary {bin_name}")
 
 

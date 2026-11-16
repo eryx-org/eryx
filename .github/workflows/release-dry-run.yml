@@ -36,6 +36,9 @@ on:
       - scripts/sync-runtime-versions.sh
       # What the runtimes' notices are made from.
       - scripts/notices.py
+      # coreutils' crates are only checked when its notices are written.
+      - clis/coreutils.toml
+      - clis/patches/**
       - third_party/**
       - about.toml
       - mise.toml
