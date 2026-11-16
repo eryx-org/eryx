@@ -372,7 +372,7 @@ files = [
     "third_party/licenses/rust-Unicode-3.0.txt",
 ]
 rust_toolchain = "1.100.0"
-artifacts = ["host", "runtime-shell", "eryx-bundler"]
+artifacts = ["host", "runtime-shell", "eryx-bundler", "coreutils"]
 
 [[component]]
 name = "The Rust standard library"

@@ -4,8 +4,9 @@
 # nothing. Two artifacts:
 # - `runtime-assets`: runtime-{python,javascript,shell}.wasm, the shell's
 #   embedded commands coreutils.wasm, the JavaScript bundler
-#   eryx-bundler.wasm (eryx's `packages` feature), and their .sha256: the
-#   release assets `eryx-precompile setup` downloads.
+#   eryx-bundler.wasm (eryx's `packages` feature), their .sha256 and their
+#   third-party .notices.md (#837): the release assets `eryx-precompile setup`
+#   downloads.
 # - `wasm-runtime`: what the pyeryx wheel jobs need to precompile the Python
 #   runtime on each platform (runtime-python.wasm, prebuilt/ and the stdlib).
 #
@@ -59,6 +60,13 @@ jobs:
           done
           cat ./*.wasm.sha256
 
+      # After build-coreutils, so coreutils' notices list its crates.
+      - name: Write the runtimes' notices
+        run: |
+          mise run ensure-rust-src
+          python3 scripts/notices.py generate crates/eryx-runtime \
+            runtime-python runtime-javascript runtime-shell coreutils eryx-bundler
+
       - name: Upload runtime assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -76,6 +84,11 @@ jobs:
             crates/eryx-runtime/runtime-shell.wasm.sha256
             crates/eryx-runtime/coreutils.wasm.sha256
             crates/eryx-runtime/eryx-bundler.wasm.sha256
+            crates/eryx-runtime/runtime-python.notices.md
+            crates/eryx-runtime/runtime-javascript.notices.md
+            crates/eryx-runtime/runtime-shell.notices.md
+            crates/eryx-runtime/coreutils.notices.md
+            crates/eryx-runtime/eryx-bundler.notices.md
           if-no-files-found: error
           retention-days: 5
 
