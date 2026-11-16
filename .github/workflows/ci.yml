@@ -776,7 +776,8 @@ jobs:
           pr-comment: false
 
       # Tests build small guests of their own: a wasm32-wasip3 probe
-      # (crates/eryx-vfs/tests/p3_filesystem.rs) and a wasm32-wasip2 command
+      # (crates/eryx-vfs/tests/p3_filesystem.rs), a wasm32-wasip3 guest
+      # (crates/eryx/tests/p3_guest.rs) and a wasm32-wasip2 command
       # (crates/eryx/tests/commands.rs).
       - name: Install wasm32-wasip2 and wasm32-wasip3 targets
         run: rustup target add wasm32-wasip2 wasm32-wasip3

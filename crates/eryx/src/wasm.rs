@@ -3509,6 +3509,11 @@ impl Executor {
         // Add WASI support (p2 = preview 2)
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
+        // And WASI 0.3, for guests built for wasm32-wasip3. Its interfaces
+        // have their own versions, and a component links only what it
+        // imports, so p2 guests are unaffected.
+        wasmtime_wasi::p3::add_to_linker(&mut linker)
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add WASI 0.3 to linker: {e}")))?;
 
         // Add hybrid VFS filesystem support (overrides WASI filesystem bindings)
         // The hybrid VFS routes:
@@ -3521,6 +3526,11 @@ impl Executor {
             linker.allow_shadowing(true);
             eryx_vfs::add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
                 ErrorKind::WasmEngine(format!("Failed to add hybrid VFS to linker: {e}"))
+            })?;
+            eryx_vfs::add_hybrid_vfs_to_linker_p3(&mut linker).map_err(|e| {
+                ErrorKind::WasmEngine(format!(
+                    "Failed to add the WASI 0.3 hybrid VFS to linker: {e}"
+                ))
             })?;
             linker.allow_shadowing(false);
         }
