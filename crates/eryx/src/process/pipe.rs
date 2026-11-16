@@ -70,10 +70,20 @@ fn wake(wakers: &mut Vec<Waker>) {
     }
 }
 
+/// Wakers kept per direction before they're all woken to make room.
+const MAX_WAKERS: usize = 8;
+
 fn register(wakers: &mut Vec<Waker>, cx: &Context<'_>) {
-    if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-        wakers.push(cx.waker().clone());
+    if wakers.iter().any(|w| w.will_wake(cx.waker())) {
+        return;
     }
+    // Several handles may wait on one end, so keep a list. A waiter that
+    // cancels leaves a stale waker behind; rather than let them pile up,
+    // wake the lot (live waiters poll again and re-register).
+    if wakers.len() >= MAX_WAKERS {
+        wake(wakers);
+    }
+    wakers.push(cx.waker().clone());
 }
 
 impl Shared {
@@ -235,7 +245,11 @@ impl OutputStream for Writer {
         if state.readers == 0 {
             return Err(StreamError::Closed);
         }
-        // `check_write` permitted this much.
+        // The guest may ignore `check_write`; trap as wasmtime-wasi's own
+        // streams do, rather than buffer past the bound in host memory.
+        if bytes.len() > self.0.capacity - state.buf.len() {
+            return Err(StreamError::trap("write exceeded budget"));
+        }
         state.buf.extend_from_slice(&bytes);
         wake(&mut state.readable);
         Ok(())
@@ -360,6 +374,21 @@ mod tests {
             InputStream::read(&mut r, 1),
             Err(StreamError::Closed)
         ));
+
+        // Writes past `check_write` trap, even split across handles.
+        let (mut w, _r) = pipe(4);
+        let mut w2 = w.clone();
+        assert!(matches!(
+            OutputStream::write(&mut w, Bytes::from_static(b"abcde")),
+            Err(StreamError::Trap(_))
+        ));
+        OutputStream::write(&mut w, Bytes::from_static(b"abc")).unwrap();
+        assert!(matches!(
+            OutputStream::write(&mut w2, Bytes::from_static(b"de")),
+            Err(StreamError::Trap(_))
+        ));
+        OutputStream::write(&mut w2, Bytes::from_static(b"d")).unwrap();
+        assert_eq!(OutputStream::check_write(&mut w).unwrap(), 0);
 
         // With no reader, writes fail.
         let (mut w, r) = pipe(4);
