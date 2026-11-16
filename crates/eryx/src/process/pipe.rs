@@ -28,10 +28,11 @@ use wasmtime_wasi::p2::{InputStream, OutputStream, Pollable, StreamError, Stream
 /// the same task, so without a yield a child writing short lines runs on
 /// until the pipe fills (or an epoch tick) before its reader sees any of it.
 /// Yielding on every write instead costs a trip through the parent's event
-/// loop per line (~100 µs, the cost #890 is about). A short timeslice keeps
-/// a line's latency to about a millisecond and lets a reader take many lines
-/// per trip.
-const YIELD_EVERY: Duration = Duration::from_millis(1);
+/// loop per line (~100 µs, the cost #890 is about). A timeslice of about
+/// one such trip lets a reader take many lines per trip while adding little
+/// latency: longer ones (1 ms) slowed a pipeline's teardown after `head`
+/// exits, since each stage writes on for a slice before it sees `EPIPE`.
+const YIELD_EVERY: Duration = Duration::from_micros(100);
 
 /// A pipe holding at most `capacity` bytes.
 pub(super) fn pipe(capacity: usize) -> (Writer, Reader) {

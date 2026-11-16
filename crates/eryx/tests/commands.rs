@@ -739,6 +739,23 @@ async fn coreutils_see_the_root_and_dev() {
     }
 }
 
+/// A line-at-a-time producer moves data at a useful rate (#890). The bound
+/// is ~10x a debug build's time alone (0.3 s), to catch only a return to
+/// ~100 µs per line (about 6 s); `pipe_throughput` has the real numbers.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn line_at_a_time_pipes_are_not_slow() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let start = Instant::now();
+    let out = sandbox
+        .execute("tc lines | head -c 100000 | wc -c")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap().trim(), "100000");
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(4), "took {took:?}");
+}
+
 /// Throughput of child pipes, for #890: line-at-a-time producers (one
 /// write and flush per 2-byte line), a buffered one, and the first line's
 /// latency. Prints timings; run it by name with `--run-ignored only`.
