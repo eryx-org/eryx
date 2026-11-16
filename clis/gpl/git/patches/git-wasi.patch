@@ -1,22 +1,39 @@
+SPDX-License-Identifier: GPL-2.0-only
+
+Modifications to git v2.56.1 for the wasip2 build (see ../NOTICE.md):
+a run-command.c backend over eryx:process/run, merge's pre-merge stash
+through capture_command, a start in $PWD, and no /dev/null in setup.c.
+
 diff --git a/builtin/merge.c b/builtin/merge.c
-index 5b4eb23..ba0ba4f 100644
+index 5b4eb23..b4aa695 100644
 --- a/builtin/merge.c
 +++ b/builtin/merge.c
-@@ -357,8 +357,13 @@ static int save_state(struct object_id *stash)
- 	cp.out = -1;
+@@ -354,8 +354,14 @@ static int save_state(struct object_id *stash)
+ 	rollback_lock_file(&lock_file);
+ 
+ 	strvec_pushl(&cp.args, "stash", "create", NULL);
+-	cp.out = -1;
  	cp.git_cmd = 1;
- 
--	if (start_command(&cp))
-+	if (start_command(&cp)) {
 +#ifdef __wasi__
-+		/* No subprocesses: merge without the pre-merge stash snapshot. */
-+		goto out;
-+#endif
- 		die(_("could not run stash."));
-+	}
- 	len = strbuf_read(&buffer, cp.out, 1024);
- 	close(cp.out);
++	/* No live pipes: capture its output once it exits instead. */
++	if (capture_command(&cp, &buffer, 1024))
++		die(_("stash failed"));
++	len = buffer.len;
++#else
++	cp.out = -1;
  
+ 	if (start_command(&cp))
+ 		die(_("could not run stash."));
+@@ -364,7 +370,8 @@ static int save_state(struct object_id *stash)
+ 
+ 	if (finish_command(&cp) || len < 0)
+ 		die(_("stash failed"));
+-	else if (!len)		/* no changes */
++#endif
++	if (!len)		/* no changes */
+ 		goto out;
+ 	strbuf_setlen(&buffer, buffer.len-1);
+ 	if (repo_get_oid(the_repository, buffer.buf, stash))
 diff --git a/common-main.c b/common-main.c
 index 6b7ab07..7bf0685 100644
 --- a/common-main.c
@@ -40,10 +57,10 @@ index 6b7ab07..7bf0685 100644
  
  	init_git(argv);
 diff --git a/run-command.c b/run-command.c
-index ce84db8..e11575a 100644
+index ce84db8..f6ebdf6 100644
 --- a/run-command.c
 +++ b/run-command.c
-@@ -18,6 +18,186 @@
+@@ -18,6 +18,201 @@
  #include "packfile.h"
  #include "compat/nonblock.h"
  
@@ -102,7 +119,7 @@ index ce84db8..e11575a 100644
 +	child_string_t *args = NULL;
 +	child_tuple2_string_string_t *pairs = NULL;
 +	extern char **environ;
-+	int code = -1;
++	int code = -1, saved_errno = 0;
 +	size_t i, nr_pairs = 0;
 +
 +	if (cmd->git_cmd)
@@ -182,14 +199,25 @@ index ce84db8..e11575a 100644
 +
 +	fflush(NULL);
 +	if (!eryx_process_run_run(&c_cmd, &c_args, &c_env, &c_cwd, &c_stdin, &ret, &run_err)) {
-+		if (run_err == ERYX_PROCESS_RUN_RUN_ERROR_COMMAND_NOT_FOUND) {
-+			if (!cmd->silent_exec_failure)
-+				error(_("cannot run %s: %s"), argv.v[0], strerror(ENOENT));
-+			code = 127;
-+		} else {
-+			error(_("cannot run %s: the host refused it"), argv.v[0]);
++		/* As a failed exec: -1 with errno, which aliases and the
++		 * "is not a git command" message look at. */
++		const char *why;
++		switch (run_err) {
++		case ERYX_PROCESS_RUN_RUN_ERROR_COMMAND_NOT_FOUND:
++			errno = ENOENT;
++			why = strerror(ENOENT);
++			break;
++		case ERYX_PROCESS_RUN_RUN_ERROR_LIMIT_EXCEEDED:
++			errno = EAGAIN;
++			why = "the host's limits on child processes (limit-exceeded)";
++			break;
++		default:
 +			errno = ENOSYS;
++			why = "the host couldn't run it (spawn-failed)";
++			break;
 +		}
++		if (!cmd->silent_exec_failure || errno != ENOENT)
++			error(_("cannot run %s: %s"), argv.v[0], why);
 +		goto out;
 +	}
 +
@@ -209,6 +237,8 @@ index ce84db8..e11575a 100644
 +	eryx_process_run_output_free(&ret);
 +
 +out:
++	/* Cleaning up mustn't change the errno a failure leaves. */
++	saved_errno = errno;
 +	if (cmd->in > 0)
 +		close(cmd->in);
 +	if (cmd->out > 0)
@@ -223,6 +253,8 @@ index ce84db8..e11575a 100644
 +	strvec_clear(&argv);
 +	child_process_clear(cmd);
 +	invalidate_lstat_cache();
++	if (code < 0)
++		errno = saved_errno;
 +	return code;
 +}
 +#endif
@@ -230,7 +262,7 @@ index ce84db8..e11575a 100644
  void child_process_init(struct child_process *child)
  {
  	struct child_process blank = CHILD_PROCESS_INIT;
-@@ -681,6 +861,16 @@ int start_command(struct child_process *cmd)
+@@ -681,6 +876,16 @@ int start_command(struct child_process *cmd)
  	int failed_errno;
  	const char *str;
  
@@ -247,7 +279,7 @@ index ce84db8..e11575a 100644
  	/*
  	 * In case of errors we must keep the promise to close FDs
  	 * that have been passed in via ->in and ->out.
-@@ -1003,6 +1193,10 @@ int start_command(struct child_process *cmd)
+@@ -1003,6 +1208,10 @@ int start_command(struct child_process *cmd)
  
  int finish_command(struct child_process *cmd)
  {
@@ -258,7 +290,7 @@ index ce84db8..e11575a 100644
  	int ret = wait_or_whine(cmd->pid, cmd->args.v[0], 0);
  	trace2_child_exit(cmd, ret);
  	child_process_clear(cmd);
-@@ -1434,6 +1628,9 @@ int pipe_command(struct child_process *cmd,
+@@ -1434,6 +1643,9 @@ int pipe_command(struct child_process *cmd,
  	struct io_pump io[3];
  	int nr = 0;
  

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #pragma once
 typedef unsigned int tcflag_t; typedef unsigned char cc_t; typedef unsigned int speed_t;
 #define NCCS 32

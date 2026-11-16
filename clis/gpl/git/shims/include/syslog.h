@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #pragma once
 #define LOG_ERR 3
 #define LOG_INFO 6

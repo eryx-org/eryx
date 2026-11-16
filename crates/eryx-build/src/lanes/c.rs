@@ -548,10 +548,17 @@ fn build_make(
     ];
     args.extend(subst(&manifest.build.make_flags)?);
     args.extend(manifest.build.make_targets.iter().cloned());
+    // The Makefile tracks flags, not the shim and WIT objects they name, so
+    // relink every time rather than keep an artifact built against old ones.
+    let artifact = source_dir.join(artifact_rel);
+    if artifact.exists() {
+        std::fs::remove_file(&artifact)
+            .with_context(|| format!("removing stale {}", artifact.display()))?;
+    }
     eprintln!("=== [{}] make ===", manifest.name);
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     run("make", &args_ref, source_dir, &[])?;
-    copy_artifact(&source_dir.join(artifact_rel), component)
+    copy_artifact(&artifact, component)
 }
 
 /// Copy a built executable (already a component) to `component.wasm`.

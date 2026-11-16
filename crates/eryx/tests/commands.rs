@@ -1491,7 +1491,7 @@ async fn allowed_commands_cover_the_grep_builtin() {
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
 }
 
-/// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash`, through
+/// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash` (and aliases), through
 /// `eryx:process/run`, when registered with `allow_spawn`. Set
 /// ERYX_TEST_GIT_WASM to its component, e.g. from
 /// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
@@ -1531,7 +1531,9 @@ echo "after stash: $(cat /data/repo/f.txt)"
 git stash list
 git stash pop
 echo "after pop: $(cat /data/repo/f.txt)"
-git status --short
+echo "list after pop: [$(git stash list)]"
+git config alias.st "status --short"
+git st
 "#,
         )
         .run()
@@ -1548,6 +1550,9 @@ git status --short
     );
     assert!(stdout.contains("stash@{0}"), "{stdout}");
     assert!(stdout.contains("after pop: two"), "{stdout}");
-    assert!(stdout.contains(" M f.txt"), "{stdout}");
+    // A pop whose apply failed would keep the entry.
+    assert!(stdout.contains("list after pop: []"), "{stdout}");
+    // `git st` is an alias once running `git-st` fails as an exec does.
+    assert!(stdout.ends_with(" M f.txt\n"), "{stdout}");
     assert_eq!(storage.read("/data/repo/f.txt").await.unwrap(), b"two\n");
 }
