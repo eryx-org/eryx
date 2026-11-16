@@ -198,7 +198,7 @@ eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
 
 ### Verification
 
-By default, `compile` verifies the output by creating a test sandbox. You can add custom verification:
+By default, `compile` verifies the output: a runtime by creating a test sandbox, and a command (no `--language`, a component exporting `wasi:cli/run`) by loading it as a shell sandbox would, which checks its version stamp and that it links. Verification is skipped for a target this machine can't run. For a runtime you can add custom verification (`--verify-code` is Python, so a command refuses it):
 
 ```bash
 # Verify that numpy actually works, not just imports
@@ -241,10 +241,10 @@ The pin is the digest of the `.wasm` itself, which is the manifest's layer diges
 ```bash
 echo "<hex>  rg.wasm" | sha256sum -c
 eryx-precompile commands inspect rg.wasm
-eryx-precompile compile rg.wasm --output rg.cwasm --no-verify
+eryx-precompile compile rg.wasm --output rg.cwasm
 ```
 
-`--no-verify` is needed because `compile`'s verification step runs a Python sandbox, which a command isn't. A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
+A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
 
 ## Upgrading to a New eryx Version
 
