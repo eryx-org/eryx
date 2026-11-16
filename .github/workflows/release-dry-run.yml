@@ -32,7 +32,10 @@ on:
       - .github/workflows/js-release.yml
       - .github/workflows/upload-runtime.yml
       - crates/eryx-server/Dockerfile
+      # The wheels' metadata and licence files, and their notices check.
+      - crates/eryx-python/pyproject.toml
       - crates/eryx-python/runtimes/**
+      - scripts/check-wheel-notices.py
       - scripts/sync-runtime-versions.sh
       # What the runtimes' notices are made from.
       - scripts/notices.py
