@@ -937,8 +937,8 @@ jobs:
       # api.github.com through the child proxy. clis.yml builds gh only when
       # its inputs change (and weekly), and the component doesn't depend on
       # eryx, so take the newest unexpired gh-component artifact rather than
-      # building Go here. Only one this repository's own push or scheduled
-      # run made is trusted: a fork PR's run can report any head_branch
+      # building Go here. Only artifacts from this repository's own push or
+      # scheduled runs are trusted: a fork PR's run can report any head_branch
       # (including "main"), so the branch name proves nothing, while
       # head_repository_id and the run's event can't be set by a fork.
       # Push runs only; none found is a notice, not a failure.
