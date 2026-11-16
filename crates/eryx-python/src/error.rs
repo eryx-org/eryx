@@ -89,6 +89,7 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         // `stdout` and `stderr` carry what the script wrote before it raised.
         eryx::ErrorKind::ScriptFailed {
             message,
+            exit_code,
             stdout,
             stderr,
             ..
@@ -100,6 +101,8 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
                 // realistically fail; if it does, the traceback still raises.
                 let _ = value.setattr("stdout", PyBytes::new(py, &stdout));
                 let _ = value.setattr("stderr", PyBytes::new(py, &stderr));
+                // A shell script's exit status; None for Python and JavaScript.
+                let _ = value.setattr("exit_code", exit_code);
             });
             err
         }
