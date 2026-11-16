@@ -942,12 +942,12 @@ jobs:
       # `git` itself for `stash` through eryx:process/run (#830). clis.yml
       # builds them only when their inputs change (and weekly), and the
       # components don't depend on eryx, so take the newest unexpired
-      # artifact of each rather than building Go or git here. Only one this
-      # repository's own push or scheduled run made is trusted: a fork PR's
-      # run can report any head_branch (including "main"), so the branch
-      # name proves nothing, while head_repository_id and the run's event
-      # can't be set by a fork. Push runs only; none found is a notice, not
-      # a failure.
+      # artifact of each rather than building Go or git here. Only
+      # artifacts from this repository's own push or scheduled runs are
+      # trusted: a fork PR's run can report any head_branch (including
+      # "main"), so the branch name proves nothing, while head_repository_id
+      # and the run's event can't be set by a fork. Push runs only; none
+      # found is a notice, not a failure.
       - name: Find the CLI components
         id: components
         if: github.event_name == 'push'
@@ -979,22 +979,26 @@ jobs:
           done
 
       # The components, not the artifacts' .cwasm, which another eryx build
-      # may have precompiled. Same features as the run above: no rebuild.
-      - name: Run the gh child test
-        if: steps.components.outputs.gh != ''
+      # may have precompiled. The same command line as the run above, so
+      # nothing rebuilds (`-p eryx` alone would unify features differently and
+      # rebuild the workspace: 2m 41s on run 43869202917). Only the tests
+      # whose component was found are selected, and the step needs one.
+      - name: Run the CLI child tests
+        if: steps.components.outputs.gh != '' || steps.components.outputs.git != ''
         env:
           ERYX_TEST_GH_WASM: ${{ steps.components.outputs.gh }}
-        run: |
-          cargo nextest run -p eryx --all-features --profile ci --test child_network \
-            --run-ignored only -E 'test(=p3_gh_reaches_github_through_the_proxy)'
-
-      - name: Run the git child test
-        if: steps.components.outputs.git != ''
-        env:
           ERYX_TEST_GIT_WASM: ${{ steps.components.outputs.git }}
         run: |
-          cargo nextest run -p eryx --all-features --profile ci --test commands \
-            --run-ignored only -E 'test(=git_stash_runs_git_itself)'
+          tests=()
+          if [ -n "$ERYX_TEST_GH_WASM" ]; then
+            tests+=('test(=p3_gh_reaches_github_through_the_proxy)')
+          fi
+          if [ -n "$ERYX_TEST_GIT_WASM" ]; then
+            tests+=('test(=git_stash_runs_git_itself)')
+          fi
+          filter=$(IFS='|'; echo "${tests[*]}")
+          cargo nextest run --workspace --all-features --profile ci \
+            --run-ignored only -E "$filter"
 
       # The shell (and JavaScript) without `unstable-vfs`, which --all-features
       # always turns on: bugs gated on its absence (#910's p3 gate, #914's
