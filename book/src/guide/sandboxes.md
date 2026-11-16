@@ -79,6 +79,36 @@ the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see
 [Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)).
 
+### Timers in JavaScript
+
+JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`
+functions, `queueMicrotask`, and `node:timers` and `node:timers/promises`
+(`await setTimeout(ms, value, { signal })`, and `setInterval` as an async
+iterator). Waiting burns no fuel, but it counts towards the execution
+timeout.
+
+- **An execute waits for referenced timers**, as a Node process does. So
+  `setTimeout(() => console.log("hi"), 100)` prints `hi` without an `await`,
+  and a `setInterval` that's never cleared runs until the execution timeout
+  fails the execute (`ErrorKind::Timeout`). A timed-out execute discards its
+  instance, so a session's next execute starts fresh (`state_was_reset`), as
+  after running out of fuel.
+- **It waits for callbacks started after the script's synchronous run**: in a
+  promise callback (`Promise.resolve().then(() => tool())`), after an `await`,
+  or in a timer. A callback the script's top-level code starts synchronously
+  and never awaits (`tool(); console.log("done")`) is released when the
+  script ends, as in Python.
+- **`timer.unref()`** lets the execute finish without that timer, and an
+  unref'd timer alone (like `AbortSignal.timeout()`'s) doesn't keep a script
+  that never settles waiting. Timers still pending when the execute finishes
+  are dropped: none carries over to a session's next execute.
+- Each turn of the event loop runs the timers due when it started, then lets
+  finished callbacks in, so timers that are always due (a `setImmediate`
+  loop) don't starve callback results.
+- An exception thrown in a timer callback fails the execute.
+- `fetch` is synchronous inside the guest: it blocks until the response has
+  been read, so timers don't fire during a fetch, only after it returns.
+
 ### Shell Environment
 
 A shell sandbox starts with what CLI tools expect of a Unix system:
