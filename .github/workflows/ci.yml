@@ -942,9 +942,9 @@ jobs:
       # `git` itself for `stash` through eryx:process/run (#830). clis.yml
       # builds them only when their inputs change (and weekly), and the
       # components don't depend on eryx, so take the newest unexpired
-      # artifact of each rather than building Go or git here. Only artifacts
-      # from this repository's own push or scheduled runs are trusted: a fork
-      # PR's run can report any head_branch (including "main"), so the branch
+      # artifact of each rather than building Go or git here. Only one this
+      # repository's own push or scheduled run made is trusted: a fork PR's
+      # run can report any head_branch (including "main"), so the branch
       # name proves nothing, while head_repository_id and the run's event
       # can't be set by a fork. Push runs only; none found is a notice, not
       # a failure.
