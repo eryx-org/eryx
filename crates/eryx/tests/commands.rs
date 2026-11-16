@@ -738,3 +738,51 @@ async fn coreutils_see_the_root_and_dev() {
         assert!(err.to_string().contains(message), "{script}: {err}");
     }
 }
+
+/// Throughput of child pipes, for #890: line-at-a-time producers (one
+/// write and flush per 2-byte line), a buffered one, and the first line's
+/// latency. Prints timings; run it by name with `--run-ignored only`.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+#[ignore = "benchmark"]
+async fn pipe_throughput() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(120)),
+        )
+        .build()
+        .unwrap();
+    for (label, script, bytes) in [
+        (
+            "lines -> head",
+            "tc lines | head -c 100000 | wc -c",
+            100_000,
+        ),
+        (
+            "lines -> cat -> head",
+            "tc lines | cat | head -c 10000 | wc -c",
+            10_000,
+        ),
+        (
+            "yes -> head",
+            "tc yes | head -c 20000000 | wc -c",
+            20_000_000,
+        ),
+        // Latency: the first line should reach `head` long before the pipe fills.
+        (
+            "first lines -> cat -> head",
+            "tc lines | cat | head -c 10 | wc -c",
+            10,
+        ),
+    ] {
+        let start = Instant::now();
+        let out = sandbox.execute(script).await.unwrap();
+        let secs = start.elapsed().as_secs_f64();
+        assert_eq!(out.stdout_utf8().unwrap().trim(), bytes.to_string());
+        eprintln!(
+            "BENCH {label}: {bytes} bytes in {secs:.3}s = {:.0} KB/s",
+            bytes as f64 / secs / 1000.0
+        );
+    }
+}
