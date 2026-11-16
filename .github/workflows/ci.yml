@@ -162,7 +162,7 @@ jobs:
               - 'scripts/notices.py'
               - 'crates/eryx-runtime/libs/**'
               - 'crates/eryx-guest-js/src/node/**'
-              - 'clis/coreutils.toml'
+              - 'clis/*.toml'
               - 'mise.toml'
               - '.github/workflows/ci.yml'
 

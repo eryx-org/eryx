@@ -160,6 +160,11 @@ let sandbox = Sandbox::embedded()
 let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 ```
 
+- **Prebuilt commands:** each eryx release on GitHub carries `rg.wasm`,
+  `sd.wasm`, `jaq.wasm`, `jq.wasm` and `curl.wasm` (built from `clis/` at that
+  release), each with a `.wasm.sha256` to check it against and a
+  `.notices.md` with the third-party licences it carries, as the runtimes
+  and `coreutils.wasm` have.
 - **Defaults:** with the `shell` feature, `Sandbox::embedded().shell()` already
   runs uutils coreutils (`cat`, `head`, `tail`, `ls`, `wc`, `cp`, `mv`, `rm`,
   `mkdir`, `touch`, `sort`, `seq`, `cut`, `tr`, `uniq`, `basename`, `dirname`,

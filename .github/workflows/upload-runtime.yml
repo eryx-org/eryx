@@ -1,6 +1,7 @@
 # Upload runtime-{python,javascript,shell}.wasm, the shell's coreutils.wasm and
-# the JavaScript bundler eryx-bundler.wasm (with their .sha256) to the main eryx
-# GitHub release, for `eryx-precompile setup`.
+# the JavaScript bundler eryx-bundler.wasm, for `eryx-precompile setup`, and the
+# command components from clis/ (runtime-build.yml), each with its .sha256 and
+# third-party .notices.md, to the main eryx GitHub release.
 # Runs separately from the release workflows to avoid conflicts over the release.
 
 name: Upload Runtime Artifacts
@@ -37,12 +38,19 @@ jobs:
           name: runtime-assets
           path: runtime-assets
 
+      - name: Download CLI assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-assets-*
+          merge-multiple: true
+          path: runtime-assets
+
       # `eryx-precompile setup` verifies each download against its .sha256.
       - name: Upload the runtimes to the release
         working-directory: runtime-assets
         run: |
           sha256sum --check ./*.wasm.sha256
-          gh release upload "$TAG_NAME" ./*.wasm ./*.wasm.sha256 \
+          gh release upload "$TAG_NAME" ./*.wasm ./*.wasm.sha256 ./*.notices.md \
             --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

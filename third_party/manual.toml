@@ -313,6 +313,11 @@ artifacts = [
     "runtime-shell",
     "coreutils",
     "eryx-bundler",
+    "rg",
+    "sd",
+    "jaq",
+    "jq",
+    "curl",
 ]
 covers = [
     { path = "crates/eryx-runtime/libs/libc.so.zst", sha256 = "55eecf0ff724dbaad24d29abd01f709fa294164152448be657fb9854d5865436" },
@@ -439,12 +444,100 @@ name = "uutils coreutils"
 version = "0.9.0 (840c36d3)"
 license = "MIT"
 url = "https://github.com/uutils/coreutils/tree/840c36d3964833e1dc107fcb9ade9c0ad63076c0"
-# The tool itself; the crates it's built from are listed when eryx-build
-# builds it (#837 step 2).
+# The tool itself; scripts/notices.py lists the crates it's built from, from
+# its checkout (CLIS).
 files = ["third_party/licenses/uutils-coreutils-LICENSE"]
 artifacts = ["coreutils"]
 cli = "clis/coreutils.toml"
 cli_commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+
+# The other published command components (#834). Licence texts are copied
+# from each source at the pinned commit or tarball. Like coreutils, the Rust
+# ones' crates come from their checkouts; the C ones list what they link.
+
+[[component]]
+name = "ripgrep"
+version = "15.1.0 (af60c2de)"
+license = "Unlicense OR MIT"
+url = "https://github.com/BurntSushi/ripgrep/tree/af60c2de9d85e7f3d81c78601669468cf02dabab"
+files = [
+    "third_party/licenses/ripgrep-COPYING",
+    "third_party/licenses/ripgrep-LICENSE-MIT",
+    "third_party/licenses/ripgrep-UNLICENSE",
+]
+artifacts = ["rg"]
+cli = "clis/rg.toml"
+cli_commit = "af60c2de9d85e7f3d81c78601669468cf02dabab"
+
+[[component]]
+name = "sd"
+version = "1.1.0 (4a7b2165)"
+license = "MIT"
+url = "https://github.com/chmln/sd/tree/4a7b216552d64134c0fa17a59b9d557d89019f0f"
+files = ["third_party/licenses/sd-LICENSE"]
+artifacts = ["sd"]
+cli = "clis/sd.toml"
+cli_commit = "4a7b216552d64134c0fa17a59b9d557d89019f0f"
+
+[[component]]
+name = "jaq"
+version = "3.1.2 (f7fea921)"
+license = "MIT"
+url = "https://github.com/01mf02/jaq/tree/f7fea9219d8d5364c91c6a0278765eaa0e6fa95e"
+files = ["third_party/licenses/jaq-LICENSE-MIT"]
+artifacts = ["jaq"]
+cli = "clis/jaq.toml"
+cli_commit = "f7fea9219d8d5364c91c6a0278765eaa0e6fa95e"
+
+[[component]]
+name = "jq"
+version = "1.8.2"
+# jq is MIT; its COPYING also covers the code it incorporates: David M. Gay's
+# dtoa, decNumber (ICU), Heimdal's thread and list code and NetBSD's strptime
+# (both BSD-2-Clause). Its documentation (CC BY 3.0) isn't built.
+license = "MIT AND ICU AND dtoa AND BSD-2-Clause"
+url = "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz"
+files = ["third_party/licenses/jq-COPYING"]
+artifacts = ["jq"]
+cli = "clis/jq.toml"
+cli_sha256 = "71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af"
+
+[[component]]
+name = "Oniguruma"
+version = "6.9.10"
+license = "BSD-2-Clause"
+url = "https://github.com/kkos/oniguruma/releases/download/v6.9.10/onig-6.9.10.tar.gz"
+# jq's regex library, statically linked.
+files = ["third_party/licenses/oniguruma-COPYING"]
+artifacts = ["jq"]
+cli = "clis/jq.toml"
+cli_dep = "onig"
+cli_sha256 = "2a5cfc5ae259e4e97f86b68dfffc152cdaffe94e2060b770cb827238d769fc05"
+
+[[component]]
+name = "curl"
+version = "8.20.0 (a05f3497)"
+license = "curl"
+url = "https://github.com/curl/curl/tree/a05f34973e6c4bb629d018f7cb51487be1c904d8"
+# Built with every optional library but mbedTLS off (clis/curl.toml).
+files = ["third_party/licenses/curl-COPYING"]
+artifacts = ["curl"]
+cli = "clis/curl.toml"
+cli_commit = "a05f34973e6c4bb629d018f7cb51487be1c904d8"
+
+[[component]]
+name = "Mbed TLS"
+version = "3.6.6"
+# Dual-licensed Apache-2.0 OR GPL-2.0-or-later; eryx takes it under
+# Apache-2.0. Its LICENSE carries both texts.
+license = "Apache-2.0"
+url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2"
+# curl's TLS library, statically linked.
+files = ["third_party/licenses/mbedtls-LICENSE"]
+artifacts = ["curl"]
+cli = "clis/curl.toml"
+cli_dep = "mbedtls"
+cli_sha256 = "8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a"
 
 [[component]]
 name = "HACL*"

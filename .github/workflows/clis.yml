@@ -11,8 +11,9 @@
 # - Everything weekly, to catch upstream and toolchain bit-rot, and on demand.
 #
 # Each component is uploaded as a workflow artifact with its manifest.toml and
-# provenance.json (see crates/eryx-build/src/provenance.rs), for testing and
-# for #809 to consume. Workflow artifacts are not a release channel.
+# provenance.json (see crates/eryx-build/src/provenance.rs), for testing.
+# Workflow artifacts are not a release channel: releases build the published
+# commands themselves (runtime-build.yml).
 
 name: CLI components
 

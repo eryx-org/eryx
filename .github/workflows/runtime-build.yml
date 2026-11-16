@@ -1,11 +1,16 @@
 # Build the guest runtime components every release needs.
 #
 # Called by the release workflows and the release dry run; it publishes
-# nothing. Two artifacts:
+# nothing. Its artifacts:
 # - `runtime-assets`: runtime-{python,javascript,shell}.wasm, the shell's
 #   embedded commands coreutils.wasm, the JavaScript bundler
-#   eryx-bundler.wasm (eryx's `packages` feature), and their .sha256: the
-#   release assets `eryx-precompile setup` downloads.
+#   eryx-bundler.wasm (eryx's `packages` feature), their .sha256 and their
+#   third-party .notices.md (#837): the release assets `eryx-precompile setup`
+#   downloads.
+# - `cli-assets-<name>`: the command components in clis/ that ship as release
+#   assets, for the eryx-server image and anyone registering them as
+#   commands: <name>.wasm, its .sha256 and its .notices.md. gh waits for its
+#   Go-module notices (#986).
 # - `wasm-runtime`: what the pyeryx wheel jobs need to precompile the Python
 #   runtime on each platform (runtime-python.wasm, prebuilt/ and the stdlib).
 #
@@ -59,6 +64,12 @@ jobs:
           done
           cat ./*.wasm.sha256
 
+      # After build-coreutils, so coreutils' notices list its crates.
+      - name: Write the runtimes' notices
+        run: |
+          python3 scripts/notices.py generate crates/eryx-runtime \
+            runtime-python runtime-javascript runtime-shell coreutils eryx-bundler
+
       - name: Upload runtime assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -76,6 +87,11 @@ jobs:
             crates/eryx-runtime/runtime-shell.wasm.sha256
             crates/eryx-runtime/coreutils.wasm.sha256
             crates/eryx-runtime/eryx-bundler.wasm.sha256
+            crates/eryx-runtime/runtime-python.notices.md
+            crates/eryx-runtime/runtime-javascript.notices.md
+            crates/eryx-runtime/runtime-shell.notices.md
+            crates/eryx-runtime/coreutils.notices.md
+            crates/eryx-runtime/eryx-bundler.notices.md
           if-no-files-found: error
           retention-days: 5
 
@@ -97,3 +113,61 @@ jobs:
             crates/eryx-guest-python/tests/python-stdlib/
           if-no-files-found: error
           retention-days: 1
+
+  # The command components from clis/, built and smoke-tested as clis.yml
+  # does, without its caches.
+  build-clis:
+    name: Build ${{ matrix.cli }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cli: rg, lane: rust }
+          - { cli: sd, lane: rust }
+          - { cli: jaq, lane: rust }
+          - { cli: jq, lane: c }
+          - { cli: curl, lane: c }
+    env:
+      CLI: ${{ matrix.cli }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - run: rustup target add wasm32-wasip2
+
+      # The C lane's CMake builds use Ninja, which the runner doesn't ship.
+      - name: Install the C lane's tools
+        if: matrix.lane == 'c'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          mise run ensure-wasi-sdk
+
+      - name: Build and smoke-test
+        run: |
+          mise trust
+          mise run build-cli -- "$CLI"
+          clis/smoke.sh "$CLI"
+
+      # Named and listed one by one, so nothing else in the output directory
+      # is published.
+      - name: Hash and write notices
+        run: |
+          mkdir -p cli-assets
+          cp "scratch/$CLI-component/component.wasm" "cli-assets/$CLI.wasm"
+          (cd cli-assets && sha256sum "$CLI.wasm" > "$CLI.wasm.sha256" && cat "$CLI.wasm.sha256")
+          python3 scripts/notices.py generate cli-assets "$CLI"
+
+      - name: Upload CLI assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-assets-${{ matrix.cli }}
+          path: |
+            cli-assets/${{ matrix.cli }}.wasm
+            cli-assets/${{ matrix.cli }}.wasm.sha256
+            cli-assets/${{ matrix.cli }}.notices.md
+          if-no-files-found: error
+          retention-days: 5
