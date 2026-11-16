@@ -28,6 +28,10 @@ on:
       - 'scripts/bootstrap-go-wasip3.sh'
       - 'mise.toml'
       - '.github/workflows/clis.yml'
+      # The published commands' notices (#837).
+      - 'about.toml'
+      - 'scripts/notices.py'
+      - 'third_party/**'
   pull_request:
     branches: [main, multi-guest]
     paths: *paths
@@ -68,8 +72,14 @@ jobs:
               - 'clis/smoke.sh'
               - 'mise.toml'
               - '.github/workflows/clis.yml'
+            # Licence policy and notices: the Rust commands run cargo-about.
+            notices: &notices
+              - 'about.toml'
+              - 'scripts/notices.py'
+              - 'third_party/**'
             rust:
               - *driver
+              - *notices
               - 'clis/coreutils.toml'
               - 'clis/rg.toml'
               - 'clis/sd.toml'
@@ -139,8 +149,10 @@ jobs:
       # A release can't publish a command whose crates' licences aren't
       # accepted (#837); find out here instead.
       - name: Check the notices
-        if: contains(fromJSON('["coreutils", "rg", "sd", "jaq"]'), matrix.cli)
-        run: python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
+        run: |
+          if python3 scripts/notices.py published "$CLI"; then
+            python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
+          fi
         env:
           CLI: ${{ matrix.cli }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -189,8 +201,10 @@ jobs:
           CLI: ${{ matrix.cli }}
       # Published ones (cli-build.yml) need their manual.toml entries (#837).
       - name: Check the notices
-        if: contains(fromJSON('["jq", "curl"]'), matrix.cli)
-        run: python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
+        run: |
+          if python3 scripts/notices.py published "$CLI"; then
+            python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
+          fi
         env:
           CLI: ${{ matrix.cli }}
       # A GPL component ships with its licence and our notice (#837).

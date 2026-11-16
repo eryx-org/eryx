@@ -4,6 +4,7 @@
     scripts/notices.py generate OUTDIR [ARTIFACT...]
                                          # write OUTDIR/<artifact>.notices.md
     scripts/notices.py check             # what CI runs; writes nothing
+    scripts/notices.py published NAME    # exit 0 if NAME is a published CLI
 
 Each artifact's notices are cargo-about's rendering of the Rust crates in its
 lock file and targets (about.toml, third_party/about.hbs), followed by the
@@ -330,6 +331,8 @@ def main():
         case ["generate", outdir, *only]:
             if failed := generate(Path(outdir), only or None):
                 sys.exit(f"cargo-about failed for {', '.join(failed)}; see its output above")
+        case ["published", name]:
+            sys.exit(0 if name in CLIS else 1)
         case ["check"]:
             errors = check_manual()
             with tempfile.TemporaryDirectory() as tmp:
