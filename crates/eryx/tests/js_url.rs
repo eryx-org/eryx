@@ -99,14 +99,19 @@ async fn node_url() {
         import url, { fileURLToPath, pathToFileURL, URL as NodeURL } from 'node:url'
         console.log(NodeURL === URL, require('url').URLSearchParams === URLSearchParams);
         console.log(fileURLToPath('file:///tmp/a%20b'), pathToFileURL('/tmp/a b#c').href);
+        // Relative to `/` (there's no working directory); `\` is encoded.
+        console.log(pathToFileURL('rel/x').href, pathToFileURL('/tmp/a\\b').href);
         try { fileURLToPath('http://x.test/'); } catch (e) { console.log(e.code); }
         console.log(JSON.stringify(url.urlToHttpOptions(new URL('https://u:p@x.test:81/p?q'))));
         console.log(url.domainToASCII('bücher.example'), url.domainToUnicode('xn--bcher-kva.example'), url.domainToASCII('exa mple'));
+        console.log(JSON.stringify(['user@host', 'x:80', 'a/b', '[::1]', 'a\\b'].map((d) => [url.domainToASCII(d), url.domainToUnicode(d)])));
         const parsed = url.parse('https://u:p@x.test:81/a/b?c=1&c=2#h', true);
         console.log(parsed.protocol, parsed.auth, parsed.host, parsed.port, parsed.pathname, parsed.search, JSON.stringify(parsed.query), parsed.hash, parsed.path);
+        const ported = url.parse('http://[::1]:80/p?');
+        console.log(ported.host, ported.port, ported.hostname, ported.search, ported.path, url.parse('http://x.test:80/').host);
         const rel = url.parse('/p/q?x=1#y');
         console.log(rel.protocol, rel.pathname, rel.query, rel.hash, rel.href);
-        console.log(url.format({ protocol: 'https', hostname: 'x.test', port: 8, pathname: 'p', query: { a: 1 } }));
+        console.log(url.format({ protocol: 'https', hostname: 'x.test', port: 8, pathname: 'p', query: { a: 1, b: ['2', '3'] } }));
         console.log(url.format(new URL('http://x.test/a')), url.resolve('/one/two', 'three'), url.resolve('http://x.test/a/b', '../c'));
         ")
     .await;
@@ -114,12 +119,15 @@ async fn node_url() {
         out,
         "true true\n\
          /tmp/a b file:///tmp/a%20b%23c\n\
+         file:///rel/x file:///tmp/a%5Cb\n\
          ERR_INVALID_URL\n\
          {\"protocol\":\"https:\",\"hostname\":\"x.test\",\"hash\":\"\",\"search\":\"?q\",\"pathname\":\"/p\",\"path\":\"/p?q\",\"href\":\"https://u:p@x.test:81/p?q\",\"port\":81,\"auth\":\"u:p\"}\n\
          xn--bcher-kva.example bücher.example \n\
-         https: u:p x.test:81 81 /a/b ?c=1&c=2 {\"c\":\"2\"} #h /a/b?c=1&c=2\n\
+         [[\"\",\"\"],[\"\",\"\"],[\"\",\"\"],[\"\",\"\"],[\"\",\"\"]]\n\
+         https: u:p x.test:81 81 /a/b ?c=1&c=2 {\"c\":[\"1\",\"2\"]} #h /a/b?c=1&c=2\n\
+         [::1]:80 80 ::1 ? /p? x.test:80\n\
          null /p/q x=1 #y /p/q?x=1#y\n\
-         https://x.test:8/p?a=1\n\
+         https://x.test:8/p?a=1&b=2&b=3\n\
          http://x.test/a /one/three http://x.test/c\n"
     );
 }
@@ -135,9 +143,11 @@ async fn no_core_js_state_and_snapshots_skip_urls() {
         console.log(JSON.stringify(extra), Object.keys(globalThis).includes('URL'));
         console.log([Array.prototype.includes, String.prototype.at, Object.fromEntries, Symbol.for]
             .every((f) => /\[native code\]/.test(Function.prototype.toString.call(f))));
+        // core-js wraps a Request it finds while loading; it loads first.
+        console.log(new Request('https://x.test/').constructor === Request, Request.prototype.constructor === Request);
         ")
     .await;
-    assert_eq!(out, "[] false\ntrue\n");
+    assert_eq!(out, "[] false\ntrue\ntrue true\n");
 
     let executor = Sandbox::embedded().javascript().build().unwrap().executor();
     let mut session = SessionExecutor::new(executor.clone(), &[]).await.unwrap();

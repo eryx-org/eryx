@@ -19,11 +19,18 @@ export const fileURLToPath = (url) => {
 };
 
 export const pathToFileURL = (path) => {
-    let resolved = posix.resolve(String(path));
+    // Relative to `/`: there's no process (or working directory) to resolve
+    // against.
+    let resolved = posix.resolve('/', String(path));
     // posix.resolve drops a trailing slash, which Node keeps.
     if (String(path).endsWith('/') && !resolved.endsWith('/')) resolved += '/';
     const url = new URL('file://');
-    url.pathname = resolved.replace(/%/g, '%25').replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/\t/g, '%09');
+    url.pathname = resolved
+        .replace(/%/g, '%25')
+        .replace(/\\/g, '%5C')
+        .replace(/\n/g, '%0A')
+        .replace(/\r/g, '%0D')
+        .replace(/\t/g, '%09');
     return url;
 };
 
@@ -44,7 +51,12 @@ export const urlToHttpOptions = (url) => {
     return options;
 };
 
+// Only a domain: anything that would make it more of a URL (credentials, a
+// port, a path) gives '', as in Node, rather than the host part of it.
+const NOT_IN_DOMAINS = /[@:/?#[\]\\]/;
+
 export const domainToASCII = (domain) => {
+    if (NOT_IN_DOMAINS.test(String(domain))) return '';
     try {
         return new URL(`http://${domain}`).hostname;
     } catch {
@@ -118,10 +130,21 @@ class Url {
     }
 }
 
+// A key repeated in the query gives an array of its values, as in Node.
 const queryOf = (search, parseQueryString) => {
     if (!parseQueryString) return search ? search.slice(1) : search;
-    return Object.fromEntries(new URLSearchParams(search ?? ''));
+    const query = Object.create(null);
+    for (const [key, value] of new URLSearchParams(search ?? '')) {
+        if (!(key in query)) query[key] = value;
+        else if (Array.isArray(query[key])) query[key].push(value);
+        else query[key] = [query[key], value];
+    }
+    return query;
 };
+
+// The authority as written, which the WHATWG parser normalizes away (a
+// default port, the brackets around an IPv6 hostname).
+const AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]/?#]*\]|[^:/?#]*)(?::(\d*))?/i;
 
 // A subset of the legacy parser: absolute URLs go through the WHATWG
 // parser, anything else is split into path, query and hash.
@@ -141,12 +164,15 @@ export const parse = (input, parseQueryString = false) => {
             result.auth = decodeURIComponent(parsed.password ? `${parsed.username}:${parsed.password}` : parsed.username);
         }
         if (parsed.host) {
-            result.host = parsed.host;
-            result.hostname = parsed.hostname;
-            result.port = parsed.port || null;
+            const written = AUTHORITY.exec(text);
+            const port = written?.[2] || parsed.port;
+            result.hostname = parsed.hostname.startsWith('[') ? parsed.hostname.slice(1, -1) : parsed.hostname;
+            result.port = port || null;
+            result.host = port ? `${parsed.hostname}:${port}` : parsed.hostname;
         }
         result.pathname = parsed.pathname || (parsed.host ? '/' : null);
-        result.search = parsed.search || null;
+        // An empty query keeps its `?`, as in Node.
+        result.search = parsed.search || (/^[^#]*\?/.test(text) ? '?' : null);
         result.hash = parsed.hash || null;
     } else {
         const hashAt = text.indexOf('#');
@@ -179,7 +205,12 @@ export const format = (object) => {
     const slashes = object.slashes || host ? '//' : '';
     let search = object.search ?? '';
     if (!search && object.query && typeof object.query === 'object') {
-        const query = new URLSearchParams(object.query).toString();
+        // An array value repeats its key, as in Node.
+        const params = new URLSearchParams();
+        for (const [key, value] of Object.entries(object.query)) {
+            for (const item of Array.isArray(value) ? value : [value]) params.append(key, item);
+        }
+        const query = params.toString();
         search = query ? `?${query}` : '';
     }
     if (search && !search.startsWith('?')) search = `?${search}`;

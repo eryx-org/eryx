@@ -382,6 +382,9 @@ async fn fetch_takes_urls_and_still_refuses_what_it_cant_use() {
         r"
         const ok = await fetch(new URL('/json#frag', 'https://api.test'));
         console.log(ok.status, ok.url);
+        // A URLSearchParams body is a form, as in browsers and Node.
+        const form = await (await fetch('https://api.test/echo', { method: 'POST', body: new URLSearchParams({ a: '1 2', b: 'é' }) })).text();
+        console.log(form.includes('content-type: application/x-www-form-urlencoded;charset=UTF-8'), form.endsWith('a=1+2&b=%C3%A9'));
         for (const url of ['https://user:pw@api.test/json', 'ftp://api.test/x', 'https://bücher.example/']) {
             try {
                 await fetch(new URL(url));
@@ -398,6 +401,7 @@ async fn fetch_takes_urls_and_still_refuses_what_it_cant_use() {
     assert_eq!(
         out,
         "200 https://api.test/json\n\
+         true true\n\
          TypeError URLs with credentials aren't allowed -\n\
          TypeError fetch only supports http and https, not ftp: -\n\
          TypeError fetch failed not-permitted\n"
