@@ -1207,6 +1207,14 @@ impl ConnectionManager {
         ))
     }
 
+    /// `Err` once the byte limit is spent.
+    fn check_bytes_left(&self) -> Result<(), TcpError> {
+        match self.budget.bytes().remaining() {
+            Some(0) => Err(self.over_limit()),
+            _ => Ok(()),
+        }
+    }
+
     /// Charge a write of all `len` bytes, or refuse it if they'd go over the
     /// limit.
     fn take_write(&self, len: usize) -> Result<(), TcpError> {
@@ -1339,6 +1347,9 @@ impl ConnectionManager {
         // Refuse a disallowed host before the connection limit, as the
         // policy's own check in `connect` would.
         self.policy.check_host(host)?;
+        // A spent byte limit takes no new connections, whose lookups and
+        // handshakes it wouldn't count, as the proxy refuses them.
+        self.check_bytes_left()?;
 
         let permit = self
             .budget
@@ -1416,9 +1427,12 @@ impl ConnectionManager {
             return Err(TcpError::InvalidHandle);
         }
         self.take_write(data.len())?;
-        let written = self.write_framed_tcp(handle, data, timeout_ms).await;
+        let (accepted, written) = self.write_framed_tcp(handle, data, timeout_ms).await;
         if written.is_err() {
-            self.budget.bytes().refund_sent(data.len() as u64);
+            // A write that times out or fails may have sent some of it: only
+            // what the stream never accepted is refunded.
+            let unsent = data.len().saturating_sub(accepted);
+            self.budget.bytes().refund_sent(unsent as u64);
         }
         written?;
         // Report what the guest wrote: substitution changes the length on the wire.
@@ -1426,47 +1440,47 @@ impl ConnectionManager {
     }
 
     /// Write `data`, substituting secrets and checking HTTP rules if the
-    /// connection frames requests.
+    /// connection frames requests, returning how many bytes the stream
+    /// accepted, finished or not.
     async fn write_framed_tcp(
         &mut self,
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<(), TcpError> {
+    ) -> (usize, Result<(), TcpError>) {
         // Fast path: nothing to substitute or check = no parsing
         if !self.frames_requests(handle) {
-            self.tcp_write_raw(handle, data, timeout_ms).await?;
-        } else {
-            let bytes = self.process_write_data(handle, data)?;
-            if !bytes.is_empty() {
-                self.tcp_write_raw(handle, &bytes, timeout_ms).await?;
-            }
+            return self.tcp_write_raw(handle, data, timeout_ms).await;
         }
-        Ok(())
+        match self.process_write_data(handle, data) {
+            Ok(bytes) if bytes.is_empty() => (0, Ok(())),
+            Ok(bytes) => self.tcp_write_raw(handle, &bytes, timeout_ms).await,
+            Err(e) => (0, Err(e)),
+        }
     }
 
-    /// Write all of `data` to a TCP connection without HTTP parsing.
+    /// Write all of `data` to a TCP connection without HTTP parsing,
+    /// returning how much of it the stream accepted, finished or not.
     async fn tcp_write_raw(
         &mut self,
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<(), TcpError> {
+    ) -> (usize, Result<(), TcpError>) {
         let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
-        let stream = self
-            .tcp_connections
-            .get_mut(&handle)
-            .ok_or(TcpError::InvalidHandle)?
-            .stream();
-
-        tokio::time::timeout(io_timeout, stream.write_all(data))
-            .await
-            .map_err(|_| TcpError::TimedOut)?
-            .map_err(|e| match e.kind() {
+        let Some(connection) = self.tcp_connections.get_mut(&handle) else {
+            return (0, Err(TcpError::InvalidHandle));
+        };
+        let (accepted, written) = write_counted(connection.stream(), data, io_timeout, false).await;
+        let written = written.map_err(|e| match e {
+            None => TcpError::TimedOut,
+            Some(e) => match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
-            })
+            },
+        });
+        (accepted, written)
     }
 
     /// Close a TCP connection.
@@ -1499,6 +1513,9 @@ impl ConnectionManager {
         hostname: &str,
         timeout_ms: u32,
     ) -> Result<u32, TlsError> {
+        // A spent byte limit takes no handshakes either; the connection
+        // stays the guest's.
+        self.check_bytes_left().map_err(TlsError::Tcp)?;
         let connect_timeout =
             Self::effective_timeout(self.policy.config.connect_timeout, timeout_ms);
 
@@ -1591,9 +1608,12 @@ impl ConnectionManager {
             return Err(TlsError::InvalidHandle);
         }
         self.take_write(data.len()).map_err(TlsError::Tcp)?;
-        let written = self.write_framed_tls(handle, data, timeout_ms).await;
+        let (accepted, written) = self.write_framed_tls(handle, data, timeout_ms).await;
         if written.is_err() {
-            self.budget.bytes().refund_sent(data.len() as u64);
+            // A write that times out or fails may have sent some of it: only
+            // what the stream never accepted is refunded.
+            let unsent = data.len().saturating_sub(accepted);
+            self.budget.bytes().refund_sent(unsent as u64);
         }
         written?;
         // Report what the guest wrote: substitution changes the length on the wire.
@@ -1601,26 +1621,27 @@ impl ConnectionManager {
     }
 
     /// Write `data`, substituting secrets and checking HTTP rules if the
-    /// connection frames requests.
+    /// connection frames requests, returning how many bytes the stream
+    /// accepted, finished or not.
     async fn write_framed_tls(
         &mut self,
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<(), TlsError> {
+    ) -> (usize, Result<(), TlsError>) {
         // Fast path: nothing to substitute or check = no parsing
         if !self.frames_requests(handle) {
-            self.tls_write_raw(handle, data, timeout_ms).await?;
-        } else {
-            let bytes = self.process_write_data(handle, data)?;
-            if !bytes.is_empty() {
-                self.tls_write_raw(handle, &bytes, timeout_ms).await?;
-            }
+            return self.tls_write_raw(handle, data, timeout_ms).await;
         }
-        Ok(())
+        match self.process_write_data(handle, data) {
+            Ok(bytes) if bytes.is_empty() => (0, Ok(())),
+            Ok(bytes) => self.tls_write_raw(handle, &bytes, timeout_ms).await,
+            Err(e) => (0, Err(e.into())),
+        }
     }
 
-    /// Write all of `data` to a TLS connection without HTTP parsing.
+    /// Write all of `data` to a TLS connection without HTTP parsing,
+    /// returning how much of it rustls accepted, finished or not.
     ///
     /// Flushes too, so no TLS records stay buffered once the call returns.
     async fn tls_write_raw(
@@ -1628,25 +1649,21 @@ impl ConnectionManager {
         handle: u32,
         data: &[u8],
         timeout_ms: u32,
-    ) -> Result<(), TlsError> {
+    ) -> (usize, Result<(), TlsError>) {
         let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
-        let stream = self
-            .tls_connections
-            .get_mut(&handle)
-            .ok_or(TlsError::InvalidHandle)?;
-
-        let write = async {
-            stream.write_all(data).await?;
-            stream.flush().await
+        let Some(stream) = self.tls_connections.get_mut(&handle) else {
+            return (0, Err(TlsError::InvalidHandle));
         };
-        tokio::time::timeout(io_timeout, write)
-            .await
-            .map_err(|_| TlsError::Tcp(TcpError::TimedOut))?
-            .map_err(|e| match e.kind() {
+        let (accepted, written) = write_counted(stream, data, io_timeout, true).await;
+        let written = written.map_err(|e| match e {
+            None => TlsError::Tcp(TcpError::TimedOut),
+            Some(e) => match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
-            })
+            },
+        });
+        (accepted, written)
     }
 
     /// Close a TLS connection.
@@ -1939,6 +1956,35 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
         }
     }
     true
+}
+
+/// Write all of `data` to `stream` (and flush it, with `flush`) within
+/// `timeout`, returning how many bytes it accepted whether or not that
+/// finished: `Err(None)` if it timed out.
+async fn write_counted<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    data: &[u8],
+    timeout: Duration,
+    flush: bool,
+) -> (usize, Result<(), Option<std::io::Error>>) {
+    let mut accepted = 0;
+    let write = async {
+        while accepted < data.len() {
+            match stream.write(&data[accepted..]).await? {
+                0 => return Err(std::io::ErrorKind::WriteZero.into()),
+                n => accepted += n,
+            }
+        }
+        if flush {
+            stream.flush().await?;
+        }
+        Ok(())
+    };
+    let written = match tokio::time::timeout(timeout, write).await {
+        Ok(written) => written.map_err(Some),
+        Err(_) => Err(None),
+    };
+    (accepted, written)
 }
 
 #[cfg(test)]
@@ -3249,6 +3295,70 @@ mod tests {
             &[b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"],
         );
         assert!(m.process_write_data(1, b"zz\r\n").is_err());
+    }
+
+    /// A write that times out reports how much the stream had accepted, so
+    /// it can be counted; one that finishes reports all of it.
+    #[tokio::test]
+    async fn write_counted_reports_what_was_accepted() {
+        let (mut stream, _peer) = tokio::io::duplex(1024);
+        let data = vec![b'x'; 4096];
+        let (accepted, written) =
+            super::write_counted(&mut stream, &data, Duration::from_millis(50), true).await;
+        assert_eq!(accepted, 1024);
+        assert!(matches!(written, Err(None)));
+
+        let (mut stream, _peer) = tokio::io::duplex(8192);
+        let (accepted, written) =
+            super::write_counted(&mut stream, &data, Duration::from_secs(5), true).await;
+        assert_eq!(accepted, 4096);
+        assert!(written.is_ok());
+    }
+
+    /// A TCP write that times out keeps what the socket took charged to the
+    /// byte limit, refunding only the rest.
+    #[tokio::test]
+    async fn timed_out_writes_refund_only_the_unsent_part() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = NetConfig::permissive().with_max_bytes(64 << 20);
+        let mut m = ConnectionManager::new(config, HashMap::new());
+        // The peer never reads, so the write stalls once the socket buffers
+        // are full.
+        let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let handle = handle.unwrap();
+        let err = m
+            .tcp_write(handle, &vec![b'x'; 32 << 20], 200)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TcpError::TimedOut), "{err}");
+        let used = (64 << 20) - m.budget.bytes().remaining().unwrap();
+        assert!(used > 0 && used < 32 << 20, "{used}");
+    }
+
+    /// Once the byte limit is spent, a new connection and a TLS handshake are
+    /// refused like reads and writes, and the refused upgrade leaves the
+    /// connection with the guest.
+    #[tokio::test]
+    async fn a_spent_byte_limit_refuses_connects_and_handshakes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m =
+            ConnectionManager::new(NetConfig::permissive().with_max_bytes(4), HashMap::new());
+        let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let handle = handle.unwrap();
+        assert!(m.budget.bytes().take_sent(4));
+
+        let limit = |e: &TcpError| matches!(e, TcpError::NotPermitted(m) if m.contains("network limit reached"));
+        let err = m.tcp_connect("127.0.0.1", port, 0).await.unwrap_err();
+        assert!(limit(&err), "{err}");
+        let err = m.tls_upgrade(handle, "127.0.0.1", 0).await.unwrap_err();
+        assert!(matches!(&err, TlsError::Tcp(e) if limit(e)), "{err}");
+        assert!(m.tcp_connections.contains_key(&handle));
     }
 
     /// A write reports the guest's own length, all of the (substituted) bytes
