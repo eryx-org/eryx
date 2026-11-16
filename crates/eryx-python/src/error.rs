@@ -80,9 +80,8 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         // `{:#}` keeps the whole chain: wasmtime's outer context alone can be as
         // bare as "failed to open file", without the OS error behind it.
         eryx::ErrorKind::WasmComponent(e) => InitializationError::new_err(format!("{e:#}")),
-        err @ eryx::ErrorKind::IncompatiblePrecompiled { .. } => {
-            InitializationError::new_err(err.to_string())
-        }
+        err @ (eryx::ErrorKind::IncompatiblePrecompiled { .. }
+        | eryx::ErrorKind::CommandImports { .. }) => InitializationError::new_err(err.to_string()),
         eryx::ErrorKind::Execution(msg) => ExecutionError::new_err(msg),
         // A subclass of ExecutionError, so callers can tell a script error from
         // a sandbox failure while `except ExecutionError` still catches both.
