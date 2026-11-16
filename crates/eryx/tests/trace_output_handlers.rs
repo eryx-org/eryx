@@ -993,3 +993,41 @@ await sleep(ms=10)
     assert!(durations[1] < 1000, "the TaskGroup's call: {durations:?}");
     assert!(durations[2] < 150, "the last call: {durations:?}");
 }
+
+/// A call abandoned at the end of an execution (a task still pending) is
+/// closed by a later garbage collection with GeneratorExit. That mustn't
+/// report a stray callback_end into the later execution, where it would be
+/// paired with another call's start.
+#[tokio::test]
+async fn test_abandoned_call_reports_no_end_later() {
+    let trace_handler = CollectingTraceHandler::new();
+    let sandbox = sandbox_builder()
+        .with_callback(SleepCallback)
+        .with_trace_handler(trace_handler.clone())
+        .build()
+        .expect("Failed to build sandbox");
+    let mut session = eryx::InProcessSession::new(&sandbox)
+        .await
+        .expect("session");
+    use eryx::Session as _;
+    session
+        .execute(
+            "import asyncio\nleft = asyncio.ensure_future(sleep(ms=500))\nawait asyncio.sleep(0)",
+        )
+        .await
+        .expect("first execution");
+    let before = trace_handler.events().len();
+    session
+        .execute("del left\nimport gc\ngc.collect()\nawait sleep(ms=10)\ngc.collect()")
+        .await
+        .expect("second execution");
+    let later: Vec<_> = trace_handler.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.event {
+            TraceEventKind::CallbackStart { name, .. } => Some(format!("start {name}")),
+            TraceEventKind::CallbackEnd { name, .. } => Some(format!("end {name}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(later, ["start sleep", "end sleep"], "{later:?}");
+}

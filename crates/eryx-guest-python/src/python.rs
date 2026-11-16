@@ -1766,14 +1766,20 @@ def _eryx_install_callbacks(callbacks_json):
         # Exactly one callback_end per start, however the call ends: the
         # host times calls by pairing them by name, so a missing or extra end
         # shifts every later duration for that name. A cancelled call
-        # (asyncio.wait_for, a gather whose sibling failed) raises
+        # (asyncio.wait_for, a TaskGroup whose sibling failed) raises
         # CancelledError, a BaseException, so `except Exception` misses it.
+        # GeneratorExit is the exception: it means a call abandoned in an
+        # earlier execution is being closed (by a later garbage collection),
+        # and an end now would land in that later execution's trace.
         _error = None
+        _report = True
         try:
             # Use _eryx_async.await_invoke for proper async handling
             result_json = await _eryx_async.await_invoke(_callback_name, args_json)
         except BaseException as e:
-            if isinstance(e, _asyncio.CancelledError):
+            if isinstance(e, GeneratorExit):
+                _report = False
+            elif isinstance(e, _asyncio.CancelledError):
                 _error = "cancelled"
             elif isinstance(e, Exception):
                 _error = str(e)
@@ -1781,10 +1787,11 @@ def _eryx_install_callbacks(callbacks_json):
                 _error = type(e).__name__
             raise
         finally:
-            _end = {"type": "callback_end", "name": _callback_name}
-            if _error is not None:
-                _end["error"] = _error
-            _eryx._eryx_report_trace(0, _json.dumps(_end), "")
+            if _report:
+                _end = {"type": "callback_end", "name": _callback_name}
+                if _error is not None:
+                    _end["error"] = _error
+                _eryx._eryx_report_trace(0, _json.dumps(_end), "")
         # Outside the try: the call itself succeeded even if its result
         # doesn't parse, and that mustn't report a second end.
         if result_json:
