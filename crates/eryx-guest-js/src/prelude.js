@@ -108,6 +108,27 @@
             parametersSchema: cb.parameters_schema_json ? JSON.parse(cb.parameters_schema_json) : null,
         }));
 
+    // A prefix callback (`mcp.svc.*`) handles every name below its prefix,
+    // so its namespace is a Proxy: any property is another such namespace,
+    // and calling one invokes its full dotted name. `invoke` binds the
+    // arguments by name, so an exact callback below the prefix keeps its
+    // schema; anything else sends positional arguments as `__eryx_args__`
+    // for the host to bind. Symbols, `then` (so awaiting a namespace doesn't
+    // call it) and Object.prototype's names aren't tool names.
+    const prefixNamespaces = new WeakSet();
+    const prefixNamespace = (name) =>
+        new Proxy(() => {}, {
+            get(target, key) {
+                if (typeof key === 'symbol' || key === 'then' || key in Object.prototype) {
+                    return Reflect.get(target, key);
+                }
+                return prefixNamespace(`${name}.${key}`);
+            },
+            apply(_target, _this, args) {
+                return globalThis.invoke(name, ...args);
+            },
+        });
+
     // Top-level names we installed last time, so a changed callback set can
     // remove them. Anything else already on globalThis is never shadowed.
     let installed = [];
@@ -117,16 +138,36 @@
         installed = [];
         callbacks = list;
         paramCache = new Map();
+        const prefixes = [];
         for (const { name } of callbacks) {
             const parts = name.split('.');
             const root = parts[0];
             if (root in globalThis && !installed.includes(root)) continue;
             if (!installed.includes(root)) installed.push(root);
+            if (parts.length > 1 && parts.at(-1) === '*') {
+                prefixes.push(parts.slice(0, -1));
+                continue;
+            }
             let target = globalThis;
             for (const part of parts.slice(0, -1)) {
                 target = target[part] ??= {};
             }
             target[parts[parts.length - 1]] = (...args) => globalThis.invoke(name, ...args);
+        }
+        // After the exact callbacks, so a prefix's namespace replaces theirs
+        // (it still reaches them by name); shorter prefixes first, so a
+        // longer one inside another is already covered.
+        prefixes.sort((a, b) => a.length - b.length);
+        for (const parts of prefixes) {
+            let target = globalThis;
+            for (const part of parts.slice(0, -1)) {
+                target = target[part] ??= {};
+                if (prefixNamespaces.has(target)) break;
+            }
+            if (prefixNamespaces.has(target)) continue;
+            const namespace = prefixNamespace(parts.join('.'));
+            prefixNamespaces.add(namespace);
+            target[parts.at(-1)] = namespace;
         }
     };
 
