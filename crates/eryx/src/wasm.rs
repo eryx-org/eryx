@@ -1352,8 +1352,11 @@ pub(crate) struct TraceClock {
     /// without ends can't grow it.
     // ponytail: concurrent calls to one callback that finish out of order get
     // each other's durations; a call id in the events would pair them exactly.
-    // A start whose end never comes (the CPython guest reports no end for a
-    // cancelled call, #943) skews that name's later durations the same way.
+    // A start whose end never comes skews that name's later durations the
+    // same way: the CPython guest reports no end for a call abandoned at the
+    // end of an execution (a task still pending), since a garbage collection
+    // closes it in a later execution, where an end would be paired with
+    // another call.
     callbacks: VecDeque<(String, std::time::Instant)>,
     /// The last child process's pid.
     last_pid: u32,
