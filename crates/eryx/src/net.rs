@@ -270,7 +270,9 @@ impl NetConfig {
         Self::default()
     }
 
-    /// Set the maximum number of concurrent connections.
+    /// Set the maximum number of concurrent connections, the execution's and
+    /// its child processes' together (see
+    /// [`ConnectionManager::child_network`]). A child past it gets a `503`.
     #[must_use]
     pub fn with_max_connections(mut self, max: u32) -> Self {
         self.max_connections = max;

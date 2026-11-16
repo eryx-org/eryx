@@ -366,13 +366,17 @@ impl Sandbox {
         };
 
         // Spawn network handler if networking is enabled
-        let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
+        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
             let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
+            // Children draw on the guest's budget.
+            let child_net = manager
+                .child_network(self.executor.child_network().clone())
+                .map(crate::process::ChildNet::new);
             let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler))
+            (Some(tx), Some(handler), child_net)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Spawn output collector for real-time streaming if handler is configured
@@ -413,7 +417,7 @@ impl Sandbox {
         if let Some(tx) = net_tx {
             execute_builder = execute_builder.with_network(tx);
         }
-        if let Some(net) = self.child_net() {
+        if let Some(net) = child_net {
             execute_builder = execute_builder.with_child_network(net);
         }
 
@@ -640,16 +644,6 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn net_config(&self) -> Option<&NetConfig> {
         self.net_config.as_ref()
-    }
-
-    /// The network for one execution's child processes, if they have one:
-    /// this request's policy and secrets.
-    pub(crate) fn child_net(&self) -> Option<crate::process::ChildNet> {
-        crate::process::ChildNet::new(
-            self.net_config.clone()?,
-            self.secrets.clone(),
-            self.executor.child_network().clone(),
-        )
     }
 
     /// Whether stdout should be scrubbed of secret placeholders.

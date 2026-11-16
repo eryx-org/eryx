@@ -81,11 +81,8 @@ pub struct ServerLimits {
     pub max_fuel: Option<u64>,
     /// Most callback invocations a request may allow.
     pub max_callback_invocations: u32,
-    /// Most concurrent network connections a request may allow. This bounds
-    /// each proxy on its own: the guest's connections, and its children's
-    /// through an inspecting and a tunnelling proxy, so a shell request whose
-    /// commands use both can hold up to 3x this (process-wide socket caps
-    /// still apply).
+    /// Most concurrent network connections a request may allow, its guest's
+    /// and its children's together.
     pub max_connections: u32,
     /// Longest network connect or I/O timeout a request may set.
     pub max_io_timeout: Duration,
@@ -1246,20 +1243,22 @@ async fn execute_with_session(
     });
 
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
-    let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
+    let (net_tx, _net_handler, child_net) = if let Some(config) = params.net_config.clone() {
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
         let allowed_hosts = config.allowed_hosts().len();
         let max_connections = config.max_connections();
         let manager = ConnectionManager::new(config, params.secrets.clone());
+        // The shell's children share the guest's connection and byte budget.
+        let child_net = manager.child_network(params.child_network.clone());
         tracing::info!(allowed_hosts, max_connections, "network handler started");
         let handler = tokio::spawn(async move {
             let result = run_net_handler(rx, manager).await;
             tracing::info!("network handler stopped");
             result
         });
-        (Some(tx), Some(handler))
+        (Some(tx), Some(handler), child_net)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let mut builder = session
@@ -1279,12 +1278,8 @@ async fn execute_with_session(
     if let Some(tx) = net_tx {
         builder = builder.with_network(tx);
     }
-    if let Some(config) = &params.net_config {
-        builder = builder.with_child_network(
-            params.child_network.clone(),
-            config.clone(),
-            params.secrets.clone(),
-        );
+    if let Some(net) = child_net {
+        builder = builder.with_child_network(net);
     }
     if let Some(names) = &params.allowed_commands {
         builder = builder.with_allowed_commands(names.iter().cloned());

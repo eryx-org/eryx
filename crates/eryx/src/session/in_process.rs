@@ -415,14 +415,15 @@ async fn run_code(
     }));
 
     // Spawn the network handler if networking is enabled
-    let (net_tx, net_handler) = match sandbox.net_config() {
+    let (net_tx, net_handler, child_net) = match sandbox.net_config() {
         Some(config) => {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
             let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone());
+            let child_net = manager.child_network(sandbox.executor().child_network().clone());
             let handler = AbortOnDrop(tokio::spawn(run_net_handler(rx, manager)));
-            (Some(tx), Some(handler))
+            (Some(tx), Some(handler), child_net)
         }
-        None => (None, None),
+        None => (None, None, None),
     };
 
     // Execute using the session executor (keeps instance alive!)
@@ -438,12 +439,8 @@ async fn run_code(
     if let Some(net_tx) = net_tx {
         execute_builder = execute_builder.with_network(net_tx);
     }
-    if let Some(config) = sandbox.net_config() {
-        execute_builder = execute_builder.with_child_network(
-            sandbox.executor().child_network().clone(),
-            config.clone(),
-            sandbox.secrets().clone(),
-        );
+    if let Some(net) = child_net {
+        execute_builder = execute_builder.with_child_network(net);
     }
     let execution_result = execute_builder.run().await;
 

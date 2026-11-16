@@ -549,14 +549,13 @@ impl Command {
     }
 }
 
-/// An execution's network for its children: the sandbox's policy and secrets,
-/// and the proxies started for them, at most one inspecting and one
-/// tunnelling. They live as long as the execution (see
+/// An execution's network for its children: the sandbox's policy, secrets
+/// and budget (shared with the guest's connections), and the proxies started
+/// for them, at most one inspecting and one tunnelling. Nested children use
+/// the same one. They live as long as the execution (see
 /// [`ExecutorState::disconnect`]), well inside their CAs' validity.
 pub(crate) struct ChildNet {
-    config: crate::net::NetConfig,
-    secrets: HashMap<String, crate::secrets::SecretConfig>,
-    network: crate::net::ChildNetwork,
+    net: crate::net::ChildNetPolicy,
     proxies: [Option<ProxyLink>; 2],
     /// TCP sockets its children hold, together.
     sockets: Arc<AtomicUsize>,
@@ -570,20 +569,13 @@ struct ProxyLink {
 }
 
 impl ChildNet {
-    /// `None` for [`ChildNetwork::None`](crate::net::ChildNetwork::None):
-    /// children stay offline.
-    pub(crate) fn new(
-        config: crate::net::NetConfig,
-        secrets: HashMap<String, crate::secrets::SecretConfig>,
-        network: crate::net::ChildNetwork,
-    ) -> Option<Self> {
-        (!matches!(network, crate::net::ChildNetwork::None)).then_some(Self {
-            config,
-            secrets,
-            network,
+    /// From [`ConnectionManager::child_network`](crate::ConnectionManager::child_network).
+    pub(crate) fn new(net: crate::net::ChildNetPolicy) -> Self {
+        Self {
+            net,
             proxies: [None, None],
             sockets: Arc::default(),
-        })
+        }
     }
 
     /// The proxy for a child that may (`tunnels`) or may not open blind
@@ -593,15 +585,7 @@ impl ChildNet {
         let link = match slot {
             Some(link) => link,
             None => {
-                let Some(proxy) = crate::net::ChildProxy::start(
-                    self.config.clone(),
-                    self.secrets.clone(),
-                    self.network.clone(),
-                    tunnels,
-                )?
-                else {
-                    return Err(std::io::Error::other("children have no network"));
-                };
+                let proxy = self.net.start_proxy(tunnels)?;
                 let ca_dir = tempfile::tempdir()?;
                 std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
                 slot.insert(ProxyLink { proxy, ca_dir })

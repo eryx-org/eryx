@@ -748,18 +748,20 @@ impl Session {
                 });
 
                 // Spawn network handler if networking is enabled
-                let (net_tx, net_handler) = if let Some(ref config) = net_config {
+                let (net_tx, net_handler, child_net) = if let Some(ref config) = net_config {
                     let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
                     let manager = eryx::net::ConnectionManager::new(
                         config.clone(),
                         std::collections::HashMap::new(),
                     );
+                    // A shell session's children share its network budget.
+                    let child_net = manager.child_network(child_network);
                     let task = tokio::spawn(async move {
                         eryx::callback_handler::run_net_handler(rx, manager).await;
                     });
-                    (Some(tx), Some(task))
+                    (Some(tx), Some(task), child_net)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 // Spawn output collector for real-time streaming if handler is configured
@@ -790,12 +792,8 @@ impl Session {
                 if let Some(tx) = net_tx {
                     builder = builder.with_network(tx);
                 }
-                if let Some(config) = net_config {
-                    builder = builder.with_child_network(
-                        child_network,
-                        config,
-                        std::collections::HashMap::new(),
-                    );
+                if let Some(net) = child_net {
+                    builder = builder.with_child_network(net);
                 }
 
                 if let Some(tx) = output_tx {
