@@ -448,8 +448,9 @@ jobs:
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v2 -> v3:
-          # the shell's embedded coreutils (#809).
-          key: wasm-runtime-shell-v3-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
+          # the shell's embedded coreutils (#809). v3 -> v4: the shell is
+          # built for wasm32-wasip3.
+          key: wasm-runtime-shell-v4-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -530,10 +531,12 @@ jobs:
           cmp crates/eryx-runtime/wit/deps/net.wit crates/eryx-guest-shell/wit/deps/net.wit
           cmp crates/eryx-runtime/wit/deps/process.wit crates/eryx-guest-shell/wit/deps/process.wit
 
+      # It ships for WASI 0.3, and for WASI 0.2 in js/eryx.
       - name: Clippy
         working-directory: crates/eryx-guest-shell
         run: |
-          rustup target add wasm32-wasip2
+          rustup target add wasm32-wasip2 wasm32-wasip3
+          cargo clippy --locked --target wasm32-wasip3 -- -D warnings
           cargo clippy --locked --target wasm32-wasip2 -- -D warnings
 
       # The argument parsing and builtins are plain Rust, so their unit tests

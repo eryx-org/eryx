@@ -58,7 +58,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # The `grep` builtin.
 regex-lite = "0.1"
 tokio = { version = "1", features = ["rt", "sync"] }
-wit-bindgen = "0.57"
+wit-bindgen = "0.63"
 
 [profile.release]
 opt-level = "s"

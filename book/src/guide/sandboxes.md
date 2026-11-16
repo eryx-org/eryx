@@ -46,6 +46,11 @@ runtime: install the others with `pip install pyeryx[javascript]`,
 `pyeryx[shell]` or `pyeryx[all]` (or pass `runtime_path=` to a precompiled
 `.cwasm`).
 
+The shell runtime is a WASI 0.3 component (`wasm32-wasip3`), and the Python and
+JavaScript runtimes are WASI 0.2 ones; eryx links both versions of WASI, so
+each sees the same sandboxed filesystem, environment and clocks. The JavaScript
+package (`@eryx-org/eryx`) still runs a WASI 0.2 build of the shell.
+
 <!-- langtabs-start -->
 ```rust,ignore
 let js = Sandbox::embedded().javascript().build()?;

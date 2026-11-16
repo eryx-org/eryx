@@ -91,14 +91,15 @@ jobs:
         id: wasm-cache-shell
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: crates/eryx-runtime/runtime-shell.wasm
-          key: wasm-runtime-shell-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # The WASI 0.2 build, which this package uses (see js/mise.toml).
+          path: crates/eryx-runtime/runtime-shell-p2.wasm
+          key: wasm-runtime-shell-p2-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
 
       - name: Touch cached guest WASM
         if: steps.wasm-cache-javascript.outputs.cache-hit == 'true' && steps.wasm-cache-shell.outputs.cache-hit == 'true'
         run: |
           # So mise considers the wasm-build-guests task current
-          touch crates/eryx-runtime/runtime-javascript.wasm crates/eryx-runtime/runtime-shell.wasm
+          touch crates/eryx-runtime/runtime-javascript.wasm crates/eryx-runtime/runtime-shell-p2.wasm
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
