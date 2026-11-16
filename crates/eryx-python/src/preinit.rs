@@ -802,6 +802,7 @@ impl SandboxFactory {
         }
 
         let inner = builder.build().map_err(eryx_error_to_py)?;
+        crate::sandbox::warn_callback_names(py, eryx::Language::Python, &inner)?;
 
         Ok(Sandbox::from_factory(
             inner,

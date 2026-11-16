@@ -92,6 +92,15 @@ gh)
     # all work, and no secret is needed.
     expect "$(ghw --env GH_TOKEN=placeholder "$OUT/component.wasm" api /zen)" "HTTP 401"
     ;;
+git)
+    # git imports eryx:process/run, for the subcommands it runs itself, which
+    # only eryx provides, so it can't run under the wasmtime CLI. Check its
+    # shape here; the opt-in git_stash_runs_git_itself test in
+    # crates/eryx/tests/commands.rs runs it (ci.yml, from this artifact).
+    wit="$(wasm-tools component wit "$OUT/component.wasm")"
+    expect "$wit" "import eryx:process/run@0.1.0;"
+    expect "$wit" "export wasi:cli/run@0.2"
+    ;;
 *)
     echo "no smoke test for '$NAME'" >&2
     exit 1

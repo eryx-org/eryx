@@ -626,3 +626,35 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The shell's reserved words, as brush-core's `keywords.rs` lists them
+    /// (it doesn't export them). A command can't take one of these names:
+    /// it's parsed as syntax.
+    const KEYWORDS: [&str; 22] = [
+        "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until",
+        "do", "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc",
+    ];
+
+    /// The host refuses callbacks named like these builtins and reserved
+    /// words (#962), from its own copy of the list; this keeps it in step
+    /// with what the guest registers.
+    #[test]
+    fn builtins_match_the_host_list() {
+        let mut builtins: Vec<String> =
+            brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
+                .into_keys()
+                .chain(["invoke".to_string(), "grep".to_string()])
+                .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
+                .collect();
+        builtins.sort();
+        builtins.dedup();
+        let host: Vec<&str> = include_str!("../../eryx/src/reserved/shell.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(host, builtins, "update crates/eryx/src/reserved/shell.txt");
+    }
+}

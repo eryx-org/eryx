@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PythonExceptionError, Sandbox } from "@eryx-org/eryx";
 
 const callbacks = { add: ({ a, b }: Record<string, number>) => a + b };
@@ -115,4 +115,36 @@ sys.__stderr__.flush()
 it("rejects an unknown language", () => {
   // @ts-expect-error not a language
   expect(() => new Sandbox({ language: "ruby" })).toThrow(TypeError);
+});
+
+// A callback the guest would never install under its name is refused (#962).
+describe("reserved callback names", () => {
+  it("refuses JavaScript globals, including a dotted name's root", () => {
+    for (const name of ["fetch", "crypto.subtle", "setTimeout", "URL.*"]) {
+      expect(() => new Sandbox({ language: "javascript", callbacks: { [name]: () => 1 } })).toThrow(
+        "collides with the JavaScript global",
+      );
+    }
+    using ok = new Sandbox({ language: "javascript", callbacks: { fetch_user: () => 1 } });
+    expect(ok).toBeDefined();
+  });
+
+  it("refuses shell builtins and the commands a callback would hide", () => {
+    expect(() => new Sandbox({ language: "shell", callbacks: { echo: () => 1 } })).toThrow(
+      "collides with the shell builtin or reserved word 'echo'",
+    );
+    expect(() => new Sandbox({ language: "shell", callbacks: { cat: () => 1 } })).toThrow(
+      "collides with the command 'cat'",
+    );
+    using free = new Sandbox({ language: "shell", coreutils: false, callbacks: { cat: () => 1 } });
+    expect(free).toBeDefined();
+  });
+
+  it("only warns for Python builtins", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    using sandbox = new Sandbox({ callbacks: { print: () => 1 } });
+    expect(sandbox).toBeDefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("collides with the Python builtin 'print'"));
+    warn.mockRestore();
+  });
 });

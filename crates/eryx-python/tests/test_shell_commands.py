@@ -206,3 +206,30 @@ def test_allowed_commands_narrow_one_session_call(monkeypatch):
 def test_allowed_commands_are_only_for_the_shell():
     with pytest.raises(ValueError, match="only for"):
         eryx.Session().execute("pass", allowed_commands=[])
+
+
+def test_allowed_commands_narrow_one_sandbox_call(monkeypatch):
+    companion(monkeypatch)
+    sandbox = eryx.Sandbox(language="shell")
+    code = 'echo a | cat; echo "cat=$?"; echo b | sort >/dev/null; echo "sort=$?"'
+    assert sandbox.execute(code, allowed_commands=["cat"]).stdout == b"a\ncat=0\nsort=127\n"
+    assert sandbox.execute(code).stdout == b"a\ncat=0\nsort=0\n"
+    outcome = sandbox.execute_with_journal(code, allowed_commands=[])
+    assert outcome.result.stdout == b"cat=127\nsort=127\n"
+
+
+def test_allowed_commands_narrow_an_async_sandbox_call(monkeypatch):
+    import asyncio
+
+    companion(monkeypatch)
+    sandbox = eryx.Sandbox(language="shell")
+
+    async def run():
+        return await sandbox.execute_async('echo a | sort; echo "sort=$?"', allowed_commands=[])
+
+    assert asyncio.run(run()).stdout == b"sort=127\n"
+
+
+def test_sandbox_allowed_commands_are_only_for_the_shell():
+    with pytest.raises(ValueError, match="only for"):
+        eryx.Sandbox().execute("pass", allowed_commands=[])

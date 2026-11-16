@@ -1302,3 +1302,11 @@ assert tags == ["first", "second", "third"], f"Wrong tags: {tags}"
 print("SUBTASK_KEYING_OK")
 """)
         assert b"SUBTASK_KEYING_OK" in result.stdout, f"Failed: {result.stdout}"
+
+
+def test_callback_named_like_a_builtin_warns():
+    """A callback named like a Python builtin is reachable only through
+    invoke(): building the sandbox says so with a UserWarning (#962)."""
+    with pytest.warns(UserWarning, match="collides with the Python builtin 'print'"):
+        sandbox = eryx.Sandbox(callbacks=[{"name": "print", "fn": lambda: "called", "description": ""}])
+    assert sandbox.execute("result = await invoke('print')").result == "called"

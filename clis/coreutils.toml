@@ -9,7 +9,7 @@
 #
 # `mkdir -p` and canonicalizing `realpath`/`readlink -f` walk up from `/`,
 # which the shell's read-only root makes statable (#832). Children see it
-# with `unstable-vfs`; without it they have no filesystem until #812.
+# with `unstable-vfs`; without it they have no filesystem yet (#968).
 
 name = "coreutils"
 description = "uutils coreutils (Rust, wasip2, multicall)"

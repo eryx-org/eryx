@@ -792,9 +792,9 @@ pub struct SessionExecutor {
     #[cfg(feature = "unstable-vfs")]
     vfs_config: Option<VfsConfig>,
 
-    /// Quota used when creating the session's own VFS storage.
+    /// Limits used when creating the session's own VFS storage.
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
-    vfs_max_bytes: Option<u64>,
+    vfs_limits: VfsLimits,
 
     /// Limit on host files the session may hold open, kept for resets.
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -1023,14 +1023,40 @@ fn add_library_preopens(
     Ok(())
 }
 
+/// [`ResourceLimits::max_vfs_bytes`] and
+/// [`max_vfs_entries`](ResourceLimits::max_vfs_entries), which apply to the
+/// in-memory storage eryx creates itself.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VfsLimits {
+    max_bytes: Option<u64>,
+    max_entries: Option<usize>,
+}
+
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+impl VfsLimits {
+    pub(crate) fn of(limits: &ResourceLimits) -> Self {
+        Self {
+            max_bytes: limits.max_vfs_bytes,
+            max_entries: limits.max_vfs_entries,
+        }
+    }
+
+    /// Empty storage under these limits, with the `eryx-vfs` defaults for
+    /// any left unset.
+    pub(crate) fn storage(self) -> eryx_vfs::InMemoryStorage {
+        eryx_vfs::InMemoryStorage::with_max_bytes(
+            self.max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+        )
+        .with_max_entries(self.max_entries.unwrap_or(eryx_vfs::MAX_ENTRIES))
+    }
+}
+
 /// The storage behind the shell's private `/tmp` when there's no
-/// `unstable-vfs` VFS, under `max_bytes` (default
-/// [`eryx_vfs::DEFAULT_MAX_BYTES`]).
+/// `unstable-vfs` VFS, under `limits`.
 #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-pub(crate) fn private_vfs_storage(max_bytes: Option<u64>) -> eryx_vfs::ArcStorage {
-    eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-        eryx_vfs::InMemoryStorage::with_max_bytes(max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES)),
-    ))
+pub(crate) fn private_vfs_storage(limits: VfsLimits) -> eryx_vfs::ArcStorage {
+    eryx_vfs::ArcStorage::new(std::sync::Arc::new(limits.storage()))
 }
 
 /// The hybrid VFS context without `unstable-vfs`, which `shell` links it for:
@@ -1187,7 +1213,8 @@ impl SessionExecutor {
     /// Create a session with caller-owned VFS storage and resource limits.
     ///
     /// The supplied storage retains ownership of its own quota and policy;
-    /// `limits.max_vfs_bytes` is only used for storage created by Eryx.
+    /// `limits.max_vfs_bytes` and `limits.max_vfs_entries` are only used for
+    /// storage created by Eryx.
     ///
     /// # Errors
     ///
@@ -1225,13 +1252,9 @@ impl SessionExecutor {
         let wasi = build_wasi_context(&executor, &fd_output)?;
 
         // Use provided storage/config or create defaults. A storage supplied by
-        // the caller owns its own quota; max_vfs_bytes applies only here.
+        // the caller owns its own quota; the VFS limits apply only here.
         let vfs_storage = vfs_storage.unwrap_or_else(|| {
-            eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                eryx_vfs::InMemoryStorage::with_max_bytes(
-                    limits.max_vfs_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                ),
-            ))
+            eryx_vfs::ArcStorage::new(std::sync::Arc::new(VfsLimits::of(limits).storage()))
         });
         let vfs_config = vfs_config.unwrap_or_default();
 
@@ -1307,7 +1330,7 @@ impl SessionExecutor {
             fd_output,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
-            vfs_max_bytes: limits.max_vfs_bytes,
+            vfs_limits: VfsLimits::of(limits),
             max_open_host_files: limits.max_open_host_files,
             max_child_host_bytes: limits.max_child_host_bytes,
         })
@@ -1334,7 +1357,7 @@ impl SessionExecutor {
         )
         .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
         #[cfg(feature = "shell")]
-        let vfs_storage = private_vfs_storage(limits.max_vfs_bytes);
+        let vfs_storage = private_vfs_storage(VfsLimits::of(limits));
         #[cfg(feature = "shell")]
         let state = state.with_hybrid_vfs(build_private_vfs_context(
             &executor,
@@ -1395,7 +1418,7 @@ impl SessionExecutor {
             #[cfg(feature = "shell")]
             vfs_storage: Some(vfs_storage),
             #[cfg(feature = "shell")]
-            vfs_max_bytes: limits.max_vfs_bytes,
+            vfs_limits: VfsLimits::of(limits),
             #[cfg(feature = "shell")]
             max_open_host_files: limits.max_open_host_files,
             max_child_host_bytes: limits.max_child_host_bytes,
@@ -1877,7 +1900,7 @@ impl SessionExecutor {
             let storage = self
                 .vfs_storage
                 .clone()
-                .unwrap_or_else(|| private_vfs_storage(self.vfs_max_bytes));
+                .unwrap_or_else(|| private_vfs_storage(self.vfs_limits));
             state.with_hybrid_vfs(build_private_vfs_context(
                 &self.executor,
                 storage,
@@ -1891,11 +1914,7 @@ impl SessionExecutor {
             let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
                 // This is only a defensive fallback (constructors always keep
                 // the storage), but retain the configured quota if it is used.
-                eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(
-                        self.vfs_max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                    ),
-                ))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(self.vfs_limits.storage()))
             });
             let vfs_config = self.vfs_config.clone().unwrap_or_default();
 

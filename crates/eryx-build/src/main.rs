@@ -84,20 +84,29 @@ fn resolve_manifest_path(arg: &str) -> PathBuf {
     }
 }
 
-/// Collect the paths of all `*.toml` manifests in `clis/`, sorted.
+/// Collect the paths of all `*.toml` manifests in `clis/`, and in each
+/// directory of `clis/gpl/` (GPL-licensed recipes, kept apart; #837), sorted.
 fn manifest_paths() -> Result<Vec<PathBuf>> {
     let dir = PathBuf::from(CLIS_DIR);
-    let entries = std::fs::read_dir(&dir).with_context(|| {
-        format!(
-            "reading manifest dir {} (run eryx-build from the repo root)",
-            dir.display()
-        )
-    })?;
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
-        .collect();
+    let tomls = |dir: &std::path::Path| -> Result<Vec<PathBuf>> {
+        let entries = std::fs::read_dir(dir).with_context(|| {
+            format!(
+                "reading manifest dir {} (run eryx-build from the repo root)",
+                dir.display()
+            )
+        })?;
+        Ok(entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+            .collect())
+    };
+    let mut paths = tomls(&dir)?;
+    if let Ok(gpl) = std::fs::read_dir(dir.join("gpl")) {
+        for entry in gpl.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+            paths.extend(tomls(&entry.path())?);
+        }
+    }
     paths.sort();
     if paths.is_empty() {
         bail!("no manifests found in {}", dir.display());
@@ -153,12 +162,18 @@ fn check_one(path: &std::path::Path) -> Result<Manifest> {
     }
     // Patches and shims are tracked in-repo, so their existence is checkable.
     // Source dirs live in the gitignored scratch/, so they aren't.
-    let tracked = manifest.build.vendor_patch.iter().chain(
-        manifest
-            .deps
-            .iter()
-            .flat_map(|d| d.config_patch.iter().chain(&d.shims)),
-    );
+    let tracked = manifest
+        .build
+        .vendor_patch
+        .iter()
+        .chain(&manifest.build.shims)
+        .chain(manifest.build.wit.iter().map(|w| &w.path))
+        .chain(
+            manifest
+                .deps
+                .iter()
+                .flat_map(|d| d.config_patch.iter().chain(&d.shims)),
+        );
     for file in tracked {
         if !file.exists() {
             bail!("{} does not exist", file.display());

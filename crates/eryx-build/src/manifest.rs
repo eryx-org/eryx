@@ -120,6 +120,10 @@ pub enum CBuildSystem {
     /// Run an autotools `configure` script cross-compiling to wasip2, then
     /// `make` (e.g. jq). Uses `configure_flags` and `artifact`.
     Autotools,
+    /// Run a plain Makefile in the source tree, with the wasi-sdk toolchain
+    /// and the build's flags as make variables (e.g. git). Uses `make_flags`,
+    /// `make_targets` and `artifact` (relative to the source dir).
+    Make,
 }
 
 /// Where a CLI's source comes from.
@@ -153,7 +157,8 @@ pub struct Build {
     /// compile for the wasm target.
     #[serde(default)]
     pub vendor_patch: Option<PathBuf>,
-    /// C lane: which build system to use (`single` clang call vs `cmake`).
+    /// C lane: which build system to use (`single`, `cmake`, `autotools` or
+    /// `make`).
     #[serde(default)]
     pub system: CBuildSystem,
     /// C lane (`single`): source files to compile, relative to the source dir
@@ -179,8 +184,26 @@ pub struct Build {
     pub configure_flags: Vec<String>,
     /// C lane (`cmake`, `autotools`): built artifact path relative to the
     /// build dir (e.g. `src/curl`); copied to `<output>/component.wasm`.
+    /// For `make`, relative to the source dir.
     #[serde(default)]
     pub artifact: Option<PathBuf>,
+    /// C lane (`make`): extra `make` variable assignments (e.g.
+    /// `NO_CURL=YesPlease`), placeholders substituted.
+    #[serde(default)]
+    pub make_flags: Vec<String>,
+    /// C lane (`make`): targets to build (default: make's own default).
+    #[serde(default)]
+    pub make_targets: Vec<String>,
+    /// C lane: extra C sources (repo-root-relative) compiled with the build's
+    /// `cflags` and linked into it: WASI glue the project lacks.
+    #[serde(default)]
+    pub shims: Vec<PathBuf>,
+    /// C lane: a WIT world to generate C bindings for with `wit-bindgen c`,
+    /// compiled and linked into the build so its sources can call the
+    /// world's imports. Generated into `<output>/wit`, so `cflags` can
+    /// `-I` it.
+    #[serde(default)]
+    pub wit: Option<WitBindings>,
     /// Go lane: `go build -ldflags` value. `{ref}` is replaced with the
     /// source's pinned ref and `{version}` with that ref minus a leading `v`,
     /// e.g. to stamp the version a CLI reports.
@@ -199,6 +222,15 @@ pub struct Build {
     /// feature). Currently honored by the Rust lane.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// A WIT world to bind C sources to (see [`Build::wit`]).
+#[derive(Debug, Deserialize)]
+pub struct WitBindings {
+    /// WIT file or directory, relative to the repo root.
+    pub path: PathBuf,
+    /// The world, e.g. `eryx:process/child`.
+    pub world: String,
 }
 
 fn default_package() -> String {
@@ -350,6 +382,36 @@ mod tests {
         assert_eq!(m.build.system, CBuildSystem::Autotools);
         assert_eq!(m.build.artifact, Some(PathBuf::from("jq")));
         assert_eq!(m.build.configure_flags, ["--disable-docs"]);
+    }
+
+    /// A plain-Makefile manifest (git-style) parses `system = "make"` plus
+    /// its make flags, targets, shims and WIT bindings.
+    #[test]
+    fn parses_c_make_manifest() {
+        let toml = r#"
+            name = "git"
+            license = "GPL-2.0-only"
+            lang = "c"
+            [source]
+            repo = "https://example.com/git.git"
+            ref = "v2.56.0"
+            dir = "scratch/git"
+            [build]
+            system = "make"
+            artifact = "git"
+            make_targets = ["git"]
+            make_flags = ["NO_CURL=YesPlease"]
+            shims = ["clis/gpl/git/shims/stubs.c"]
+            wit = { path = "crates/eryx-runtime/wit/deps/process.wit", world = "eryx:process/child" }
+            [output]
+            dir = "scratch/git-component"
+        "#;
+        let m: Manifest = toml::from_str(toml).expect("make manifest should parse");
+        assert_eq!(m.build.system, CBuildSystem::Make);
+        assert_eq!(m.build.make_targets, ["git"]);
+        assert_eq!(m.build.make_flags, ["NO_CURL=YesPlease"]);
+        assert_eq!(m.build.shims.len(), 1);
+        assert_eq!(m.build.wit.unwrap().world, "eryx:process/child");
     }
 
     /// A Rust-lane manifest (ripgrep-style) parses its `bin`/`cargo_flags`.

@@ -261,7 +261,23 @@ impl Sandbox {
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
     pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
-        self.run_inner(code, None, None).await
+        self.execute_with(code, &ExecuteOptions::default()).await
+    }
+
+    /// Execute code with per-call [`ExecuteOptions`]: narrowed shell
+    /// commands, or a token that cancels it. [`execute`](Self::execute) is
+    /// this with the defaults.
+    ///
+    /// # Errors
+    ///
+    /// As for [`execute`](Self::execute), and
+    /// [`ErrorKind::Cancelled`] if the options' token is cancelled.
+    pub async fn execute_with(
+        &self,
+        code: &str,
+        options: &ExecuteOptions,
+    ) -> Result<ExecuteResult, Error> {
+        self.run_inner(code, None, options).await
     }
 
     /// Execute Python code with callback-result replay and journaling.
@@ -286,13 +302,31 @@ impl Sandbox {
     /// source** (e.g. a previous run of the same sandbox, or a journal verified
     /// via HMAC signature). See the [`replay`](crate::replay) module docs for
     /// details.
+    ///
+    /// Use [`execute_journaled`](Self::execute_journaled) when you need
+    /// [`ExecuteOptions`].
     pub async fn execute_with_journal(
         &self,
         code: &str,
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
+        self.execute_journaled(code, journal, &ExecuteOptions::default())
+            .await
+    }
+
+    /// [`execute_with_journal`](Self::execute_with_journal) with per-call
+    /// [`ExecuteOptions`]: use this one when you need options. The same
+    /// security note applies: only replay journals from a trusted source.
+    pub async fn execute_journaled(
+        &self,
+        code: &str,
+        journal: Option<CallbackJournal>,
+        options: &ExecuteOptions,
+    ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
-        let result = self.run_inner(code, Some(Arc::clone(&state)), None).await;
+        let result = self
+            .run_inner(code, Some(Arc::clone(&state)), options)
+            .await;
         ReplayOutcome::from_state(&state, code, result)
     }
 
@@ -302,9 +336,8 @@ impl Sandbox {
     ///
     /// When `replay_state` is `Some`, every registered callback is wrapped with
     /// a [`ReplayCallback`](crate::replay::ReplayCallback) sharing that state.
-    /// When `cancel_token` is `Some`, cancelling it interrupts the execution.
     #[tracing::instrument(
-        skip(self, code, replay_state, cancel_token),
+        skip(self, code, replay_state, options),
         fields(
             code_len = code.len(),
             callbacks = self.callbacks.len(),
@@ -318,7 +351,7 @@ impl Sandbox {
         &self,
         code: &str,
         replay_state: Option<Arc<Mutex<ReplayState>>>,
-        cancel_token: Option<CancellationToken>,
+        options: &ExecuteOptions,
     ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -401,8 +434,11 @@ impl Sandbox {
             .execute(code)
             .with_preamble(self.preamble.as_str())
             .with_callbacks(&callbacks, callback_tx);
-        if let Some(token) = cancel_token {
-            execute_builder = execute_builder.with_cancellation(token);
+        if let Some(token) = &options.cancellation {
+            execute_builder = execute_builder.with_cancellation(token.clone());
+        }
+        if let Some(names) = &options.allowed_commands {
+            execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
         }
         if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
@@ -425,10 +461,6 @@ impl Sandbox {
         // a scrubbing storage from the sandbox's secrets configuration.
         #[cfg(feature = "unstable-vfs")]
         {
-            let vfs_max_bytes = self
-                .resource_limits
-                .max_vfs_bytes
-                .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES);
             let vfs_storage = if let Some(ref storage) = self.vfs_storage {
                 eryx_vfs::ArcStorage::new(Arc::clone(storage))
             } else {
@@ -455,7 +487,7 @@ impl Sandbox {
                     }
                 };
                 let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(vfs_max_bytes),
+                    crate::session::executor::VfsLimits::of(&self.resource_limits).storage(),
                     vfs_secrets,
                     vfs_policy,
                 );
@@ -477,8 +509,9 @@ impl Sandbox {
         // Without `unstable-vfs`, the quota still bounds the shell's /tmp.
         #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
         {
-            execute_builder =
-                execute_builder.with_max_vfs_bytes(self.resource_limits.max_vfs_bytes);
+            execute_builder = execute_builder.with_vfs_limits(
+                crate::session::executor::VfsLimits::of(&self.resource_limits),
+            );
         }
         execute_builder =
             execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
@@ -719,7 +752,9 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
-    /// name; the existing callbacks are left unchanged.
+    /// name, or if one collides with a name the guest uses itself (a
+    /// JavaScript global, a shell builtin or command; Python only warns);
+    /// the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
         let mut duplicate = None;
@@ -727,6 +762,11 @@ impl Sandbox {
             insert_callback(&mut map, &mut duplicate, Arc::from(callback));
         }
         check_duplicate_callback(duplicate)?;
+        crate::reserved::check(
+            self.executor.language(),
+            map.keys().map(String::as_str),
+            self.executor.commands().registered_names(),
+        )?;
         self.callbacks = Arc::new(map);
         Ok(())
     }
@@ -875,13 +915,14 @@ impl Sandbox {
 
         let finished = Arc::new(AtomicBool::new(false));
 
-        let sandbox = self.clone_for_task();
+        let sandbox = self.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
         let task_finished = Arc::clone(&finished);
 
         tokio::spawn(async move {
-            let result = sandbox.run_inner(&code, None, Some(token)).await;
+            let options = ExecuteOptions::new().with_cancellation(token);
+            let result = sandbox.execute_with(&code, &options).await;
             task_finished.store(true, Ordering::Release);
             // Send result back (ignore error if receiver dropped)
             let _ = result_tx.send(result);
@@ -893,10 +934,17 @@ impl Sandbox {
             result: result_rx,
         }
     }
+}
 
-    /// A copy of this sandbox sharing its executor and callbacks, so an
-    /// execution can run on a spawned task.
-    fn clone_for_task(&self) -> Self {
+/// A copy sharing the compiled runtime, callbacks and handlers, so a clone is
+/// cheap, and an execution can run on a spawned task. Executions of a sandbox
+/// and of its clones are independent, as executions of one sandbox are.
+///
+/// A clone of a [`SandboxPool`](crate::pool::SandboxPool) lease doesn't
+/// belong to the pool: it keeps that lease's callbacks, secrets and network
+/// config after the lease goes back, and isn't reset or reused with it.
+impl Clone for Sandbox {
+    fn clone(&self) -> Self {
         Self {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
@@ -1060,6 +1108,53 @@ fn python_str_literal(value: &str) -> String {
 pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
     ErrorKind::Execution(format!("{task} task failed: {error}")).into()
+}
+
+/// Options for one execution of a [`Sandbox`], for
+/// [`execute_with`](Sandbox::execute_with) and
+/// [`execute_journaled`](Sandbox::execute_journaled).
+///
+/// # Stability
+///
+/// Options added later default to today's behaviour.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ExecuteOptions {
+    allowed_commands: Option<Vec<String>>,
+    cancellation: Option<CancellationToken>,
+}
+
+impl ExecuteOptions {
+    /// The defaults: every registered command, and no cancellation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Let this execution spawn only the named commands: the guest lists
+    /// just those, and any other spawn fails with `command-not-found`. Only
+    /// the shell spawns commands; for other guests it changes nothing (no
+    /// error). An empty list allows none; names that aren't
+    /// registered are ignored. The shell's `grep` builtin counts as a
+    /// command here; other builtins and callbacks aren't affected. Sessions
+    /// take the same option on [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Interrupt the execution when `token` is cancelled; it then fails with
+    /// [`ErrorKind::Cancelled`].
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
 }
 
 /// Handle to a cancellable execution.
@@ -2560,7 +2655,12 @@ impl<L, R> SandboxBuilder<L, R> {
 
     /// Add a single callback.
     ///
-    /// A callback name registered twice makes [`build`](Self::build) fail.
+    /// A callback name registered twice makes [`build`](Self::build) fail,
+    /// as does one the guest already uses itself, which the callback could
+    /// otherwise only be reached through `invoke()` under: a JavaScript
+    /// global (`fetch`, `crypto`, ...), including the first part of a dotted
+    /// name, or a shell builtin or command. A Python builtin is logged as a
+    /// warning for now.
     #[must_use]
     pub fn with_callback(mut self, callback: impl Callback + 'static) -> Self {
         insert_callback(
@@ -3122,6 +3222,11 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         };
         #[cfg(not(all(feature = "embedded", feature = "coreutils")))]
         let commands = self.commands;
+        crate::reserved::check(
+            L::LANGUAGE,
+            self.callbacks.keys().map(String::as_str),
+            commands.registered_names(),
+        )?;
 
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
@@ -3632,8 +3737,20 @@ pub struct ResourceLimits {
     /// Applies with the `unstable-vfs` feature, and with `shell` to the shell's
     /// `/tmp`, and only to the storage eryx creates itself; storage you construct and pass in carries its own limit (see
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
-    /// default of 64 MiB.
+    /// default of 64 MiB. A tree too large for this or
+    /// [`max_vfs_entries`](Self::max_vfs_entries) belongs on a host-directory
+    /// volume, which neither limit applies to.
     pub max_vfs_bytes: Option<u64>,
+    /// Maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Each entry is also charged against
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) (its path, twice for a directory, plus 64 bytes), so
+    /// this mainly bounds operations that visit every entry, such as listing,
+    /// removing or renaming a directory. Scripts see the limit as `ENOSPC`.
+    /// Applies to the same storage as `max_vfs_bytes`. `None` uses the
+    /// `eryx-vfs` default of 65,536.
+    pub max_vfs_entries: Option<usize>,
     /// Maximum host files and directories a script may hold open at once
     /// beneath host mounts (the stdlib, site-packages and volumes).
     ///
@@ -3664,6 +3781,7 @@ impl Default for ResourceLimits {
             max_callback_invocations: Some(1000),
             max_fuel: None,             // Unlimited by default, but still tracked
             max_vfs_bytes: None,        // eryx-vfs default (64 MiB)
+            max_vfs_entries: None,      // eryx-vfs default (65,536)
             max_open_host_files: None,  // eryx-vfs default (256)
             max_child_host_bytes: None, // 64 MiB
         }
@@ -3676,10 +3794,11 @@ impl ResourceLimits {
     /// Only for code you trust: scripts can then run indefinitely and consume
     /// memory without bound.
     ///
-    /// [`max_vfs_bytes`](Self::max_vfs_bytes) is the exception and stays at its
-    /// default. It bounds *host* memory rather than the guest, so clearing it
-    /// would let a script abort the process rather than merely outstay its
-    /// welcome; raise it explicitly if you need more room.
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) and
+    /// [`max_vfs_entries`](Self::max_vfs_entries) are the exception and stay at
+    /// their defaults. They bound *host* memory rather than the guest, so
+    /// clearing them would let a script abort the process rather than merely
+    /// outstay its welcome; raise them explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
     /// default, since host descriptors are shared with the whole process,
     /// and [`max_child_host_bytes`](Self::max_child_host_bytes) for the same
@@ -3693,6 +3812,7 @@ impl ResourceLimits {
             max_callback_invocations: None,
             max_fuel: None,
             max_vfs_bytes: None,
+            max_vfs_entries: None,
             max_open_host_files: None,
             max_child_host_bytes: None,
         }
@@ -3751,6 +3871,18 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_vfs_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
         self.max_vfs_bytes = bytes.into();
+        self
+    }
+
+    /// Set the maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Pass `None` to use the `eryx-vfs` default of 65,536. Like
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes), there is no way to remove this
+    /// limit; see [`max_vfs_entries`](Self::max_vfs_entries).
+    #[must_use]
+    pub fn with_max_vfs_entries(mut self, entries: impl Into<Option<usize>>) -> Self {
+        self.max_vfs_entries = entries.into();
         self
     }
 

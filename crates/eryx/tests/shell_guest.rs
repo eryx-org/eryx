@@ -519,20 +519,40 @@ async fn suspending_callback_halts_the_guest() {
     ));
 }
 
-/// A callback can't replace a builtin of the same name (functions, then
-/// builtins, then callbacks), but `invoke NAME` still reaches it.
+/// A callback named like a builtin could only be reached through `invoke`,
+/// and one named like a command would hide it, so neither builds (#962).
 #[tokio::test]
-async fn builtins_win_over_callbacks_of_the_same_name() {
+async fn callbacks_named_like_builtins_or_commands_are_refused() {
     let Some(builder) = shell_sandbox() else {
         return;
     };
-    let echo = TestCallback::new("echo", |_| Ok(json!("from the callback")));
-    let calls = Arc::clone(&echo.calls);
-    let sandbox = builder.with_callback(echo).build().unwrap();
-
-    let out = sandbox.execute("echo plain; invoke echo").await.unwrap();
-    assert_eq!(out.stdout_utf8().unwrap(), "plain\nfrom the callback\n");
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let err = builder
+        .with_callback(TestCallback::new("echo", |_| Ok(json!(null))))
+        .build()
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("callback 'echo' collides with the shell builtin or reserved word 'echo'"),
+        "{err}"
+    );
+    // The embedded coreutils' `cat`.
+    let err = shell_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("cat", |_| Ok(json!(null))))
+        .build()
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("callback 'cat' collides with the command 'cat'"),
+        "{err}"
+    );
+    // Without the embedded commands, `cat` is free.
+    shell_sandbox()
+        .unwrap()
+        .without_embedded_commands()
+        .with_callback(TestCallback::new("cat", |_| Ok(json!(null))))
+        .build()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -718,6 +738,29 @@ if printf '%*s' 200000 x > /tmp/big; then echo big; else echo full; fi
         .await
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "small\nfull\n");
+}
+
+/// The shell's `/tmp` is also bounded by the VFS entry limit.
+#[tokio::test]
+async fn the_shell_tmp_is_bounded_by_the_vfs_entry_limit() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_resource_limits(eryx::ResourceLimits::default().with_max_vfs_entries(16))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+n=0; for i in {1..32}; do if : > /tmp/f$i; then n=$((n+1)); fi; done 2>/dev/null
+echo $n
+"#,
+        )
+        .await
+        .unwrap();
+    let created: usize = out.stdout_utf8().unwrap().trim().parse().unwrap();
+    assert!((1..16).contains(&created), "{created}");
 }
 
 /// A session's `/tmp` outlives a reset, as the VFS does.

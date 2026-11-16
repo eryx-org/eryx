@@ -638,6 +638,34 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
         ),
         ("mkdir /tmp/t && rmdir /tmp/t && echo gone", "gone\n"),
         ("realpath /tmp/../tmp", "/tmp\n"),
+        // Directories carry their own times rather than the epoch (#973).
+        (
+            "mkdir /tmp/d && y=$(date -r /tmp/d +%Y) && [ \"$y\" != 1970 ] && echo dated",
+            "dated\n",
+        ),
+        (
+            "mkdir /tmp/e && touch -d @100000 /tmp/e && date -r /tmp/e +%s",
+            "100000\n",
+        ),
+        // touch sets an existing file's times through a read-only descriptor.
+        (
+            "echo x > /tmp/f && touch -d @100000 /tmp/f && date -r /tmp/f +%s",
+            "100000\n",
+        ),
+        // WASI has no file modes, so cp doesn't try to copy them (#982).
+        (
+            "mkdir -p /tmp/a/s && echo x > /tmp/a/f && touch -d @100000 /tmp/a/f; \
+             cp -r /tmp/a /tmp/b 2>&1; echo r=$?; \
+             cp -p /tmp/a/f /tmp/g 2>&1; echo p=$?; \
+             cp -rp /tmp/a /tmp/c 2>&1; echo rp=$?; \
+             cat /tmp/b/f /tmp/g /tmp/c/f; date -r /tmp/g +%s",
+            "r=0\np=0\nrp=0\nx\nx\nx\n100000\n",
+        ),
+        // `touch -r` reads the reference file's times.
+        (
+            "echo x > /tmp/r && touch -d @100000 /tmp/r && touch -r /tmp/r /tmp/s && date -r /tmp/s +%s",
+            "100000\n",
+        ),
     ])
     .await;
 }
@@ -716,8 +744,56 @@ wc -l < /data/fruit.txt
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
 }
 
+/// `ls -R` descends nested directories on the session's VFS, the shell's
+/// `/tmp` and a host volume, and `cp -r` copies them whole: uutils tells
+/// directories apart by device and inode on WASI, not by type and size, which
+/// made every empty directory look already listed (#972).
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn coreutils_walk_nested_directories() {
+    use eryx::session::{VfsConfig, VolumeMount};
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
+
+    let host = tempfile::tempdir().unwrap();
+    let executor = shell().build().unwrap().executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs_config(
+        executor,
+        &[],
+        storage,
+        VfsConfig::default().with_volumes([VolumeMount::new(host.path(), "/vol")]),
+    )
+    .await
+    .unwrap();
+
+    for root in ["/data", "/tmp", "/vol"] {
+        let out = session
+            .execute(format!(
+                "mkdir -p {root}/t/a/b {root}/t/c; touch {root}/t/x {root}/t/a/y {root}/t/a/b/z\n\
+                 cp -r {root}/t {root}/u\n\
+                 ls -R {root}/t; ls -R {root}/u"
+            ))
+            .run()
+            .await
+            .unwrap();
+        let listing =
+            |dir: &str| format!("{dir}:\na\nc\nx\n\n{dir}/a:\nb\ny\n\n{dir}/a/b:\nz\n\n{dir}/c:\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "{}{}",
+                listing(&format!("{root}/t")),
+                listing(&format!("{root}/u"))
+            ),
+            "{root}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// Children see the shell's root and `/dev` too (with `unstable-vfs`; without
-/// it they wait on #812), so tools that walk up to `/` work.
+/// it they have no filesystem yet, #968), so tools that walk up to `/` work.
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_see_the_root_and_dev() {
@@ -1416,6 +1492,58 @@ async fn allowed_commands_narrow_a_one_shot_execution() {
     );
 }
 
+/// `Sandbox::execute_with` narrows one call's commands, and a later plain
+/// `execute` gets them all back.
+#[tokio::test]
+async fn execute_with_narrows_a_sandbox_call() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap();
+    let both = "tc argv0; echo \"tc=$?\"; upper argv0; echo \"upper=$?\"";
+
+    let options = eryx::ExecuteOptions::new().with_allowed_commands(["tc"]);
+    let out = sandbox.execute_with(both, &options).await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "tc\ntc=0\nupper=127\n");
+
+    let out = sandbox.execute(both).await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "tc\ntc=0\nupper\nupper=0\n");
+
+    let outcome = sandbox
+        .execute_journaled(
+            both,
+            None,
+            &eryx::ExecuteOptions::new().with_allowed_commands(["upper"]),
+        )
+        .await;
+    assert_eq!(
+        outcome.result.unwrap().stdout_utf8().unwrap(),
+        "tc=127\nupper\nupper=0\n"
+    );
+}
+
+/// `ExecuteOptions::with_cancellation` stops a call when its token is cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_with_cancels_on_its_token() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let token = eryx::CancellationToken::new();
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        canceller.cancel();
+    });
+    let options = eryx::ExecuteOptions::new().with_cancellation(token);
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        sandbox.execute_with("tc spin", &options),
+    )
+    .await
+    .expect("cancelling didn't stop the call")
+    .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+}
+
 /// Nested children are held to their execution's `with_allowed_commands`
 /// too: a command it narrowed away can't be reached through one that may
 /// spawn.
@@ -1489,4 +1617,70 @@ async fn allowed_commands_cover_the_grep_builtin() {
 
     let all = session.execute(code).run().await.unwrap();
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
+}
+
+/// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash` (and aliases), through
+/// `eryx:process/run`, when registered with `allow_spawn`. Set
+/// ERYX_TEST_GIT_WASM to its component, e.g. from
+/// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
+/// artifact of the CLI components workflow. git needs a filesystem, which
+/// children only get from the VFS. (Other children don't start in the
+/// shell's directory, #978, so `cat` gets absolute paths.)
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+#[ignore = "needs ERYX_TEST_GIT_WASM"]
+async fn git_stash_runs_git_itself() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
+    let executor = shell()
+        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let out = session
+        .execute(
+            r#"
+export HOME=/data GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=eryx GIT_AUTHOR_EMAIL=eryx@example.com
+export GIT_COMMITTER_NAME=eryx GIT_COMMITTER_EMAIL=eryx@example.com
+mkdir -p /data/repo && cd /data/repo
+git init -q
+echo one > f.txt
+git add f.txt && git commit -q -m one
+echo two > f.txt
+git stash
+echo "after stash: $(cat /data/repo/f.txt)"
+git stash list
+git stash pop
+echo "after pop: $(cat /data/repo/f.txt)"
+echo "list after pop: [$(git stash list)]"
+git config alias.st "status --short"
+git st
+"#,
+        )
+        .run()
+        .await;
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => panic!("{e}"),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("after stash: one"),
+        "{stdout}{:?}",
+        out.stderr
+    );
+    assert!(stdout.contains("stash@{0}"), "{stdout}");
+    assert!(stdout.contains("after pop: two"), "{stdout}");
+    // A pop whose apply failed would keep the entry.
+    assert!(stdout.contains("list after pop: []"), "{stdout}");
+    // `git st` is an alias once running `git-st` fails as an exec does.
+    assert!(stdout.ends_with(" M f.txt\n"), "{stdout}");
+    assert_eq!(storage.read("/data/repo/f.txt").await.unwrap(), b"two\n");
 }

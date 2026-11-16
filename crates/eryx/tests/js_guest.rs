@@ -992,3 +992,26 @@ async fn replay_ignores_key_order_and_resumes_after_suspending() {
     assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
     assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
 }
+
+/// Arguments with a cycle fail the call with JSON's TypeError (sorting the
+/// keys mustn't recurse forever), and an object shared without a cycle is
+/// fine.
+#[tokio::test]
+async fn cyclic_arguments_throw_and_shared_ones_dont() {
+    let Some(builder) = js_sandbox() else { return };
+    let tool = TestCallback::new("tool", Ok);
+    let sandbox = builder.with_callback(tool).build().unwrap();
+    let out = sandbox
+        .execute(
+            "const shared = { b: 1, a: 2 };\n\
+             console.log(JSON.stringify(await tool({ y: shared, x: shared })));\n\
+             const cyclic = { z: 1 }; cyclic.self = cyclic;\n\
+             try { await tool({ cyclic }); } catch (e) { console.log(e.name, /circular/i.test(e.message)); }",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_text(),
+        "{\"x\":{\"a\":2,\"b\":1},\"y\":{\"a\":2,\"b\":1}}\nTypeError true\n"
+    );
+}

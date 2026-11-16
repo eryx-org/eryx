@@ -1421,8 +1421,9 @@ struct RunningChild {
 
 impl RunningChild {
     /// Its `process_end` event: it exited with a code, or failed.
-    fn end_event(&self, outcome: Result<i32, &str>) -> String {
-        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    fn end_event(&self, outcome: Result<i32, &str>, ended: std::time::Instant) -> String {
+        let duration = ended.saturating_duration_since(self.started);
+        let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let mut event = serde_json::json!({
             "type": "process_end",
             "name": self.name,
@@ -1454,10 +1455,21 @@ impl ProcessTrace {
     /// Report that the child exited with `code`, or failed with `error`,
     /// unless its execution already reported it killed.
     pub(crate) fn end(self, state: &mut ExecutorState, outcome: Result<i32, &str>) {
+        self.end_at(state, outcome, std::time::Instant::now());
+    }
+
+    /// [`end`](Self::end), for a child that ended at `ended` (a nested one,
+    /// reported later).
+    pub(crate) fn end_at(
+        self,
+        state: &mut ExecutorState,
+        outcome: Result<i32, &str>,
+        ended: std::time::Instant,
+    ) {
         let running = &mut state.trace_clock.running;
         if let Some(i) = running.iter().position(|child| child.key == self.key) {
             let child = running.swap_remove(i);
-            state.send_trace(0, child.end_event(outcome), String::new());
+            state.send_trace(0, child.end_event(outcome, ended), String::new());
         }
     }
 }
@@ -1608,6 +1620,16 @@ impl ExecutorState {
     /// Report that a child process `argv` started, numbering it; `None` if
     /// tracing is off or the start wasn't sent, so no end is reported either.
     pub(crate) fn trace_process_start(&mut self, argv: &[String]) -> Option<ProcessTrace> {
+        self.trace_process_start_at(argv, std::time::Instant::now())
+    }
+
+    /// [`trace_process_start`](Self::trace_process_start), for a child that
+    /// started at `started` (a nested one, reported later).
+    pub(crate) fn trace_process_start_at(
+        &mut self,
+        argv: &[String],
+        started: std::time::Instant,
+    ) -> Option<ProcessTrace> {
         /// Tells apart children of different executions of one session, whose
         /// pids both start at 1.
         static KEYS: AtomicU64 = AtomicU64::new(0);
@@ -1624,7 +1646,7 @@ impl ExecutorState {
             key,
             name: name.clone(),
             pid,
-            started: std::time::Instant::now(),
+            started,
         });
         Some(ProcessTrace { key })
     }
@@ -1636,7 +1658,8 @@ impl ExecutorState {
     /// pairs each start; at most one event per running child.
     pub(crate) fn end_running_children(&mut self) {
         for child in std::mem::take(&mut self.trace_clock.running) {
-            self.send_charged_trace(0, child.end_event(Err("killed")), String::new());
+            let event = child.end_event(Err("killed"), std::time::Instant::now());
+            self.send_charged_trace(0, event, String::new());
         }
     }
 
@@ -2186,7 +2209,7 @@ pub struct ExecuteBuilder<'a> {
     #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
     #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-    max_vfs_bytes: Option<u64>,
+    vfs_limits: crate::session::executor::VfsLimits,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -2237,7 +2260,7 @@ impl<'a> ExecuteBuilder<'a> {
             #[cfg(feature = "unstable-vfs")]
             max_open_host_files: None,
             #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-            max_vfs_bytes: None,
+            vfs_limits: crate::session::executor::VfsLimits::default(),
         }
     }
 
@@ -2371,13 +2394,12 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
-    /// Limit the size of the shell's private `/tmp` (default
-    /// [`eryx_vfs::DEFAULT_MAX_BYTES`]; see
+    /// Limit the size and entry count of the shell's private `/tmp` (see
     /// [`ResourceLimits::max_vfs_bytes`](crate::ResourceLimits::max_vfs_bytes)).
     #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
     #[must_use]
-    pub(crate) fn with_max_vfs_bytes(mut self, bytes: Option<u64>) -> Self {
-        self.max_vfs_bytes = bytes;
+    pub(crate) fn with_vfs_limits(mut self, limits: crate::session::executor::VfsLimits) -> Self {
+        self.vfs_limits = limits;
         self
     }
 
@@ -2440,7 +2462,7 @@ impl<'a> ExecuteBuilder<'a> {
                 #[cfg(feature = "unstable-vfs")]
                 self.max_open_host_files,
                 #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-                self.max_vfs_bytes,
+                self.vfs_limits,
             )
             .await
     }
@@ -3923,7 +3945,8 @@ impl Executor {
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
-        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))] max_vfs_bytes: Option<u64>,
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
@@ -4008,7 +4031,7 @@ impl Executor {
         #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
         let hybrid_vfs_ctx = Some(crate::session::executor::build_private_vfs_context(
             self,
-            crate::session::executor::private_vfs_storage(max_vfs_bytes),
+            crate::session::executor::private_vfs_storage(vfs_limits),
             None,
         )?);
 
@@ -4424,7 +4447,7 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 /// Ends a precompiled runtime stamped with its guest language, after the
 /// language's snapshot tag. wasmtime ignores bytes after a component, so a
 /// stamped file still loads anywhere a plain one does.
-const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
+pub(crate) const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
 
 /// How many bytes [`Executor::stamp_language`] appends.
 #[cfg(any(feature = "embedded", feature = "preinit"))]

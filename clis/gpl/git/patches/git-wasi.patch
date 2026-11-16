@@ -1,0 +1,317 @@
+SPDX-License-Identifier: GPL-2.0-only
+
+Modifications to git v2.56.1 for the wasip2 build (see ../NOTICE.md):
+a run-command.c backend over eryx:process/run, merge's pre-merge stash
+through capture_command, a start in $PWD, and no /dev/null in setup.c.
+
+diff --git a/builtin/merge.c b/builtin/merge.c
+index 5b4eb23..b4aa695 100644
+--- a/builtin/merge.c
++++ b/builtin/merge.c
+@@ -354,8 +354,14 @@ static int save_state(struct object_id *stash)
+ 	rollback_lock_file(&lock_file);
+ 
+ 	strvec_pushl(&cp.args, "stash", "create", NULL);
+-	cp.out = -1;
+ 	cp.git_cmd = 1;
++#ifdef __wasi__
++	/* No live pipes: capture its output once it exits instead. */
++	if (capture_command(&cp, &buffer, 1024))
++		die(_("stash failed"));
++	len = buffer.len;
++#else
++	cp.out = -1;
+ 
+ 	if (start_command(&cp))
+ 		die(_("could not run stash."));
+@@ -364,7 +370,8 @@ static int save_state(struct object_id *stash)
+ 
+ 	if (finish_command(&cp) || len < 0)
+ 		die(_("stash failed"));
+-	else if (!len)		/* no changes */
++#endif
++	if (!len)		/* no changes */
+ 		goto out;
+ 	strbuf_setlen(&buffer, buffer.len-1);
+ 	if (repo_get_oid(the_repository, buffer.buf, stash))
+diff --git a/common-main.c b/common-main.c
+index 6b7ab07..7bf0685 100644
+--- a/common-main.c
++++ b/common-main.c
+@@ -3,6 +3,17 @@
+ 
+ int main(int argc, const char **argv)
+ {
++#ifdef __wasi__
++	/*
++	 * WASI has no working directory; eryx passes the caller's in PWD.
++	 * Relative paths resolve against wasi-libc's own, so start there.
++	 */
++	{
++		const char *pwd = getenv("PWD");
++		if (pwd && *pwd == '/')
++			chdir(pwd);
++	}
++#endif
+ 	int result;
+ 
+ 	init_git(argv);
+diff --git a/run-command.c b/run-command.c
+index ce84db8..f6ebdf6 100644
+--- a/run-command.c
++++ b/run-command.c
+@@ -18,6 +18,201 @@
+ #include "packfile.h"
+ #include "compat/nonblock.h"
+ 
++#ifdef __wasi__
++/*
++ * eryx (https://github.com/eryx-org/eryx) runs git as a WASI component,
++ * which can't fork, exec or make pipes. It runs a child command through the
++ * host instead: eryx:process/run takes the command's stdin as a buffer and
++ * returns its exit status, stdout and stderr once it exits. So commands git
++ * starts without a live pipe (run_command) or with all their input up front
++ * (pipe_command, capture_command) work; ones needing a live pipe or
++ * start_async still fail with ENOSYS.
++ */
++#include "abspath.h"
++#include "child.h"
++
++/* A command start_command deferred to finish_command. */
++#define WASI_DEFERRED_PID ((pid_t)-2)
++
++static void wasi_str(child_string_t *s, const char *v)
++{
++	s->ptr = (uint8_t *)v;
++	s->len = strlen(v);
++}
++
++/* Write all of buf to fd; errors are ignored, as a closed pipe's would be. */
++static void wasi_write_all(int fd, const uint8_t *buf, size_t len)
++{
++	while (len) {
++		ssize_t n = write(fd, buf, len);
++		if (n <= 0)
++			return;
++		buf += n;
++		len -= n;
++	}
++}
++
++/*
++ * Run cmd to completion through the host, with in (or, with neither in nor
++ * no_stdin, the contents of cmd->in when it's a file) as its stdin. Its
++ * output goes to out/err when given, else where cmd says: a file
++ * descriptor, nowhere, or this process's own stdout and stderr.
++ */
++static int wasi_run(struct child_process *cmd, const char *in, size_t in_len,
++		    struct strbuf *out, struct strbuf *err)
++{
++	struct strvec argv = STRVEC_INIT;
++	struct strbuf input = STRBUF_INIT, cwd = STRBUF_INIT;
++	struct string_list env = STRING_LIST_INIT_DUP;
++	child_string_t c_cmd, c_cwd;
++	child_list_string_t c_args;
++	child_list_tuple2_string_string_t c_env;
++	child_list_u8_t c_stdin;
++	eryx_process_run_output_t ret;
++	eryx_process_run_run_error_t run_err;
++	child_string_t *args = NULL;
++	child_tuple2_string_string_t *pairs = NULL;
++	extern char **environ;
++	int code = -1, saved_errno = 0;
++	size_t i, nr_pairs = 0;
++
++	if (cmd->git_cmd)
++		strvec_push(&argv, "git");
++	strvec_pushv(&argv, cmd->args.v);
++	if (!argv.nr) {
++		errno = EINVAL;
++		goto out;
++	}
++	/* No shell: a shell command runs only if it's a plain argv. */
++	if (cmd->use_shell && strcspn(argv.v[0], "|&;<>()$`\\\"' \t\n*?[#~=%") != strlen(argv.v[0])) {
++		errno = ENOSYS;
++		goto out;
++	}
++
++	if (!in && !cmd->no_stdin && cmd->in > 0) {
++		if (strbuf_read(&input, cmd->in, 0) < 0)
++			goto out;
++		in = input.buf;
++		in_len = input.len;
++	}
++
++	/* This process's environment, with cmd's changes ("K=V", or "K" to unset). */
++	for (i = 0; environ[i]; i++)
++		string_list_append(&env, environ[i]);
++	for (i = 0; i < cmd->env.nr; i++) {
++		const char *kv = cmd->env.v[i];
++		size_t klen = strchrnul(kv, '=') - kv;
++		size_t j;
++		for (j = 0; j < env.nr; j++) {
++			if (!strncmp(env.items[j].string, kv, klen) &&
++			    env.items[j].string[klen] == '=') {
++				unsorted_string_list_delete_item(&env, j, 0);
++				break;
++			}
++		}
++		if (kv[klen] == '=')
++			string_list_append(&env, kv);
++	}
++
++	if (cmd->dir && is_absolute_path(cmd->dir)) {
++		strbuf_addstr(&cwd, cmd->dir);
++	} else {
++		if (strbuf_getcwd(&cwd) < 0)
++			goto out;
++		if (cmd->dir) {
++			strbuf_addch(&cwd, '/');
++			strbuf_addstr(&cwd, cmd->dir);
++		}
++	}
++
++	ALLOC_ARRAY(args, argv.nr);
++	for (i = 1; i < argv.nr; i++)
++		wasi_str(&args[i - 1], argv.v[i]);
++	ALLOC_ARRAY(pairs, env.nr + 1);
++	for (i = 0; i < env.nr; i++) {
++		char *kv = env.items[i].string;
++		char *eq = strchr(kv, '=');
++		/* The host sets PWD from cwd. */
++		if (!eq || !strncmp(kv, "PWD=", 4))
++			continue;
++		pairs[nr_pairs].f0.ptr = (uint8_t *)kv;
++		pairs[nr_pairs].f0.len = eq - kv;
++		wasi_str(&pairs[nr_pairs].f1, eq + 1);
++		nr_pairs++;
++	}
++
++	wasi_str(&c_cmd, argv.v[0]);
++	c_args.ptr = args;
++	c_args.len = argv.nr - 1;
++	c_env.ptr = pairs;
++	c_env.len = nr_pairs;
++	c_cwd.ptr = (uint8_t *)cwd.buf;
++	c_cwd.len = cwd.len;
++	c_stdin.ptr = (uint8_t *)(in ? in : "");
++	c_stdin.len = in ? in_len : 0;
++
++	fflush(NULL);
++	if (!eryx_process_run_run(&c_cmd, &c_args, &c_env, &c_cwd, &c_stdin, &ret, &run_err)) {
++		/* As a failed exec: -1 with errno, which aliases and the
++		 * "is not a git command" message look at. */
++		const char *why;
++		switch (run_err) {
++		case ERYX_PROCESS_RUN_RUN_ERROR_COMMAND_NOT_FOUND:
++			errno = ENOENT;
++			why = strerror(ENOENT);
++			break;
++		case ERYX_PROCESS_RUN_RUN_ERROR_LIMIT_EXCEEDED:
++			errno = EAGAIN;
++			why = "the host's limits on child processes (limit-exceeded)";
++			break;
++		default:
++			errno = ENOSYS;
++			why = "the host couldn't run it (spawn-failed)";
++			break;
++		}
++		if (!cmd->silent_exec_failure || errno != ENOENT)
++			error(_("cannot run %s: %s"), argv.v[0], why);
++		goto out;
++	}
++
++	if (out)
++		strbuf_add(out, ret.stdout_.ptr, ret.stdout_.len);
++	else if (cmd->out > 0)
++		wasi_write_all(cmd->out, ret.stdout_.ptr, ret.stdout_.len);
++	else if (!cmd->no_stdout)
++		wasi_write_all(cmd->stdout_to_stderr ? 2 : 1, ret.stdout_.ptr, ret.stdout_.len);
++	if (err)
++		strbuf_add(err, ret.stderr_.ptr, ret.stderr_.len);
++	else if (cmd->err > 0)
++		wasi_write_all(cmd->err, ret.stderr_.ptr, ret.stderr_.len);
++	else if (!cmd->no_stderr)
++		wasi_write_all(2, ret.stderr_.ptr, ret.stderr_.len);
++	code = ret.status;
++	eryx_process_run_output_free(&ret);
++
++out:
++	/* Cleaning up mustn't change the errno a failure leaves. */
++	saved_errno = errno;
++	if (cmd->in > 0)
++		close(cmd->in);
++	if (cmd->out > 0)
++		close(cmd->out);
++	if (cmd->err > 0)
++		close(cmd->err);
++	free(args);
++	free(pairs);
++	string_list_clear(&env, 0);
++	strbuf_release(&input);
++	strbuf_release(&cwd);
++	strvec_clear(&argv);
++	child_process_clear(cmd);
++	invalidate_lstat_cache();
++	if (code < 0)
++		errno = saved_errno;
++	return code;
++}
++#endif
++
+ void child_process_init(struct child_process *child)
+ {
+ 	struct child_process blank = CHILD_PROCESS_INIT;
+@@ -681,6 +876,16 @@ int start_command(struct child_process *cmd)
+ 	int failed_errno;
+ 	const char *str;
+ 
++#ifdef __wasi__
++	/* Without pipes, it runs when finish_command waits for it. */
++	if ((cmd->no_stdin || cmd->in >= 0) &&
++	    (cmd->no_stdout || cmd->stdout_to_stderr || cmd->out >= 0) &&
++	    (cmd->no_stderr || cmd->err >= 0)) {
++		cmd->pid = WASI_DEFERRED_PID;
++		return 0;
++	}
++#endif
++
+ 	/*
+ 	 * In case of errors we must keep the promise to close FDs
+ 	 * that have been passed in via ->in and ->out.
+@@ -1003,6 +1208,10 @@ int start_command(struct child_process *cmd)
+ 
+ int finish_command(struct child_process *cmd)
+ {
++#ifdef __wasi__
++	if (cmd->pid == WASI_DEFERRED_PID)
++		return wasi_run(cmd, NULL, 0, NULL, NULL);
++#endif
+ 	int ret = wait_or_whine(cmd->pid, cmd->args.v[0], 0);
+ 	trace2_child_exit(cmd, ret);
+ 	child_process_clear(cmd);
+@@ -1434,6 +1643,9 @@ int pipe_command(struct child_process *cmd,
+ 	struct io_pump io[3];
+ 	int nr = 0;
+ 
++#ifdef __wasi__
++	return wasi_run(cmd, in, in_len, out, err);
++#endif
+ 	if (in)
+ 		cmd->in = -1;
+ 	if (out)
+diff --git a/setup.c b/setup.c
+index 0d157ac..fbb6404 100644
+--- a/setup.c
++++ b/setup.c
+@@ -2201,6 +2201,10 @@ const char *resolve_gitdir_gently(const char *suspect, int *return_error_code)
+ /* if any standard file descriptor is missing open it to /dev/null */
+ void sanitize_stdfds(void)
+ {
++#ifdef __wasi__
++	/* WASI components always get fds 0-2 and may have no /dev/null. */
++	return;
++#endif
+ 	int fd = xopen("/dev/null", O_RDWR);
+ 	while (fd < 2)
+ 		fd = xdup(fd);

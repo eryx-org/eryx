@@ -127,9 +127,7 @@ impl<'a> InProcessSession<'a> {
             // snapshot the session's files, else its own.
             let storage = sandbox.vfs_storage().cloned().unwrap_or_else(|| {
                 let limits = sandbox.resource_limits();
-                Arc::new(eryx_vfs::InMemoryStorage::with_max_bytes(
-                    limits.max_vfs_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                ))
+                Arc::new(super::executor::VfsLimits::of(limits).storage())
             });
             SessionExecutor::new_with_vfs_config_and_limits(
                 sandbox.executor().clone(),

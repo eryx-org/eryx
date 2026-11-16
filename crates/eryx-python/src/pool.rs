@@ -13,7 +13,7 @@ use crate::error::{eryx_error_to_py, pool_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::resource_limits::ResourceLimits;
 use crate::result::ExecuteResult;
-use crate::sandbox::{PyOutputHandler, run_cancellable};
+use crate::sandbox::{PyOutputHandler, execute_options, run_cancellable};
 
 /// A managed pool of warm sandbox instances.
 ///
@@ -153,15 +153,18 @@ impl PooledSandbox {
     ///     ExecutionError: If the Python code raises an exception.
     ///     TimeoutError: If execution exceeds the timeout limit.
     ///     CancelledError: If `cancel` was cancelled.
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute(
         &self,
         py: Python<'_>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ExecuteResult> {
+        let sandbox = self.sandbox()?;
+        let options = execute_options(sandbox, allowed_commands)?;
         let token = call_token(cancel);
-        let run = run_cancellable(self.sandbox()?, &self.runtime, code, token.clone());
+        let run = run_cancellable(sandbox, code, options, token.clone());
         run_blocking(py, &self.runtime, &token, run)?
     }
 
@@ -170,18 +173,20 @@ impl PooledSandbox {
     ///
     /// Raises:
     ///     ValueError: If the sandbox has already been released.
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute_async<'py>(
         &self,
         py: Python<'py>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let sandbox = self.sandbox()?;
+        let options = execute_options(sandbox, allowed_commands)?;
         let token = call_token(cancel);
         let run_token = token.clone();
         run_async(py, &self.runtime, token, || {
-            run_cancellable(sandbox, &self.runtime, code, run_token)
+            run_cancellable(sandbox, code, options, run_token)
         })
     }
 
@@ -191,22 +196,22 @@ impl PooledSandbox {
     /// Raises:
     ///     ValueError: If the sandbox has already been released or `journal`
     ///         is invalid.
-    #[pyo3(signature = (code, journal=None))]
+    #[pyo3(signature = (code, journal=None, *, allowed_commands=None))]
     fn execute_with_journal(
         &self,
         py: Python<'_>,
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<crate::result::ReplayOutcome> {
-        let sandbox = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("sandbox has been released back to pool"))?;
+        let sandbox = self.sandbox()?;
+        let options = execute_options(sandbox, allowed_commands)?;
         let journal = crate::result::journal_from_py(journal)?;
 
         let code = code.to_string();
         let runtime = self.runtime.clone();
-        let outcome = py.detach(|| runtime.block_on(sandbox.execute_with_journal(&code, journal)));
+        let outcome =
+            py.detach(|| runtime.block_on(sandbox.execute_journaled(&code, journal, &options)));
         crate::result::ReplayOutcome::from_outcome(py, outcome)
     }
 
@@ -437,6 +442,7 @@ impl SandboxPool {
                 .sandbox_mut()
                 .set_callbacks(boxed)
                 .map_err(eryx_error_to_py)?;
+            crate::sandbox::warn_callback_names(py, eryx::Language::Python, pooled.sandbox_mut())?;
         }
 
         if let Some(limits) = resource_limits {
