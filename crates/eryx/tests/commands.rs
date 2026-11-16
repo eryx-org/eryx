@@ -670,8 +670,7 @@ async fn the_embedded_shell_runs_common_script_tools() {
         ("printf '1\\n2\\n' | paste -sd+", "1+2\n"),
         ("date -u -d @0 +%Y", "1970\n"),
         ("echo hi | base64", "aGkK\n"),
-        // Without `unstable-vfs` children have no filesystem until #812, so
-        // only the lexical forms; coreutils_see_the_root_and_dev canonicalizes.
+        // Only the lexical forms; coreutils_see_the_root_and_dev canonicalizes.
         ("realpath -m /a/../b", "/b\n"),
         ("readlink -m /a/../b/c", "/b/c\n"),
     ])
@@ -796,30 +795,41 @@ wc -l < /data/fruit.txt
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
 }
 
-/// `ls -R` descends nested directories on the session's VFS, the shell's
-/// `/tmp` and a host volume, and `cp -r` copies them whole: uutils tells
-/// directories apart by device and inode on WASI, not by type and size, which
-/// made every empty directory look already listed (#972).
-#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+/// `ls -R` descends nested directories on the shell's `/tmp` and, with
+/// `unstable-vfs`, the session's VFS and a host volume, and `cp -r` copies
+/// them whole: uutils tells directories apart by device and inode on WASI, not
+/// by type and size, which made every empty directory look already listed
+/// (#972).
+#[cfg(feature = "coreutils")]
 #[tokio::test]
 async fn coreutils_walk_nested_directories() {
-    use eryx::session::{VfsConfig, VolumeMount};
-    use eryx::vfs::{ArcStorage, InMemoryStorage};
-    use std::sync::Arc;
-
-    let host = tempfile::tempdir().unwrap();
     let executor = shell().build().unwrap().executor();
-    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
-    let mut session = SessionExecutor::new_with_vfs_config(
-        executor,
-        &[],
-        storage,
-        VfsConfig::default().with_volumes([VolumeMount::new(host.path(), "/vol")]),
-    )
-    .await
-    .unwrap();
+    #[cfg(not(feature = "unstable-vfs"))]
+    let (mut session, roots) = (
+        SessionExecutor::new(executor, &[]).await.unwrap(),
+        ["/tmp"].as_slice(),
+    );
+    #[cfg(feature = "unstable-vfs")]
+    let host = tempfile::tempdir().unwrap();
+    #[cfg(feature = "unstable-vfs")]
+    let (mut session, roots) = {
+        use eryx::session::{VfsConfig, VolumeMount};
+        use eryx::vfs::{ArcStorage, InMemoryStorage};
+        use std::sync::Arc;
 
-    for root in ["/data", "/tmp", "/vol"] {
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+        let session = SessionExecutor::new_with_vfs_config(
+            executor,
+            &[],
+            storage,
+            VfsConfig::default().with_volumes([VolumeMount::new(host.path(), "/vol")]),
+        )
+        .await
+        .unwrap();
+        (session, ["/data", "/tmp", "/vol"].as_slice())
+    };
+
+    for root in roots {
         let out = session
             .execute(format!(
                 "mkdir -p {root}/t/a/b {root}/t/c; touch {root}/t/x {root}/t/a/y {root}/t/a/b/z\n\
