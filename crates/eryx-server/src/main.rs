@@ -197,6 +197,20 @@ struct Args {
     )]
     shell_commands: Vec<ShellCommand>,
 
+    /// Let a --shell-command NAME open blind CONNECT tunnels through the
+    /// child proxy, for protocols it can't inspect (e.g. git over SSH):
+    /// requests through a tunnel get no secret substitution and no HTTP
+    /// rules, and hosts with rules are refused one. Repeat for more names; in
+    /// the environment, separate them with `,`. Only matters for requests
+    /// that give children network (NetworkConfig.child_network).
+    #[arg(
+        long = "shell-command-tunnels",
+        env = "ERYX_SHELL_COMMAND_TUNNELS",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
+    shell_command_tunnels: Vec<String>,
+
     /// Leave out the shell's embedded coreutils (cat, head, ls, ...), so it
     /// runs only the --shell-command commands.
     #[arg(long, env = "ERYX_NO_SHELL_COREUTILS")]
@@ -225,33 +239,52 @@ fn parse_shell_command(value: &str) -> Result<ShellCommand, String> {
 }
 
 /// Load each `--shell-command`, so a bad one fails startup rather than the
-/// first shell request.
+/// first shell request. The names in `tunnels` (`--shell-command-tunnels`)
+/// get [`allow_tunnels`](eryx::Command::allow_tunnels), and must each be one
+/// of the commands' names.
 fn load_shell_commands(
     commands: &[ShellCommand],
+    tunnels: &[String],
 ) -> Result<Vec<(Vec<String>, eryx::Command)>, String> {
-    commands
+    if let Some(name) = tunnels
         .iter()
-        .map(|ShellCommand { names, path }| {
-            let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
-            let command = if precompiled {
-                // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
-                #[allow(unsafe_code)]
-                unsafe {
-                    eryx::Command::from_precompiled_file(path)
-                }
-            } else {
-                eryx::Command::from_file(path)
-            };
-            let command = command.map_err(|e| {
-                format!(
-                    "--shell-command {}={}: {e}",
-                    names.join(","),
-                    path.display()
-                )
-            })?;
-            Ok((names.clone(), command))
-        })
-        .collect()
+        .find(|name| !commands.iter().any(|c| c.names.contains(name)))
+    {
+        return Err(format!(
+            "--shell-command-tunnels {name}: not a --shell-command name"
+        ));
+    }
+    let mut loaded = Vec::new();
+    for ShellCommand { names, path } in commands {
+        let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
+        let command = if precompiled {
+            // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
+            #[allow(unsafe_code)]
+            unsafe {
+                eryx::Command::from_precompiled_file(path)
+            }
+        } else {
+            eryx::Command::from_file(path)
+        };
+        let command = command.map_err(|e| {
+            format!(
+                "--shell-command {}={}: {e}",
+                names.join(","),
+                path.display()
+            )
+        })?;
+        let (tunnelling, plain): (Vec<String>, Vec<String>) = names
+            .iter()
+            .cloned()
+            .partition(|name| tunnels.contains(name));
+        if !tunnelling.is_empty() {
+            loaded.push((tunnelling, command.clone().allow_tunnels()));
+        }
+        if !plain.is_empty() {
+            loaded.push((plain, command));
+        }
+    }
+    Ok(loaded)
 }
 
 /// Build a [`ServerTlsConfig`] from the configured cert/key/CA paths.
@@ -501,7 +534,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
 
     let shell = ShellCommands {
-        commands: load_shell_commands(&args.shell_commands)?,
+        commands: load_shell_commands(&args.shell_commands, &args.shell_command_tunnels)?,
         coreutils: !args.no_shell_coreutils,
     };
     let shell_configured = !shell.commands.is_empty() || !shell.coreutils;
@@ -689,10 +722,13 @@ mod tests {
         let coreutils =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm");
         let shell = ShellCommands {
-            commands: load_shell_commands(&[ShellCommand {
-                names: vec!["cat".into()],
-                path: coreutils,
-            }])
+            commands: load_shell_commands(
+                &[ShellCommand {
+                    names: vec!["cat".into()],
+                    path: coreutils,
+                }],
+                &[],
+            )
             .unwrap(),
             coreutils: false,
         };
@@ -727,12 +763,35 @@ mod tests {
         assert_eq!(out.stdout_utf8().unwrap(), "a\nb\n");
     }
 
+    /// `--shell-command-tunnels` splits a multicall entry by name, and must
+    /// name a `--shell-command`.
+    #[test]
+    fn shell_command_tunnels_name_registered_commands() {
+        let coreutils = ShellCommand {
+            names: vec!["cat".into(), "head".into()],
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm"),
+        };
+        let loaded =
+            load_shell_commands(std::slice::from_ref(&coreutils), &["head".into()]).unwrap();
+        let names: Vec<_> = loaded.iter().map(|(names, _)| names.clone()).collect();
+        assert_eq!(names, [vec!["head".to_string()], vec!["cat".to_string()]]);
+
+        let err = load_shell_commands(&[coreutils], &["curl".into()]).unwrap_err();
+        assert_eq!(
+            err,
+            "--shell-command-tunnels curl: not a --shell-command name"
+        );
+    }
+
     #[test]
     fn a_missing_shell_command_fails_startup_clearly() {
-        let err = load_shell_commands(&[ShellCommand {
-            names: vec!["rg".into()],
-            path: "/nonexistent/rg.wasm".into(),
-        }])
+        let err = load_shell_commands(
+            &[ShellCommand {
+                names: vec!["rg".into()],
+                path: "/nonexistent/rg.wasm".into(),
+            }],
+            &[],
+        )
         .unwrap_err();
         assert!(
             err.starts_with("--shell-command rg=/nonexistent/rg.wasm: "),

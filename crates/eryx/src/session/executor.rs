@@ -393,11 +393,23 @@ impl<'a> SessionExecuteBuilder<'a> {
         }
     }
 
-    /// Give this execution's child processes network, through a proxy that
-    /// lives as long as the execution.
-    pub(crate) fn with_child_network(mut self, net: crate::process::ChildNet) -> Self {
-        self.child_net = Some(net);
+    unstable_pub! {
+    /// Give this execution's child processes `network`, through a proxy that
+    /// lives as long as the execution, under `config` (this execution's own
+    /// policy, as given to [`with_network`](Self::with_network)) and with
+    /// `secrets` substituted by it.
+    /// [`ChildNetwork::None`](crate::net::ChildNetwork::None) leaves them
+    /// offline.
+    #[must_use]
+    fn with_child_network(
+        mut self,
+        network: crate::net::ChildNetwork,
+        config: crate::net::NetConfig,
+        secrets: std::collections::HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Self {
+        self.child_net = crate::process::ChildNet::new(config, secrets, network);
         self
+    }
     }
 
     unstable_pub! {
@@ -2338,7 +2350,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
-            callback_clock: crate::wasm::CallbackClock::default(),
+            trace_clock: crate::wasm::TraceClock::default(),
         }
     }
 
@@ -2369,7 +2381,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
-            callback_clock: crate::wasm::CallbackClock::default(),
+            trace_clock: crate::wasm::TraceClock::default(),
         }
     }
 
@@ -2402,8 +2414,11 @@ impl ExecutorState {
 
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
+        // A child whose `wait` the execution left parked (it timed out) is
+        // reported killed on the old channel before it goes.
+        self.end_running_children();
         self.trace_tx = tx;
-        self.callback_clock = crate::wasm::CallbackClock::default();
+        self.trace_clock = crate::wasm::TraceClock::default();
     }
 
     /// Update the network channel for a new execution.

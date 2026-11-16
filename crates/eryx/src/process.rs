@@ -649,6 +649,90 @@ struct Spawner {
     net: Option<std::sync::Weak<std::sync::Mutex<ChildNet>>>,
     /// How deep the children it spawns are (the shell's are 1).
     depth: usize,
+    /// Where its children's process events go, for the shell's `wait` to
+    /// report: shared by every descendant of one of the shell's children.
+    traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
+}
+
+/// Nested children's process events, queued for the `wait` of the shell's
+/// child they descend from: only it can reach the execution's trace.
+#[derive(Default)]
+struct NestedTraces {
+    next: u64,
+    events: Vec<NestedEvent>,
+}
+
+enum NestedEvent {
+    Start {
+        id: u64,
+        argv: Vec<String>,
+    },
+    End {
+        id: u64,
+        outcome: Result<i32, String>,
+    },
+}
+
+impl NestedTraces {
+    fn push(traces: &std::sync::Mutex<NestedTraces>, event: NestedEvent) {
+        traces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .push(event);
+    }
+}
+
+/// A nested child's process events: its start when made, its end when
+/// [`end`](Self::end)ed, or `killed` if it's dropped first (its caller was
+/// killed, or the execution ended, midway).
+struct NestedTrace {
+    traces: Arc<std::sync::Mutex<NestedTraces>>,
+    id: u64,
+    ended: bool,
+}
+
+impl NestedTrace {
+    fn start(traces: Arc<std::sync::Mutex<NestedTraces>>, argv: Vec<String>) -> Self {
+        let id = {
+            let mut queue = traces
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue.next += 1;
+            queue.next
+        };
+        NestedTraces::push(&traces, NestedEvent::Start { id, argv });
+        Self {
+            traces,
+            id,
+            ended: false,
+        }
+    }
+
+    fn end(mut self, outcome: Result<i32, String>) {
+        self.ended = true;
+        NestedTraces::push(
+            &self.traces,
+            NestedEvent::End {
+                id: self.id,
+                outcome,
+            },
+        );
+    }
+}
+
+impl Drop for NestedTrace {
+    fn drop(&mut self) {
+        if !self.ended {
+            NestedTraces::push(
+                &self.traces,
+                NestedEvent::End {
+                    id: self.id,
+                    outcome: Err("killed".to_owned()),
+                },
+            );
+        }
+    }
 }
 
 /// A child ready to run, with what it holds of the execution's budget and
@@ -736,6 +820,7 @@ impl Spawner {
             network,
             spawner: command.spawns.then(|| Spawner {
                 depth: self.depth + 1,
+                traces: Some(self.traces.clone().unwrap_or_default()),
                 ..self.clone()
             }),
             #[cfg(feature = "unstable-vfs")]
@@ -1357,6 +1442,7 @@ impl ExecutorState {
             budget: self.child_budget.clone(),
             net: self.child_net.as_ref().map(Arc::downgrade),
             depth: 1,
+            traces: None,
         }
     }
 
@@ -1473,6 +1559,39 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
             tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
         }
+        let trace = accessor.with(|mut access| access.get().trace_process_start(&run.argv));
+        // Its descendants' process events, reported as they come.
+        let nested = run.spawner.as_ref().and_then(|s| s.traces.clone());
+        let mut reported = HashMap::new();
+        let mut report_nested = || {
+            let Some(nested) = &nested else { return };
+            let events = std::mem::take(
+                &mut nested
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .events,
+            );
+            if events.is_empty() {
+                return;
+            }
+            accessor.with(|mut access| {
+                let state = access.get();
+                for event in events {
+                    match event {
+                        NestedEvent::Start { id, argv } => {
+                            if let Some(trace) = state.trace_process_start(&argv) {
+                                reported.insert(id, trace);
+                            }
+                        }
+                        NestedEvent::End { id, outcome } => {
+                            if let Some(trace) = reported.remove(&id) {
+                                trace.end(state, outcome.as_ref().copied().map_err(String::as_str));
+                            }
+                        }
+                    }
+                }
+            });
+        };
         let fuel_used = Arc::clone(&run.fuel_used);
         let mut charged = 0;
         // Move what the child has burned since the last charge to the parent;
@@ -1488,25 +1607,45 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 left > 0
             })
         };
-        let mut running = std::pin::pin!(run.run());
-        let finished = std::future::poll_fn(|cx| match running.as_mut().poll(cx) {
-            Poll::Ready(done) => Poll::Ready(Some(done)),
-            // The child yielded (an epoch tick) or is waiting on a pipe.
-            Poll::Pending if charge(fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
-            Poll::Pending => Poll::Ready(None),
+        // Boxed, so it can be dropped (killing its descendants) before the
+        // last report.
+        let mut running = Box::pin(run.run());
+        let finished = std::future::poll_fn(|cx| {
+            let polled = running.as_mut().poll(cx);
+            report_nested();
+            match polled {
+                Poll::Ready(done) => Poll::Ready(Some(done)),
+                // The child yielded (an epoch tick) or is waiting on a pipe.
+                Poll::Pending if charge(fuel_used.load(Ordering::Relaxed)) => Poll::Pending,
+                Poll::Pending => Poll::Ready(None),
+            }
         })
         .await;
-        let Some((code, used)) = finished else {
-            tracing::warn!("parent ran out of fuel; killed its child");
-            return Err(ProcessError::SpawnFailed);
+        // A child killed midway left its descendants' ends queued.
+        drop(running);
+        report_nested();
+        const OUT_OF_FUEL: &str = "the parent ran out of fuel";
+        let outcome = match finished {
+            Some((code, used)) if charge(used) => code,
+            _ => {
+                tracing::warn!("parent ran out of fuel; killed its child");
+                Err(OUT_OF_FUEL.to_owned())
+            }
         };
-        if !charge(used) {
-            return Err(ProcessError::SpawnFailed);
-        }
-        code.map_err(|e| {
+        if let Err(e) = &outcome
+            && e != OUT_OF_FUEL
+        {
             tracing::warn!(error = %e, "child command failed");
-            ProcessError::SpawnFailed
-        })
+        }
+        if let Some(trace) = trace {
+            accessor.with(|mut access| {
+                trace.end(
+                    access.get(),
+                    outcome.as_ref().copied().map_err(String::as_str),
+                )
+            });
+        }
+        outcome.map_err(|_| ProcessError::SpawnFailed)
     }
 }
 
@@ -1625,6 +1764,10 @@ async fn run_nested(
         #[cfg(feature = "unstable-vfs")]
         state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
     )?;
+    let trace = spawner
+        .traces
+        .clone()
+        .map(|traces| NestedTrace::start(traces, run.argv.clone()));
     let mut held = Held {
         budget: spawner.budget,
         bytes: charged,
@@ -1701,6 +1844,13 @@ async fn run_nested(
         _ => fuel_used.load(Ordering::Relaxed),
     };
     let fuel_left = charge(&mut store, used);
+    if let Some(trace) = trace {
+        trace.end(match &result {
+            Ok(Some((code, _))) => code.clone(),
+            Ok(None) => Err("its caller ran out of fuel".to_owned()),
+            Err(e) => Err(format!("{e:?}")),
+        });
+    }
     let Some((code, _)) = result? else {
         tracing::warn!("caller ran out of fuel; killed its nested child");
         return Err(ProcessError::SpawnFailed);

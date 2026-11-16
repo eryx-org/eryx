@@ -76,6 +76,8 @@ pub struct Session {
     callbacks: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
     /// Network configuration for this session.
     net_config: Option<eryx::NetConfig>,
+    /// The network for a shell session's children, under `net_config`.
+    child_network: eryx::ChildNetwork,
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Keep a factory's site-packages directories alive for sessions it
@@ -195,6 +197,7 @@ impl Session {
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
             net_config,
+            child_network: eryx::ChildNetwork::None,
             output_handler,
             _factory_files: factory_files,
             callback_limits,
@@ -224,6 +227,8 @@ impl Session {
     ///         Can be a CallbackRegistry or a list of callback dicts.
     ///     commands: For the shell only: external commands by name, as for
     ///         `Sandbox`.
+    ///     child_network: For the shell only, with `network`: its commands'
+    ///         network, as for `Sandbox`.
     ///
     /// Returns:
     ///     A new Session instance ready to execute Python code.
@@ -251,7 +256,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -270,17 +275,26 @@ impl Session {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
         commands: Option<crate::command::Commands<'_>>,
+        child_network: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
         let language = crate::sandbox::parse_language(language)?;
+        let child_network =
+            crate::sandbox::parse_child_network(language, network.is_some(), child_network)?;
         // The runtime is checked and loaded the way a Sandbox's is.
         let (mut builder, source) = crate::sandbox::base_builder(py, language, runtime_path)?;
         if let Some(name) = result_variable {
             builder = builder.with_result_variable(name);
         }
-        let executor =
-            crate::sandbox::build_for(py, (builder, source), language, commands)?.executor();
+        let executor = crate::sandbox::build_for(
+            py,
+            (builder, source),
+            language,
+            commands,
+            eryx::ChildNetwork::None,
+        )?
+        .executor();
 
         let mut limits = resource_limits.unwrap_or_default();
         if execution_timeout_ms.is_some() {
@@ -304,6 +318,10 @@ impl Session {
             on_stderr,
             None,
         )
+        .map(|session| Self {
+            child_network,
+            ..session
+        })
     }
 
     /// Execute Python code in the session.
@@ -655,6 +673,7 @@ impl Session {
         let session = Arc::clone(&self.inner);
         let output_handler = self.output_handler.clone();
         let net_config = self.net_config.clone();
+        let child_network = self.child_network.clone();
         let callback_limits = self.callback_limits.clone();
         let slot = self.queue_slot();
 
@@ -727,6 +746,13 @@ impl Session {
 
                 if let Some(tx) = net_tx {
                     builder = builder.with_network(tx);
+                }
+                if let Some(config) = net_config {
+                    builder = builder.with_child_network(
+                        child_network,
+                        config,
+                        std::collections::HashMap::new(),
+                    );
                 }
 
                 if let Some(tx) = output_tx {

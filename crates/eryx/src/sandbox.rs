@@ -928,16 +928,17 @@ impl Sandbox {
     }
 }
 
-/// The preamble setting each secret's placeholder in `os.environ`, followed
-/// by `library_preamble`.
-///
-/// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
-/// execution would not show up. JSON string literals are valid Python string
-/// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
-/// The code the guest runs before each execution: [`full_preamble`] for
+unstable_pub! {
+/// The code the guest runs before each execution: `full_preamble` for
 /// Python, [`crate::secrets::javascript_preamble`] for JavaScript, and for the
 /// shell an `export` of each secret's placeholder, which its child commands
 /// inherit (the child proxy substitutes them). Library preambles are Python.
+///
+/// # Errors
+///
+/// A library preamble for another language, or a secret name the shell can't
+/// export.
+#[doc(hidden)]
 fn language_preamble(
     language: Language,
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
@@ -952,6 +953,7 @@ fn language_preamble(
         Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
         Language::Shell => shell_preamble(secrets),
     }
+}
 }
 
 /// `export NAME='placeholder'` for each secret, in name order, with any `'`
@@ -981,6 +983,12 @@ fn shell_preamble(
     Ok(preamble)
 }
 
+/// The preamble setting each secret's placeholder in `os.environ`, followed
+/// by `library_preamble`.
+///
+/// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
+/// execution would not show up. JSON string literals are valid Python string
+/// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
 fn full_preamble(
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
     library_preamble: &str,
