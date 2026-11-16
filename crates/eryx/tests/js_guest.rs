@@ -417,6 +417,10 @@ async fn fuel_limit_stops_an_infinite_loop() {
         matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
         "expected FuelExhausted, got {err:?}"
     );
+    // The trapped instance is discarded: the session starts again.
+    let out = session.execute("console.log('next')").run().await.unwrap();
+    assert_eq!(out.stdout_text(), "next\n");
+    assert!(out.state_was_reset);
 }
 
 #[tokio::test]

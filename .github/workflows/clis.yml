@@ -96,9 +96,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-binstall
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
-          version: 2026.11.5
+          version: 2026.11.8
           install_args: rust
           cache: false
       - run: cargo test -p eryx-build
@@ -118,9 +118,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-binstall
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
-          version: 2026.11.5
+          version: 2026.11.8
           install_args: rust aqua:bytecodealliance/wasmtime
           cache: false
       - run: rustup target add wasm32-wasip2
@@ -155,9 +155,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-binstall
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
-          version: 2026.11.5
+          version: 2026.11.8
           install_args: rust aqua:bytecodealliance/wasmtime
           cache: false
       # The CMake builds use Ninja, which the runner doesn't ship.
@@ -190,9 +190,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-binstall
-      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
-          version: 2026.11.5
+          version: 2026.11.8
           install_args: rust cargo:wasm-tools aqua:bytecodealliance/wasmtime
           cache: false
       # Building the fork from source takes ~10 minutes; key it on the script,

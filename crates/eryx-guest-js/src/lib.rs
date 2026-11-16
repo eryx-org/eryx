@@ -20,6 +20,9 @@
 //! - `process.env`, with secrets' placeholders, when the sandbox has secrets.
 //! - `TextEncoder`, `TextDecoder` and `crypto.getRandomValues`/`randomUUID`
 //!   (`src/web.js`, `src/web.rs`).
+//! - `setTimeout` and friends (`src/timers.js`, `src/timers.rs`), run by the
+//!   execute's event loop (`js::poll`) on the host's `sleep` import. An
+//!   execute waits for referenced timers, as Node does.
 //! - `import`/`require` of an environment's modules and of the Node built-ins
 //!   in `src/node/` (`src/modules.rs`).
 //!
@@ -47,6 +50,7 @@ mod fetch;
 mod fresh;
 mod js;
 mod modules;
+mod timers;
 mod url;
 mod web;
 mod wit;

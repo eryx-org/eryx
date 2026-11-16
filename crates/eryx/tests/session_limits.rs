@@ -380,3 +380,56 @@ async fn session_memory_plateaus_across_executes() {
         );
     }
 }
+
+/// A run that times out leaves no instance behind (a trapped one, or a guest
+/// still suspended on a sleep): the next call starts on a fresh instance and
+/// says so, instead of failing or timing out too.
+#[tokio::test]
+async fn a_timed_out_session_starts_again() {
+    let limits =
+        ResourceLimits::unlimited().with_execution_timeout(std::time::Duration::from_millis(300));
+    for code in [
+        "while True: pass",
+        "import asyncio\nawait asyncio.sleep(60)",
+    ] {
+        let mut session = limited_session(limits.clone()).await;
+        session.execute("kept = 1").run().await.expect("setup");
+        assert!(
+            matches!(
+                session.execute(code).run().await.map_err(Error::into_kind),
+                Err(ErrorKind::Timeout(_))
+            ),
+            "{code}"
+        );
+        let output = session
+            .execute("print('next', 'kept' in globals())")
+            .run()
+            .await
+            .unwrap_or_else(|e| panic!("{code}: {e}"));
+        assert_eq!(output.stdout_text().trim(), "next False", "{code}");
+        assert!(output.state_was_reset, "{code}");
+    }
+}
+
+/// Running out of fuel traps the instance, so it's discarded too: the next
+/// call starts on a fresh one instead of "cannot enter component instance".
+#[tokio::test]
+async fn a_session_out_of_fuel_starts_again() {
+    let limits = ResourceLimits::unlimited().with_max_fuel(50_000_000);
+    let mut session = limited_session(limits).await;
+    assert!(matches!(
+        session
+            .execute("while True: pass")
+            .run()
+            .await
+            .map_err(Error::into_kind),
+        Err(ErrorKind::FuelExhausted { .. })
+    ));
+    let output = session
+        .execute("print('next')")
+        .run()
+        .await
+        .expect("next call");
+    assert_eq!(output.stdout_text().trim(), "next");
+    assert!(output.state_was_reset);
+}
