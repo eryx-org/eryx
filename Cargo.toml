@@ -96,7 +96,10 @@ wasmtime-wasi = "50.0.0"
 wasmtime-wasi-io = "50.0.0"
 # Only for `VMOffsets`, to size children's instance metadata (#942). It
 # must be exactly the version wasmtime itself uses: move this pin with every
-# wasmtime bump (Renovate groups it with wasmtime).
+# wasmtime bump (Renovate groups it with wasmtime). A hand bump of wasmtime
+# alone leaves a second wasmtime-environ in the tree, sizing with the old
+# layout; process.rs's instance_metadata_estimates_match_wasmtime test, which
+# checks the estimate against wasmtime's own figure, is what catches that.
 wasmtime-environ = "=50.0.1"
 wasmtime-wizer = { version = "50.0.0", features = ["component-model", "wasmtime"] }
 webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhra CAs)

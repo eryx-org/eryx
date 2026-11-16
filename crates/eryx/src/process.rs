@@ -464,9 +464,8 @@ impl Command {
     /// `eryx-precompile compile` does this for commands.
     ///
     /// A precompiled command without the stamp is charged 4 MiB per child,
-    /// the most one core instance's metadata may take under the pooling
-    /// allocator: always enough, but it fits fewer children in their memory
-    /// pool.
+    /// usually enough (gh, the largest measured, needs 1.3 MB), but it fits
+    /// fewer children in their memory pool.
     pub fn stamp_precompiled(precompiled: &mut Vec<u8>, wasm: &[u8]) {
         vmctx::stamp(precompiled, vmctx::estimate(wasm));
     }
@@ -2057,31 +2056,53 @@ mod tests {
         loop {
             let mut pooling = wasmtime::PoolingAllocationConfig::new();
             pooling.max_core_instance_size(limit);
-            let mut config = wasmtime::Config::new();
-            config.wasm_component_model_async(true);
-            config.wasm_component_model_more_async_builtins(true);
-            config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
-            let engine = Engine::new(&config).unwrap();
-            // wasmtime checks when compiling, and again when instantiating.
-            let tried = async {
-                let component = Component::new(&engine, wasm)?;
-                let mut linker = Linker::<()>::new(&engine);
-                linker.define_unknown_imports_as_traps(&component)?;
-                let mut store = Store::new(&engine, ());
-                linker.instantiate_async(&mut store, &component).await
-            };
-            let Err(e) = tried.await else {
-                return limit as u64;
-            };
-            let message = format!("{e:#}");
-            let needed = message
-                .split_once("requires ")
-                .and_then(|(_, rest)| rest.split_once(' '))
-                .and_then(|(n, _)| n.parse::<usize>().ok())
-                .unwrap_or_else(|| panic!("unexpected error: {message}"));
-            assert!(needed > limit, "{message}");
-            limit = needed;
+            match pooling_refusal(wasm, pooling).await {
+                Some(needed) => {
+                    assert!(needed > limit);
+                    limit = needed;
+                }
+                None => return limit as u64,
+            }
         }
+    }
+
+    /// What wasmtime needs for all of `wasm`'s instance metadata, core
+    /// instances and `VMComponentContext` together: its pooling limit on a
+    /// component instance reports the total.
+    async fn component_total(wasm: &[u8]) -> u64 {
+        let mut pooling = wasmtime::PoolingAllocationConfig::new();
+        pooling.max_core_instance_size(64 << 20);
+        pooling.max_component_instance_size(1);
+        pooling_refusal(wasm, pooling).await.expect("refused") as u64
+    }
+
+    /// The bytes a pooling allocator under `pooling` says `wasm` needs, if it
+    /// refuses to compile or instantiate it.
+    async fn pooling_refusal(
+        wasm: &[u8],
+        pooling: wasmtime::PoolingAllocationConfig,
+    ) -> Option<usize> {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model_async(true);
+        config.wasm_component_model_more_async_builtins(true);
+        config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+        let engine = Engine::new(&config).unwrap();
+        // wasmtime checks when compiling, and again when instantiating.
+        let tried = async {
+            let component = Component::new(&engine, wasm)?;
+            let mut linker = Linker::<()>::new(&engine);
+            linker.define_unknown_imports_as_traps(&component)?;
+            let mut store = Store::new(&engine, ());
+            linker.instantiate_async(&mut store, &component).await
+        };
+        let e = tried.await.err()?;
+        let message = format!("{e:#}");
+        let needed = message
+            .split_once("requires ")
+            .and_then(|(_, rest)| rest.split_once(' '))
+            .and_then(|(n, _)| n.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("unexpected error: {message}"));
+        Some(needed)
     }
 
     /// The estimate a command is charged for its instances' metadata covers
@@ -2095,6 +2116,14 @@ mod tests {
             assert!(
                 estimated >= actual && estimated <= actual + actual / 20,
                 "{target}: estimated {estimated}, wasmtime {actual}"
+            );
+            // The pool is charged the total: every core instance (none
+            // missed or counted twice) and the component's own context.
+            let actual = component_total(&wasm).await;
+            let estimated = vmctx::estimate(&wasm);
+            assert!(
+                estimated >= actual && estimated <= actual + actual / 20 + 16 * 1024,
+                "{target}: estimated total {estimated}, wasmtime {actual}"
             );
         }
     }

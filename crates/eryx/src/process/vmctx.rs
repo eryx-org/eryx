@@ -15,15 +15,23 @@
 use std::collections::HashSet;
 
 use wasmparser::{
-    ComponentExternalKind, ConstExpr, ElementItems, ExternalKind, Instance, Operator, Parser,
-    Payload, TypeRef,
+    ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, ConstExpr,
+    ElementItems, ExternalKind, Instance, Operator, Parser, Payload, TypeRef,
 };
 use wasmtime_environ::{HostPtr, VMOffsets, VMOffsetsFields};
 
-/// What a precompiled command without a stamp is charged: wasmtime's pooling
-/// limit on one core instance's metadata (`CORE_INSTANCE_SIZE`).
+/// What a precompiled command without a stamp is charged for its instances'
+/// metadata: a conservative guess, usually enough (gh, the largest measured,
+/// needs 1.3 MB across its instances), since there's no wasm left to size it
+/// from. It's charged to the child memory pool, which is what bounds every
+/// child's metadata.
 #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
-pub(super) const UNSTAMPED: u64 = 4 << 20;
+pub(super) const UNSTAMPED: u64 = UNMODELLED_INSTANCE;
+
+/// What each core instance is charged in a component [`estimate`] doesn't
+/// model (nested components, imported or aliased core modules): the same
+/// conservative guess as for an unstamped command, per instance.
+const UNMODELLED_INSTANCE: u64 = 4 << 20;
 
 /// Allowance per core instance for wasmtime's `Instance` itself, which
 /// precedes its `VMContext` in the same allocation.
@@ -38,72 +46,109 @@ const STAMP_TAG: u8 = 0x80;
 /// Bytes of metadata `wasm`'s core instances need, summed over every core
 /// instance the component creates.
 pub(super) fn estimate(wasm: &[u8]) -> u64 {
-    instance_sizes(wasm).iter().sum::<u64>() + COMPONENT_HEADER
+    let instances = match instance_sizes(wasm) {
+        Ok(sizes) => sizes.iter().sum::<u64>(),
+        Err(Unmodelled { instances }) => UNMODELLED_INSTANCE * instances.max(1) as u64,
+    };
+    instances + COMPONENT_HEADER
 }
 
 /// The largest core instance's share of [`estimate`].
 #[cfg(test)]
 pub(super) fn largest(wasm: &[u8]) -> u64 {
-    instance_sizes(wasm).into_iter().max().unwrap_or(0)
+    instance_sizes(wasm)
+        .ok()
+        .and_then(|sizes| sizes.into_iter().max())
+        .unwrap_or(0)
+}
+
+/// A component [`instance_sizes`] doesn't model, with how many core
+/// instances it creates (anywhere in it).
+struct Unmodelled {
+    instances: usize,
 }
 
 /// Each core instance's metadata, in the order the component creates them.
-fn instance_sizes(wasm: &[u8]) -> Vec<u64> {
-    // Per component scope (nested components have their own), the sizes of
-    // the core modules it defines, by module index.
-    let mut scopes: Vec<Vec<u64>> = vec![Vec::new()];
+///
+/// Only the shape `wasm-component-ld` and `wit-component` produce is
+/// modelled: core modules defined in the component itself, instantiated
+/// there. Core modules or instances in a nested component, and imported or
+/// aliased core modules (whose sizes, or instantiations, aren't where this
+/// looks), are [`Unmodelled`], and charged conservatively.
+fn instance_sizes(wasm: &[u8]) -> Result<Vec<u64>, Unmodelled> {
+    // The sizes of the core modules the component defines, by module index.
+    let mut modules: Vec<u64> = Vec::new();
     let mut instances = Vec::new();
     let mut module: Option<Counts> = None;
+    let mut modelled = true;
+    let mut instantiations = 0;
+    // How deep in nested components the walk is. wit-component nests one to
+    // re-export `wasi:cli/run` with its types, holding no core modules;
+    // only core modules or instances inside one are unmodelled.
     let mut depth = 0usize;
     for payload in Parser::new(0).parse_all(wasm) {
         let Ok(payload) = payload else { break };
         if let Some(counts) = module.as_mut() {
             if counts.add(&payload) {
-                let size = counts.size();
+                modules.push(counts.size());
                 module = None;
-                if let Some(scope) = scopes.last_mut() {
-                    scope.push(size);
-                }
             }
             continue;
         }
         match payload {
-            Payload::ModuleSection { .. } => module = Some(Counts::default()),
-            Payload::ComponentSection { .. } => {
-                depth += 1;
-                scopes.push(Vec::new());
+            Payload::ModuleSection { .. } => {
+                modelled &= depth == 0;
+                module = Some(Counts::default());
             }
-            Payload::End(_) if depth > 0 => {
-                depth -= 1;
-                scopes.pop();
-            }
+            Payload::ComponentSection { .. } => depth += 1,
+            Payload::End(_) if depth > 0 => depth -= 1,
             Payload::InstanceSection(section) => {
-                let Some(scope) = scopes.last() else { continue };
                 for instance in section.into_iter().flatten() {
-                    if let Instance::Instantiate { module_index, .. } = instance
-                        && let Some(&size) = scope.get(module_index as usize)
-                    {
-                        instances.push(size);
+                    if let Instance::Instantiate { module_index, .. } = instance {
+                        instantiations += 1;
+                        match modules.get(module_index as usize) {
+                            Some(&size) if depth == 0 => instances.push(size),
+                            _ => modelled = false,
+                        }
                     }
                 }
             }
-            // Aliased or imported core modules take an index too.
+            // Core modules from elsewhere take module indices too.
+            Payload::ComponentImportSection(section) => {
+                if section
+                    .into_iter()
+                    .flatten()
+                    .any(|import| matches!(import.ty, ComponentTypeRef::Module(_)))
+                {
+                    modelled = false;
+                }
+            }
             Payload::ComponentAliasSection(section) => {
-                for alias in section.into_iter().flatten() {
-                    if let wasmparser::ComponentAlias::InstanceExport {
-                        kind: ComponentExternalKind::Module,
-                        ..
-                    } = alias
-                        && let Some(scope) = scopes.last_mut()
-                    {
-                        scope.push(0);
-                    }
+                if section.into_iter().flatten().any(|alias| {
+                    matches!(
+                        alias,
+                        ComponentAlias::InstanceExport {
+                            kind: ComponentExternalKind::Module,
+                            ..
+                        } | ComponentAlias::Outer {
+                            kind: ComponentOuterAliasKind::CoreModule,
+                            ..
+                        }
+                    )
+                }) {
+                    modelled = false;
                 }
             }
             _ => {}
         }
     }
-    instances
+    if modelled {
+        Ok(instances)
+    } else {
+        Err(Unmodelled {
+            instances: instantiations,
+        })
+    }
 }
 
 /// The counts `VMOffsets` needs, for one core module.
@@ -261,8 +306,34 @@ pub(super) fn stamped(tail: &[u8]) -> Option<u64> {
 pub(super) const STAMP_LEN: usize = 8 + 1 + 8;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A component this doesn't model is charged the conservative figure
+    /// per core instance it creates, rather than mis-sized.
+    #[test]
+    fn unmodelled_components_are_charged_conservatively() {
+        let nested = wat::parse_str(
+            "(component (component (core module $m) \
+             (core instance (instantiate $m)) (core instance (instantiate $m))))",
+        )
+        .unwrap();
+        assert_eq!(
+            estimate(&nested),
+            2 * UNMODELLED_INSTANCE + COMPONENT_HEADER
+        );
+        let imported = wat::parse_str(
+            "(component (import \"m\" (core module $m)) (core instance (instantiate $m)))",
+        )
+        .unwrap();
+        assert_eq!(estimate(&imported), UNMODELLED_INSTANCE + COMPONENT_HEADER);
+        // What wit-component makes is modelled: a module defined and
+        // instantiated here.
+        let plain = wat::parse_str("(component (core module $m) (core instance (instantiate $m)))")
+            .unwrap();
+        assert!(estimate(&plain) < UNMODELLED_INSTANCE);
+    }
 
     #[test]
     fn stamps_round_trip() {

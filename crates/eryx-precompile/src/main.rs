@@ -1078,7 +1078,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         .context("Failed to AOT compile")?;
         match args.language {
             Some(language) => eryx::Executor::stamp_language(&mut precompiled, language),
-            // Without a language it's a command.
+            // Without a language it's usually a command, which needs the
+            // figure; an unstamped runtime ignores it (the trailer is one
+            // wasmtime skips, and the language stamp reader doesn't match).
             None => eryx::Command::stamp_precompiled(&mut precompiled, &component_bytes),
         }
 
