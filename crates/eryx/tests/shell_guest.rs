@@ -176,6 +176,49 @@ if ! fail 2>/dev/null; then echo "fail failed"; fi
     assert_eq!(out.stdout_utf8().unwrap(), "5 15 2 10\nfail failed\n");
 }
 
+/// Every callback command reports `callback_start` (its arguments as context)
+/// and `callback_end`, in the CPython and QuickJS guests' shape; a failed call
+/// too. The host fills in the duration.
+#[tokio::test]
+async fn callbacks_report_trace_events() {
+    use eryx::TraceEventKind;
+
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
+        .with_callback(TestCallback::new("fail", |_| {
+            Err(CallbackError::ExecutionFailed("nope".to_string()))
+        }))
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute("add --a 1 --b 2 >/dev/null; fail 2>/dev/null || true; echo plain")
+        .await
+        .unwrap();
+    let events: Vec<_> = out
+        .trace
+        .iter()
+        .map(|e| match &e.event {
+            TraceEventKind::CallbackStart { name, .. } => format!("start {name}"),
+            TraceEventKind::CallbackEnd { name, .. } => format!("end {name}"),
+            other => panic!("unexpected trace event {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        events,
+        ["start add", "end add", "start fail", "end fail"],
+        "{:?}",
+        out.trace
+    );
+    let contexts: Vec<_> = out.trace.iter().map(|e| e.context.clone()).collect();
+    assert_eq!(contexts[0], Some(json!({ "a": 1, "b": 2 })));
+    assert_eq!(contexts[1], None);
+}
+
 /// Exit codes and messages: 1 for a failed callback, 2 for bad usage, 127 for
 /// `invoke` of an unknown name; `--help` describes the arguments.
 #[tokio::test]

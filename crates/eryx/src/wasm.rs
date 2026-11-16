@@ -23,6 +23,7 @@
 //! Alternatively, enable the `embedded` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1333,6 +1334,50 @@ impl StreamBudget {
     }
 }
 
+/// Times host callbacks from the guest's `callback_start` and `callback_end`
+/// trace events, which every guest reports around a call but none times.
+///
+/// Calls are matched by name, first in first out.
+// ponytail: concurrent calls to one callback that finish out of order get
+// each other's durations; a call id in the events would pair them exactly.
+#[derive(Debug, Default)]
+pub(crate) struct CallbackClock(HashMap<String, VecDeque<std::time::Instant>>);
+
+impl CallbackClock {
+    /// Note a `callback_start`, or add `duration_ms` to a `callback_end`.
+    fn time(&mut self, event_json: &mut String) {
+        // Only parse the events that can be callback events.
+        if !event_json.contains("callback_") {
+            return;
+        }
+        let Ok(serde_json::Value::Object(mut event)) = serde_json::from_str(event_json) else {
+            return;
+        };
+        let (Some(kind), Some(name)) = (
+            event.get("type").and_then(serde_json::Value::as_str),
+            event.get("name").and_then(serde_json::Value::as_str),
+        ) else {
+            return;
+        };
+        match kind {
+            "callback_start" => self
+                .0
+                .entry(name.to_owned())
+                .or_default()
+                .push_back(std::time::Instant::now()),
+            "callback_end" => {
+                let Some(started) = self.0.get_mut(name).and_then(VecDeque::pop_front) else {
+                    return;
+                };
+                let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                event.insert("duration_ms".to_owned(), ms.into());
+                *event_json = serde_json::Value::Object(event).to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// State for a single execution, implementing WASI and callback channels.
 pub struct ExecutorState {
     /// WASI context for the execution.
@@ -1380,6 +1425,9 @@ pub struct ExecutorState {
     /// The execution's children's network, if they have one. Dropped (with
     /// its proxies) when the execution ends.
     pub(crate) child_net: Option<crate::process::ChildNet>,
+    /// When each callback still running started, for `callback_end`'s
+    /// duration.
+    pub(crate) callback_clock: CallbackClock,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1428,6 +1476,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
+            callback_clock: CallbackClock::default(),
         }
     }
 
@@ -1601,8 +1650,9 @@ impl SandboxImports for ExecutorState {
     }
 
     /// Report a trace event to the host.
-    fn report_trace(&mut self, lineno: u32, event_json: String, context_json: String) {
+    fn report_trace(&mut self, lineno: u32, mut event_json: String, context_json: String) {
         if let Some(tx) = &self.trace_tx {
+            self.callback_clock.time(&mut event_json);
             let size = event_json.len() + context_json.len();
             if !self.stream_budget.spend_trace(size) {
                 return;
@@ -3820,6 +3870,7 @@ impl Executor {
             commands: self.commands.clone(),
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
             child_net,
+            callback_clock: CallbackClock::default(),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -4144,11 +4195,12 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>")
                 .to_string();
-            // Duration would need to be tracked by the host
-            crate::trace::TraceEventKind::CallbackEnd {
-                name,
-                duration_ms: 0,
-            }
+            // Added by the host; see `CallbackClock`.
+            let duration_ms = event_data
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            crate::trace::TraceEventKind::CallbackEnd { name, duration_ms }
         }
         _ => crate::trace::TraceEventKind::Line,
     };
