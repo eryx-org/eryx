@@ -437,13 +437,30 @@ cli = "clis/coreutils.toml"
 cli_commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
 
 [[component]]
+name = "HACL*"
+version = "4ef25b54"
+license = "MIT"
+url = "https://github.com/hacl-star/hacl-star/tree/4ef25b547b377dcef855db4289c6a00580e7221c"
+# Formally verified hashes that CPython 3.14.0 vendors in Modules/_hacl/ (at
+# the hacl-star revision its refresh.sh pins) and compiles into libpython for
+# `hashlib`. Doc/license.rst's incorporated-software section doesn't cover it.
+# The vendored C files carry this MIT notice; hacl-star's repository is
+# Apache-2.0, which covers its F* sources.
+files = ["third_party/licenses/hacl-star-LICENSE"]
+artifacts = ["runtime-python"]
+version_strings = [
+    { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", strings = ["invalid HACL* algorithm"] },
+]
+
+[[component]]
 name = "aws-lc-sys (full LICENSE)"
 version = "0.47.0"
 license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
 url = "https://github.com/aws/aws-lc-rs/tree/main/aws-lc-sys"
 # Its LICENSE verbatim, including the OpenSSL and SSLeay notices, which ask
 # to be reproduced; cargo-about only renders the SPDX licences it reports
-# (the expression above, from its Cargo.toml).
+# (the expression above, from its Cargo.toml). Shipped in full with the host
+# notices, the only artifact that links aws-lc-sys (decided, #930).
 files = ["third_party/licenses/aws-lc-sys-LICENSE"]
 artifacts = ["host"]
 crate = "aws-lc-sys"

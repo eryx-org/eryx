@@ -54,7 +54,8 @@ console.log(process.env.TOKEN); // Prints: [REDACTED]
 ```
 
 `process` only exists when the sandbox has secrets, and only has `env`. The
-shell can't have secrets.
+shell exports each placeholder as a variable, for its commands; with
+[child network](./sandboxes.md#external-commands), their proxy substitutes the real values.
 
 ## Rust API
 

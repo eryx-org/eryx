@@ -438,8 +438,12 @@ async fn run_code(
     if let Some(net_tx) = net_tx {
         execute_builder = execute_builder.with_network(net_tx);
     }
-    if let Some(net) = sandbox.child_net() {
-        execute_builder = execute_builder.with_child_network(net);
+    if let Some(config) = sandbox.net_config() {
+        execute_builder = execute_builder.with_child_network(
+            sandbox.executor().child_network().clone(),
+            config.clone(),
+            sandbox.secrets().clone(),
+        );
     }
     let execution_result = execute_builder.run().await;
 

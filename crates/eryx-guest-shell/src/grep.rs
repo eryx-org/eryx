@@ -1,4 +1,5 @@
-//! `grep`: print lines matching a pattern, ported from conch-shell.
+//! `grep`: print lines matching a pattern, ported from conch-shell and
+//! included under eryx's licence (MIT OR Apache-2.0) by its author.
 //!
 //! ```text
 //! grep [-vinclLHhqsEFwx] [-m NUM] [-e PATTERN]... [PATTERN] [FILE]...
