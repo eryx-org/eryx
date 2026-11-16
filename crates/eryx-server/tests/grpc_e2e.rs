@@ -989,6 +989,11 @@ print(x + y)
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::TraceEvent(event)) => {
+                // Every trace event reaches the client before the result.
+                assert!(
+                    !got_result,
+                    "trace event after the ExecuteResult: {event:?}"
+                );
                 trace_events.push(event);
             }
             Some(server_message::Message::ExecuteResult(result)) => {

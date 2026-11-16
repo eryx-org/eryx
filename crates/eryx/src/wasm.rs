@@ -1357,6 +1357,8 @@ pub(crate) struct TraceClock {
     callbacks: VecDeque<(String, std::time::Instant)>,
     /// The last child process's pid.
     last_pid: u32,
+    /// Children started and not yet ended.
+    running: Vec<RunningChild>,
 }
 
 impl TraceClock {
@@ -1403,28 +1405,20 @@ impl TraceClock {
     }
 }
 
-/// A child process's `process_start` and `process_end` trace events.
-///
-/// [`ExecutorState::trace_process_start`] reports the start; [`Self::end`]
-/// reports how the child ended. Dropped before that (the parent's execution
-/// timed out or was cancelled while it waited), it reports the child killed.
-pub(crate) struct ProcessTrace {
-    tx: mpsc::UnboundedSender<TraceRequest>,
+/// A child process whose `process_start` was reported and whose
+/// `process_end` wasn't yet.
+#[derive(Debug)]
+struct RunningChild {
+    /// Identifies the child across executions; see [`ProcessTrace`].
+    key: u64,
     name: String,
     pid: u32,
     started: std::time::Instant,
-    ended: bool,
 }
 
-impl ProcessTrace {
-    /// Report that the child exited with `code`, or failed with `error`.
-    pub(crate) fn end(mut self, state: &mut ExecutorState, outcome: Result<i32, &str>) {
-        self.ended = true;
-        let (event_json, context_json) = self.end_event(outcome);
-        state.send_trace(0, event_json, context_json);
-    }
-
-    fn end_event(&self, outcome: Result<i32, &str>) -> (String, String) {
+impl RunningChild {
+    /// Its `process_end` event: it exited with a code, or failed.
+    fn end_event(&self, outcome: Result<i32, &str>) -> String {
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let mut event = serde_json::json!({
             "type": "process_end",
@@ -1436,21 +1430,31 @@ impl ProcessTrace {
             Ok(code) => event["exit_code"] = code.into(),
             Err(error) => event["error"] = error.into(),
         }
-        (event.to_string(), String::new())
+        event.to_string()
     }
 }
 
-impl Drop for ProcessTrace {
-    fn drop(&mut self) {
-        if !self.ended {
-            // The execution's state may already be gone, so this skips the
-            // stream budget: at most one event per running child.
-            let (event_json, context_json) = self.end_event(Err("killed"));
-            let _ = self.tx.send(TraceRequest {
-                lineno: 0,
-                event_json,
-                context_json,
-            });
+/// A child process's trace, from [`ExecutorState::trace_process_start`] to
+/// [`Self::end`].
+///
+/// It holds no sender: a session keeps a `wait` its timeout interrupted
+/// parked in the store, and a sender held there would keep the trace channel
+/// open, so the execution would never finish. A child still running when the
+/// execution's trace channel goes is reported killed then instead
+/// ([`ExecutorState::end_running_children`]).
+#[must_use]
+pub(crate) struct ProcessTrace {
+    key: u64,
+}
+
+impl ProcessTrace {
+    /// Report that the child exited with `code`, or failed with `error`,
+    /// unless its execution already reported it killed.
+    pub(crate) fn end(self, state: &mut ExecutorState, outcome: Result<i32, &str>) {
+        let running = &mut state.trace_clock.running;
+        if let Some(i) = running.iter().position(|child| child.key == self.key) {
+            let child = running.swap_remove(i);
+            state.send_trace(0, child.end_event(outcome), String::new());
         }
     }
 }
@@ -1528,6 +1532,14 @@ impl std::fmt::Debug for ExecutorState {
     }
 }
 
+impl Drop for ExecutorState {
+    fn drop(&mut self) {
+        // A dropped store (a timed-out or cancelled one-shot execution) drops
+        // its children's `wait`s; report them before the trace channel goes.
+        self.end_running_children();
+    }
+}
+
 impl ExecutorState {
     /// State for instantiating a store ahead of any execution.
     ///
@@ -1557,11 +1569,14 @@ impl ExecutorState {
         }
     }
 
-    /// Send a trace event, if tracing is on and the stream budget allows.
-    fn send_trace(&mut self, lineno: u32, event_json: String, context_json: String) {
-        if self.charge_trace(&event_json, &context_json) {
+    /// Send a trace event, if tracing is on and the stream budget allows;
+    /// whether it was sent.
+    fn send_trace(&mut self, lineno: u32, event_json: String, context_json: String) -> bool {
+        let charged = self.charge_trace(&event_json, &context_json);
+        if charged {
             self.send_charged_trace(lineno, event_json, context_json);
         }
+        charged
     }
 
     /// Whether tracing is on and the stream budget has room for an event;
@@ -1585,28 +1600,42 @@ impl ExecutorState {
         }
     }
 
-    /// Report that a child process `argv` started, numbering it; `None` with
-    /// tracing off.
+    /// Report that a child process `argv` started, numbering it; `None` if
+    /// tracing is off or the start wasn't sent, so no end is reported either.
     pub(crate) fn trace_process_start(&mut self, argv: &[String]) -> Option<ProcessTrace> {
-        let tx = self.trace_tx.clone()?;
+        /// Tells apart children of different executions of one session, whose
+        /// pids both start at 1.
+        static KEYS: AtomicU64 = AtomicU64::new(0);
         let (name, args) = argv.split_first()?;
-        self.trace_clock.last_pid += 1;
-        let pid = self.trace_clock.last_pid;
+        let pid = self.trace_clock.last_pid + 1;
         let event = serde_json::json!({ "type": "process_start", "name": name, "pid": pid });
         let context = serde_json::json!({ "args": args });
-        self.send_trace(0, event.to_string(), context.to_string());
-        Some(ProcessTrace {
-            tx,
+        if !self.send_trace(0, event.to_string(), context.to_string()) {
+            return None;
+        }
+        self.trace_clock.last_pid = pid;
+        let key = KEYS.fetch_add(1, Ordering::Relaxed);
+        self.trace_clock.running.push(RunningChild {
+            key,
             name: name.clone(),
             pid,
             started: std::time::Instant::now(),
-            ended: false,
-        })
+        });
+        Some(ProcessTrace { key })
+    }
+
+    /// Report every child still running as killed: its execution is ending
+    /// (or timed out, or was cancelled) with the child's `wait` unfinished.
+    pub(crate) fn end_running_children(&mut self) {
+        for child in std::mem::take(&mut self.trace_clock.running) {
+            self.send_trace(0, child.end_event(Err("killed")), String::new());
+        }
     }
 
     /// Drop every channel to the host so their receivers see end-of-stream,
     /// and stop the children's proxies.
     pub(crate) fn disconnect(&mut self) {
+        self.end_running_children();
         self.callback_tx = None;
         self.trace_tx = None;
         self.net_tx = None;

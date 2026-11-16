@@ -1056,20 +1056,22 @@ async fn children_report_trace_events() {
     );
 }
 
+/// Collects the trace events a sandbox's handler receives.
+#[derive(Clone, Default)]
+struct CollectTrace(std::sync::Arc<std::sync::Mutex<Vec<eryx::TraceEvent>>>);
+
+#[async_trait::async_trait]
+impl eryx::TraceHandler for CollectTrace {
+    async fn on_trace(&self, event: eryx::TraceEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
 /// A child the parent's timeout kills still reports its `process_end`, to a
 /// trace handler (a failed execution returns no collected trace).
 #[tokio::test]
 async fn a_child_killed_by_the_timeout_reports_its_end() {
-    #[derive(Clone, Default)]
-    struct Collect(std::sync::Arc<std::sync::Mutex<Vec<eryx::TraceEvent>>>);
-    #[async_trait::async_trait]
-    impl eryx::TraceHandler for Collect {
-        async fn on_trace(&self, event: eryx::TraceEvent) {
-            self.0.lock().unwrap().push(event);
-        }
-    }
-
-    let handler = Collect::default();
+    let handler = CollectTrace::default();
     let sandbox = shell()
         .with_command("tc", test_cmd())
         .with_trace_handler(handler.clone())
@@ -1087,6 +1089,52 @@ async fn a_child_killed_by_the_timeout_reports_its_end() {
         [
             ("start", "tc".to_string(), 1, None, None),
             ("end", "tc".to_string(), 1, None, Some("killed".to_string())),
+        ],
+        "{events:?}"
+    );
+}
+
+/// In a session, a timeout leaves the child's `wait` parked in the store
+/// rather than dropping it; the execution still ends, and reports the child
+/// killed. The next execution numbers its children afresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_reports_a_child_its_timeout_killed() {
+    use eryx::session::{InProcessSession, Session};
+
+    let handler = CollectTrace::default();
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_trace_handler(handler.clone())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+
+    let err = tokio::time::timeout(Duration::from_secs(10), session.execute("tc spin"))
+        .await
+        .expect("the timed-out execution never finished")
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    let events = std::mem::take(&mut *handler.0.lock().unwrap());
+    assert_eq!(
+        process_events(&events),
+        [
+            ("start", "tc".to_string(), 1, None, None),
+            ("end", "tc".to_string(), 1, None, Some("killed".to_string())),
+        ],
+        "{events:?}"
+    );
+
+    session.reset().await.unwrap();
+    session.execute("tc exit 0").await.unwrap();
+    let events = handler.0.lock().unwrap().clone();
+    assert_eq!(
+        process_events(&events),
+        [
+            ("start", "tc".to_string(), 1, None, None),
+            ("end", "tc".to_string(), 1, Some(0), None),
         ],
         "{events:?}"
     );

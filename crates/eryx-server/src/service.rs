@@ -970,6 +970,10 @@ struct SessionParams<'a> {
     max_output_bytes: usize,
 }
 
+/// Longest an execution waits for its trace events to reach the client
+/// before sending its result.
+const TRACE_RELAY_DRAIN: Duration = Duration::from_secs(1);
+
 /// Execute Python code using a session executor.
 ///
 /// Creates a [`SessionExecutor`] from the sandbox's Python executor, mounts any
@@ -1122,7 +1126,7 @@ async fn execute_with_session(
 
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-    if params.enable_tracing {
+    let trace_relay = params.enable_tracing.then(|| {
         let trace_server_tx = server_tx.clone();
         let trace_secrets = params.secrets.clone();
         tokio::spawn(async move {
@@ -1137,8 +1141,8 @@ async fn execute_with_session(
                     break;
                 }
             }
-        });
-    }
+        })
+    });
 
     // Stream output to the client as it arrives, and keep the raw (pre-scrub)
     // bytes for the final ExecuteResult. Both stop at `max_output_bytes`.
@@ -1243,6 +1247,14 @@ async fn execute_with_session(
 
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // The execution's trace senders are gone, so the relay ends once it has
+    // forwarded what's queued. Let it, so the last events (such as a killed
+    // child's `process_end`) reach the client before the ExecuteResult; bounded,
+    // in case the client has stopped reading.
+    if let Some(relay) = trace_relay {
+        let _ = tokio::time::timeout(TRACE_RELAY_DRAIN, relay).await;
+    }
 
     // The output channel sender is dropped once execution completes, so the
     // accumulator task has now (or will shortly) finish draining. Its captured

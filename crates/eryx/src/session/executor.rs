@@ -2393,6 +2393,9 @@ impl ExecutorState {
 
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
+        // A child whose `wait` the execution left parked (it timed out) is
+        // reported killed on the old channel before it goes.
+        self.end_running_children();
         self.trace_tx = tx;
         self.trace_clock = crate::wasm::TraceClock::default();
     }
