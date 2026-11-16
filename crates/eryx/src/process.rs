@@ -644,7 +644,9 @@ impl ChildLink {
 struct Spawner {
     commands: Commands,
     budget: ChildBudget,
-    net: Option<Arc<std::sync::Mutex<ChildNet>>>,
+    /// Weak, so a child left unwaited can't keep the execution's proxies
+    /// (and its secrets) alive after it ends.
+    net: Option<std::sync::Weak<std::sync::Mutex<ChildNet>>>,
     /// How deep the children it spawns are (the shell's are 1).
     depth: usize,
 }
@@ -684,10 +686,13 @@ impl Spawner {
         // from the shell, which exports them.)
         let network = match &self.net {
             Some(net) => match net
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .link(command.tunnels)
-            {
+                .upgrade()
+                .ok_or_else(|| std::io::Error::other("the execution has ended"))
+                .and_then(|net| {
+                    net.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .link(command.tunnels)
+                }) {
                 Ok(link) => Some(link),
                 Err(e) => {
                     tracing::warn!(error = %e, "starting the child proxy failed");
@@ -1350,7 +1355,7 @@ impl ExecutorState {
         Spawner {
             commands: self.commands.clone(),
             budget: self.child_budget.clone(),
-            net: self.child_net.clone(),
+            net: self.child_net.as_ref().map(Arc::downgrade),
             depth: 1,
         }
     }
@@ -1523,6 +1528,28 @@ fn add_run_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
     )
 }
 
+/// What a nested run holds of its execution's [`ChildBudget`], given back
+/// when it's dropped: when `run` returns, or when its caller is killed
+/// midway.
+struct Held {
+    budget: ChildBudget,
+    bytes: u64,
+}
+
+impl Held {
+    fn charge(&mut self, bytes: u64) -> Result<(), ProcessError> {
+        self.budget.charge(bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.budget.release(self.bytes);
+    }
+}
+
 /// One of a nested run's output streams, read into memory as it's written.
 struct Capture {
     reader: Option<pipe::Reader>,
@@ -1530,9 +1557,9 @@ struct Capture {
 }
 
 impl Capture {
-    /// Read what's there into `data`, charging it to `budget`: `Ready(Ok)`
-    /// at end of file, an error past `MAX_RUN_OUTPUT` or the budget.
-    fn poll(&mut self, cx: &Context<'_>, budget: &ChildBudget) -> Poll<Result<(), ProcessError>> {
+    /// Read what's there into `data`, charging it to `held`: `Ready(Ok)` at
+    /// end of file, an error past `MAX_RUN_OUTPUT` or the budget.
+    fn poll(&mut self, cx: &Context<'_>, held: &mut Held) -> Poll<Result<(), ProcessError>> {
         let Some(reader) = &self.reader else {
             return Poll::Ready(Ok(()));
         };
@@ -1548,7 +1575,7 @@ impl Capture {
                         tracing::warn!("nested command's output over the limit");
                         return Poll::Ready(Err(ProcessError::LimitExceeded));
                     }
-                    budget.charge(n as u64)?;
+                    held.charge(n as u64)?;
                     self.data.extend_from_slice(&buf[..n]);
                 }
                 Poll::Pending => return Poll::Pending,
@@ -1562,8 +1589,8 @@ impl Capture {
 ///
 /// The nested child gets the caller's fuel left (at most `CHILD_FUEL`), and
 /// what it burns is charged to the caller as it runs, so it rolls up to the
-/// execution. Its argv, env and captured output are held against the
-/// execution's [`ChildBudget`] until this returns.
+/// execution. Its argv, env, stdin and captured output are held against
+/// the execution's [`ChildBudget`] until this returns (or is dropped).
 async fn run_nested(
     mut store: StoreContextMut<'_, ChildState>,
     cmd: String,
@@ -1598,7 +1625,11 @@ async fn run_nested(
         #[cfg(feature = "unstable-vfs")]
         state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
     )?;
-    let budget = spawner.budget;
+    let mut held = Held {
+        budget: spawner.budget,
+        bytes: charged,
+    };
+    held.charge(input.len() as u64)?;
     run.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
     let fuel_used = Arc::clone(&run.fuel_used);
     let mut running = std::pin::pin!(run.run());
@@ -1643,10 +1674,10 @@ async fn run_nested(
                 Poll::Pending => break,
             }
         }
-        if let Poll::Ready(Err(e)) = out.poll(cx, &budget) {
+        if let Poll::Ready(Err(e)) = out.poll(cx, &mut held) {
             return Poll::Ready(Err(e));
         }
-        if let Poll::Ready(Err(e)) = err.poll(cx, &budget) {
+        if let Poll::Ready(Err(e)) = err.poll(cx, &mut held) {
             return Poll::Ready(Err(e));
         }
         if done.is_none()
@@ -1663,12 +1694,18 @@ async fn run_nested(
         }
     })
     .await;
-    budget.release(charged + (out.data.len() + err.data.len()) as u64);
-    let Some((code, used)) = result? else {
+    drop(held);
+    // Charge what it burned however it ended, before any error returns.
+    let used = match &result {
+        Ok(Some((_, used))) => *used,
+        _ => fuel_used.load(Ordering::Relaxed),
+    };
+    let fuel_left = charge(&mut store, used);
+    let Some((code, _)) = result? else {
         tracing::warn!("caller ran out of fuel; killed its nested child");
         return Err(ProcessError::SpawnFailed);
     };
-    if !charge(&mut store, used) {
+    if !fuel_left {
         return Err(ProcessError::SpawnFailed);
     }
     let status = code.map_err(|e| {
@@ -1719,6 +1756,22 @@ mod tests {
         assert!(count_p3_sockets(&mut linker).is_err());
         wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
         count_p3_sockets(&mut linker).unwrap();
+    }
+
+    /// What a nested run holds of the budget comes back however it ends,
+    /// including when it's dropped midway (a timeout, or its caller killed).
+    #[test]
+    fn nested_runs_give_back_their_budget() {
+        let budget = ChildBudget::new(Some(100));
+        let mut held = Held {
+            budget: budget.clone(),
+            bytes: 0,
+        };
+        held.charge(60).unwrap();
+        assert!(held.charge(60).is_err());
+        assert_eq!(budget.used.load(Ordering::Relaxed), 60);
+        drop(held);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
     }
 
     /// A command is linked for the WASI version whose `wasi:cli/run` it
