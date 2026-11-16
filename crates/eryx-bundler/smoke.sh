@@ -45,6 +45,19 @@ grep -q 'prod build' "$out/env-pkg.js" || fail "the production branch wasn't kep
 grep -q 'from "not-installed"' "$out/needs-missing.js" || fail "the unresolved import isn't external"
 grep -qi 'not-installed' "$out/bundle.json" || fail "no warning names the unresolved import: $(cat "$out/bundle.json")"
 
+# Symlinked packages resolve, as pnpm (`.pnpm/<id>/node_modules/<name>`)
+# and workspaces lay them out: a copy of the fixture with cjs-pkg moved into a
+# pnpm-style store and linked back, relatively.
+linked="$(mktemp -d)"
+trap 'rm -rf "$out" "$linked"' EXIT
+mkdir "$linked/out"
+cp -r "$here/tests/fixture/node_modules" "$linked/"
+mkdir -p "$linked/node_modules/.pnpm/cjs-pkg@1.0.0/node_modules"
+mv "$linked/node_modules/cjs-pkg" "$linked/node_modules/.pnpm/cjs-pkg@1.0.0/node_modules/"
+ln -s .pnpm/cjs-pkg@1.0.0/node_modules/cjs-pkg "$linked/node_modules/cjs-pkg"
+wasmtime run --dir "$linked::/src" --dir "$linked/out::/out" "$wasm" --cwd /src --out /out --entry esm-pkg
+grep -q 'n \* 2' "$linked"/out/*.js || fail "the symlinked cjs-pkg wasn't bundled"
+
 # A package that isn't installed fails with status 1 and a diagnostic.
 set +e
 msg="$(run --cwd /src --out /out --entry missing-pkg 2>&1)"

@@ -11,7 +11,8 @@
 //! eryx-precompile env build data-tools.toml --out envs/data-tools
 //! ```
 //!
-//! Building one is `environment::build`, with the `packages` feature; loading and
+//! Building one is `environment::build`, or `environment::pack` from packages
+//! already installed (e.g. by `npm ci`), with the `packages` feature; loading and
 //! mounting one ([`Environment::load`], `SandboxBuilder::with_environment`)
 //! only needs `environment`, without the bundler or an HTTP client.
 //!
@@ -45,6 +46,10 @@ use crate::Language as GuestLanguage;
 mod build;
 #[cfg(feature = "packages")]
 pub use build::{BuildOptions, build};
+#[cfg(feature = "packages")]
+mod pack;
+#[cfg(feature = "packages")]
+pub use pack::{PackOptions, pack};
 
 /// Where a sandbox sees the environment it was given with
 /// `SandboxBuilder::with_environment`, read-only.

@@ -67,6 +67,41 @@ inputs, what it exports, and a hash of everything sandboxes rely on), the
 lockfile and the modules. Rebuilding from the same lockfile gives the same
 hash.
 
+## Packing installed packages
+
+When the packages are already installed (by `npm ci`, pnpm, or a service
+that resolves and fetches them), `env pack` turns them into an environment
+without resolving or fetching anything:
+
+```bash
+npm ci --ignore-scripts --omit=dev
+eryx-precompile env pack . --name data-tools --entry date-fns/format \
+    --lockfile package-lock.json --out envs/data-tools
+```
+
+- **Entries:** what's importable. Without `--entry`, the tree's
+  `package.json` `dependencies`; with it, exactly the entries given.
+- **Layouts:** npm's, and pnpm's isolated one (`node_modules/.pnpm`), work
+  as installed, symlinks included. Every package symlink must be relative
+  and lead somewhere the bundler can see: by default the tree itself. For
+  workspace packages or `file:` dependencies outside it, pass a `--root`
+  that holds them (a monorepo's root, say). An absolute symlink, or one that
+  leads outside the root, fails before bundling, naming the link. Links that
+  aren't packages (`node_modules/.bin`) and links that lead nowhere are left
+  alone. Yarn's Plug'n'Play has no `node_modules`, so use its
+  `nodeLinker: node-modules`.
+- **Safety:** as for `build`, the bundler parses the packages in a sandbox
+  that sees only the root, read-only, and its output. Pass
+  `--ignore-scripts` to the install so no package code runs there either.
+- `--lockfile` copies the given file into the environment and records it
+  and its hash in the manifest's `inputs`, with the installed versions of
+  the entries' packages. None of that is part of the hash: packing the same
+  installed tree again gives the same environment.
+
+In Rust, the same is `eryx::environment::pack(tree, out, &PackOptions::new(name, Language::JavaScript))`,
+with the `packages` feature. The directory format is described in
+[Environment Format](../api/environment-format.md).
+
 ## Using it
 
 ```rust,ignore

@@ -14,13 +14,13 @@ use super::{
 };
 use crate::process::{IsolatedLimits, Mount};
 
-fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> EnvironmentError {
+pub(super) fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> EnvironmentError {
     let context = context.into();
     move |source| EnvironmentError::Io { context, source }
 }
 
 /// The directory a JavaScript environment's modules are in.
-const MODULES_DIR: &str = "modules";
+pub(super) const MODULES_DIR: &str = "modules";
 
 /// The lockfile's name inside a JavaScript environment.
 const NPM_LOCKFILE: &str = "eryx-npm.lock";
@@ -225,7 +225,7 @@ async fn build_javascript(
         .ok_or_else(|| EnvironmentError::Build("installed tree has no root".to_string()))?;
     // `modules` is new and empty: the bundler doesn't clear its output dir,
     // so a fresh staging dir is what keeps stale chunks out of the hash.
-    let mut report = run_bundler(tree_root, &modules, &entries).await?;
+    let mut report = run_bundler(tree_root, "/src", &modules, &entries).await?;
     std::fs::remove_file(modules.join("bundle.json")).map_err(io("removing bundle.json"))?;
 
     let exports = std::mem::take(&mut report.entries)
@@ -269,7 +269,7 @@ fn is_empty_dir(dir: &Path) -> bool {
 /// volume mounted there, say), so the result can be moved in on the same
 /// filesystem; otherwise next to it, to be renamed into place. An `out`
 /// that holds anything other than an environment is refused up front.
-fn staging_dir(out: &Path) -> Result<tempfile::TempDir, EnvironmentError> {
+pub(super) fn staging_dir(out: &Path) -> Result<tempfile::TempDir, EnvironmentError> {
     let staging = |dir: &Path| {
         tempfile::Builder::new()
             .prefix(".eryx-staging-")
@@ -305,7 +305,7 @@ fn staging_dir(out: &Path) -> Result<tempfile::TempDir, EnvironmentError> {
 ///
 /// `out` must not be a mount point holding an environment, since that can't
 /// be renamed: mount its parent instead, or an empty directory.
-fn install_environment(
+pub(super) fn install_environment(
     staging: tempfile::TempDir,
     out: &Path,
     cached: bool,
@@ -404,20 +404,23 @@ fn aside_path(out: &Path) -> PathBuf {
 
 /// `bundle.json`, as the bundler writes it.
 #[derive(serde::Deserialize)]
-struct BundleReport {
-    bundler: String,
-    entries: BTreeMap<String, String>,
+pub(super) struct BundleReport {
+    pub(super) bundler: String,
+    pub(super) entries: BTreeMap<String, String>,
     #[serde(default)]
-    warnings: Vec<String>,
+    pub(super) warnings: Vec<String>,
 }
 
-/// Bundle `entries` from the tree at `tree_root` into `out`.
-async fn run_bundler(
-    tree_root: &Path,
+/// Bundle `entries` from the tree at `tree_root` into `out`. `root` is
+/// mounted (read-only) and `cwd` is the tree inside it, as a guest path
+/// under `/src`.
+pub(super) async fn run_bundler(
+    root: &Path,
+    cwd: &str,
     out: &Path,
     entries: &[String],
 ) -> Result<BundleReport, EnvironmentError> {
-    let mut argv: Vec<String> = ["eryx-bundler", "--cwd", "/src", "--out", "/out"]
+    let mut argv: Vec<String> = ["eryx-bundler", "--cwd", cwd, "--out", "/out"]
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -427,7 +430,7 @@ async fn run_bundler(
     }
     let mounts = [
         Mount {
-            host: tree_root,
+            host: root,
             guest: "/src",
             writable: false,
         },
@@ -464,7 +467,7 @@ async fn run_bundler(
 /// setup --bundler` cached. Returns it and a hash identifying it, for
 /// environments' cache keys. Only a loaded bundler is kept: after a failure,
 /// the next build looks again, so running `setup` fixes a running process.
-fn bundler() -> Result<(crate::Command, &'static str), EnvironmentError> {
+pub(super) fn bundler() -> Result<(crate::Command, &'static str), EnvironmentError> {
     static BUNDLER: OnceLock<(crate::Command, String)> = OnceLock::new();
     let (command, hash) = match BUNDLER.get() {
         Some(loaded) => loaded,

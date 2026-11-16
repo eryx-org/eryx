@@ -34,6 +34,7 @@
 - [Rust API](./api/rust.md)
 - [Python API](./api/python.md)
 - [JavaScript API](./api/javascript.md)
+- [Environment Format](./api/environment-format.md)
 
 # Contributing
 

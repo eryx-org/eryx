@@ -1000,6 +1000,74 @@ mod tests {
         ));
     }
 
+    /// A fixed environment: two modules, one export.
+    fn golden(root: &Path) -> Manifest {
+        std::fs::create_dir_all(root.join("modules/sub")).unwrap();
+        std::fs::write(root.join("modules/a.js"), "export const a = 1;\n").unwrap();
+        std::fs::write(root.join("modules/sub/b.js"), "export const b = 2;\n").unwrap();
+        Manifest::new(
+            "golden",
+            Language::JavaScript,
+            Inputs::new(vec!["a@1.0.0".to_string()]),
+            Builder::new("0.0.0"),
+            root,
+            "modules",
+            BTreeMap::from([("a".to_string(), "modules/a.js".to_string())]),
+        )
+        .unwrap()
+    }
+
+    /// The identity hash is part of the environment format
+    /// (book/src/api/environment-format.md): environments packed by one eryx
+    /// are loaded by another, so it must never change by accident. Changing
+    /// it means a new MANIFEST_VERSION.
+    #[test]
+    fn the_identity_hash_is_stable() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        assert_eq!(
+            manifest.content.hash,
+            "sha256-8ff8b91932effce64fd2558d104dcb20164ecc63aa2772e65792e36aa4ab5c4d"
+        );
+        // What isn't identity doesn't move it.
+        let mut informational = manifest.clone();
+        informational.inputs = Inputs::new(vec!["other@2".to_string()]);
+        informational.builder = Builder::new("9.9.9");
+        informational.warnings = vec!["w".to_string()];
+        informational.verify(root.path()).unwrap();
+    }
+
+    /// Readers ignore fields they don't know, so a newer eryx can add
+    /// informational ones without a new format version.
+    #[test]
+    fn unknown_manifest_fields_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        json["futureField"] = serde_json::json!({"x": 1});
+        json["content"]["futureField"] = serde_json::json!(true);
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let read = Manifest::read(root.path()).unwrap();
+        assert_eq!(read, manifest);
+        read.verify(root.path()).unwrap();
+    }
+
+    /// An environment in a format version this eryx doesn't know is refused,
+    /// naming both.
+    #[test]
+    fn unknown_format_versions_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let mut json = serde_json::to_value(golden(root.path())).unwrap();
+        json["formatVersion"] = serde_json::json!(MANIFEST_VERSION + 1);
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let err = Manifest::read(root.path()).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("version {}", MANIFEST_VERSION + 1))
+                && err.contains(&format!("reads {MANIFEST_VERSION}")),
+            "{err}"
+        );
+    }
+
     #[test]
     fn content_hash_depends_on_paths_and_contents() {
         let a = tempfile::tempdir().unwrap();
