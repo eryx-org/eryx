@@ -1919,7 +1919,9 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
@@ -1953,15 +1955,15 @@ jobs:
           # Push or load, never both: some BuildKit versions refuse the pair
           # on the default docker driver (docker/build-push-action#727). The
           # docker job only pushes too.
-          push: ${{ github.event_name == 'push' }}
-          load: ${{ github.event_name != 'push' }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+          load: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
           tags: |
             eryx-server:python-only
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Report image size
-        if: github.event_name != 'push'
+        if: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
         run: |
           size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
           echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1999,7 +2001,9 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
@@ -2031,6 +2035,6 @@ jobs:
           build-args: |
             RUNTIME_SOURCE=custom
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
