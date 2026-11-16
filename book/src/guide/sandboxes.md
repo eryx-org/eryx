@@ -185,8 +185,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 
 - **Per execution:** an execution can be narrowed to some of the registered
   commands: `with_allowed_commands(["cat", "sort"])` on a session's (or
-  executor's) execute builder, `allowed_commands=[...]` on pyeryx
-  `Session.execute`, or `ExecuteRequest.allowed_commands` on eryx-server.
+  executor's) execute builder or on the `ExecuteOptions` of
+  `Sandbox::execute_with`, `allowed_commands=[...]` on pyeryx
+  `Sandbox.execute` and `Session.execute`, or
+  `ExecuteRequest.allowed_commands` on eryx-server.
   The guest sees only those, and the others exit 127 as if not installed. An
   empty list allows none, unset allows all, and unknown names are ignored. It
   lasts one execution: a session's next call without it gets every command

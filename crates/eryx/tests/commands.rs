@@ -1203,3 +1203,55 @@ async fn allowed_commands_narrow_a_one_shot_execution() {
         "tc\ntc=0\nupper=127\n"
     );
 }
+
+/// `Sandbox::execute_with` narrows one call's commands, and a later plain
+/// `execute` gets them all back.
+#[tokio::test]
+async fn execute_with_narrows_a_sandbox_call() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap();
+    let both = "tc argv0; echo \"tc=$?\"; upper argv0; echo \"upper=$?\"";
+
+    let options = eryx::ExecuteOptions::new().with_allowed_commands(["tc"]);
+    let out = sandbox.execute_with(both, &options).await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "tc\ntc=0\nupper=127\n");
+
+    let out = sandbox.execute(both).await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "tc\ntc=0\nupper\nupper=0\n");
+
+    let outcome = sandbox
+        .execute_journaled(
+            both,
+            None,
+            &eryx::ExecuteOptions::new().with_allowed_commands(["upper"]),
+        )
+        .await;
+    assert_eq!(
+        outcome.result.unwrap().stdout_utf8().unwrap(),
+        "tc=127\nupper\nupper=0\n"
+    );
+}
+
+/// `ExecuteOptions::with_cancellation` stops a call when its token is cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_with_cancels_on_its_token() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let token = eryx::CancellationToken::new();
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        canceller.cancel();
+    });
+    let options = eryx::ExecuteOptions::new().with_cancellation(token);
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        sandbox.execute_with("tc spin", &options),
+    )
+    .await
+    .expect("cancelling didn't stop the call")
+    .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+}

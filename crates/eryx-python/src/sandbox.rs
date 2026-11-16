@@ -279,6 +279,11 @@ impl Sandbox {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin counts as a command; other builtins
+    ///         and callbacks aren't affected.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout, timing info, and statistics.
@@ -288,6 +293,7 @@ impl Sandbox {
     ///     TimeoutError: If execution exceeds the timeout limit.
     ///     ResourceLimitError: If a resource limit is exceeded.
     ///     CancelledError: If `cancel` was cancelled.
+    ///     ValueError: If `allowed_commands` is given for another language.
     ///
     /// Example:
     ///     result = sandbox.execute('''
@@ -295,15 +301,17 @@ impl Sandbox {
     ///     print(f"2 + 2 = {x}")
     ///     ''')
     ///     print(result.stdout)  # "2 + 2 = 4"
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute(
         &self,
         py: Python<'_>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ExecuteResult> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let token = call_token(cancel);
-        let run = run_cancellable(&self.inner, &self.runtime, code, token.clone());
+        let run = run_cancellable(&self.inner, code, options, token.clone());
         run_blocking(py, &self.runtime, &token, run)?
     }
 
@@ -316,23 +324,30 @@ impl Sandbox {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin counts as a command; other builtins
+    ///         and callbacks aren't affected.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
     ///
     /// Example:
     ///     result = await sandbox.execute_async('print("hi")')
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute_async<'py>(
         &self,
         py: Python<'py>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let token = call_token(cancel);
         let run_token = token.clone();
         run_async(py, &self.runtime, token, || {
-            run_cancellable(&self.inner, &self.runtime, code, run_token)
+            run_cancellable(&self.inner, code, options, run_token)
         })
     }
 
@@ -349,6 +364,11 @@ impl Sandbox {
     ///         whose callback results are replayed instead of invoking callbacks
     ///         live. Trusted input: replayed results are returned to the sandbox
     ///         verbatim.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin counts as a command; other builtins
+    ///         and callbacks aren't affected.
     ///
     /// Returns:
     ///     ReplayOutcome with the result or error, the recorded journal, the
@@ -360,18 +380,21 @@ impl Sandbox {
     ///         save(outcome.journal)  # resume later with execute_with_journal(code, journal=...)
     ///     elif outcome.error:
     ///         raise outcome.error
-    #[pyo3(signature = (code, journal=None))]
+    #[pyo3(signature = (code, journal=None, *, allowed_commands=None))]
     fn execute_with_journal(
         &self,
         py: Python<'_>,
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ReplayOutcome> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let journal = crate::result::journal_from_py(journal)?;
         let code = code.to_string();
         let runtime = self.runtime.clone();
         let inner = &self.inner;
-        let outcome = py.detach(|| runtime.block_on(inner.execute_with_journal(&code, journal)));
+        let outcome =
+            py.detach(|| runtime.block_on(inner.execute_journaled(&code, journal, &options)));
         ReplayOutcome::from_outcome(py, outcome)
     }
 
@@ -414,32 +437,42 @@ impl std::fmt::Debug for Sandbox {
     }
 }
 
-/// Start `code` on `sandbox` and return a future for its result that also
-/// stops the run when `token` is cancelled.
+/// A call's [`eryx::ExecuteOptions`], checking `allowed_commands`, which
+/// only the shell takes.
+pub(crate) fn execute_options(
+    sandbox: &eryx::Sandbox,
+    allowed_commands: Option<Vec<String>>,
+) -> PyResult<eryx::ExecuteOptions> {
+    let mut options = eryx::ExecuteOptions::new();
+    if let Some(names) = allowed_commands {
+        let language = sandbox.executor().language();
+        if language != eryx::Language::Shell {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "allowed_commands= is only for language=\"shell\", not {language}"
+            )));
+        }
+        options = options.with_allowed_commands(names);
+    }
+    Ok(options)
+}
+
+/// A future for running `code` on (a cheap clone of) `sandbox` with
+/// `options`, stopped when `token` is cancelled.
 pub(crate) fn run_cancellable(
     sandbox: &eryx::Sandbox,
-    runtime: &tokio::runtime::Runtime,
     code: &str,
+    options: eryx::ExecuteOptions,
     token: CancellationToken,
 ) -> impl Future<Output = PyResult<ExecuteResult>> + Send + 'static {
-    // A token cancelled before the call never starts the run.
-    let handle = (!token.is_cancelled()).then(|| {
-        let _guard = runtime.enter();
-        sandbox.execute_cancellable(code)
-    });
+    let sandbox = sandbox.clone();
+    let code = code.to_string();
+    let options = options.with_cancellation(token);
     async move {
-        let handle = handle.ok_or_else(|| eryx_error_to_py(eryx::ErrorKind::Cancelled.into()))?;
-        let stop = handle.cancellation_token();
-        let wait = handle.wait();
-        tokio::pin!(wait);
-        let result = tokio::select! {
-            result = &mut wait => result,
-            () = token.cancelled() => {
-                stop.cancel();
-                wait.await
-            }
-        };
-        result.map(ExecuteResult::from).map_err(eryx_error_to_py)
+        sandbox
+            .execute_with(&code, &options)
+            .await
+            .map(ExecuteResult::from)
+            .map_err(eryx_error_to_py)
     }
 }
 

@@ -913,7 +913,11 @@ class Sandbox:
         ...
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the sandbox.
 
@@ -928,6 +932,12 @@ class Sandbox:
             code: Python source code to execute.
             cancel: Optional token; calling ``cancel.cancel()`` from any thread
                 stops the run.
+            allowed_commands: For ``language="shell"`` only: the commands this
+                call may run, out of the sandbox's. ``None`` (the default)
+                allows them all, ``[]`` allows none, and names the sandbox
+                doesn't have are ignored. Others exit 127. The shell's ``grep``
+                builtin counts as a command; other builtins and callbacks are
+                unaffected. ValueError for other languages.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -948,7 +958,11 @@ class Sandbox:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute Python code in the sandbox from asyncio.
 
@@ -961,6 +975,7 @@ class Sandbox:
             code: Python source code to execute.
             cancel: Optional token; cancelling it stops the run and raises
                 ``CancelledError``.
+            allowed_commands: As for ``execute()``.
 
         Example:
             result = await sandbox.execute_async('print("hi")')
@@ -968,7 +983,11 @@ class Sandbox:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code, journaling callback results and replaying them from
         ``journal`` if one was given.
@@ -981,9 +1000,11 @@ class Sandbox:
             journal: A journal from a previous ``ReplayOutcome.journal``. Matching
                 callbacks return their recorded results instead of running live.
                 Trusted input: replayed results reach the sandbox verbatim.
+            allowed_commands: As for ``execute()``.
 
         Raises:
-            ValueError: If ``journal`` is not a valid journal.
+            ValueError: If ``journal`` is not a valid journal, or
+                ``allowed_commands`` is given for another language.
 
         Example:
             outcome = sandbox.execute_with_journal(code)
@@ -1834,13 +1855,18 @@ class PooledSandbox:
     """
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the sandboxed lease. See ``Sandbox.execute()``.
 
         Args:
             code: Python source code to execute.
             cancel: Optional token; cancelling it stops the run.
+            allowed_commands: As for ``Sandbox.execute()``.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -1855,7 +1881,11 @@ class PooledSandbox:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute Python code in the sandboxed lease from asyncio. See
         ``Sandbox.execute_async()``.
@@ -1866,7 +1896,11 @@ class PooledSandbox:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code with callback journaling and replay. See
         ``Sandbox.execute_with_journal()``.

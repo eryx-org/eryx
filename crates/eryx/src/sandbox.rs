@@ -261,7 +261,23 @@ impl Sandbox {
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
     pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
-        self.run_inner(code, None, None).await
+        self.execute_with(code, &ExecuteOptions::default()).await
+    }
+
+    /// Execute code with per-call [`ExecuteOptions`]: narrowed shell
+    /// commands, or a token that cancels it. [`execute`](Self::execute) is
+    /// this with the defaults.
+    ///
+    /// # Errors
+    ///
+    /// As for [`execute`](Self::execute), and
+    /// [`ErrorKind::Cancelled`] if the options' token is cancelled.
+    pub async fn execute_with(
+        &self,
+        code: &str,
+        options: &ExecuteOptions,
+    ) -> Result<ExecuteResult, Error> {
+        self.run_inner(code, None, options).await
     }
 
     /// Execute Python code with callback-result replay and journaling.
@@ -291,8 +307,23 @@ impl Sandbox {
         code: &str,
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
+        self.execute_journaled(code, journal, &ExecuteOptions::default())
+            .await
+    }
+
+    /// [`execute_with_journal`](Self::execute_with_journal) with per-call
+    /// [`ExecuteOptions`]. The same security note applies: only replay
+    /// journals from a trusted source.
+    pub async fn execute_journaled(
+        &self,
+        code: &str,
+        journal: Option<CallbackJournal>,
+        options: &ExecuteOptions,
+    ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
-        let result = self.run_inner(code, Some(Arc::clone(&state)), None).await;
+        let result = self
+            .run_inner(code, Some(Arc::clone(&state)), options)
+            .await;
         ReplayOutcome::from_state(&state, code, result)
     }
 
@@ -302,9 +333,8 @@ impl Sandbox {
     ///
     /// When `replay_state` is `Some`, every registered callback is wrapped with
     /// a [`ReplayCallback`](crate::replay::ReplayCallback) sharing that state.
-    /// When `cancel_token` is `Some`, cancelling it interrupts the execution.
     #[tracing::instrument(
-        skip(self, code, replay_state, cancel_token),
+        skip(self, code, replay_state, options),
         fields(
             code_len = code.len(),
             callbacks = self.callbacks.len(),
@@ -318,7 +348,7 @@ impl Sandbox {
         &self,
         code: &str,
         replay_state: Option<Arc<Mutex<ReplayState>>>,
-        cancel_token: Option<CancellationToken>,
+        options: &ExecuteOptions,
     ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -397,8 +427,11 @@ impl Sandbox {
             .execute(code)
             .with_preamble(self.preamble.as_str())
             .with_callbacks(&callbacks, callback_tx);
-        if let Some(token) = cancel_token {
-            execute_builder = execute_builder.with_cancellation(token);
+        if let Some(token) = &options.cancellation {
+            execute_builder = execute_builder.with_cancellation(token.clone());
+        }
+        if let Some(names) = &options.allowed_commands {
+            execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
         }
         if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
@@ -881,13 +914,14 @@ impl Sandbox {
 
         let finished = Arc::new(AtomicBool::new(false));
 
-        let sandbox = self.clone_for_task();
+        let sandbox = self.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
         let task_finished = Arc::clone(&finished);
 
         tokio::spawn(async move {
-            let result = sandbox.run_inner(&code, None, Some(token)).await;
+            let options = ExecuteOptions::new().with_cancellation(token);
+            let result = sandbox.execute_with(&code, &options).await;
             task_finished.store(true, Ordering::Release);
             // Send result back (ignore error if receiver dropped)
             let _ = result_tx.send(result);
@@ -899,10 +933,13 @@ impl Sandbox {
             result: result_rx,
         }
     }
+}
 
-    /// A copy of this sandbox sharing its executor and callbacks, so an
-    /// execution can run on a spawned task.
-    fn clone_for_task(&self) -> Self {
+/// A copy sharing the compiled runtime, callbacks and handlers, so a clone is
+/// cheap, and an execution can run on a spawned task. Executions of a sandbox
+/// and of its clones are independent, as executions of one sandbox are.
+impl Clone for Sandbox {
+    fn clone(&self) -> Self {
         Self {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
@@ -1066,6 +1103,52 @@ fn python_str_literal(value: &str) -> String {
 pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
     ErrorKind::Execution(format!("{task} task failed: {error}")).into()
+}
+
+/// Options for one execution of a [`Sandbox`], for
+/// [`execute_with`](Sandbox::execute_with) and
+/// [`execute_journaled`](Sandbox::execute_journaled).
+///
+/// # Stability
+///
+/// Options added later default to today's behaviour.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ExecuteOptions {
+    allowed_commands: Option<Vec<String>>,
+    cancellation: Option<CancellationToken>,
+}
+
+impl ExecuteOptions {
+    /// The defaults: every registered command, and no cancellation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Let this execution spawn only the named commands (shell only): the
+    /// guest lists just those, and any other spawn fails with
+    /// `command-not-found`. An empty list allows none; names that aren't
+    /// registered are ignored. The shell's `grep` builtin counts as a
+    /// command here; other builtins and callbacks aren't affected. Sessions
+    /// take the same option on [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Interrupt the execution when `token` is cancelled; it then fails with
+    /// [`ErrorKind::Cancelled`].
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
 }
 
 /// Handle to a cancellable execution.
