@@ -562,8 +562,7 @@ run = """
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/coreutils.wasm \
   --target "${ERYX_CPU_FEATURES:-native}" \
-  --output crates/eryx-runtime/coreutils.cwasm \
-  --no-verify
+  --output crates/eryx-runtime/coreutils.cwasm
 """
 sources = ["crates/eryx-runtime/coreutils.wasm"]
 outputs = ["crates/eryx-runtime/coreutils.cwasm"]
@@ -593,8 +592,7 @@ run = """
 cargo run -p eryx-precompile --release -- compile \
   crates/eryx-runtime/eryx-bundler.wasm \
   --target "${ERYX_CPU_FEATURES:-native}" \
-  --output crates/eryx-runtime/eryx-bundler.cwasm \
-  --no-verify
+  --output crates/eryx-runtime/eryx-bundler.cwasm
 """
 sources = ["crates/eryx-runtime/eryx-bundler.wasm"]
 outputs = ["crates/eryx-runtime/eryx-bundler.cwasm"]

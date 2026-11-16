@@ -333,7 +333,8 @@ struct CompileArgs {
     #[arg(long, conflicts_with_all = ["target", "cpu_features"])]
     wasm_only: bool,
 
-    /// Skip verification step
+    /// Skip verification: running a Python runtime's imports (and
+    /// --verify-code), or loading a command as a shell sandbox would
     #[arg(long)]
     no_verify: bool,
 
@@ -1147,16 +1148,23 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         wasm_bytes.len() as f64 / 1_000_000.0
     );
 
-    // A command (a component exporting wasi:cli/run) that imports what
+    // A command is a component exporting wasi:cli/run. One that imports what
     // children don't get would only fail once registered: refuse it now.
-    if args.language.is_none()
-        && let Ok(info) = eryx::Command::inspect(&wasm_bytes)
-        && info.wasi.is_some()
-        && let Some(problem) = info.problem
-    {
+    let command = match eryx::Command::inspect(&wasm_bytes) {
+        Ok(info) if args.language.is_none() && info.wasi.is_some() => {
+            if let Some(problem) = info.problem {
+                anyhow::bail!(
+                    "{} can't run as a shell command: {problem}",
+                    args.input.display()
+                );
+            }
+            true
+        }
+        _ => false,
+    };
+    if command && args.verify_code.is_some() {
         anyhow::bail!(
-            "{} can't run as a shell command: {problem}",
-            args.input.display()
+            "--verify-code is Python code, for runtimes: a command is verified by loading it"
         );
     }
 
@@ -1248,10 +1256,17 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         // Verify if requested
         if !args.no_verify {
             println!();
-            if !python {
-                println!("Step 4: Skipping verification: it runs Python code");
-            } else if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
+            if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
                 println!("Step 4: Skipping verification: {reason}");
+            } else if command {
+                println!("Step 4: Verifying the command loads...");
+                // SAFETY: We just created this file from Executor::precompile()
+                #[allow(unsafe_code)]
+                unsafe { eryx::Command::from_precompiled_file(&output) }
+                    .context("The compiled command doesn't load")?;
+                println!("  Verification passed!");
+            } else if !python {
+                println!("Step 4: Skipping verification: it runs Python code");
             } else {
                 println!("Step 4: Verifying...");
                 verify_cwasm(&output, &stdlib, &args.imports, args.verify_code.as_deref()).await?;
