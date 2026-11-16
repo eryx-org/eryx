@@ -1568,7 +1568,7 @@ impl SessionExecutor {
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
-            state.child_net = child_net;
+            state.child_net = child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net)));
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.stream_budget = StreamBudget::default();

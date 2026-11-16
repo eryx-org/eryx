@@ -1378,9 +1378,10 @@ pub struct ExecutorState {
     pub(crate) commands: crate::process::Commands,
     /// Host memory the execution's child processes may hold.
     pub(crate) child_budget: crate::process::ChildBudget,
-    /// The execution's children's network, if they have one. Dropped (with
-    /// its proxies) when the execution ends.
-    pub(crate) child_net: Option<crate::process::ChildNet>,
+    /// The execution's children's network, if they have one, shared with
+    /// children that spawn their own. Dropped (with its proxies) when the
+    /// execution ends.
+    pub(crate) child_net: Option<std::sync::Arc<std::sync::Mutex<crate::process::ChildNet>>>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -3825,7 +3826,7 @@ impl Executor {
             stream_budget: StreamBudget::default(),
             commands: self.commands.clone(),
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
-            child_net,
+            child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode

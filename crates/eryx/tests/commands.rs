@@ -879,6 +879,161 @@ async fn p3_children_share_the_sessions_vfs() {
     assert_eq!(storage.read("/data/b.txt").await.unwrap(), b"from-p3");
 }
 
+/// The test command, allowed to run commands itself (`tc spawn CMD ...`).
+fn spawning_cmd() -> Command {
+    test_cmd().allow_spawn()
+}
+
+/// What a script printed, to stdout and stderr, whether or not it failed.
+async fn run_script(sandbox: &Sandbox, script: &str) -> String {
+    let (stdout, stderr) = match sandbox.execute(script).await {
+        Ok(out) => (out.stdout, out.stderr),
+        Err(e) => match e.kind() {
+            ErrorKind::ScriptFailed { stdout, stderr, .. } => (stdout.clone(), stderr.clone()),
+            _ => panic!("{e}"),
+        },
+    };
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    )
+}
+
+/// A child whose command may spawn runs commands through
+/// `eryx:process/run`: with its stdin, args, env and exit status, from WASI
+/// 0.2 and 0.3 children alike, and only commands that are registered.
+#[tokio::test]
+async fn children_run_commands_of_their_own() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_command("tc3", test_cmd_p3().allow_spawn())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "echo hi | tc spawn tc; tc spawn tc exit 3; echo \"status=$?\"; \
+             FOO=bar tc spawn tc env FOO; tc spawn tc argv0; \
+             echo lo | tc3 spawn tc; echo p3 | tc spawn tc3; tc spawn nope; true",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "HI\nstatus=3\nbar\ntc\nLO\nP3\nerror: command-not-found\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "bye\n");
+}
+
+/// Only commands registered with `allow_spawn` may run others, at any depth.
+#[tokio::test]
+async fn only_commands_allowed_to_spawn_can() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_command("plain", test_cmd())
+        .build()
+        .unwrap();
+    let out = run_script(
+        &sandbox,
+        "plain spawn tc argv0; tc spawn plain spawn tc argv0",
+    )
+    .await;
+    assert_eq!(out, "error: spawn-failed\nerror: spawn-failed\n");
+}
+
+/// Children nest at most four deep (the shell's are the first).
+#[tokio::test]
+async fn nested_spawns_stop_at_the_depth_limit() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc spawn tc spawn tc spawn tc argv0").await;
+    assert_eq!(out, "tc\n");
+    let out = run_script(&sandbox, "tc spawn tc spawn tc spawn tc spawn tc argv0").await;
+    assert_eq!(out, "error: limit-exceeded\n");
+}
+
+/// A nested child burns its execution's fuel, stops at its timeout, and
+/// draws on the children's memory pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_children_share_the_executions_limits() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(100_000_000))
+        .build()
+        .unwrap();
+    sandbox.execute("tc spawn tc argv0").await.unwrap();
+    let err = sandbox
+        .execute("tc spawn tc spawn tc spin")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox.execute("tc spawn tc spin").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // The pool is 256 MiB.
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "echo hi | tc spawn tc alloc 160").await;
+    assert_eq!(out, "hi\n");
+    let out = run_script(&sandbox, "echo hi | tc spawn tc alloc 300").await;
+    assert_eq!(out, "error: OutOfMemory\n");
+}
+
+/// A nested run's output is capped: a command writing more is stopped.
+/// (`run` returns output only once the command exits.)
+#[tokio::test]
+async fn nested_output_is_capped() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc spawn tc yes").await;
+    assert_eq!(out, "error: limit-exceeded\n");
+}
+
+/// Nested children see the same VFS as the shell and their caller.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn nested_children_share_the_sessions_vfs() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let out = session
+        .execute(
+            "echo from-shell > /data/a.txt; tc spawn tc cat /data/a.txt; \
+             tc spawn tc write /data/b.txt nested; read -r b < /data/b.txt; echo \"b=$b\"",
+        )
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "from-shell\nb=nested\n"
+    );
+    assert_eq!(storage.read("/data/b.txt").await.unwrap(), b"nested");
+}
+
 /// A line-at-a-time producer moves data at a useful rate (#890). Timed
 /// against a buffered producer in the same test, so the bound follows the
 /// runner's speed: 100 KB in 2-byte lines takes ~0.55x as long as 20 MB
