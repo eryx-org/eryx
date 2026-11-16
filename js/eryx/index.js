@@ -285,8 +285,8 @@ function _toResult(output, stateWasReset, stats) {
 /**
  * Refuse callbacks the guest would never install under their name, as the
  * Rust host does (#962): a JavaScript global or the first part of a dotted
- * name, a shell builtin, or a shell command the callback would hide. A
- * Python builtin is only warned about for now. Reports the first by name.
+ * name, a Python builtin, a shell builtin, or a shell command the callback
+ * would hide. Reports the first by name.
  * @param {string} language
  * @param {string[]} names - The callbacks' names
  * @param {string[]} commands - The shell's command names
@@ -304,10 +304,6 @@ function checkCallbackNames(language, names, commands) {
     } else if (language === "shell" && commands.includes(root)) {
       message = `callback '${name}' collides with the command '${root}', which it would hide; give one of them another name`;
     } else {
-      continue;
-    }
-    if (language === "python") {
-      console.warn(`eryx: ${message}`);
       continue;
     }
     throw new TypeError(message);

@@ -759,7 +759,7 @@ impl Sandbox {
     ///
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
     /// name, or if one collides with a name the guest uses itself (a
-    /// JavaScript global, a shell builtin or command; Python only warns);
+    /// JavaScript global, a Python builtin, a shell builtin or command);
     /// the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
