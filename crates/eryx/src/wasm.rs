@@ -3358,6 +3358,11 @@ impl Executor {
         // TCP/TLS functions are sync `func` in WIT but use fiber-based async
         // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
+        // The synchronous `stream`/`future` read and write builtins and async
+        // `subtask.cancel`, which wasip3 Go programs (`gh`) use as child
+        // commands. Only validation gates them: wasmparser refuses those
+        // canonical builtins unless this is on.
+        config.wasm_component_model_more_async_builtins(true);
 
         // Enable epoch-based interruption for execution timeouts.
         // This allows us to interrupt WASM execution even in tight loops
