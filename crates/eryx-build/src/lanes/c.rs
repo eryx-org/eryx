@@ -84,7 +84,9 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
-    // The main build's own glue: WIT bindings, then shims.
+    // The main build's own glue: the start-in-$PWD constructor, WIT
+    // bindings, then shims.
+    shim_objs.push(super::cwd_from_pwd_obj(&output_dir)?);
     if let Some(wit) = &manifest.build.wit {
         shim_objs.extend(build_wit(manifest, wit, &clang, &output_dir, &repo_root)?);
     }

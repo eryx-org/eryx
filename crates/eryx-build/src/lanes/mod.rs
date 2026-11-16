@@ -34,6 +34,37 @@ pub(crate) fn path_str(p: &Path) -> Result<String> {
 /// the manifest's `[cwasm]` settings. Shared by the lanes; a no-op when
 /// `cwasm.enabled` is false. `cwasm.flags` carries any engine knobs the target
 /// needs (e.g. the Go lane's async/stackful flags).
+/// Compile `src/cwd_from_pwd.rs`'s constructor to a `wasm32-wasip2`
+/// object in `output_dir`, for the C and Rust lanes to link into every
+/// component (#978). Built with `rustc`, which both lanes have.
+pub(crate) fn cwd_from_pwd_obj(output_dir: &Path) -> Result<String> {
+    let source = output_dir.join("cwd_from_pwd.rs");
+    std::fs::write(&source, include_str!("../cwd_from_pwd.rs"))
+        .with_context(|| format!("writing {}", source.display()))?;
+    let obj = path_str(&output_dir.join("cwd_from_pwd.o"))?;
+    let source_s = path_str(&source)?;
+    run(
+        "rustc",
+        &[
+            "--edition",
+            "2024",
+            "--target",
+            "wasm32-wasip2",
+            "--crate-type",
+            "lib",
+            "--emit",
+            "obj",
+            "-O",
+            "-o",
+            &obj,
+            &source_s,
+        ],
+        output_dir,
+        &[],
+    )?;
+    Ok(obj)
+}
+
 pub(crate) fn compile_cwasm(
     manifest: &Manifest,
     component: &Path,

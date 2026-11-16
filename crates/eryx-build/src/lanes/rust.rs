@@ -41,9 +41,12 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
+    let cwd_obj = super::cwd_from_pwd_obj(&output_dir)?;
     eprintln!("=== [{}] cargo build → wasip2 component ===", manifest.name);
+    // `cargo rustc`, to link the start-in-$PWD constructor (#978) into the
+    // binary alone without replacing the project's own RUSTFLAGS.
     let mut args: Vec<String> = vec![
-        "build".into(),
+        "rustc".into(),
         "--release".into(),
         // Build exactly the pinned lockfile (after any vendor_patch updates it).
         "--locked".into(),
@@ -53,6 +56,7 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         bin.to_string(),
     ];
     args.extend(manifest.build.cargo_flags.iter().cloned());
+    args.extend(["--".into(), "-C".into(), format!("link-arg={cwd_obj}")]);
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     // Pin the target dir to the source tree: a `.cargo/config.toml` or
     // CARGO_TARGET_DIR inherited from the eryx checkout would otherwise send
