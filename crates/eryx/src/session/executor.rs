@@ -1682,10 +1682,23 @@ impl SessionExecutor {
                 .with_output_truncated(output_truncated)
         };
 
-        // A cancelled run was interrupted mid-call, so its instance can't be
-        // reused: leave the store out and the next call resets the session.
+        // A cancelled or timed-out run was interrupted mid-call, so its
+        // instance can't be reused: a trap leaves it unenterable, and a guest
+        // suspended on a timer or callback would wake into the next call.
+        // Leave the store out and the next call resets the session.
         if was_cancelled.load(Ordering::Relaxed) {
             return Err(with_stats(ErrorKind::Cancelled.into()));
+        }
+        let timed_out = async_timeout_elapsed
+            || result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<wasmtime::Trap>())
+                == Some(&wasmtime::Trap::Interrupt);
+        if timed_out {
+            return Err(with_stats(
+                ErrorKind::Timeout(execution_timeout.unwrap_or_default()).into(),
+            ));
         }
 
         // Restore store and bindings before handling result
@@ -1693,15 +1706,11 @@ impl SessionExecutor {
         self.bindings = Some(bindings);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
-        // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
-        // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
+        // so we downcast to wasmtime::Trap for WASM-level traps (OutOfFuel here;
+        // timeouts returned above).
         let wasmtime_result = result
             .map_err(|e| {
-                if async_timeout_elapsed
-                    || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
-                {
-                    ErrorKind::Timeout(execution_timeout.unwrap_or_default())
-                } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+                if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                     if let Some(reason) = suspended_reason.clone() {
                         ErrorKind::Suspended(reason)
                     } else {
@@ -1765,8 +1774,9 @@ impl SessionExecutor {
         Ok(output)
     }
 
-    /// Start over on a fresh instance if a call whose future was dropped
-    /// mid-run took the instance with it, rather than failing every later call.
+    /// Start over on a fresh instance if a call that was cancelled or timed
+    /// out, or whose future was dropped mid-run, took the instance with it,
+    /// rather than failing every later call.
     ///
     /// Returns whether the instance was reset; the next successful execution
     /// then reports [`ExecutionOutput::state_was_reset`].
@@ -1781,7 +1791,9 @@ impl SessionExecutor {
         if self.store.is_some() {
             return Ok(false);
         }
-        tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
+        tracing::warn!(
+            "previous session call was cancelled or timed out mid-run; resetting, state lost"
+        );
         self.reset(callbacks).await?;
         self.state_was_reset = true;
         Ok(true)

@@ -69,19 +69,20 @@ struct Task {
     /// The host `sleep` waiting for the next timer, if one is armed, and
     /// when (on `fresh::now`'s clock) it ends.
     sleep: Option<(wit::PendingSleep, f64)>,
-    /// A timer has run, or the script has settled: invokes started from now
-    /// on keep the execute running.
-    timer_work: bool,
+    /// The script's synchronous run is over: invokes started from now on
+    /// keep the execute running.
+    past_sync_run: bool,
 }
 
 struct PendingInvoke {
     call: PendingInvokeCall,
     resolve: Persistent<Function<'static>>,
     reject: Persistent<Function<'static>>,
-    /// Started by timer work (a timer's callback, or anything after one ran)
-    /// or after the script settled, so, as in Node, the execute waits for
-    /// it. An invoke the script itself started and never awaited is
-    /// released when the script ends, as in the CPython guest.
+    /// Started after the script's synchronous run (in a promise callback,
+    /// after an `await`, or in a timer), so, as in Node, the execute waits
+    /// for it. One the script's top-level code started synchronously and
+    /// never awaited is released when the script ends, as in the CPython
+    /// guest.
     keeps_alive: bool,
 }
 
@@ -173,7 +174,7 @@ fn native_invoke<'js>(
                 call,
                 resolve: Persistent::save(&ctx, resolve),
                 reject: Persistent::save(&ctx, reject),
-                keeps_alive: with_task(|task| task.timer_work).unwrap_or(false),
+                keeps_alive: with_task(|task| task.past_sync_run).unwrap_or(false),
             };
             with_task(|task| task.register(pending));
         }
@@ -234,7 +235,7 @@ impl Task {
             stderr: Vec::new(),
             imports: Vec::new(),
             sleep: None,
-            timer_work: false,
+            past_sync_run: false,
         }
     }
 
@@ -392,7 +393,10 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
         {
             Ok(promise) => {
                 let promise = Persistent::save(ctx, promise);
-                with_task(|task| task.completion = Some(promise));
+                with_task(|task| {
+                    task.completion = Some(promise);
+                    task.past_sync_run = true;
+                });
                 poll(ctx, hooks)
             }
             // Syntax errors are thrown synchronously rather than rejecting.
@@ -560,10 +564,7 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
         }
         loop {
             match timers_call::<bool>(hooks, "runDue", ()).catch(ctx) {
-                Ok(true) => {
-                    with_task(|task| task.timer_work = true);
-                    while ctx.execute_pending_job() {}
-                }
+                Ok(true) => while ctx.execute_pending_job() {},
                 Ok(false) => break,
                 // An exception in a timer callback fails the execute, as an
                 // uncaught one ends a Node process.
@@ -590,12 +591,10 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
         // the invokes it waits for. Unref'd timers only fire while
         // something else does.
         match promise.state() {
-            PromiseState::Resolved => {
-                with_task(|task| task.timer_work = true);
-                if !referenced && !alive_invokes {
-                    return finish(hooks, Ok(()));
-                }
+            PromiseState::Resolved if !referenced && !alive_invokes => {
+                return finish(hooks, Ok(()));
             }
+            PromiseState::Resolved => {}
             PromiseState::Rejected => {
                 // `result` rethrows the rejection reason so `catch` can pick it up.
                 let _ = promise.result::<Value<'_>>();

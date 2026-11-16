@@ -305,3 +305,60 @@ async fn refresh_doesnt_grow_the_queue() {
     let many = peak(200_000).await;
     assert!(many < few + 4_000_000, "few {few}, many {many}");
 }
+
+/// A timed-out execute leaves no guest task behind, whether it was waiting
+/// on a timer or spinning: the session's next execute starts on a fresh
+/// instance and says so.
+#[tokio::test]
+async fn a_timed_out_session_starts_again() {
+    for code in [
+        "setInterval(() => {}, 10)",
+        "await new Promise((r) => setTimeout(r, 10000))",
+        "while (true) {}",
+    ] {
+        let executor = sandbox(Duration::from_secs(10)).executor();
+        let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+        session.set_execution_timeout(Some(Duration::from_millis(300)));
+        session.execute("var kept = 1").run().await.unwrap();
+        let err = session.execute(code).run().await.unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Timeout(_)),
+            "{code}: {err:?}"
+        );
+        let out = session
+            .execute("console.log('next', typeof kept)")
+            .run()
+            .await
+            .unwrap_or_else(|e| panic!("{code}: {e}"));
+        assert_eq!(out.stdout_text(), "next undefined\n", "{code}");
+        assert!(out.state_was_reset, "{code}");
+    }
+}
+
+/// Which invokes the execute waits for: any started after the script's
+/// synchronous run (in a promise callback, after an `await`, in a timer),
+/// but not one its top-level code started and never awaited.
+#[tokio::test]
+async fn which_invokes_keep_the_execute_running() {
+    for (code, expected) in [
+        ("slow().then(console.log); console.log('end')", "end\n"),
+        (
+            "AbortSignal.timeout(10000); slow().then(console.log); console.log('end')",
+            "end\n",
+        ),
+        (
+            "Promise.resolve().then(() => slow().then(console.log))",
+            "slept\n",
+        ),
+        ("await null; slow().then(console.log)", "slept\n"),
+        ("setTimeout(() => slow().then(console.log), 1)", "slept\n"),
+    ] {
+        let start = Instant::now();
+        assert_eq!(run(code).await.unwrap(), expected, "{code}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{code}: {:?}",
+            start.elapsed()
+        );
+    }
+}

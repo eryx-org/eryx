@@ -87,12 +87,16 @@ functions, `queueMicrotask`, and `node:timers` and `node:timers/promises`
 iterator). Waiting burns no fuel, but it counts towards the execution
 timeout.
 
-- **An execute waits for referenced timers**, as a Node process does, and for
-  callbacks that timer work started (`setTimeout(async () => await tool(),
-  10)`). So `setTimeout(() => console.log("hi"), 100)` prints `hi` without an
-  `await`, and a `setInterval` that's never cleared runs until the execution
-  timeout fails the execute (`ErrorKind::Timeout`). A callback the script
-  itself starts and never awaits is still released when the script ends.
+- **An execute waits for referenced timers**, as a Node process does. So
+  `setTimeout(() => console.log("hi"), 100)` prints `hi` without an `await`,
+  and a `setInterval` that's never cleared runs until the execution timeout
+  fails the execute (`ErrorKind::Timeout`). A timed-out execute discards its
+  instance, so a session's next execute starts fresh (`state_was_reset`).
+- **It waits for callbacks started after the script's synchronous run**: in a
+  promise callback (`Promise.resolve().then(() => tool())`), after an `await`,
+  or in a timer. A callback the script's top-level code starts synchronously
+  and never awaits (`tool(); console.log("done")`) is released when the
+  script ends, as in Python.
 - **`timer.unref()`** lets the execute finish without that timer, and an
   unref'd timer alone (like `AbortSignal.timeout()`'s) doesn't keep a script
   that never settles waiting. Timers still pending when the execute finishes
