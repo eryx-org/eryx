@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["python", "sandbox", "wasm", "webassembly", "async"]
 categories = ["development-tools", "wasm"]
 # Only the JS package uses the .gz copy; leaving it out keeps the crate under the 10 MB crates.io limit.
-exclude = ["python-stdlib.tar.gz"]
+exclude = ["python-stdlib.tar.gz", "tests/fixtures/js-environment"]
 
 [[bench]]
 name = "execution"
@@ -202,11 +202,14 @@ unstable-vfs = ["dep:eryx-vfs"]
 # code; this is for hosts that drive the executor themselves, like eryx-server.
 # Outside semver, like `unstable-vfs`.
 unstable-internals = []
-# Environments (`eryx::environment`): build package sets ahead of time for
-# sandboxes to mount. Embeds the JavaScript bundler (eryx-bundler.cwasm: from
-# `eryx-precompile setup --bundler`, or `mise run precompile-bundler` in the
-# workspace; ERYX_BUNDLER_CWASM names another).
-packages = ["dep:eryx-packages", "dep:blake3"]
+# Environments (`eryx::environment`): package sets built ahead of time, which
+# sandboxes mount with `with_environment`. `environment` loads and mounts
+# them; `packages` also builds them, which embeds the npm client and the
+# JavaScript bundler (eryx-bundler.cwasm: from `eryx-precompile setup
+# --bundler`, or `mise run precompile-bundler` in the workspace;
+# ERYX_BUNDLER_CWASM names another).
+environment = ["dep:eryx-packages"]
+packages = ["environment", "eryx-packages/npm", "dep:blake3"]
 
 
 [dev-dependencies]
@@ -214,7 +217,7 @@ packages = ["dep:eryx-packages", "dep:blake3"]
 # exercise the executor plumbing directly.
 eryx = { path = ".", features = ["unstable-internals"] }
 # The environment tests build package caches and lockfiles by hand.
-eryx-packages.workspace = true
+eryx-packages = { workspace = true, features = ["npm"] }
 anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
