@@ -23,7 +23,7 @@
 //! Alternatively, enable the `embedded` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1334,14 +1334,22 @@ impl StreamBudget {
     }
 }
 
+/// Most callback starts [`CallbackClock`] keeps waiting for their end; past
+/// it, the oldest is forgotten (its end then reports no duration).
+const MAX_PENDING_CALLBACKS: usize = 1024;
+
 /// Times host callbacks from the guest's `callback_start` and `callback_end`
 /// trace events, which every guest reports around a call but none times.
 ///
-/// Calls are matched by name, first in first out.
+/// Calls are matched by name, first in first out. Only events the trace
+/// budget let through are timed, and at most [`MAX_PENDING_CALLBACKS`] starts
+/// are kept, so a guest reporting starts without ends can't grow it.
 // ponytail: concurrent calls to one callback that finish out of order get
 // each other's durations; a call id in the events would pair them exactly.
+// A start whose end never comes (the CPython guest reports no end for a
+// cancelled call, #943) skews that name's later durations the same way.
 #[derive(Debug, Default)]
-pub(crate) struct CallbackClock(HashMap<String, VecDeque<std::time::Instant>>);
+pub(crate) struct CallbackClock(VecDeque<(String, std::time::Instant)>);
 
 impl CallbackClock {
     /// Note a `callback_start`, or add `duration_ms` to a `callback_end`.
@@ -1360,13 +1368,18 @@ impl CallbackClock {
             return;
         };
         match kind {
-            "callback_start" => self
-                .0
-                .entry(name.to_owned())
-                .or_default()
-                .push_back(std::time::Instant::now()),
+            "callback_start" => {
+                if self.0.len() == MAX_PENDING_CALLBACKS {
+                    self.0.pop_front();
+                }
+                self.0
+                    .push_back((name.to_owned(), std::time::Instant::now()));
+            }
             "callback_end" => {
-                let Some(started) = self.0.get_mut(name).and_then(VecDeque::pop_front) else {
+                let Some(i) = self.0.iter().position(|(started, _)| started == name) else {
+                    return;
+                };
+                let Some((_, started)) = self.0.remove(i) else {
                     return;
                 };
                 let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1652,11 +1665,13 @@ impl SandboxImports for ExecutorState {
     /// Report a trace event to the host.
     fn report_trace(&mut self, lineno: u32, mut event_json: String, context_json: String) {
         if let Some(tx) = &self.trace_tx {
-            self.callback_clock.time(&mut event_json);
             let size = event_json.len() + context_json.len();
             if !self.stream_budget.spend_trace(size) {
                 return;
             }
+            // Only once charged: the clock keeps what a start's event names.
+            // (An end's added `duration_ms` goes uncharged, a few bytes.)
+            self.callback_clock.time(&mut event_json);
             let request = TraceRequest {
                 lineno,
                 event_json,
@@ -4255,6 +4270,43 @@ pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// The callback clock times matched calls, keeps at most
+    /// `MAX_PENDING_CALLBACKS` unmatched starts, and keeps none the trace
+    /// budget dropped.
+    #[test]
+    fn the_callback_clock_is_bounded_and_charged() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ExecutorState::placeholder();
+        state.trace_tx = Some(tx);
+        let event =
+            |kind: &str, name: &str| serde_json::json!({ "type": kind, "name": name }).to_string();
+
+        SandboxImports::report_trace(&mut state, 0, event("callback_start", "a"), String::new());
+        SandboxImports::report_trace(&mut state, 0, event("callback_end", "a"), String::new());
+        let _start = rx.try_recv().unwrap();
+        let end: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert!(end["duration_ms"].is_u64(), "{end}");
+        assert!(state.callback_clock.0.is_empty());
+
+        for i in 0..3 * MAX_PENDING_CALLBACKS {
+            let name = format!("cb{i}");
+            SandboxImports::report_trace(
+                &mut state,
+                0,
+                event("callback_start", &name),
+                String::new(),
+            );
+        }
+        assert_eq!(state.callback_clock.0.len(), MAX_PENDING_CALLBACKS);
+
+        // Once the budget is spent, starts are dropped and not kept either.
+        state.callback_clock = CallbackClock::default();
+        state.stream_budget.trace = 0;
+        SandboxImports::report_trace(&mut state, 0, event("callback_start", "b"), String::new());
+        assert!(state.callback_clock.0.is_empty());
+    }
+
     #[test]
     fn language_stamp_round_trips() {
         for language in [Language::Python, Language::JavaScript, Language::Shell] {
