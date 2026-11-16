@@ -407,3 +407,29 @@ async fn fetch_takes_urls_and_still_refuses_what_it_cant_use() {
          TypeError fetch failed not-permitted\n"
     );
 }
+
+/// A fetch the signal's deadline stops is a TimeoutError, every time: the
+/// host's request timeout and the guest's clock can disagree by a hair, and
+/// a host timeout on the deadline still counts as the signal's.
+#[tokio::test]
+async fn deadline_timeouts_are_timeout_errors() {
+    let server = Server::start().await;
+    let sandbox = server.sandbox(server.net()).build().unwrap();
+    let out = run(
+        &sandbox,
+        r"
+        const names = new Set();
+        for (let i = 0; i < 20; i++) {
+            const signal = AbortSignal.timeout(20);
+            try {
+                await fetch('https://api.test/stall', { signal });
+            } catch (e) {
+                names.add(`${e.name} ${e === signal.reason}`);
+            }
+        }
+        console.log([...names].join());
+        ",
+    )
+    .await;
+    assert_eq!(out, "TimeoutError true\n");
+}

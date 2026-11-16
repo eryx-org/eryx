@@ -71,6 +71,11 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::wasm::{ExecutorState, SandboxPre};
 
+// The checks build.rs runs on a cached runtime, shared so the names and
+// checksums `eryx-precompile setup` writes are read the same way here.
+#[path = "../build/cached_runtime.rs"]
+mod cached_runtime;
+
 /// Error type for cache operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -442,30 +447,86 @@ pub fn setup_coreutils() -> Option<PathBuf> {
     setup_file("coreutils")
 }
 
-/// `<stem>-v<version>-<arch>-<os>.cwasm` in the setup cache, if it's there
-/// and private.
-fn setup_file(stem: &str) -> Option<PathBuf> {
+/// The JavaScript bundler (`eryx-bundler.cwasm`) that `eryx-precompile setup
+/// --bundler` cached for this platform and eryx version, if it's there:
+/// its bytes, once they match the checksum `setup` wrote next to them and
+/// pass the same privacy checks as [`setup_runtime`], or why they don't.
+#[must_use]
+pub fn setup_bundler() -> Option<(PathBuf, Result<Vec<u8>, String>)> {
+    setup_file("eryx-bundler").map(|path| {
+        let bytes = setup_read_verified(&path);
+        (path, bytes)
+    })
+}
+
+/// The bytes of a file `eryx-precompile setup` cached at `path`, if they
+/// match the checksum next to them and the file, its checksum and their
+/// directory are private to this user (as for [`setup_runtime`]), or why
+/// they can't be used. `setup` and eryx's build script check its cache with
+/// this too.
+///
+/// # Errors
+///
+/// Why the cached file can't be used.
+pub fn setup_read_verified(path: &Path) -> Result<Vec<u8>, String> {
+    cached_runtime::read_verified(path)
+}
+
+/// The directory `eryx-precompile setup` caches into and eryx reads from:
+/// `$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx` (`%USERPROFILE%` without a
+/// `HOME`). A relative or empty `XDG_CACHE_HOME` or `HOME` is ignored, as for
+/// the embedded runtime's cache. `None` without either.
+#[must_use]
+pub fn setup_dir() -> Option<PathBuf> {
     let absolute = |name: &str| {
         std::env::var_os(name)
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    let dir = match absolute("XDG_CACHE_HOME") {
+    Some(match absolute("XDG_CACHE_HOME") {
         Some(xdg) => xdg.join("eryx"),
         None => absolute("HOME")
             .or_else(|| absolute("USERPROFILE"))?
             .join(".cache")
             .join("eryx"),
-    };
+    })
+}
+
+/// The name `eryx-precompile setup` caches `stem` (e.g. `runtime-python`,
+/// `coreutils`, `eryx-bundler`) under for eryx `version` on `target` (see
+/// [`setup_target`]): `<stem>-v<version>-<target>.cwasm`. The setup cache's
+/// writer, eryx's build script and the readers here all use it.
+#[must_use]
+pub fn setup_file_name(stem: &str, version: &str, target: &str) -> String {
+    cached_runtime::file_name(stem, version, target)
+}
+
+/// This platform's target in [`setup_file_name`]s: `<arch>-<os>`, e.g.
+/// `x86_64-linux` or `aarch64-macos`.
+#[must_use]
+pub fn setup_target() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Where `eryx-precompile setup` keeps the SHA-256 of a cached `path`:
+/// `<path>.sha256`.
+#[must_use]
+pub fn setup_checksum_path(path: &Path) -> PathBuf {
+    cached_runtime::checksum_path(path)
+}
+
+/// [`setup_file_name`] for this eryx version and platform in the setup
+/// cache, if it's there and private.
+fn setup_file(stem: &str) -> Option<PathBuf> {
+    let dir = setup_dir()?;
     let dir_meta = fs::symlink_metadata(&dir).ok()?;
     if !dir_meta.is_dir() || !is_private(&dir_meta) {
         return None;
     }
-    let path = dir.join(format!(
-        "{stem}-v{}-{}-{}.cwasm",
+    let path = dir.join(setup_file_name(
+        stem,
         env!("CARGO_PKG_VERSION"),
-        std::env::consts::ARCH,
-        std::env::consts::OS
+        &setup_target(),
     ));
     let meta = fs::symlink_metadata(&path).ok()?;
     (meta.is_file() && is_private(&meta)).then_some(path)

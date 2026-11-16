@@ -45,8 +45,11 @@ Nothing from a package runs during the build: there are no install scripts.
 In Rust, the same is `eryx::environment::build` with the `packages` feature.
 A definition can also be built in code, without TOML:
 `EnvironmentDefinition::new("data-tools", Language::JavaScript)?.with_npm(NpmSection::new(["zod@^4"]))`.
-The `packages` feature embeds the bundler: a crates.io build gets it with
-`eryx-precompile setup --bundler`.
+The `packages` feature embeds the bundler if it's there at build time
+(`ERYX_BUNDLER_CWASM`, the setup cache, or the workspace). Otherwise, as in a
+crates.io build or a released `eryx-precompile`, it's loaded at run time from
+the cache `eryx-precompile setup --bundler` writes, checked against its
+checksum; without one, the build fails saying to run that.
 
 Where the lockfile goes: `env build` keeps it next to the definition (its
 `base_dir`). Through the library, `BuildOptions` without a `base_dir` keeps it
@@ -56,9 +59,8 @@ resolve different versions, and definitions with the same name share it. For
 reproducible builds, commit the lockfile next to the definition, point
 `base_dir` at that directory, and build with `frozen`.
 
-> Released `eryx-precompile` binaries don't include `env build` yet. From a
-> checkout of eryx: `mise run precompile-bundler`, then
-> `cargo install --path crates/eryx-precompile --features env`.
+> With a released `eryx-precompile`, run `eryx-precompile setup --bundler`
+> once before the first `env build`.
 
 The result is a directory with a manifest (`eryx-environment.json`: language,
 inputs, what it exports, and a hash of everything sandboxes rely on), the

@@ -7,20 +7,19 @@ mod cached_runtime;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cached_runtime::{checksum_path, read_verified};
+use cached_runtime::{checksum_path, file_name, read_verified};
 use sha2::{Digest, Sha256};
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Write a runtime and its checksum file the way `setup` does.
 fn write_cached(dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
-    let path = dir.join("runtime-v0.0.0-x86_64-linux.cwasm");
+    let name = file_name("runtime", "0.0.0", "x86_64-linux");
+    assert_eq!(name, "runtime-v0.0.0-x86_64-linux.cwasm");
+    let path = dir.join(&name);
     fs::write(&path, bytes)?;
     let hash = hex::encode(Sha256::digest(bytes));
-    fs::write(
-        checksum_path(&path),
-        format!("{hash}  runtime-v0.0.0-x86_64-linux.cwasm\n"),
-    )?;
+    fs::write(checksum_path(&path), format!("{hash}  {name}\n"))?;
     #[cfg(unix)]
     for file in [path.clone(), checksum_path(&path)] {
         use std::os::unix::fs::PermissionsExt;
