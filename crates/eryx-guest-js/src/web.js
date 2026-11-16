@@ -4,7 +4,8 @@
 //
 // - `TextEncoder` and `TextDecoder` (UTF-8 only);
 // - `crypto.getRandomValues()` and `crypto.randomUUID()`, from the host's
-//   `wasi:random` (no `crypto.subtle`).
+//   `wasi:random` (no `crypto.subtle`);
+// - `URL` and `URLSearchParams` (core-js's pure build, `native.url`).
 (native) => {
     const define = (name, value) =>
         Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
@@ -137,6 +138,14 @@
             return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
         },
     };
+
+    // Loaded with the context, so they're in the preinitialized snapshot:
+    // loading them on first use instead costs about 8 ms per instance.
+    define('URL', native.url.URL);
+    define('URLSearchParams', native.url.URLSearchParams);
+    // core-js keeps its shared state on this global while it loads; its
+    // modules hold their own reference, so the global itself can go.
+    delete globalThis['__core-js_shared__'];
 
     define('TextEncoder', TextEncoder);
     define('TextDecoder', TextDecoder);

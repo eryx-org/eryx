@@ -94,6 +94,13 @@ async function readAll(stream, bytes) {
     }
   } catch (e) {
     bytes.give(size);
+    // The shell drops its end once the child's `wait` returns; drop ours too,
+    // or jco keeps the stream until the instance goes.
+    try {
+      stream.return?.()?.catch?.(() => {});
+    } catch {
+      // Already gone.
+    }
     throw e?.payload ? e : fail("io-error");
   }
   const out = new Uint8Array(size);
@@ -158,30 +165,47 @@ function outputPipe(bytes) {
  */
 
 /**
- * The `eryx:process` imports for one sandbox.
+ * The `eryx:process` imports for one sandbox, and `startExecution()`, to
+ * call as each execution starts.
+ *
+ * The limits on live children and buffered bytes are per execution, as the
+ * Rust host's: each execution starts with fresh budgets, and a child an
+ * earlier one left behind (it was cancelled mid-run) charges and frees the
+ * budgets of the execution that spawned it.
  * @param {Object} fileTree - The sandbox's file tree, which children share
  * @param {Map<string, () => Promise<CommandModule>>} commands - Loaders by command name
- * @returns {{ Child: Function, listCommands: () => string[] }}
+ * @returns {{ Child: Function, listCommands: () => string[], startExecution: () => void }}
  */
 export function createProcessHost(fileTree, commands) {
-  const live = new Budget(MAX_LIVE_CHILDREN);
-  const bytes = new Budget(MAX_BUFFERED_BYTES);
+  let live;
+  let bytes;
+  const startExecution = () => {
+    live = new Budget(MAX_LIVE_CHILDREN);
+    bytes = new Budget(MAX_BUFFERED_BYTES);
+  };
+  startExecution();
 
   class Child {
     /** @type {(() => Promise<number>) | null} */
     #run;
+    /** The live-children budget the child holds a slot of. */
+    #slots;
     #released = false;
 
-    constructor(run) {
+    constructor(run, slots) {
       this.#run = run;
+      this.#slots = slots;
     }
 
     static spawn(cmd, args, env, cwd, stdin) {
       const load = commands.get(cmd);
       if (!load) throw fail("command-not-found");
-      if (!live.take(1)) throw fail("limit-exceeded");
-      const stdout = outputPipe(bytes);
-      const stderr = outputPipe(bytes);
+      // This execution's budgets, which the child keeps however long it runs.
+      const slots = live;
+      const held = bytes;
+      if (!slots.take(1)) throw fail("limit-exceeded");
+      const stdout = outputPipe(held);
+      const stderr = outputPipe(held);
       let child;
       const run = async () => {
         let input;
@@ -193,7 +217,7 @@ export function createProcessHost(fileTree, commands) {
             // A bad URL, or a download that failed: as a command that can't start.
             throw fail("spawn-failed");
           }
-          input = await readAll(stdin, bytes);
+          input = await readAll(stdin, held);
           return await runChild(command, fileTree, {
             argv: [cmd, ...args],
             env,
@@ -203,19 +227,19 @@ export function createProcessHost(fileTree, commands) {
             stderr: stderr.handler,
           });
         } finally {
-          if (input) bytes.give(input.byteLength);
+          if (input) held.give(input.byteLength);
           stdout.close();
           stderr.close();
           child.release();
         }
       };
-      child = new Child(run);
+      child = new Child(run, slots);
       return { child, stdout: stdout.stream, stderr: stderr.stream };
     }
 
     /** Give back the child's live slot, once. */
     release() {
-      if (!this.#released) live.give(1);
+      if (!this.#released) this.#slots.give(1);
       this.#released = true;
     }
 
@@ -235,7 +259,7 @@ export function createProcessHost(fileTree, commands) {
   // The shell's own `grep` builtin runs only when it's listed; with no
   // allow-list here, it always is.
   const listCommands = () => [...commands.keys(), "grep"];
-  return { Child, listCommands };
+  return { Child, listCommands, startExecution };
 }
 
 /**

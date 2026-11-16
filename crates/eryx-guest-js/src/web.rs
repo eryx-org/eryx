@@ -1,9 +1,11 @@
-//! Web globals QuickJS lacks: `TextEncoder`, `TextDecoder` and `crypto`
-//! (`src/web.js`), on these intrinsics.
+//! Web globals QuickJS lacks: `TextEncoder`, `TextDecoder`, `crypto`
+//! (`src/web.js`, on these intrinsics), and `URL` and `URLSearchParams`
+//! (core-js's, vendored as `src/node/url_globals.js`).
 
 use rquickjs::{ArrayBuffer, Ctx, Exception, Function, Object};
 
 const WEB_JS: &str = include_str!("web.js");
+const URL_GLOBALS_JS: &str = include_str!("node/url_globals.js");
 
 pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
@@ -13,6 +15,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     )?;
     native.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
     native.set("randomBytes", Function::new(ctx.clone(), random_bytes)?)?;
+    native.set("url", ctx.eval::<Object<'_>, _>(URL_GLOBALS_JS)?)?;
     let install: Function<'_> = ctx.eval(WEB_JS)?;
     install.call((native,))
 }

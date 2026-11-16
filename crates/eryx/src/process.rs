@@ -758,7 +758,6 @@ impl Spawner {
     ) -> Result<Prepared, ProcessError> {
         let command = self
             .commands
-            .0
             .get(&cmd)
             .ok_or(ProcessError::CommandNotFound)?
             .clone();
@@ -1035,39 +1034,76 @@ impl Pre {
     }
 }
 
+/// In-guest builtins that count as commands for an execution's
+/// allow-list: the shell's own `grep`. `list-commands` names each one the
+/// execution allows, and the guest refuses those it doesn't list.
+const GUEST_COMMANDS: [&str; 1] = ["grep"];
+
 /// The commands a sandbox can spawn, by name.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Commands(Arc<HashMap<String, Command>>);
+pub(crate) struct Commands {
+    registered: Arc<HashMap<String, Command>>,
+    /// Which of [`GUEST_COMMANDS`] this execution allows; `None` allows all.
+    guest: Option<Vec<&'static str>>,
+}
 
 impl Commands {
     pub(crate) fn insert(&mut self, name: String, command: Command) {
-        Arc::make_mut(&mut self.0).insert(name, command);
+        Arc::make_mut(&mut self.registered).insert(name, command);
     }
 
     /// Just the commands named in `allowed`, for one execution; `None`
     /// keeps them all, and `Some` of an empty list leaves none. Names that
-    /// aren't registered are ignored.
+    /// aren't registered or [`GUEST_COMMANDS`] are ignored.
     pub(crate) fn only(&self, allowed: Option<&[String]>) -> Self {
         let Some(allowed) = allowed else {
             return self.clone();
         };
-        let mut kept = HashMap::new();
+        let mut registered = HashMap::new();
+        let mut guest = Vec::new();
         for name in allowed {
-            match self.0.get(name) {
-                Some(command) => {
-                    kept.insert(name.clone(), command.clone());
-                }
-                None => tracing::debug!(command = %name, "allowed command isn't registered"),
+            if let Some(command) = self.registered.get(name) {
+                registered.insert(name.clone(), command.clone());
+            } else if let Some(builtin) = GUEST_COMMANDS.iter().find(|b| **b == name) {
+                guest.push(*builtin);
+            } else {
+                tracing::debug!(command = %name, "allowed command isn't registered");
             }
         }
-        Self(Arc::new(kept))
+        Self {
+            registered: Arc::new(registered),
+            guest: Some(guest),
+        }
+    }
+
+    /// What `list-commands` reports: the registered commands, and the
+    /// guest's own the execution allows.
+    fn names(&self) -> Vec<String> {
+        let guest = GUEST_COMMANDS
+            .iter()
+            .filter(|b| {
+                self.guest
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(b))
+            })
+            .filter(|b| !self.registered.contains_key(**b));
+        self.registered
+            .keys()
+            .cloned()
+            .chain(guest.map(|b| (*b).to_owned()))
+            .collect()
+    }
+
+    /// The registered command `name`, if this execution may spawn it.
+    fn get(&self, name: &str) -> Option<&Command> {
+        self.registered.get(name)
     }
 
     /// Register `command` as `name` unless something already is.
     #[cfg(all(feature = "embedded", feature = "coreutils"))]
     pub(crate) fn insert_if_absent(&mut self, name: &str, command: &Command) {
-        if !self.0.contains_key(name) {
-            Arc::make_mut(&mut self.0).insert(name.to_owned(), command.clone());
+        if !self.registered.contains_key(name) {
+            Arc::make_mut(&mut self.registered).insert(name.to_owned(), command.clone());
         }
     }
 }
@@ -1492,7 +1528,7 @@ impl ExecutorState {
 
 impl Host for ExecutorState {
     async fn list_commands(&mut self) -> Vec<String> {
-        self.commands.0.keys().cloned().collect()
+        self.commands.names()
     }
 }
 

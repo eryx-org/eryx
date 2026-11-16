@@ -106,3 +106,21 @@ describe("shell command options", () => {
     expect(COREUTILS_TOOLS).toContain("sort");
   });
 });
+
+describe("shell command budgets", () => {
+  // The host directly: what a leftover child holds doesn't carry into the
+  // next execution.
+  it("are per execution", async () => {
+    const { createProcessHost } = await import("../eryx/shims/process.js");
+    const host = createProcessHost(
+      { dir: {} },
+      new Map([["cat", async () => ({ instantiate: async () => ({}), getCoreModule: () => new WebAssembly.Module(new Uint8Array()) })]]),
+    );
+    const spawn = () => host.Child.spawn("cat", [], [], "/", undefined);
+    // 64 children spawned and never waited for (the call was cancelled).
+    for (let i = 0; i < 64; i++) spawn();
+    expect(spawn).toThrow(expect.objectContaining({ payload: "limit-exceeded" }));
+    host.startExecution();
+    expect(() => spawn()).not.toThrow();
+  });
+});

@@ -1444,3 +1444,49 @@ async fn nested_spawns_respect_allowed_commands() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "HI\n");
 }
+
+/// The shell's `grep` builtin counts as a command for `with_allowed_commands`:
+/// left out, it exits 127; allowed, or with no list, it runs.
+#[tokio::test]
+async fn allowed_commands_cover_the_grep_builtin() {
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let mut session = SessionExecutor::new_with_limits(executor, &[], &ResourceLimits::default())
+        .await
+        .unwrap();
+    let code = "echo hit | grep hit; echo \"grep=$?\"";
+
+    let refused = session
+        .execute(code)
+        .with_allowed_commands(["tc"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&refused.stdout), "grep=127\n");
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr),
+        "error: command not found: grep\n"
+    );
+
+    let allowed = session
+        .execute(code)
+        .with_allowed_commands(["grep"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&allowed.stdout), "hit\ngrep=0\n");
+
+    let none = session
+        .execute(code)
+        .with_allowed_commands(Vec::<String>::new())
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&none.stdout), "grep=127\n");
+
+    let all = session.execute(code).run().await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
+}
