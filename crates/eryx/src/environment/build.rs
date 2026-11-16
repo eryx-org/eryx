@@ -199,7 +199,9 @@ async fn build_javascript(
                     "{}\0{}\0{}\0{}",
                     definition.name,
                     installed.lockfile.content_hash(),
-                    env!("ERYX_EMBEDDED_BUNDLER_HASH"),
+                    // Which bundler builds it: an environment cached by
+                    // another (e.g. after an upgrade) is rebuilt.
+                    bundler()?.1,
                     entries.join("\0")
                 )
                 .as_bytes(),
@@ -442,6 +444,7 @@ async fn run_bundler(
         output: 1024 * 1024,
     };
     let (code, _stdout, stderr) = bundler()?
+        .0
         .run_isolated(&argv, &mounts, &limits)
         .await
         .map_err(|e| EnvironmentError::Build(format!("bundling: {e}")))?;
@@ -459,8 +462,9 @@ async fn run_bundler(
 /// The bundler, loaded on first use: the embedded one, or, if this eryx was
 /// built without it (a placeholder is embedded), the one `eryx-precompile
 /// setup --bundler` cached.
-fn bundler() -> Result<crate::Command, EnvironmentError> {
-    static BUNDLER: OnceLock<Result<crate::Command, String>> = OnceLock::new();
+/// Returns it and a hash identifying it, for environments' cache keys.
+fn bundler() -> Result<(crate::Command, &'static str), EnvironmentError> {
+    static BUNDLER: OnceLock<Result<(crate::Command, String), String>> = OnceLock::new();
     BUNDLER
         .get_or_init(|| {
             load_bundler(
@@ -468,15 +472,18 @@ fn bundler() -> Result<crate::Command, EnvironmentError> {
                 crate::cache::setup_bundler,
             )
         })
-        .clone()
+        .as_ref()
+        .map(|(command, hash)| (command.clone(), hash.as_str()))
         .map_err(|e| EnvironmentError::Build(format!("the bundler: {e}")))
 }
 
 /// Load `embedded`, or what `cached` finds if it's empty.
+/// Also returns the bundler's hash: the build script's for `embedded`, or
+/// the cached bytes' own.
 fn load_bundler(
     embedded: &[u8],
     cached: impl FnOnce() -> Option<Result<Vec<u8>, String>>,
-) -> Result<crate::Command, String> {
+) -> Result<(crate::Command, String), String> {
     let setup = "run `eryx-precompile setup --bundler` (or, in the eryx workspace, \
                  `mise run precompile-bundler`)";
     if !embedded.is_empty() {
@@ -484,6 +491,7 @@ fn load_bundler(
         // produced, as it does the runtimes.
         #[allow(unsafe_code)]
         return unsafe { crate::Command::from_precompiled_isolated(embedded) }
+            .map(|command| (command, env!("ERYX_EMBEDDED_BUNDLER_HASH").to_owned()))
             .map_err(|e| format!("the embedded bundler: {e}"));
     }
     let bytes = match cached() {
@@ -506,6 +514,7 @@ fn load_bundler(
     // eryx precompiled fails to load.
     #[allow(unsafe_code)]
     unsafe { crate::Command::from_precompiled_isolated(&bytes) }
+        .map(|command| (command, blake3::hash(&bytes).to_hex()[..16].to_owned()))
         .map_err(|e| format!("the cached bundler: {e}; {setup} again"))
 }
 
@@ -521,7 +530,10 @@ mod tests {
         let embedded: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/eryx-bundler.cwasm"));
         if !embedded.is_empty() {
             assert!(load_bundler(embedded, || panic!("the cache was consulted")).is_ok());
-            assert!(load_bundler(b"", || Some(Ok(embedded.to_vec()))).is_ok());
+            // A cached bundler keys environments by its own bytes, not the
+            // build script's hash of the empty placeholder.
+            let (_, hash) = load_bundler(b"", || Some(Ok(embedded.to_vec()))).unwrap();
+            assert_eq!(hash, blake3::hash(embedded).to_hex()[..16]);
         }
 
         let err = load_bundler(b"", || None).unwrap_err();
