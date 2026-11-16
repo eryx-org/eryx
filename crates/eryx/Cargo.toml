@@ -145,13 +145,15 @@ zstd = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] } #unified
 
-# build.rs checks a cached runtime against its checksum file (build/cached_runtime.rs).
+# build.rs hashes what it embeds and checks a cached runtime against its
+# checksum file (build/cached_runtime.rs), only for the features that embed
+# something: embedded-stdlib, embedded and packages.
 [build-dependencies]
-hex.workspace = true
-sha2.workspace = true
+hex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.build-dependencies]
-rustix = { workspace = true, features = ["process"] } #unified
+rustix = { workspace = true, features = ["process"], optional = true } #unified
 
 [features]
 default = ["python"]
@@ -175,12 +177,12 @@ macros = ["dep:eryx-macros"]
 # Embed just the Python stdlib (python-stdlib.tar.zst) in the binary.
 # Enables `with_embedded_stdlib()` on SandboxBuilder for use with custom runtimes.
 # Much smaller than `embedded` (~6MB vs ~36MB added to binary).
-embedded-stdlib = ["python", "dep:zstd"]
+embedded-stdlib = ["python", "dep:zstd", "dep:hex", "dep:sha2"]
 # Zero-config sandboxes: pre-compiled runtimes (Python, plus JavaScript and
 # the shell when their features are on) and the Python stdlib embedded in the binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-embedded = ["python", "embedded-stdlib", "dep:blake3"]
+embedded = ["python", "embedded-stdlib", "dep:blake3", "dep:rustix"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.
@@ -206,7 +208,7 @@ unstable-internals = []
 # sandboxes to mount. Embeds the JavaScript bundler (eryx-bundler.cwasm: from
 # `eryx-precompile setup --bundler`, or `mise run precompile-bundler` in the
 # workspace; ERYX_BUNDLER_CWASM names another).
-packages = ["dep:eryx-packages", "dep:blake3"]
+packages = ["dep:eryx-packages", "dep:blake3", "dep:hex", "dep:sha2", "dep:rustix"]
 
 
 [dev-dependencies]

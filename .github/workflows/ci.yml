@@ -790,6 +790,17 @@ jobs:
         # Use --profile ci for longer timeouts on slow WASM component tests
         run: cargo nextest run --workspace --all-features --profile ci
 
+      # The shell (and JavaScript) without `unstable-vfs`, which --all-features
+      # always turns on: bugs gated on its absence (#910's p3 gate, #914's
+      # environment mount) only show up here. Only the suites that exercise
+      # that path, reusing this job's artifacts and compiled dependencies, so
+      # it costs about the eryx crate's own rebuild plus a minute of tests.
+      - name: Run the shell suites without unstable-vfs
+        run: >-
+          cargo nextest run -p eryx --profile ci
+          --features embedded,shell,javascript,packages
+          --test shell_guest --test commands --test p3_guest --test environment
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
