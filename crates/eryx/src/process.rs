@@ -2328,20 +2328,32 @@ mod tests {
         use wit_component_wasmtime::{ComponentEncoder, StringEncoding};
         use wit_parser_wasmtime::{LiftLowerAbi, ManglingAndAbi, Resolve};
 
-        let metadata = std::process::Command::new(env!("CARGO"))
-            .args(["metadata", "--format-version", "1", "--locked", "--offline"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .unwrap();
-        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-        let wasmtime_wasi = metadata["packages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"] == "wasmtime-wasi")
-            .map(|p| std::path::PathBuf::from(p["manifest_path"].as_str().unwrap()))
-            .unwrap();
-        let src = wasmtime_wasi.parent().unwrap().join("src");
+        // The WIT of the wasmtime-wasi in Cargo.lock, from cargo's registry
+        // sources (where the build got it).
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let lock = std::fs::read_to_string(manifest.join("../../Cargo.lock"))
+            .expect("reading the workspace Cargo.lock");
+        let version = lock
+            .split("\n[[package]]\n")
+            .find_map(|p| p.strip_prefix("name = \"wasmtime-wasi\"\nversion = \""))
+            .and_then(|v| v.split('"').next())
+            .expect("wasmtime-wasi in Cargo.lock");
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cargo")))
+            .expect("CARGO_HOME or HOME");
+        let registry = cargo_home.join("registry/src");
+        let src = std::fs::read_dir(&registry)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", registry.display()))
+            .flatten()
+            .map(|index| index.path().join(format!("wasmtime-wasi-{version}/src")))
+            .find(|src| src.join("p2/wit").is_dir())
+            .unwrap_or_else(|| {
+                panic!(
+                    "wasmtime-wasi {version}'s sources aren't in {}",
+                    registry.display()
+                )
+            });
 
         // A component importing `interface` from the WIT in `dir`, plus
         // `extra` WIT defining packages of its own.
