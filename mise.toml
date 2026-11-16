@@ -690,7 +690,13 @@ outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 
 [tasks.notices]
 description = "Write each shipped artifact's third-party notices to target/notices (#837)"
+depends = ["ensure-rust-src"]
 run = "python3 scripts/notices.py generate target/notices"
+
+[tasks.ensure-rust-src]
+description = "Install rust-src for both pinned toolchains, which the notices read the standard library's dependencies from"
+depends = ["ensure-guest-toolchain"]
+run = "rustup component add rust-src"
 
 [tasks.update-reserved-names]
 description = "Regenerate the JS SDK's copy of the callback names each guest reserves (#962)"
@@ -698,6 +704,7 @@ run = "ERYX_UPDATE_RESERVED_NAMES=1 cargo test -p eryx --lib reserved::tests::js
 
 [tasks.notices-check]
 description = "Check every shipped crate's licence is accepted and every vendored input has a notices entry"
+depends = ["ensure-rust-src"]
 run = "python3 scripts/notices.py check"
 
 [tasks.setup]

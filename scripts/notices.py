@@ -9,6 +9,12 @@ lock file and targets (about.toml, third_party/about.hbs), followed by the
 entries of third_party/manual.toml that list it: code that isn't a Rust crate
 in a lock file, such as CPython, wasi-libc and the vendored npm packages.
 
+A Rust artifact also links the standard library its toolchain builds (STD):
+std's own dependencies are rendered the same way, from the toolchain's
+rust-src (`library/`, whose Cargo.lock pins them and whose vendor/ holds
+their sources). That needs rust-src installed for each toolchain, which the
+`notices` and `notices-check` mise tasks do first.
+
 The host artifacts embed every runtime, so host's notices take in theirs in
 full (EMBEDS).
 
@@ -26,7 +32,9 @@ It reads the lock files and vendored files only; nothing is built.
 """
 
 import hashlib
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -69,6 +77,20 @@ ARTIFACTS = {
     "coreutils": None,
 }
 
+# The toolchains the Rust artifacts are built with.
+STABLE = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+GUEST = tomllib.loads((ROOT / "mise.toml").read_text())["vars"]["guest_rust_toolchain"]
+
+# Artifact -> the toolchain and targets of the standard library it links.
+STD = {
+    "host": (STABLE, HOST_TARGETS),
+    # Built with -Z build-std for wasm32-wasip1 (crates/eryx-runtime/build.rs).
+    "runtime-python": (GUEST, ["wasm32-wasip1"]),
+    "runtime-javascript": (GUEST, ["wasm32-wasip1"]),
+    "runtime-shell": (STABLE, ["wasm32-wasip3", "wasm32-wasip2"]),
+    "eryx-bundler": (STABLE, ["wasm32-wasip2"]),
+}
+
 # Artifacts whose notices also take in others' in full, because they embed
 # them: the host binaries and packages carry every runtime (the eryx crate's
 # `embedded` feature, pyeryx, the server image).
@@ -86,7 +108,7 @@ def components():
     return tomllib.loads(MANUAL.read_text())["component"]
 
 
-def cargo_about(args, output):
+def cargo_about(args, output, cwd=ROOT, env=None):
     """Render the Rust crates' notices; false if any licence can't be accepted."""
     return subprocess.run(
         [
@@ -96,8 +118,73 @@ def cargo_about(args, output):
             "-o", str(output),
             str(TEMPLATE),
         ],
-        cwd=ROOT,
+        cwd=cwd,
+        env=env,
     ).returncode == 0
+
+
+def std_library(toolchain):
+    """The rust-src `library/` directory of `toolchain`."""
+    sysroot = subprocess.run(
+        ["rustc", f"+{toolchain}", "--print", "sysroot"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    library = Path(sysroot) / "lib" / "rustlib" / "src" / "rust" / "library"
+    if not (library / "Cargo.lock").is_file():
+        sys.exit(f"{toolchain} has no rust-src; run `rustup component add rust-src --toolchain {toolchain}`")
+    return library
+
+
+def std_overlay(library, tmp):
+    """A copy of `library` (symlinks to its files) whose own crates all
+    declare a licence.
+
+    The Rust project's crates in library/ are all under its MIT OR Apache-2.0
+    (its COPYRIGHT), but a few internal ones (sysroot, test, windows-link and
+    std's windows-sys) don't say so, and cargo-about can't clarify a crate
+    without a licence file. Cargo.toml files and the lock file are real
+    copies, so nothing writes into the toolchain.
+    """
+    overlay = Path(tmp) / "library"
+    shutil.copytree(library, overlay, copy_function=os.symlink, ignore=shutil.ignore_patterns("vendor", "Cargo.lock"))
+    shutil.copy(library / "Cargo.lock", overlay / "Cargo.lock")
+    # The sources rust-src vendors, which its .cargo/config.toml points at.
+    os.symlink(library / "vendor", overlay / "vendor")
+    for toml in overlay.rglob("Cargo.toml"):
+        text = toml.read_text()
+        package = tomllib.loads(text).get("package")
+        toml.unlink()
+        if package and not {"license", "license-file"} & package.keys():
+            text = text.replace("[package]\n", '[package]\nlicense = "MIT OR Apache-2.0"\n', 1)
+        toml.write_text(text)
+    return overlay
+
+
+def std_section(artifact, path):
+    """Append the standard library's notices for `artifact` to `path`, if it
+    links one; false if cargo-about fails."""
+    if artifact not in STD:
+        return True
+    toolchain, targets = STD[artifact]
+    # std's workspace uses unstable cargo features, which RUSTC_BOOTSTRAP lets
+    # its toolchain's cargo read.
+    env = {**os.environ, "RUSTUP_TOOLCHAIN": toolchain, "RUSTC_BOOTSTRAP": "1"}
+    with tempfile.TemporaryDirectory() as tmp:
+        std = std_overlay(std_library(toolchain), tmp) / "std"
+        rendered = Path(tmp) / "std.md"
+        # The features the toolchain's own std builds use (and more than a
+        # -Z build-std one may need), so nothing it can link is left out.
+        args = [
+            "-m", str(std / "Cargo.toml"), "--features", "backtrace panic-unwind",
+            *(a for t in targets for a in ("--target", t)),
+        ]
+        if not cargo_about(args, rendered, cwd=std, env=env):
+            return False
+        version = subprocess.run(
+            ["rustc", f"+{toolchain}", "--version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        with path.open("a") as f:
+            f.write(f"\n\n# The Rust standard library ({version})\n\n" + rendered.read_text().split("\n", 1)[1])
+    return True
 
 
 def manual_section(artifact):
@@ -133,6 +220,9 @@ def generate(outdir):
         if args is None:
             path.write_text("# Third-party notices\n")
         elif not cargo_about(args, path):
+            failed.append(artifact)
+            continue
+        if not std_section(artifact, path):
             failed.append(artifact)
             continue
         with path.open("a") as f:
@@ -196,6 +286,11 @@ def check_manual():
             if manifest["source"]["commit"] != c["cli_commit"]:
                 errors.append(f"{c['name']}: {c['cli']} builds {manifest['source']['commit']}, not {c['cli_commit']}")
 
+        if "rust_toolchain" in c and c["rust_toolchain"] not in (STABLE, GUEST):
+            errors.append(
+                f"{c['name']}: the pinned toolchains are {STABLE} (rust-toolchain.toml) and {GUEST} "
+                f"(mise.toml), not {c['rust_toolchain']}; update the entry and its licence files"
+            )
         if "wasi_sdk" in c:
             pinned = tomllib.loads(MISE.read_text())["vars"]["wasi_sdk_version"]
             if c["wasi_sdk"] != pinned:
@@ -205,6 +300,11 @@ def check_manual():
             for string in v["strings"]:
                 if b"\0" + string.encode() + b"\0" not in data:
                     errors.append(f"{c['name']}: {v['path']} doesn't contain {string!r}; update its version")
+
+    # Each Rust artifact's toolchain needs an entry with its licence texts.
+    for artifact, (toolchain, _) in STD.items():
+        if not any(artifact in c["artifacts"] and c.get("rust_toolchain") == toolchain for c in comps):
+            errors.append(f"{artifact}: no third_party/manual.toml entry for the Rust toolchain {toolchain}")
 
     covers = {cv["path"]: (c["name"], cv.get("sha256")) for c in comps for cv in c.get("covers", [])}
     for d in VENDORED_DIRS:
