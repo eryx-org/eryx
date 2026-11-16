@@ -8,8 +8,8 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../../../.." && pwd)"
-packages=(zod@4.6.7 date-fns@4.4.0 lodash@4.18.1)
-entries=(zod date-fns lodash)
+packages=(zod@4.6.7 date-fns@4.4.0 lodash@4.18.1 uuid@14.0.3 nanoid@6.0.2)
+entries=(zod date-fns lodash uuid nanoid)
 
 cache="$(mktemp -d)"
 trap 'rm -rf "$cache"' EXIT
