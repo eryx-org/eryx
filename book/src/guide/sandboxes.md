@@ -91,7 +91,8 @@ timeout.
   `setTimeout(() => console.log("hi"), 100)` prints `hi` without an `await`,
   and a `setInterval` that's never cleared runs until the execution timeout
   fails the execute (`ErrorKind::Timeout`). A timed-out execute discards its
-  instance, so a session's next execute starts fresh (`state_was_reset`).
+  instance, so a session's next execute starts fresh (`state_was_reset`), as
+  after running out of fuel.
 - **It waits for callbacks started after the script's synchronous run**: in a
   promise callback (`Promise.resolve().then(() => tool())`), after an `await`,
   or in a timer. A callback the script's top-level code starts synchronously

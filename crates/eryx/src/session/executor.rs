@@ -1682,35 +1682,27 @@ impl SessionExecutor {
                 .with_output_truncated(output_truncated)
         };
 
-        // A cancelled or timed-out run was interrupted mid-call, so its
-        // instance can't be reused: a trap leaves it unenterable, and a guest
-        // suspended on a timer or callback would wake into the next call.
-        // Leave the store out and the next call resets the session.
+        // A cancelled run was interrupted mid-call, and any other failure of
+        // the call itself (a timeout, running out of fuel, a suspension, a
+        // trap) leaves the instance trapped, so it can't be entered again, or
+        // leaves a guest suspended on a timer or callback, which would wake
+        // into the next call. Either way the instance can't be reused: leave
+        // the store out and the next call resets the session. (A script's
+        // own failure is the inner result, below, and keeps the instance.)
         if was_cancelled.load(Ordering::Relaxed) {
             return Err(with_stats(ErrorKind::Cancelled.into()));
         }
-        let timed_out = async_timeout_elapsed
-            || result
-                .as_ref()
-                .err()
-                .and_then(|e| e.downcast_ref::<wasmtime::Trap>())
-                == Some(&wasmtime::Trap::Interrupt);
-        if timed_out {
-            return Err(with_stats(
-                ErrorKind::Timeout(execution_timeout.unwrap_or_default()).into(),
-            ));
-        }
-
-        // Restore store and bindings before handling result
-        self.store = Some(store);
-        self.bindings = Some(bindings);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
-        // so we downcast to wasmtime::Trap for WASM-level traps (OutOfFuel here;
-        // timeouts returned above).
+        // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
+        // The async_timeout_elapsed flag covers blocking WASI host calls (e.g. time.sleep).
         let wasmtime_result = result
             .map_err(|e| {
-                if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+                if async_timeout_elapsed
+                    || e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+                {
+                    ErrorKind::Timeout(execution_timeout.unwrap_or_default())
+                } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                     if let Some(reason) = suspended_reason.clone() {
                         ErrorKind::Suspended(reason)
                     } else {
@@ -1723,6 +1715,11 @@ impl SessionExecutor {
                 }
             })
             .map_err(|kind| with_stats(kind.into()))?;
+
+        // The call itself completed: the instance is reusable.
+        self.store = Some(store);
+        self.bindings = Some(bindings);
+
         // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input

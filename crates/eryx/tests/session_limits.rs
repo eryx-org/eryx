@@ -410,3 +410,26 @@ async fn a_timed_out_session_starts_again() {
         assert!(output.state_was_reset, "{code}");
     }
 }
+
+/// Running out of fuel traps the instance, so it's discarded too: the next
+/// call starts on a fresh one instead of "cannot enter component instance".
+#[tokio::test]
+async fn a_session_out_of_fuel_starts_again() {
+    let limits = ResourceLimits::unlimited().with_max_fuel(50_000_000);
+    let mut session = limited_session(limits).await;
+    assert!(matches!(
+        session
+            .execute("while True: pass")
+            .run()
+            .await
+            .map_err(Error::into_kind),
+        Err(ErrorKind::FuelExhausted { .. })
+    ));
+    let output = session
+        .execute("print('next')")
+        .run()
+        .await
+        .expect("next call");
+    assert_eq!(output.stdout_text().trim(), "next");
+    assert!(output.state_was_reset);
+}
