@@ -10,6 +10,7 @@
 //!   `add --a 2 --b 3`, `add --json '{"a":2}'`, or `invoke add '{"a":2}'`,
 //!   with arguments typed by the callback's schema (see [`call`]). The result
 //!   goes to stdout, so `$(add 2 3 | ...)` composes like any other command.
+//!   Each call reports `callback_start` and `callback_end` trace events.
 //! - A non-zero exit status becomes an `execute-error` ("exit status N").
 //! - `snapshot-state` is brush's own serde form of the `Shell`, after a line
 //!   naming that format; restoring refuses any other format.
@@ -588,8 +589,22 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
                 return Ok(ExecutionResult::new(2));
             }
         };
+        // Trace events in the CPython and QuickJS guests' shape: the
+        // arguments are callback_start's context.
+        let arguments = arguments.to_string();
+        report_trace(
+            0,
+            &serde_json::json!({ "type": "callback_start", "name": name }).to_string(),
+            &arguments,
+        );
         // Sync builtin, async import: park on the call with waitable-set.wait.
-        match wit_bindgen::block_on(invoke(name.clone(), arguments.to_string())) {
+        let outcome = wit_bindgen::block_on(invoke(name.clone(), arguments));
+        let end = match &outcome {
+            Ok(_) => serde_json::json!({ "type": "callback_end", "name": name }),
+            Err(e) => serde_json::json!({ "type": "callback_end", "name": name, "error": e }),
+        };
+        report_trace(0, &end.to_string(), "");
+        match outcome {
             Ok(out) => {
                 if let Some(text) = call::render(&out) {
                     writeln!(context.stdout(), "{text}")?;

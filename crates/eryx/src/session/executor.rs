@@ -2329,6 +2329,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
+            callback_clock: crate::wasm::CallbackClock::default(),
         }
     }
 
@@ -2359,6 +2360,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
+            callback_clock: crate::wasm::CallbackClock::default(),
         }
     }
 
@@ -2392,6 +2394,7 @@ impl ExecutorState {
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
         self.trace_tx = tx;
+        self.callback_clock = crate::wasm::CallbackClock::default();
     }
 
     /// Update the network channel for a new execution.

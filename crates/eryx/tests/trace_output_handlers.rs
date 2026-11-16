@@ -409,16 +409,14 @@ result = await sleep(ms=50)
         "Should have CallbackEnd event for 'sleep'"
     );
 
-    // Note: Duration tracking depends on the Python runtime implementation.
-    // We verify the event exists; duration may or may not be accurate.
+    // The host times the call, from its callback_start to its callback_end.
     if let Some(event) = callback_end
         && let TraceEventKind::CallbackEnd {
             duration_ms, name, ..
         } = &event.event
     {
         assert_eq!(name, "sleep", "Callback name should be 'sleep'");
-        // Duration is informational - just verify it's a valid u64
-        let _ = *duration_ms;
+        assert!(*duration_ms >= 50, "a 50 ms sleep took {duration_ms} ms");
     }
 }
 
