@@ -82,6 +82,8 @@ jobs:
               - 'clis/patches/patch-curl.sh'
               - 'clis/patches/patch-mbedtls.sh'
               - 'clis/shims/**'
+              - 'clis/gpl/git/**'
+              - 'crates/eryx-runtime/wit/deps/process.wit'
             go:
               - 'clis/gh.toml'
               - 'clis/patches/patch-gh-vendor.sh'
@@ -149,7 +151,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cli: [sqlite3, curl, jq]
+        cli: [sqlite3, curl, jq, git]
+        include:
+          # GPL recipes live apart, in clis/gpl/ (#837).
+          - cli: git
+            manifest: clis/gpl/git/git.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,14 +164,15 @@ jobs:
       - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           version: 2026.11.8
-          install_args: rust aqua:bytecodealliance/wasmtime
+          # wit-bindgen for git's bindings, wasm-tools for its smoke check.
+          install_args: rust aqua:bytecodealliance/wasmtime github:bytecodealliance/wit-bindgen cargo:wasm-tools
           cache: false
       # The CMake builds use Ninja, which the runner doesn't ship.
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - run: mise run ensure-wasi-sdk
-      - run: mise run build-cli -- "$CLI"
+      - run: mise run build-cli -- "$MANIFEST"
         env:
-          CLI: ${{ matrix.cli }}
+          MANIFEST: ${{ matrix.manifest || matrix.cli }}
       - run: clis/smoke.sh "$CLI"
         env:
           CLI: ${{ matrix.cli }}

@@ -1490,3 +1490,64 @@ async fn allowed_commands_cover_the_grep_builtin() {
     let all = session.execute(code).run().await.unwrap();
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
 }
+
+/// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash`, through
+/// `eryx:process/run`, when registered with `allow_spawn`. Set
+/// ERYX_TEST_GIT_WASM to its component, e.g. from
+/// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
+/// artifact of the CLI components workflow. git needs a filesystem, which
+/// children only get from the VFS. (Other children don't start in the
+/// shell's directory, #978, so `cat` gets absolute paths.)
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+#[ignore = "needs ERYX_TEST_GIT_WASM"]
+async fn git_stash_runs_git_itself() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
+    let executor = shell()
+        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let out = session
+        .execute(
+            r#"
+export HOME=/data GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=eryx GIT_AUTHOR_EMAIL=eryx@example.com
+export GIT_COMMITTER_NAME=eryx GIT_COMMITTER_EMAIL=eryx@example.com
+mkdir -p /data/repo && cd /data/repo
+git init -q
+echo one > f.txt
+git add f.txt && git commit -q -m one
+echo two > f.txt
+git stash
+echo "after stash: $(cat /data/repo/f.txt)"
+git stash list
+git stash pop
+echo "after pop: $(cat /data/repo/f.txt)"
+git status --short
+"#,
+        )
+        .run()
+        .await;
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => panic!("{e}"),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("after stash: one"),
+        "{stdout}{:?}",
+        out.stderr
+    );
+    assert!(stdout.contains("stash@{0}"), "{stdout}");
+    assert!(stdout.contains("after pop: two"), "{stdout}");
+    assert!(stdout.contains(" M f.txt"), "{stdout}");
+    assert_eq!(storage.read("/data/repo/f.txt").await.unwrap(), b"two\n");
+}
