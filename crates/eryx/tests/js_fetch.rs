@@ -370,3 +370,36 @@ async fn fetch_in_a_session_with_secrets() {
     assert_eq!(out.stdout, b"world\n");
     assert!(server.requests()[1].contains(&format!("x-key: {SECRET}\r\n")));
 }
+
+/// `fetch` takes a `URL`, and still checks it with its own parser: a URL the
+/// WHATWG parser accepts but `fetch` can't use is refused, as before.
+#[tokio::test]
+async fn fetch_takes_urls_and_still_refuses_what_it_cant_use() {
+    let server = Server::start().await;
+    let sandbox = server.sandbox(server.net()).build().unwrap();
+    let out = run(
+        &sandbox,
+        r"
+        const ok = await fetch(new URL('/json#frag', 'https://api.test'));
+        console.log(ok.status, ok.url);
+        for (const url of ['https://user:pw@api.test/json', 'ftp://api.test/x', 'https://bücher.example/']) {
+            try {
+                await fetch(new URL(url));
+                console.log('fetched', url);
+            } catch (e) {
+                console.log(e.name, e.message, e.cause?.code ?? '-');
+            }
+        }
+        ",
+    )
+    .await;
+    // Credentials and other schemes are url.rs's refusals; a non-ASCII host
+    // reaches the host's network policy as its punycode form.
+    assert_eq!(
+        out,
+        "200 https://api.test/json\n\
+         TypeError URLs with credentials aren't allowed -\n\
+         TypeError fetch only supports http and https, not ftp: -\n\
+         TypeError fetch failed not-permitted\n"
+    );
+}

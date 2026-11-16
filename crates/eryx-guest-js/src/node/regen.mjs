@@ -1,6 +1,6 @@
 // Called by regen.sh: node regen.mjs <node_modules> <out dir>.
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
@@ -33,6 +33,15 @@ const licenceFile = (pkg) => {
 };
 
 const versions = [];
+const notice = (pkg) => {
+    const { version } = JSON.parse(readFileSync(join(modulesDir, pkg, 'package.json'), 'utf8'));
+    versions.push(`${pkg}@${version}`);
+    const file = licenceFile(pkg);
+    copyFileSync(file, join(outDir, 'licenses', `${pkg}-LICENSE`));
+    const text = readFileSync(file, 'utf8').replaceAll('*/', '* /').trim();
+    return `${pkg}@${version}\n\n${text}`;
+};
+
 for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
     let code = execFileSync(
         'npx',
@@ -64,14 +73,7 @@ for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
     const names = Object.keys(require(join(modulesDir, entry))).filter(
         (key) => IDENTIFIER.test(key) && key !== 'default',
     );
-    const notices = bundled.map((pkg) => {
-        const { version } = JSON.parse(readFileSync(join(modulesDir, pkg, 'package.json'), 'utf8'));
-        versions.push(`${pkg}@${version}`);
-        const file = licenceFile(pkg);
-        copyFileSync(file, join(outDir, 'licenses', `${pkg}-LICENSE`));
-        const text = readFileSync(file, 'utf8').replaceAll('*/', '* /').trim();
-        return `${pkg}@${version}\n\n${text}`;
-    });
+    const notices = bundled.map(notice);
     const out = [
         `/*! node:${name}, vendored by regen.sh. It contains:\n\n${notices.join('\n\n---\n\n')}\n*/`,
         ...imports,
@@ -81,5 +83,43 @@ for (const [name, { entry, bundled, external }] of Object.entries(builtins)) {
         '',
     ].join('\n');
     writeFileSync(join(outDir, `${name}.js`), out);
+}
+// The `URL` and `URLSearchParams` globals (src/web.js installs them): core-js's
+// pure build, which defines no globals and patches no built-ins, as one
+// expression evaluating to `{ URL, URLSearchParams }`.
+{
+    const entry = join(outDir, '.url-entry.mjs');
+    writeFileSync(
+        entry,
+        `export { default as URL } from ${JSON.stringify(join(modulesDir, 'core-js-pure/stable/url/index.js'))};\n` +
+            `export { default as URLSearchParams } from ${JSON.stringify(join(modulesDir, 'core-js-pure/stable/url-search-params/index.js'))};\n`,
+    );
+    const code = execFileSync(
+        'npx',
+        [
+            '--yes',
+            `esbuild@${ESBUILD}`,
+            entry,
+            '--bundle',
+            '--format=iife',
+            '--global-name=__m',
+            '--platform=neutral',
+            '--main-fields=module,main',
+            '--minify',
+            '--legal-comments=none',
+        ],
+        { encoding: 'utf8' },
+    );
+    rmSync(entry);
+    const out = [
+        `/*! URL and URLSearchParams, vendored by regen.sh. It contains:\n\n${notice('core-js-pure')}\n*/`,
+        // A function body, so esbuild's `var __m` stays local.
+        `(() => {`,
+        code.trim(),
+        `return __m;`,
+        `})()`,
+        '',
+    ].join('\n');
+    writeFileSync(join(outDir, 'url_globals.js'), out);
 }
 console.log(versions.join('\n'));

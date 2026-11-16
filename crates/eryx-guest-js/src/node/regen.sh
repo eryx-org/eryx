@@ -18,6 +18,7 @@ packages=(
     events@3.3.0
     path-browserify@1.0.1
     string_decoder@1.3.0 safe-buffer@5.2.1
+    core-js-pure@3.51.0
 )
 
 work="$(mktemp -d)"

@@ -123,9 +123,12 @@ when it was loaded, as pools and factories do for every sandbox they make.
   `node:string_decoder` (the npm polyfills, vendored), `node:util` (a subset:
   `format`, `inspect`, `inherits`, `promisify`, `types`, ...) and
   `node:crypto` (random values only: `randomBytes`, `randomUUID`,
-  `randomInt`, `getRandomValues`) work, with or without `node:`, and with
+  `randomInt`, `getRandomValues`) and `node:url` (`URL`, `URLSearchParams`,
+  `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`, `domainToASCII`,
+  `domainToUnicode`, and a subset of the legacy `parse`, `format` and
+  `resolve`) work, with or without `node:`, and with
   `require` too. They don't need an environment. The rest (`fs`, `net`,
-  `child_process`, `http`, `url`, ...) throw "node:fs isn't available in eryx
+  `child_process`, `http`, `os`, ...) throw "node:fs isn't available in eryx
   yet" on import, so a package that imports one statically fails when it's
   imported. Packages written for browsers or Workers generally avoid them.
 - **Web globals:** `crypto.getRandomValues()` and `crypto.randomUUID()`
@@ -133,6 +136,13 @@ when it was loaded, as pools and factories do for every sandbox they make.
   and `TextDecoder` (UTF-8 only), and timers (`setTimeout` and friends, with
   `node:timers` and `node:timers/promises`; see
   [Timers in JavaScript](./sandboxes.md#timers-in-javascript)).
+- **`URL` and `URLSearchParams`** follow the WHATWG URL standard (core-js's
+  implementation), with one gap: a non-ASCII host is lowercased and
+  punycode-encoded, without the full IDNA mapping a browser applies.
+  `fetch` takes a `URL`, but checks its `href` with its own stricter parser,
+  so a URL `fetch` can't use (credentials, a scheme other than `http`/`https`)
+  is refused as before. A `URL` kept in session state is a class instance, so
+  snapshots skip it; keep its `href` instead.
 - **Imports are checked like ES modules:** importing a name a module doesn't
   export (or a default from a module without one) throws a SyntaxError
   naming the export and the module.
@@ -141,7 +151,7 @@ when it was loaded, as pools and factories do for every sandbox they make.
 
 - Python and shell environments (`build` returns `Unsupported`).
 - The other Node built-ins (above), `crypto.subtle` and `node:crypto`'s
-  hashes and ciphers, and `URL` (#925). A package that imports a missing
+  hashes and ciphers. A package that imports a missing
   built-in fails when it's imported; one that uses a missing API fails when
   it calls it.
 - Node's globals: there's no global `Buffer` or `process.nextTick`. Code
