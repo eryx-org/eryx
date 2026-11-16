@@ -567,7 +567,6 @@ fn find_runtime(
     )))
 }
 
-/// Parse the `language` argument; `None` is Python.
 /// `child_network=`: None, "inherit" or a narrowing `NetConfig`, for a
 /// shell sandbox with `network=`.
 pub(crate) fn parse_child_network(
@@ -602,6 +601,7 @@ pub(crate) fn parse_child_network(
     }
 }
 
+/// Parse the `language` argument; `None` is Python.
 pub(crate) fn parse_language(language: Option<&str>) -> PyResult<eryx::Language> {
     language.map_or(Ok(eryx::Language::Python), |name| {
         name.parse()

@@ -81,7 +81,11 @@ pub struct ServerLimits {
     pub max_fuel: Option<u64>,
     /// Most callback invocations a request may allow.
     pub max_callback_invocations: u32,
-    /// Most concurrent network connections a request may allow.
+    /// Most concurrent network connections a request may allow. This bounds
+    /// each proxy on its own: the guest's connections, and its children's
+    /// through an inspecting and a tunnelling proxy, so a shell request whose
+    /// commands use both can hold up to 3x this (process-wide socket caps
+    /// still apply).
     pub max_connections: u32,
     /// Longest network connect or I/O timeout a request may set.
     pub max_io_timeout: Duration,
@@ -494,6 +498,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
             None => (None, eryx::net::ChildNetwork::None),
         };
+        if language != eryx::Language::Shell
+            && !matches!(child_network, eryx::net::ChildNetwork::None)
+        {
+            return Err(Status::invalid_argument(format!(
+                "network_config.child_network is only for shell requests, not {language}"
+            )));
+        }
 
         // Parse and validate secrets, generating their placeholders.
         let secrets = {

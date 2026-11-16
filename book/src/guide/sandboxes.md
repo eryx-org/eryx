@@ -161,7 +161,9 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   policy allows: in Rust `with_child_network(ChildNetwork::Inherit)` (that
   policy) or `ChildNetwork::Narrow(config)` (only what both allow); in
   Python `child_network="inherit"` or a `NetConfig`; in eryx-server
-  `network_config.child_network`. Children get `HTTPS_PROXY`/`HTTP_PROXY`
+  `network_config.child_network`. A narrowing config starts from the
+  defaults, which block localhost and private networks, so it must repeat
+  any allowed networks or internal hosts its children need. Children get `HTTPS_PROXY`/`HTTP_PROXY`
   and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
   secrets only as their placeholders, which the proxy replaces in requests
   to each secret's hosts. A command allowed tunnels

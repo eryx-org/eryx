@@ -3213,7 +3213,10 @@ async fn shell_children_get_the_requests_network_and_no_more() {
     const REAL: &str = "real-grpc-child-secret-0123456789";
     let create: eryx_server::service::PoolFactory = Arc::new(|| {
         Box::pin(async {
-            let builder = Sandbox::embedded().shell().with_command("tc", test_cmd());
+            let builder = Sandbox::embedded()
+                .shell()
+                .with_command("tc", test_cmd())
+                .with_command("tt", test_cmd().allow_tunnels());
             Ok(Arc::new(
                 SandboxPool::new(builder, PoolConfig::default().with_max_size(2)).await?,
             ))
@@ -3239,13 +3242,13 @@ async fn shell_children_get_the_requests_network_and_no_more() {
         }));
         network
     };
-    let run = |network: Option<NetworkConfig>| {
+    let run_script = |code: String, network: Option<NetworkConfig>| {
         let channel = channel.clone();
         async move {
             let result = execute_request(
                 channel,
                 ExecuteRequest {
-                    code: format!("tc env TOKEN; tc proxy-get http://127.0.0.1:{port}/x"),
+                    code,
                     language: Language::Shell as i32,
                     network_config: network,
                     secrets: vec![SecretConfig {
@@ -3260,6 +3263,12 @@ async fn shell_children_get_the_requests_network_and_no_more() {
             .unwrap();
             format!("{}{}", result.stdout.to_lossy(), result.stderr.to_lossy())
         }
+    };
+    let run = |network| {
+        run_script(
+            format!("tc env TOKEN; tc proxy-get http://127.0.0.1:{port}/x"),
+            network,
+        )
     };
 
     let inherit = run(Some(with_children(
@@ -3301,6 +3310,45 @@ async fn shell_children_get_the_requests_network_and_no_more() {
     let out = run(Some(allowing("127.0.0.1"))).await;
     assert!(!out.contains(" 200 OK") && out.contains("error:"), "{out}");
     assert_eq!(seen.lock().unwrap().matches("GET ").count(), requests);
+
+    // A command allowed tunnels gets a blind one, and its placeholder goes
+    // out as it is; one without gets an inspecting proxy, which expects TLS.
+    let inherit = || Some(with_children(allowing("127.0.0.1"), Mode::Inherit, None));
+    let out = run_script(format!("tt tunnel-get 127.0.0.1:{port}"), inherit()).await;
+    assert!(
+        out.contains(" 200 Connection established") && out.contains(" 200 OK"),
+        "{out}"
+    );
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.matches("GET ").count(), requests + 1, "{got}");
+    assert!(!got.contains(REAL), "{got}");
+    // It handshakes with the (plain) upstream first: give up on that soon.
+    let short = NetworkConfig {
+        connect_timeout_ms: 500,
+        io_timeout_ms: 500,
+        ..allowing("127.0.0.1")
+    };
+    let out = run_script(
+        format!("tc tunnel-get 127.0.0.1:{port}"),
+        Some(with_children(short, Mode::Inherit, None)),
+    )
+    .await;
+    assert!(!out.contains(" 200 OK"), "{out}");
+    assert_eq!(seen.lock().unwrap().matches("GET ").count(), requests + 1);
+
+    // Only the shell has children.
+    let status = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: "pass".to_string(),
+            network_config: inherit(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("only for shell"), "{status:?}");
 }
 
 /// A malformed `child_network` is refused before anything runs.

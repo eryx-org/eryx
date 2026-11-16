@@ -258,7 +258,12 @@ message NetworkConfig {
 
 // How a shell's child processes may reach the network. They connect through a
 // proxy on the host, never directly, and never get more than this
-// NetworkConfig allows.
+// NetworkConfig allows. Only shell requests may set it (INVALID_ARGUMENT
+// otherwise).
+//
+// max_connections bounds each proxy separately: children whose commands use
+// both the inspecting and the tunnelling proxy can hold up to twice it, on
+// top of the guest's own connections.
 //
 // Children see secrets only as their placeholders (the shell exports each
 // secret's placeholder as an environment variable). The proxy substitutes a
@@ -281,7 +286,10 @@ message ChildNetwork {
   }
   Mode mode = 1;
   // Required for MODE_NARROW, refused otherwise. Its own child_network and
-  // allow_plaintext_secrets must be unset.
+  // allow_plaintext_secrets must be unset. It starts from the same defaults
+  // as any NetworkConfig (blocked_hosts and blocked_networks block localhost
+  // and private ranges), not from this one: repeat any allowed_networks,
+  // internal_hosts or blocked_* overrides children need.
   NetworkConfig narrow = 2;
 }
 
