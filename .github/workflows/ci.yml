@@ -1001,6 +1001,12 @@ jobs:
         # Exclude crates that need WASI SDK, Python, or WASM artifacts
         run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-guest-python --exclude eryx-server
 
+      # eryx-precompile as its cargo-dist releases build it: default features
+      # (`env`, so eryx's `packages`) and no runtime artifacts, so eryx embeds
+      # the bundler's placeholder (#913). No other job builds it on these OSes.
+      - name: Check eryx-precompile
+        run: cargo check -p eryx-precompile
+
       # Host-file appends reopen the file in a platform-specific way
       # (crates/eryx-vfs/src/file_io.rs), so run those tests here too.
       - name: Test host-file appends
