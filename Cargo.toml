@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# The shell guest and the bundler target wasm32-wasip2 only and pin their
-# dependencies (brush, rolldown) with their own locks.
+# The shell guest (wasm32-wasip3, plus a wasm32-wasip2 build for js/eryx) and
+# the bundler (wasm32-wasip2) build only for wasm and pin their dependencies
+# (brush, rolldown) with their own locks.
 exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler"]
 
 # Dev tools (install via cargo or mise):

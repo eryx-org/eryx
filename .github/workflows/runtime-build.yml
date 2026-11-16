@@ -60,10 +60,17 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-assets
+          # Listed by name, so no other build in the directory (such as the
+          # shell's runtime-shell-p2.wasm, for js/eryx) is ever published.
           path: |
-            crates/eryx-runtime/runtime-*.wasm
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-javascript.wasm
+            crates/eryx-runtime/runtime-shell.wasm
             crates/eryx-runtime/coreutils.wasm
-            crates/eryx-runtime/*.wasm.sha256
+            crates/eryx-runtime/runtime-python.wasm.sha256
+            crates/eryx-runtime/runtime-javascript.wasm.sha256
+            crates/eryx-runtime/runtime-shell.wasm.sha256
+            crates/eryx-runtime/coreutils.wasm.sha256
           if-no-files-found: error
           retention-days: 5
 
