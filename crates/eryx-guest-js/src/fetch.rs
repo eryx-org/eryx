@@ -552,7 +552,7 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 }
 
 /// `encodeUtf8(string)`: the string's UTF-8 bytes, as an `ArrayBuffer`.
-fn encode_utf8(ctx: Ctx<'_>, text: String) -> rquickjs::Result<ArrayBuffer<'_>> {
+pub(crate) fn encode_utf8(ctx: Ctx<'_>, text: String) -> rquickjs::Result<ArrayBuffer<'_>> {
     ArrayBuffer::new(ctx, text.into_bytes())
 }
 

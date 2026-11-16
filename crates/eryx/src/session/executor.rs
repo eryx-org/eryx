@@ -206,7 +206,9 @@ impl StateSnapshot {
 
     /// Names of the variables left out of the snapshot because they could
     /// not be serialized (e.g. open sockets, generators). In Python they
-    /// raise `NameError` after a restore.
+    /// raise `NameError` after a restore. In JavaScript that's functions,
+    /// promises, and values holding an instance of a class (a `Buffer`, an
+    /// `EventEmitter`), which would otherwise come back as plain objects.
     ///
     /// Not part of [`to_bytes`](Self::to_bytes), so always empty for a
     /// snapshot from [`from_bytes`](Self::from_bytes).

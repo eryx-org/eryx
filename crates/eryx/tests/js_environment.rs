@@ -1,6 +1,6 @@
 //! Importing an environment's packages from JavaScript (#827).
 //!
-//! The packages are bundled copies of zod, date-fns and lodash
+//! The packages are bundled copies of zod, date-fns, lodash, uuid and nanoid
 //! (`tests/fixtures/js-environment`, see its README); each test builds an
 //! environment around them in a temporary directory and mounts it.
 //!
@@ -51,6 +51,8 @@ fn environment(dir: &Path) -> Environment {
             "zod@4.6.7".into(),
             "date-fns@4.4.0".into(),
             "lodash@4.18.1".into(),
+            "uuid@14.0.3".into(),
+            "nanoid@6.0.2".into(),
         ]),
         Builder::new("test"),
         dir,
@@ -109,6 +111,29 @@ async fn imports_packages_from_the_environment() {
     assert_eq!(out, "function 2 function\n");
 }
 
+/// uuid and nanoid draw from `crypto.getRandomValues`, which the guest
+/// provides from the host's `wasi:random`.
+#[tokio::test]
+async fn uuid_and_nanoid_run_unmodified() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = environment(dir.path());
+    let sandbox = Sandbox::embedded()
+        .javascript()
+        .with_environment(&env)
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        "import { v4, v7, validate, version } from 'uuid'\nimport { nanoid, customAlphabet } from 'nanoid'\n\
+         const id = v4()\n\
+         console.log(validate(id), version(id), version(v7()), id !== v4())\n\
+         console.log(nanoid().length, /^[ab]{5}$/.test(customAlphabet('ab', 5)()))",
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "true 4 7 true\n21 true\n");
+}
+
 #[tokio::test]
 async fn unknown_modules_and_builtins_fail_clearly() {
     let dir = tempfile::tempdir().unwrap();
@@ -122,15 +147,15 @@ async fn unknown_modules_and_builtins_fail_clearly() {
     for (code, expected) in [
         (
             "await import('left-pad')",
-            "environment provides date-fns, lodash, waits, zod",
+            "environment provides date-fns, lodash, nanoid, uuid, waits, zod",
         ),
         (
             "import x from 'left-pad'\n",
-            "environment provides date-fns, lodash, waits, zod",
+            "environment provides date-fns, lodash, nanoid, uuid, waits, zod",
         ),
         (
             "require('left-pad')",
-            "environment provides date-fns, lodash, waits, zod",
+            "environment provides date-fns, lodash, nanoid, uuid, waits, zod",
         ),
         (
             "await import('node:fs')",

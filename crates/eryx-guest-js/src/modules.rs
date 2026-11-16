@@ -33,6 +33,21 @@ const BUILTIN: &str = "node:";
 
 const MODULES_JS: &str = include_str!("modules.js");
 
+/// The built-ins eryx provides (`src/node/`), by name after `node:`: npm
+/// polyfills vendored by `src/node/regen.sh`, and hand-written subsets.
+/// Each is evaluated on its first import. The rest throw on import.
+fn node_module(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "buffer" => include_str!("node/buffer.js"),
+        "crypto" => include_str!("node/crypto.js"),
+        "events" => include_str!("node/events.js"),
+        "path" | "path/posix" => include_str!("node/path.js"),
+        "string_decoder" => include_str!("node/string_decoder.js"),
+        "util" => include_str!("node/util.js"),
+        _ => return None,
+    })
+}
+
 /// Node's built-in modules, importable without `node:` (as in eryx-bundler).
 const NODE_BUILTINS: &[&str] = &[
     "assert",
@@ -220,6 +235,9 @@ impl Loader for EnvLoader {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
         if let Some(builtin) = name.strip_prefix(BUILTIN) {
+            if let Some(source) = node_module(builtin) {
+                return Module::declare(ctx.clone(), name, source);
+            }
             let message = format!("{BUILTIN}{builtin} isn't available in eryx yet");
             let source = format!("throw new Error({});", quote(&message));
             return Module::declare(ctx.clone(), name, source);
@@ -259,16 +277,24 @@ pub(crate) fn install(ctx: &Ctx<'_>) -> Result<()> {
 /// until it settles. A module that awaits at top level can't settle that
 /// way, so it's an error.
 fn require_sync<'js>(ctx: Ctx<'js>, name: String) -> Result<Value<'js>> {
+    // A built-in is CommonJS in Node, so `require` gives its default export
+    // (`class X extends require("events")`), not the namespace.
+    let builtin_module = builtin(&name).is_some()
+        && !matches!(&*environment(&ctx)?, Environment::Present { exports, .. } if exports.contains_key(&name));
     let promise = Module::import(&ctx, name.clone())?;
     loop {
         match promise.state() {
             PromiseState::Resolved | PromiseState::Rejected => {
-                return promise.result::<Value<'js>>().unwrap_or_else(|| {
+                let namespace = promise.result::<Value<'js>>().unwrap_or_else(|| {
                     Err(Error::new_loading_message(
                         &name,
                         "the import didn't settle",
                     ))
-                });
+                })?;
+                return match namespace.as_object() {
+                    Some(object) if builtin_module => object.get("default"),
+                    _ => Ok(namespace),
+                };
             }
             PromiseState::Pending => {
                 if !ctx.execute_pending_job() {
