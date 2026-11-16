@@ -652,6 +652,20 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
             "echo x > /tmp/f && touch -d @100000 /tmp/f && date -r /tmp/f +%s",
             "100000\n",
         ),
+        // WASI has no file modes, so cp doesn't try to copy them (#982).
+        (
+            "mkdir -p /tmp/a/s && echo x > /tmp/a/f && touch -d @100000 /tmp/a/f; \
+             cp -r /tmp/a /tmp/b 2>&1; echo r=$?; \
+             cp -p /tmp/a/f /tmp/g 2>&1; echo p=$?; \
+             cp -rp /tmp/a /tmp/c 2>&1; echo rp=$?; \
+             cat /tmp/b/f /tmp/g /tmp/c/f; date -r /tmp/g +%s",
+            "r=0\np=0\nrp=0\nx\nx\nx\n100000\n",
+        ),
+        // `touch -r` reads the reference file's times.
+        (
+            "echo x > /tmp/r && touch -d @100000 /tmp/r && touch -r /tmp/r /tmp/s && date -r /tmp/s +%s",
+            "100000\n",
+        ),
     ])
     .await;
 }
@@ -1690,4 +1704,28 @@ git st
     // `git st` is an alias once running `git-st` fails as an exec does.
     assert!(stdout.ends_with(" M f.txt\n"), "{stdout}");
     assert_eq!(storage.read("/data/repo/f.txt").await.unwrap(), b"two\n");
+}
+
+/// Children run on their own on-demand engine (#833), so running ones take
+/// none of the pooling allocator's slots: only the shell holds one.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn children_take_no_pool_slots() {
+    let engine = eryx::Executor::shared_engine().unwrap();
+    let Some(before) = engine.pooling_allocator_metrics() else {
+        return; // On-demand (Windows, or ERYX_ALLOCATOR): there's no pool.
+    };
+    let (instances, memories) = (before.component_instances(), before.memories());
+    let sandbox = shell().build().unwrap();
+    let run = tokio::spawn(async move { sandbox.execute("sleep 1 | sleep 1 | sleep 1").await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let during = engine.pooling_allocator_metrics().unwrap();
+    // The shell itself, and nothing for its three sleeping children.
+    assert!(
+        during.component_instances() <= instances + 1,
+        "{}",
+        during.component_instances()
+    );
+    assert!(during.memories() <= memories + 1, "{}", during.memories());
+    run.await.unwrap().unwrap();
 }

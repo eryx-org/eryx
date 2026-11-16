@@ -1,13 +1,15 @@
 //! External commands for the shell guest: `eryx:process`.
 //!
 //! A [`Command`] is a WASI 0.2 or 0.3 command component (one that exports
-//! `wasi:cli/run`), compiled once on the shared engine. A shell sandbox
+//! `wasi:cli/run`), compiled once on the child engine (the shared engine's
+//! configuration with on-demand allocation, so children never take the
+//! sandboxes' pooling slots; #833). A shell sandbox
 //! registers commands by name
 //! ([`SandboxBuilder::with_command`](crate::SandboxBuilder::with_command)), and
 //! the shell spawns them as child processes through the `eryx:process`
 //! interface. Each spawn instantiates from the command's cached
-//! pre-instance, so children get the engine's pooling allocator, fuel
-//! metering and epoch interruption without recompiling.
+//! pre-instance, so children get the engine's fuel metering and epoch
+//! interruption without recompiling.
 //!
 //! A child's stdin, stdout and stderr are component-model streams, piped
 //! through small host buffers to its WASI stdio, so pipeline stages run
@@ -452,7 +454,7 @@ impl Command {
     /// Returns an error if the bytes don't compile, or aren't a WASI 0.2 or
     /// 0.3 command.
     pub fn from_bytes(wasm: &[u8]) -> Result<Self, Error> {
-        let engine = crate::Executor::shared_engine()?;
+        let engine = crate::Executor::child_engine()?;
         let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
         Self::from_component(&engine, &component, vmctx::estimate(wasm))
     }
@@ -489,7 +491,7 @@ impl Command {
     #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled: &[u8]) -> Result<Self, Error> {
-        let engine = crate::Executor::shared_engine()?;
+        let engine = crate::Executor::child_engine()?;
         // SAFETY: the caller guarantees the bytes are trusted eryx output.
         let component = unsafe { Component::deserialize(&engine, precompiled) }
             .map_err(crate::wasm::deserialize_error)?;
@@ -514,7 +516,7 @@ impl Command {
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
-        let engine = crate::Executor::shared_engine()?;
+        let engine = crate::Executor::child_engine()?;
         // SAFETY: the caller guarantees the file is trusted and unchanging.
         let component = unsafe { Component::deserialize_file(&engine, path) }
             .map_err(crate::wasm::deserialize_error)?;
@@ -928,7 +930,7 @@ impl Command {
     /// precompiled and you trust.
     #[allow(unsafe_code)]
     pub(crate) unsafe fn from_precompiled_isolated(precompiled: &[u8]) -> Result<Self, Error> {
-        let engine = crate::Executor::shared_engine()?;
+        let engine = crate::Executor::child_engine()?;
         // SAFETY: the caller guarantees the bytes are trusted eryx output.
         let component = unsafe { Component::deserialize(&engine, precompiled) }
             .map_err(crate::wasm::deserialize_error)?;
@@ -1169,7 +1171,7 @@ impl Commands {
 }
 
 /// The linker children are instantiated with: WASI 0.2 and 0.3, plus the
-/// hybrid VFS with `unstable-vfs`. Built once for the shared engine.
+/// hybrid VFS with `unstable-vfs`. Built once, for the child engine.
 fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
     if let Some(linker) = LINKER.get() {
@@ -1258,6 +1260,22 @@ impl ChildMemory {
     }
 }
 
+impl ChildMemory {
+    /// Take `bytes` more of the pool, if they fit.
+    fn charge(&mut self, bytes: usize) -> bool {
+        let reserved = self
+            .pool
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|&u| u <= self.limit)
+            })
+            .is_ok();
+        if reserved {
+            self.held += bytes;
+        }
+        reserved
+    }
+}
+
 impl ResourceLimiter for ChildMemory {
     fn memory_growing(
         &mut self,
@@ -1265,28 +1283,24 @@ impl ResourceLimiter for ChildMemory {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        let grow = desired.saturating_sub(current);
-        let reserved = self
-            .pool
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(grow).filter(|&u| u <= self.limit)
-            })
-            .is_ok();
-        if reserved {
-            self.held += grow;
-        }
         // A refused grow fails `memory.grow`, so the child sees an ordinary
         // allocation failure.
-        Ok(reserved)
+        Ok(self.charge(desired.saturating_sub(current)))
     }
 
+    /// Table elements are host memory too: a pointer each. Children run on
+    /// the on-demand child engine, where nothing else bounds a table (the
+    /// pooling allocator's `table_elements` doesn't apply), so they're charged
+    /// to the same pool, initial size included. A refused grow fails
+    /// `table.grow` (returns -1).
     fn table_growing(
         &mut self,
-        _current: usize,
-        _desired: usize,
+        current: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(true)
+        let elements = desired.saturating_sub(current);
+        Ok(self.charge(elements.saturating_mul(std::mem::size_of::<usize>())))
     }
 }
 
@@ -1730,7 +1744,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             accessor.with(|mut access| {
                 let mut store = access.as_context_mut();
                 let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
-                // Fuel is always enabled on the shared engine.
+                // Fuel is always enabled on both engines.
                 let _ = store.set_fuel(left);
                 left > 0
             })
@@ -1924,7 +1938,7 @@ async fn run_nested(
         let delta = used.saturating_sub(charged_fuel);
         charged_fuel = charged_fuel.max(used);
         let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
-        // Fuel is always enabled on the shared engine.
+        // Fuel is always enabled on both engines.
         let _ = store.set_fuel(left);
         let state = store.data();
         state
@@ -2030,7 +2044,7 @@ mod tests {
     /// `tcp-socket.create`, so a version it no longer links fails loudly.
     #[test]
     fn p3_sockets_are_counted_only_where_wasmtime_wasi_links_them() {
-        let engine = crate::Executor::shared_engine().unwrap();
+        let engine = crate::Executor::child_engine().unwrap();
         let mut linker = Linker::<ChildState>::new(&engine);
         assert!(count_p3_sockets(&mut linker).is_err());
         wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
@@ -2134,7 +2148,9 @@ mod tests {
     }
 
     /// A precompiled command carries its estimate in its stamp; one without
-    /// is charged the pooling limit.
+    /// is charged [`vmctx::UNSTAMPED`]. Commands precompiled on the shared
+    /// engine's configuration ([`Executor::precompile`](crate::Executor::precompile))
+    /// load on the child engine.
     #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[test]
     #[allow(unsafe_code)]
@@ -2154,6 +2170,66 @@ mod tests {
         // SAFETY: as above.
         let from_file = unsafe { Command::from_precompiled_file(&path) }.unwrap();
         assert_eq!(from_file.vmctx, stamped.vmctx);
+    }
+
+    /// Growing a child's tables is charged to its memory pool, a pointer per
+    /// element, and refused once the pool is full; the charge comes back
+    /// when the child ends.
+    #[test]
+    fn table_growth_is_charged_to_the_pool() {
+        let pool = Arc::new(AtomicUsize::new(0));
+        let ptr = std::mem::size_of::<usize>();
+        let mut child = ChildMemory::reserve(Arc::clone(&pool), 100 * ptr, 0).unwrap();
+        assert!(child.table_growing(0, 60, None).unwrap());
+        assert_eq!(pool.load(Ordering::Relaxed), 60 * ptr);
+        assert!(!child.table_growing(60, 120, None).unwrap());
+        assert!(child.memory_growing(0, 40 * ptr, None).unwrap());
+        assert!(!child.memory_growing(40 * ptr, 41 * ptr, None).unwrap());
+        drop(child);
+        assert_eq!(pool.load(Ordering::Relaxed), 0);
+    }
+
+    /// Commands run on the child engine: with the pooling allocator on the
+    /// shared engine, that's another engine, allocating on demand, so
+    /// children take none of the sandboxes' pool slots.
+    #[test]
+    fn commands_run_on_the_on_demand_child_engine() {
+        let shared = crate::Executor::shared_engine().unwrap();
+        let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        let engine = command.pre.engine();
+        assert!(engine.pooling_allocator_metrics().is_none());
+        assert_eq!(
+            Engine::same(engine, &shared),
+            shared.pooling_allocator_metrics().is_none(),
+            "the child engine is the shared one exactly when that is on-demand"
+        );
+        assert!(Engine::same(
+            engine,
+            &crate::Executor::child_engine().unwrap()
+        ));
+    }
+
+    /// The child engine has no per-instance limit of its own, so the charge
+    /// for instance metadata is what bounds a child there: one whose estimate
+    /// doesn't fit the child memory pool isn't started.
+    #[cfg(all(feature = "embedded", feature = "shell"))]
+    #[tokio::test]
+    async fn the_child_engine_refuses_an_estimate_over_the_limit() {
+        let fits = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        let engine = fits.pre.engine().clone();
+        assert!(engine.pooling_allocator_metrics().is_none());
+        let component = Component::from_binary(&engine, &test_cmd_wasm()).unwrap();
+        let too_big =
+            Command::from_component(&engine, &component, CHILD_MEMORY_LIMIT as u64 + 1).unwrap();
+        let sandbox = crate::Sandbox::embedded()
+            .shell()
+            .with_command("fits", fits)
+            .with_command("too-big", too_big)
+            .build()
+            .unwrap();
+        sandbox.execute("echo hi | fits > /dev/null").await.unwrap();
+        let err = sandbox.execute("echo hi | too-big").await.unwrap_err();
+        assert!(err.to_string().contains("too-big: limit-exceeded"), "{err}");
     }
 
     /// A child whose instances' metadata doesn't fit the memory pool isn't
@@ -2177,7 +2253,7 @@ mod tests {
         let p3 = Command::from_bytes(&test_cmd_wasm_for("wasm32-wasip3")).unwrap();
         assert!(matches!(p3.pre, Pre::P3(_)));
 
-        let engine = crate::Executor::shared_engine().unwrap();
+        let engine = crate::Executor::child_engine().unwrap();
         let empty = Component::new(&engine, "(component)").unwrap();
         assert!(Command::from_component(&engine, &empty, 0).is_err());
     }
