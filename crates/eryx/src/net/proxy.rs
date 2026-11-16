@@ -618,13 +618,14 @@ where
         if !shared.take_sent(first.len()) {
             return Err(shared.over_limit());
         }
-        let sent = match framer.frame(&first) {
-            Ok(out) => up_w.write_all(&out).await.map_err(ProxyError::from),
-            Err(e) => Err(e.into()),
-        };
-        if let Err(e) = sent {
-            shared.refund_sent(first.len());
-            return Err(e);
+        // A write that fails may have sent some of it, so only a request
+        // refused before anything was written is refunded.
+        match framer.frame(&first) {
+            Ok(out) => up_w.write_all(&out).await?,
+            Err(e) => {
+                shared.refund_sent(first.len());
+                return Err(e.into());
+            }
         }
     }
 
@@ -650,12 +651,8 @@ where
                     return Ok(());
                 }
                 match framer.frame(&buf[..n]) {
-                    Ok(out) => {
-                        if let Err(e) = up_w.write_all(&out).await {
-                            shared.refund_sent(n);
-                            return Err(e.into());
-                        }
-                    }
+                    // Not refunded if it fails: some of it may have gone.
+                    Ok(out) => up_w.write_all(&out).await?,
                     Err(e) => {
                         shared.refund_sent(n);
                         if let Some(response) = ProxyError::from(e).response(&shared.policy) {
@@ -703,12 +700,10 @@ where
             }
             tokio::select! {
                 n = a_r.read(&mut a_buf[..cap]) => match n {
+                    // Not refunded if the write fails: some of it may
+                    // have gone.
                     Ok(n) if n > 0 && shared.take_sent(n) => {
-                        let sent = b_w.write_all(&a_buf[..n]).await.is_ok();
-                        if !sent {
-                            shared.refund_sent(n);
-                        }
-                        sent
+                        b_w.write_all(&a_buf[..n]).await.is_ok()
                     }
                     _ => false,
                 },

@@ -362,6 +362,37 @@ async fn a_spinning_child_stops_at_the_parents_timeout() {
     );
 }
 
+/// A running child's argv and env count against `max_child_host_bytes` for
+/// as long as it runs, not just until the shell waits on it: with three
+/// children each holding 1 MiB running, a fourth doesn't fit a 3.5 MiB
+/// budget, and once they've finished it does. Background children start
+/// asynchronously, so they're given a second (they take milliseconds), and
+/// their end is polled for (this shell has no `wait`).
+#[cfg(feature = "coreutils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn running_children_keep_their_arguments_charged() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default()
+                .with_max_child_host_bytes(7 << 19)
+                .with_execution_timeout(Duration::from_secs(60)),
+        )
+        .build()
+        .unwrap();
+    let script = format!(
+        "{BIG}\nfor i in 1 2 3; do X=\"$BIG\" sleep 8 & done\nsleep 1\n\
+         X=\"$BIG\" tc argv0; echo \"running=$?\"\n\
+         until [ \"$(X=\"$BIG\" tc argv0 2>&1)\" = tc ]; do sleep 0.1; done\necho finished"
+    );
+    let out = sandbox.execute(&script).await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "running=126\nfinished\n");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+        "{out:?}"
+    );
+}
+
 /// A child the timeout or cancellation drops midway leaves nothing behind
 /// that stops the session running children afterwards, once it has reset
 /// (after a timeout by hand; a cancel resets on the next call).
