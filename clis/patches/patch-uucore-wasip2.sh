@@ -80,3 +80,49 @@ else
     fi
     echo "patch-uucore-wasip2: FileInformation uses dev and ino on WASI in $fs"
 fi
+
+# ---------------------------------------------------------------------------
+# 4) Don't copy file modes in `cp` on WASI.
+#
+# WASI has no file modes: std's `fs::set_permissions` calls wasi-libc's
+# `chmod`, which fails with ENOSYS. `cp` copies the mode of every directory it
+# creates, and of every file with `-p`/`--preserve=mode`, so `cp -r` printed
+# "Function not implemented" per directory and `cp -p` exited 1 (#982). Skip
+# the call there, as GNU cp skips modes a filesystem can't store. Idempotent.
+# ---------------------------------------------------------------------------
+cp=src/uu/cp/src/cp.rs
+[ -f "$cp" ] || { echo "patch-uucore-wasip2: $cp not found (wrong dir?)" >&2; exit 1; }
+
+if grep -q 'eryx: no file modes on WASI' "$cp"; then
+    echo "patch-uucore-wasip2: cp mode preservation already patched"
+else
+    perl -0pi -e 's/\Q            fs::set_permissions(dest, source_perms)\E\n/            \/\/ eryx: no file modes on WASI\n            #[cfg(target_os = "wasi")]\n            let _ = source_perms;\n            #[cfg(not(target_os = "wasi"))]\n            fs::set_permissions(dest, source_perms)\n/' "$cp"
+    if ! grep -q 'eryx: no file modes on WASI' "$cp"; then
+        echo "patch-uucore-wasip2: ERROR — failed to patch mode preservation in $cp" >&2
+        exit 1
+    fi
+    echo "patch-uucore-wasip2: cp skips mode preservation on WASI in $cp"
+fi
+
+# ---------------------------------------------------------------------------
+# 5) Read timestamps from std's metadata in `cp` and `touch`.
+#
+# filetime's WASI backend leaves `FileTime::from_last_access_time` and
+# `from_last_modification_time` as `unimplemented!()`, so `cp -p` (preserving
+# timestamps) and `touch -r` panicked (#982). std's `Metadata::accessed` and
+# `modified` work on WASI; read the times from those instead. This tree only
+# builds for wasip2, so the change isn't gated. Idempotent.
+# ---------------------------------------------------------------------------
+for f in src/uu/cp/src/cp.rs src/uu/touch/src/touch.rs; do
+    [ -f "$f" ] || { echo "patch-uucore-wasip2: $f not found (wrong dir?)" >&2; exit 1; }
+    if ! grep -q 'FileTime::from_last_\(access\|modification\)_time(&[a-z_]*metadata)' "$f"; then
+        echo "patch-uucore-wasip2: $f timestamps already patched"
+        continue
+    fi
+    perl -pi -e 's/FileTime::from_last_access_time\(&(\w*metadata)\)/FileTime::from_system_time($1.accessed()?)/g; s/FileTime::from_last_modification_time\(&(\w*metadata)\)/FileTime::from_system_time($1.modified()?)/g' "$f"
+    if grep -q 'FileTime::from_last_\(access\|modification\)_time(&[a-z_]*metadata)' "$f"; then
+        echo "patch-uucore-wasip2: ERROR — failed to patch timestamps in $f" >&2
+        exit 1
+    fi
+    echo "patch-uucore-wasip2: $f reads timestamps from std metadata"
+done
