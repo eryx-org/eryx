@@ -362,6 +362,72 @@ async fn session_state_persists_and_snapshots_round_trip() {
     assert_eq!(out.stdout, b"[]\n");
 }
 
+/// A snapshot the WASI 0.2 build of the shell took (before the shell moved to
+/// WASI 0.3) restores in this one: the target doesn't change brush's state
+/// format. The fixture holds `count=2`, a `bump` function and an alias `hi`.
+///
+/// When `STATE_FORMAT` changes (e.g. a brush pin bump), restoring it fails by
+/// design: delete the fixture and this test, or regenerate the fixture from a
+/// WASI 0.2 build of the new guest with [`capture_wasi_0_2_snapshot`].
+#[tokio::test]
+async fn a_wasi_0_2_snapshot_restores() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/shell-p2-snapshot.bin"
+    ))
+    .unwrap();
+    let snapshot = eryx::StateSnapshot::from_bytes(&bytes).unwrap();
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    session.restore_state(&snapshot).await.unwrap();
+    let out = session
+        .execute("bump; echo $count; shopt -s expand_aliases; alias hi")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"3\nalias hi='echo hi'\n");
+}
+
+/// Regenerates `tests/fixtures/shell-p2-snapshot.bin` from a WASI 0.2 build
+/// of the shell, for [`a_wasi_0_2_snapshot_restores`]:
+///
+/// ```sh
+/// mise run build-runtime-shell-p2
+/// ERYX_PRECOMPILE_BOOTSTRAP=1 cargo run -p eryx-precompile --release -- compile \
+///   crates/eryx-runtime/runtime-shell-p2.wasm --language shell --target native \
+///   --output /tmp/runtime-shell-p2.cwasm --no-verify
+/// ERYX_RUNTIME_CWASM_SHELL=/tmp/runtime-shell-p2.cwasm ERYX_CAPTURE_SHELL_SNAPSHOT=1 \
+///   cargo nextest run -p eryx --features embedded,shell --test shell_guest \
+///   --run-ignored only capture_wasi_0_2_snapshot
+/// ```
+#[tokio::test]
+#[ignore = "regenerates a fixture; see the doc comment"]
+async fn capture_wasi_0_2_snapshot() {
+    if std::env::var_os("ERYX_CAPTURE_SHELL_SNAPSHOT").is_none() {
+        return;
+    }
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    session
+        .execute("count=1; bump() { count=$((count + 1)); }; alias hi='echo hi'; bump")
+        .run()
+        .await
+        .unwrap();
+    let snapshot = session.snapshot_state().await.unwrap();
+    std::fs::write(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/shell-p2-snapshot.bin"
+        ),
+        snapshot.to_bytes(),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn fuel_limit_stops_an_infinite_loop() {
     let Some(executor) = shell_executor() else {

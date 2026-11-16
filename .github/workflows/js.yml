@@ -2,7 +2,8 @@ name: js
 
 on:
   push:
-    branches: ["main"]
+    # multi-guest too, so its merges save the caches its PRs restore.
+    branches: ["main", "multi-guest"]
   pull_request:
     branches: ["main", "multi-guest"]
 
@@ -66,7 +67,7 @@ jobs:
 
       - name: Cache WASM runtime
         id: wasm-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime-python.wasm
@@ -82,28 +83,29 @@ jobs:
       # (as in ci.yml, which caches their cwasms too, under other keys).
       - name: Cache JavaScript runtime
         id: wasm-cache-javascript
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/eryx-runtime/runtime-javascript.wasm
           key: wasm-runtime-javascript-wasm-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
 
       - name: Cache shell runtime
         id: wasm-cache-shell
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: crates/eryx-runtime/runtime-shell.wasm
-          key: wasm-runtime-shell-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          # The WASI 0.2 build, which this package uses (see js/mise.toml).
+          path: crates/eryx-runtime/runtime-shell-p2.wasm
+          key: wasm-runtime-shell-p2-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
 
       - name: Touch cached guest WASM
         if: steps.wasm-cache-javascript.outputs.cache-hit == 'true' && steps.wasm-cache-shell.outputs.cache-hit == 'true'
         run: |
           # So mise considers the wasm-build-guests task current
-          touch crates/eryx-runtime/runtime-javascript.wasm crates/eryx-runtime/runtime-shell.wasm
+          touch crates/eryx-runtime/runtime-javascript.wasm crates/eryx-runtime/runtime-shell-p2.wasm
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: ./.github/actions/setup-rust
 
@@ -116,6 +118,34 @@ jobs:
       - name: Build and test JavaScript bindings
         working-directory: js
         run: mise run test
+
+      - name: Save WASM runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-python.wasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
+      - name: Save JavaScript runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache-javascript.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/eryx-runtime/runtime-javascript.wasm
+          key: ${{ steps.wasm-cache-javascript.outputs.cache-primary-key }}
+
+      - name: Save shell runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache-shell.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/eryx-runtime/runtime-shell.wasm
+          key: ${{ steps.wasm-cache-shell.outputs.cache-primary-key }}
 
       # Workers behave differently in browsers (a message sent before the
       # Worker's listener exists is dropped), so run the timeoutMs sandboxes

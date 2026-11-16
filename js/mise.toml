@@ -43,10 +43,12 @@ sources = [
 ]
 outputs = [
   "../crates/eryx-runtime/runtime-javascript.wasm",
-  "../crates/eryx-runtime/runtime-shell.wasm",
+  "../crates/eryx-runtime/runtime-shell-p2.wasm",
 ]
+# The shell's WASI 0.2 build: this package's shims are WASI 0.2 only, while the
+# shell otherwise ships for WASI 0.3 (runtime-shell.wasm); see #918.
 run = """
-cd .. && mise run build-runtime-javascript && mise run build-runtime-shell
+cd .. && mise run build-runtime-javascript && mise run build-runtime-shell-p2
 """
 
 [tasks.extract-stdlib]
@@ -115,7 +117,7 @@ description = "Transpile the JavaScript and shell WASM components (loaded on fir
 depends = ["wasm-build-guests"]
 sources = [
   "../crates/eryx-runtime/runtime-javascript.wasm",
-  "../crates/eryx-runtime/runtime-shell.wasm",
+  "../crates/eryx-runtime/runtime-shell-p2.wasm",
 ]
 outputs = ["eryx/eryx-sandbox-javascript.js", "eryx/eryx-sandbox-shell.js"]
 run = """
@@ -125,9 +127,11 @@ set -euo pipefail
 # Python component's interfaces/; transpile elsewhere and keep the code only.
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-for language in javascript shell; do
+# The shell's WASI 0.2 build (see wasm-build-guests).
+for component in javascript:runtime-javascript shell:runtime-shell-p2; do
+  language=${component%%:*}
   jco transpile \
-    "../crates/eryx-runtime/runtime-$language.wasm" \
+    "../crates/eryx-runtime/${component#*:}.wasm" \
     --name "eryx-sandbox-$language" \
     --out-dir "$out" \
     --quiet \
