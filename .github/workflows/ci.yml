@@ -56,6 +56,11 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      # Whether to run the whole suite. PRs into multi-guest run a fast
+      # subset (lint, fmt, Linux tests and what they need, feature checks);
+      # everything else (pushes, PRs into main, tags) runs everything. The
+      # jobs left out check `full` in their `if:`, so they report as skipped.
+      full: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
@@ -66,6 +71,7 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
       bundler: ${{ steps.filter.outputs.bundler }}
+      notices: ${{ steps.filter.outputs.notices }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -120,6 +126,20 @@ jobs:
               - 'crates/eryx-bundler/**'
               - 'mise.toml'
               - '.github/workflows/ci.yml'
+            # What the third-party notices are made from (#837).
+            notices:
+              - '**/Cargo.lock'
+              - '**/Cargo.toml'
+              - 'crates/eryx/python-stdlib.tar.*'
+              - 'crates/eryx-runtime/prebuilt/**'
+              - 'about.toml'
+              - 'third_party/**'
+              - 'scripts/notices.py'
+              - 'crates/eryx-runtime/libs/**'
+              - 'crates/eryx-guest-js/src/node/**'
+              - 'clis/coreutils.toml'
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
 
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
@@ -158,6 +178,27 @@ jobs:
         run: cargo rail unify --check
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+  # Third-party notices (#837): every shipped crate's licence is one
+  # about.toml accepts, and every vendored non-Rust input has an entry in
+  # third_party/manual.toml with its current version. Reads the lock files
+  # only; nothing is built.
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.notices == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check the notices
+        run: mise run notices-check
 
   # The bundled stdlib ships precompiled bytecode (the sandbox mounts it
   # read-only, so Python can't cache it). Fail if it drifts from the sources.
@@ -225,7 +266,7 @@ jobs:
           # v6 -> v7 for the eryx version stored in every cwasm (engine config in
           # crates/eryx/src/wasm.rs). The version itself comes from Cargo.toml,
           # which the key covers.
-          key: wasm-runtime-v7-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-v7-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -387,7 +428,7 @@ jobs:
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-javascript-v3-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-javascript-v3-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -483,7 +524,7 @@ jobs:
           # cwasms were built without the CPU presets (host features). v2 -> v3:
           # the shell's embedded coreutils (#809). v3 -> v4: the shell is
           # built for wasm32-wasip3.
-          key: wasm-runtime-shell-v4-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-shell-v4-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -630,7 +671,7 @@ jobs:
             crates/eryx-runtime/eryx-bundler-macos.cwasm
           # As for the runtimes, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change.
-          key: wasm-bundler-v1-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-bundler-v1-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -755,6 +796,13 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
     steps:
+      # The full run and the shell-only run below each build a feature set of
+      # the workspace, which a cold kache can't fit in the runner's free disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -857,13 +905,29 @@ jobs:
         # Use --profile ci for longer timeouts on slow WASM component tests
         run: cargo nextest run --workspace --all-features --profile ci
 
+      # The shell (and JavaScript) without `unstable-vfs`, which --all-features
+      # always turns on: bugs gated on its absence (#910's p3 gate, #914's
+      # environment mount) only show up here. (`packages` implies
+      # `environment`.) Only the suites that exercise
+      # that path, reusing this job's artifacts and compiled dependencies, so
+      # it costs about the eryx crate's own rebuild plus a minute of tests.
+      - name: Run the shell suites without unstable-vfs
+        run: |
+          df -h .
+          cargo nextest run -p eryx --profile ci \
+            --features embedded,shell,javascript,packages \
+            --test shell_guest --test commands --test p3_guest --test environment \
+            --test js_environment
+          df -h .
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -894,8 +958,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
@@ -943,8 +1008,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -992,8 +1058,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1022,8 +1089,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'pull_request'
-      && needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'pull_request'
+      && needs.changes.outputs.core == 'true')
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1128,9 +1196,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.examples == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1195,9 +1264,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1283,9 +1353,10 @@ jobs:
     runs-on: windows-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1387,9 +1458,10 @@ jobs:
     runs-on: macos-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1553,10 +1625,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.book == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1773,13 +1846,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && github.actor != 'dependabot[bot]'
       && github.ref_type != 'tag'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true')
+      || needs.changes.outputs.demo == 'true'))
     permissions:
       contents: read
       deployments: write
@@ -1898,10 +1972,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
     steps:
@@ -1973,10 +2048,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
     steps:

@@ -21,6 +21,7 @@ entries = ["date-fns/format"]    # importable beyond each package's root
 # registry = "https://mirror.example/npm/"
 # min-release-age = "3d"          # skip versions published more recently (default 3d)
 # lockfile = "data-tools.lock"    # default: <name>.lock next to the definition
+                                 # (with `env build`; see "Building it")
 
 [limits]                         # optional
 max-packages = 500
@@ -42,6 +43,18 @@ date, and `--offline` to use only the lockfile and the download cache.
 Nothing from a package runs during the build: there are no install scripts.
 
 In Rust, the same is `eryx::environment::build` with the `packages` feature.
+A definition can also be built in code, without TOML:
+`EnvironmentDefinition::new("data-tools", Language::JavaScript)?.with_npm(NpmSection::new(["zod@^4"]))`.
+The `packages` feature embeds the bundler: a crates.io build gets it with
+`eryx-precompile setup --bundler`.
+
+Where the lockfile goes: `env build` keeps it next to the definition (its
+`base_dir`). Through the library, `BuildOptions` without a `base_dir` keeps it
+in the eryx cache (`<cache>/packages/lockfiles/`) rather than the current
+directory. A lockfile there isn't shared across machines, so two machines can
+resolve different versions, and definitions with the same name share it. For
+reproducible builds, commit the lockfile next to the definition, point
+`base_dir` at that directory, and build with `frozen`.
 
 > Released `eryx-precompile` binaries don't include `env build` yet. From a
 > checkout of eryx: `mise run precompile-bundler`, then
