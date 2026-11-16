@@ -48,9 +48,10 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   downloads from a mirror instead of GitHub.
 - The embedded runtime's cached copy is `runtime-<language>-<version>-<hash>.cwasm`
   in the eryx cache directory. Older copies are not cleaned up automatically.
-- Library preambles are Python only, and the shell can't have secrets: a
-  sandbox with either fails to build (`ErrorKind::Initialization`).
-  JavaScript reads secrets' placeholders from `process.env` and sends them
+- Library preambles are Python only: a sandbox of another language with one
+  fails to build (`ErrorKind::Initialization`). The shell exports secrets'
+  placeholders to its commands, which reach the network only through
+  `with_child_network`'s proxy. JavaScript reads secrets' placeholders from `process.env` and sends them
   with `fetch`.
 - `Executor::precompile`, `precompile_file` and `precompile_with_target` now
   fail when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS` is set in a build
@@ -70,8 +71,14 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 ## gRPC server (`eryx-server`)
 
 - New `ExecuteRequest.language` (`LANGUAGE_UNSPECIFIED` is Python). A
-  language the server doesn't serve is rejected with `INVALID_ARGUMENT`. So is
-  a shell request with `secrets`; JavaScript gets them in `process.env`.
+  language the server doesn't serve is rejected with `INVALID_ARGUMENT`.
+  JavaScript gets `secrets` in `process.env`; the shell exports them to its
+  commands.
+- New `NetworkConfig.child_network` gives a shell's commands network through
+  a proxy, within the request's policy (`MODE_INHERIT`, or `MODE_NARROW` with
+  `narrow`). Children only ever see secrets' placeholders. New
+  `--shell-command-tunnels NAME` (`ERYX_SHELL_COMMAND_TUNNELS`) lets a
+  `--shell-command` open blind tunnels, with no secret substitution.
 - New `--languages` flag (`ERYX_LANGUAGES`), default `python,javascript,shell`:
   the languages the server accepts. Each gets its own pool, sized by the pool
   flags. Python's is created and prewarmed at startup, as before; the others
