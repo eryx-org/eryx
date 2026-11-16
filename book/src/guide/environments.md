@@ -93,14 +93,17 @@ eryx-precompile env pack . --name data-tools --entry date-fns/format \
   fails before bundling, naming the link. Links that aren't packages
   (`node_modules/.bin`) and links that lead nowhere are left alone. Yarn's
   Plug'n'Play has no `node_modules`, so use its `nodeLinker: node-modules`.
-- **Safety:** the bundler parses the packages in a sandbox that sees only,
-  read-only, those `node_modules` dirs and the packages they link to, plus
-  its output: never the rest of the tree or the root, so a package can't
-  import the app's own files (a `../../service-account.json`) into the
-  environment; the pack fails instead. A linked package is visible whole,
-  so a workspace member's own files can end up in the bundle if it imports
-  them. Pass `--ignore-scripts` to the install so no package code runs
-  there either.
+- **Safety:** the bundler parses the packages in a sandbox. What it can
+  read, and so what can end up in the environment, is exactly:
+  - the contents of the `node_modules` dirs from the tree up to the root;
+  - the whole directory each package symlink points at (a workspace
+    member's or `file:` package's directory, everything in it).
+
+  Nothing else of the tree or the root is visible: a package that imports
+  the app's own files (a `../../service-account.json`), or a workspace
+  member that imports a file beside its directory, fails the pack instead.
+  Nothing is fetched, and pass `--ignore-scripts` to the install so no
+  package code runs there either.
 - `--lockfile` copies the given file into the environment and records it
   and its hash in the manifest's `inputs`, with the installed versions of
   the entries' packages. None of that is part of the hash: packing the same

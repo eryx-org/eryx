@@ -276,6 +276,60 @@ async fn packages_cant_import_the_apps_files() {
         .to_string();
     assert!(err.contains("service-account.json"), "{err}");
     assert!(!out.exists(), "nothing was written");
+    assert_no_canary(dir.path(), &app.join("service-account.json"));
+}
+
+/// No file under `dir` but `source` holds the canary.
+fn assert_no_canary(dir: &Path, source: &Path) {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() && !path.is_symlink() {
+                pending.push(path);
+            } else if path != source && path.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                assert!(
+                    !bytes.windows(6).any(|w| w == b"CANARY"),
+                    "{} holds the canary",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// A linked workspace member is visible whole, but nothing beside it: its
+/// import of a file at the workspace root fails the pack.
+#[tokio::test]
+async fn a_workspace_member_cant_import_its_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let member = repo.join("packages/w");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(repo.join("secret.txt"), "CANARY").unwrap();
+    std::fs::write(
+        member.join("package.json"),
+        r#"{"name": "w", "version": "1.0.0", "main": "index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        member.join("index.js"),
+        "import text from \"../../secret.txt\";\nexport default text;\n",
+    )
+    .unwrap();
+    let app = repo.join("apps/web");
+    std::fs::create_dir_all(app.join("node_modules")).unwrap();
+    symlink("../../../packages/w", app.join("node_modules/w")).unwrap();
+
+    let out = dir.path().join("env");
+    let err = pack(&app, &out, &options("ws").entry("w").root(&repo))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("secret.txt"), "{err}");
+    assert!(!out.exists(), "nothing was written");
+    assert_no_canary(dir.path(), &repo.join("secret.txt"));
 }
 
 /// A workspace member whose dependencies are hoisted to the repo's
