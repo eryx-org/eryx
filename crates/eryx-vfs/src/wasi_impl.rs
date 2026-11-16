@@ -244,7 +244,8 @@ pub(crate) fn vfs_metadata_hash(path: &str, meta: &Metadata) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     vfs_identity(path).hash(&mut hasher);
     meta.is_dir.hash(&mut hasher);
-    // Directory metadata carries no stored times or size.
+    // Leave out a directory's mtime, which changes whenever an entry is
+    // added or removed: wasi-libc uses this hash as the inode number.
     if !meta.is_dir {
         meta.size.hash(&mut hasher);
         meta.modified.hash(&mut hasher);

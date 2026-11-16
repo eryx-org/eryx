@@ -2185,7 +2185,7 @@ pub struct ExecuteBuilder<'a> {
     #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
     #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-    max_vfs_bytes: Option<u64>,
+    vfs_limits: crate::session::executor::VfsLimits,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -2236,7 +2236,7 @@ impl<'a> ExecuteBuilder<'a> {
             #[cfg(feature = "unstable-vfs")]
             max_open_host_files: None,
             #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-            max_vfs_bytes: None,
+            vfs_limits: crate::session::executor::VfsLimits::default(),
         }
     }
 
@@ -2370,13 +2370,12 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
-    /// Limit the size of the shell's private `/tmp` (default
-    /// [`eryx_vfs::DEFAULT_MAX_BYTES`]; see
+    /// Limit the size and entry count of the shell's private `/tmp` (see
     /// [`ResourceLimits::max_vfs_bytes`](crate::ResourceLimits::max_vfs_bytes)).
     #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
     #[must_use]
-    pub(crate) fn with_max_vfs_bytes(mut self, bytes: Option<u64>) -> Self {
-        self.max_vfs_bytes = bytes;
+    pub(crate) fn with_vfs_limits(mut self, limits: crate::session::executor::VfsLimits) -> Self {
+        self.vfs_limits = limits;
         self
     }
 
@@ -2439,7 +2438,7 @@ impl<'a> ExecuteBuilder<'a> {
                 #[cfg(feature = "unstable-vfs")]
                 self.max_open_host_files,
                 #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
-                self.max_vfs_bytes,
+                self.vfs_limits,
             )
             .await
     }
@@ -3922,7 +3921,8 @@ impl Executor {
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
-        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))] max_vfs_bytes: Option<u64>,
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
@@ -4007,7 +4007,7 @@ impl Executor {
         #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
         let hybrid_vfs_ctx = Some(crate::session::executor::build_private_vfs_context(
             self,
-            crate::session::executor::private_vfs_storage(max_vfs_bytes),
+            crate::session::executor::private_vfs_storage(vfs_limits),
             None,
         )?);
 

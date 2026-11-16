@@ -99,8 +99,7 @@ fn vfs_metadata_to_stat(meta: &crate::storage::Metadata) -> types::DescriptorSta
         types::DescriptorType::RegularFile
     };
 
-    // Only files store times; directory metadata just carries "now".
-    let time = |t| (!meta.is_dir).then(|| crate::wasi_impl::systemtime_to_datetime(t));
+    let time = |t| Some(crate::wasi_impl::systemtime_to_datetime(t));
 
     types::DescriptorStat {
         type_: dtype,

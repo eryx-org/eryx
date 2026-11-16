@@ -638,6 +638,11 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
         ),
         ("mkdir /tmp/t && rmdir /tmp/t && echo gone", "gone\n"),
         ("realpath /tmp/../tmp", "/tmp\n"),
+        // Directories carry their own times rather than the epoch (#973).
+        (
+            "mkdir /tmp/d && y=$(date -r /tmp/d +%Y) && [ \"$y\" != 1970 ] && echo dated",
+            "dated\n",
+        ),
     ])
     .await;
 }
