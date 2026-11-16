@@ -1334,24 +1334,31 @@ impl StreamBudget {
     }
 }
 
-/// Most callback starts [`CallbackClock`] keeps waiting for their end; past
+/// Most callback starts [`TraceClock`] keeps waiting for their end; past
 /// it, the oldest is forgotten (its end then reports no duration).
 const MAX_PENDING_CALLBACKS: usize = 1024;
 
-/// Times host callbacks from the guest's `callback_start` and `callback_end`
-/// trace events, which every guest reports around a call but none times.
-///
-/// Calls are matched by name, first in first out. Only events the trace
-/// budget let through are timed, and at most [`MAX_PENDING_CALLBACKS`] starts
-/// are kept, so a guest reporting starts without ends can't grow it.
-// ponytail: concurrent calls to one callback that finish out of order get
-// each other's durations; a call id in the events would pair them exactly.
-// A start whose end never comes (the CPython guest reports no end for a
-// cancelled call, #943) skews that name's later durations the same way.
+/// The host's part in an execution's trace events: timing callbacks, and
+/// numbering child processes.
 #[derive(Debug, Default)]
-pub(crate) struct CallbackClock(VecDeque<(String, std::time::Instant)>);
+pub(crate) struct TraceClock {
+    /// Callbacks started and not yet ended, oldest first, by name.
+    ///
+    /// The guests report `callback_start` and `callback_end` around a call
+    /// but don't time it. Calls are matched by name, first in first out. Only
+    /// events the trace budget let through are timed, and at most
+    /// [`MAX_PENDING_CALLBACKS`] starts are kept, so a guest reporting starts
+    /// without ends can't grow it.
+    // ponytail: concurrent calls to one callback that finish out of order get
+    // each other's durations; a call id in the events would pair them exactly.
+    // A start whose end never comes (the CPython guest reports no end for a
+    // cancelled call, #943) skews that name's later durations the same way.
+    callbacks: VecDeque<(String, std::time::Instant)>,
+    /// The last child process's pid.
+    last_pid: u32,
+}
 
-impl CallbackClock {
+impl TraceClock {
     /// Note a `callback_start`, or add `duration_ms` to a `callback_end`.
     fn time(&mut self, event_json: &mut String) {
         // Only parse the events that can be callback events.
@@ -1369,17 +1376,21 @@ impl CallbackClock {
         };
         match kind {
             "callback_start" => {
-                if self.0.len() == MAX_PENDING_CALLBACKS {
-                    self.0.pop_front();
+                if self.callbacks.len() == MAX_PENDING_CALLBACKS {
+                    self.callbacks.pop_front();
                 }
-                self.0
+                self.callbacks
                     .push_back((name.to_owned(), std::time::Instant::now()));
             }
             "callback_end" => {
-                let Some(i) = self.0.iter().position(|(started, _)| started == name) else {
+                let Some(i) = self
+                    .callbacks
+                    .iter()
+                    .position(|(started, _)| started == name)
+                else {
                     return;
                 };
-                let Some((_, started)) = self.0.remove(i) else {
+                let Some((_, started)) = self.callbacks.remove(i) else {
                     return;
                 };
                 let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1387,6 +1398,58 @@ impl CallbackClock {
                 *event_json = serde_json::Value::Object(event).to_string();
             }
             _ => {}
+        }
+    }
+}
+
+/// A child process's `process_start` and `process_end` trace events.
+///
+/// [`ExecutorState::trace_process_start`] reports the start; [`Self::end`]
+/// reports how the child ended. Dropped before that (the parent's execution
+/// timed out or was cancelled while it waited), it reports the child killed.
+pub(crate) struct ProcessTrace {
+    tx: mpsc::UnboundedSender<TraceRequest>,
+    name: String,
+    pid: u32,
+    started: std::time::Instant,
+    ended: bool,
+}
+
+impl ProcessTrace {
+    /// Report that the child exited with `code`, or failed with `error`.
+    pub(crate) fn end(mut self, state: &mut ExecutorState, outcome: Result<i32, &str>) {
+        self.ended = true;
+        let (event_json, context_json) = self.end_event(outcome);
+        state.send_trace(0, event_json, context_json);
+    }
+
+    fn end_event(&self, outcome: Result<i32, &str>) -> (String, String) {
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut event = serde_json::json!({
+            "type": "process_end",
+            "name": self.name,
+            "pid": self.pid,
+            "duration_ms": duration_ms,
+        });
+        match outcome {
+            Ok(code) => event["exit_code"] = code.into(),
+            Err(error) => event["error"] = error.into(),
+        }
+        (event.to_string(), String::new())
+    }
+}
+
+impl Drop for ProcessTrace {
+    fn drop(&mut self) {
+        if !self.ended {
+            // The execution's state may already be gone, so this skips the
+            // stream budget: at most one event per running child.
+            let (event_json, context_json) = self.end_event(Err("killed"));
+            let _ = self.tx.send(TraceRequest {
+                lineno: 0,
+                event_json,
+                context_json,
+            });
         }
     }
 }
@@ -1440,7 +1503,7 @@ pub struct ExecutorState {
     pub(crate) child_net: Option<crate::process::ChildNet>,
     /// When each callback still running started, for `callback_end`'s
     /// duration.
-    pub(crate) callback_clock: CallbackClock,
+    pub(crate) trace_clock: TraceClock,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1489,8 +1552,55 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
-            callback_clock: CallbackClock::default(),
+            trace_clock: TraceClock::default(),
         }
+    }
+
+    /// Send a trace event, if tracing is on and the stream budget allows.
+    fn send_trace(&mut self, lineno: u32, event_json: String, context_json: String) {
+        if self.charge_trace(&event_json, &context_json) {
+            self.send_charged_trace(lineno, event_json, context_json);
+        }
+    }
+
+    /// Whether tracing is on and the stream budget has room for an event;
+    /// charges it if so.
+    fn charge_trace(&mut self, event_json: &str, context_json: &str) -> bool {
+        self.trace_tx.is_some()
+            && self
+                .stream_budget
+                .spend_trace(event_json.len() + context_json.len())
+    }
+
+    /// Send an event [`Self::charge_trace`] charged.
+    fn send_charged_trace(&self, lineno: u32, event_json: String, context_json: String) {
+        if let Some(tx) = &self.trace_tx {
+            // Fire-and-forget - trace events are not critical
+            let _ = tx.send(TraceRequest {
+                lineno,
+                event_json,
+                context_json,
+            });
+        }
+    }
+
+    /// Report that a child process `argv` started, numbering it; `None` with
+    /// tracing off.
+    pub(crate) fn trace_process_start(&mut self, argv: &[String]) -> Option<ProcessTrace> {
+        let tx = self.trace_tx.clone()?;
+        let (name, args) = argv.split_first()?;
+        self.trace_clock.last_pid += 1;
+        let pid = self.trace_clock.last_pid;
+        let event = serde_json::json!({ "type": "process_start", "name": name, "pid": pid });
+        let context = serde_json::json!({ "args": args });
+        self.send_trace(0, event.to_string(), context.to_string());
+        Some(ProcessTrace {
+            tx,
+            name: name.clone(),
+            pid,
+            started: std::time::Instant::now(),
+            ended: false,
+        })
     }
 
     /// Drop every channel to the host so their receivers see end-of-stream,
@@ -1664,21 +1774,11 @@ impl SandboxImports for ExecutorState {
 
     /// Report a trace event to the host.
     fn report_trace(&mut self, lineno: u32, mut event_json: String, context_json: String) {
-        if let Some(tx) = &self.trace_tx {
-            let size = event_json.len() + context_json.len();
-            if !self.stream_budget.spend_trace(size) {
-                return;
-            }
+        if self.charge_trace(&event_json, &context_json) {
             // Only once charged: the clock keeps what a start's event names.
             // (An end's added `duration_ms` goes uncharged, a few bytes.)
-            self.callback_clock.time(&mut event_json);
-            let request = TraceRequest {
-                lineno,
-                event_json,
-                context_json,
-            };
-            // Fire-and-forget - trace events are not critical
-            let _ = tx.send(request);
+            self.trace_clock.time(&mut event_json);
+            self.send_charged_trace(lineno, event_json, context_json);
         }
     }
 
@@ -3885,7 +3985,7 @@ impl Executor {
             commands: self.commands.clone(),
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
             child_net,
-            callback_clock: CallbackClock::default(),
+            trace_clock: TraceClock::default(),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -4210,12 +4310,43 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>")
                 .to_string();
-            // Added by the host; see `CallbackClock`.
+            // Added by the host; see `TraceClock`.
             let duration_ms = event_data
                 .get("duration_ms")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             crate::trace::TraceEventKind::CallbackEnd { name, duration_ms }
+        }
+        "process_start" | "process_end" => {
+            let str_field = |key: &str| {
+                event_data
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            };
+            let name = str_field("name").unwrap_or_else(|| "<unknown>".to_owned());
+            let pid = event_data
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                .unwrap_or(0);
+            if event_type == "process_start" {
+                crate::trace::TraceEventKind::ProcessStart { name, pid }
+            } else {
+                crate::trace::TraceEventKind::ProcessEnd {
+                    name,
+                    pid,
+                    exit_code: event_data
+                        .get("exit_code")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|code| i32::try_from(code).ok()),
+                    duration_ms: event_data
+                        .get("duration_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    error: str_field("error"),
+                }
+            }
         }
         _ => crate::trace::TraceEventKind::Line,
     };
@@ -4274,7 +4405,7 @@ mod tests {
     /// `MAX_PENDING_CALLBACKS` unmatched starts, and keeps none the trace
     /// budget dropped.
     #[test]
-    fn the_callback_clock_is_bounded_and_charged() {
+    fn the_trace_clock_is_bounded_and_charged() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut state = ExecutorState::placeholder();
         state.trace_tx = Some(tx);
@@ -4287,7 +4418,7 @@ mod tests {
         let end: serde_json::Value =
             serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
         assert!(end["duration_ms"].is_u64(), "{end}");
-        assert!(state.callback_clock.0.is_empty());
+        assert!(state.trace_clock.callbacks.is_empty());
 
         for i in 0..3 * MAX_PENDING_CALLBACKS {
             let name = format!("cb{i}");
@@ -4298,13 +4429,13 @@ mod tests {
                 String::new(),
             );
         }
-        assert_eq!(state.callback_clock.0.len(), MAX_PENDING_CALLBACKS);
+        assert_eq!(state.trace_clock.callbacks.len(), MAX_PENDING_CALLBACKS);
 
         // Once the budget is spent, starts are dropped and not kept either.
-        state.callback_clock = CallbackClock::default();
+        state.trace_clock = TraceClock::default();
         state.stream_budget.trace = 0;
         SandboxImports::report_trace(&mut state, 0, event("callback_start", "b"), String::new());
-        assert!(state.callback_clock.0.is_empty());
+        assert!(state.trace_clock.callbacks.is_empty());
     }
 
     #[test]

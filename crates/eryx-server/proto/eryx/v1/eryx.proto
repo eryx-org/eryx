@@ -534,23 +534,33 @@ message TraceEvent {
   // Line number in the source code.
   uint32 lineno = 1;
 
-  // Event type: "line", "call", "return", "exception", "callback_start", "callback_end".
+  // Event type: "line", "call", "return", "exception", "callback_start",
+  // "callback_end", "process_start", "process_end".
   string event_type = 2;
 
   // Function name (for "call" and "return" events).
   string function = 3;
 
-  // Error/exception message (for "exception" events).
+  // Error/exception message (for "exception" events, and "callback_end" and
+  // "process_end" events that failed).
   string message = 4;
 
-  // Callback name (for "callback_start" and "callback_end" events).
+  // Callback or command name (for "callback_*" and "process_*" events).
   string name = 5;
 
-  // Callback duration in milliseconds (for "callback_end" events).
+  // Duration in milliseconds (for "callback_end" and "process_end" events).
   uint64 duration_ms = 6;
 
   // Optional JSON-encoded context data (e.g., local variables).
   string context_json = 7;
+
+  // Numbers an execution's child processes, pairing each "process_start"
+  // with its "process_end".
+  uint32 pid = 8;
+
+  // A child's exit code ("process_end" events); unset if it failed instead
+  // of exiting.
+  optional int32 exit_code = 9;
 }
 
 // Execution statistics.

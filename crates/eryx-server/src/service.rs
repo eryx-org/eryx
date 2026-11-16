@@ -1535,107 +1535,59 @@ fn classify_failure(error: &Error) -> FailureKind {
 
 /// Convert a guest trace event to its proto form, scrubbing secret
 /// placeholders from its text fields.
+///
+/// The event JSON uses serde's internally-tagged format with a `"type"` key
+/// (`{"type":"line"}`, `{"type":"call","function":"foo"}`, ...); each proto
+/// field is read from the key of the same name, and `message` also from
+/// `error`. JSON that doesn't parse becomes the event type as is.
 fn trace_event(
     req: &TraceRequest,
     secrets: &HashMap<String, SecretConfig>,
 ) -> crate::proto::eryx::v1::TraceEvent {
-    let (event_type, function, message, name, duration_ms) =
-        parse_trace_event_json(&req.event_json);
-    let scrub = |s: String| {
+    let scrub = |s: &str| {
         if secrets.is_empty() {
-            s
+            s.to_owned()
         } else {
-            scrub_placeholders(&s, secrets)
+            scrub_placeholders(s, secrets)
         }
+    };
+    let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_str::<serde_json::Value>(&req.event_json)
+    else {
+        return crate::proto::eryx::v1::TraceEvent {
+            lineno: req.lineno,
+            event_type: scrub(&req.event_json),
+            ..Default::default()
+        };
+    };
+    let text = |key: &str| scrub(map.get(key).and_then(|v| v.as_str()).unwrap_or(""));
+    let number = |key: &str| map.get(key).and_then(serde_json::Value::as_u64);
+    let event_type = match map.get("type").and_then(|v| v.as_str()) {
+        Some(
+            kind @ ("line" | "call" | "return" | "exception" | "callback_start" | "callback_end"
+            | "process_start" | "process_end"),
+        ) => kind.to_owned(),
+        _ => "unknown".to_owned(),
+    };
+    let message = match text("message") {
+        message if message.is_empty() => text("error"),
+        message => message,
     };
     crate::proto::eryx::v1::TraceEvent {
         lineno: req.lineno,
-        event_type: scrub(event_type),
-        function: scrub(function),
-        message: scrub(message),
-        name: scrub(name),
-        duration_ms,
+        event_type,
+        function: text("function"),
+        message,
+        name: text("name"),
+        duration_ms: number("duration_ms").unwrap_or(0),
         context_json: String::new(),
-    }
-}
-
-/// Parse a trace event JSON string into its proto components.
-///
-/// The event_json uses serde's internally-tagged format with a `"type"` key:
-/// `{"type":"line"}`, `{"type":"call","function":"foo"}`, etc.
-fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, u64) {
-    let str_or = |map: &serde_json::Map<String, serde_json::Value>, key: &str| -> String {
-        map.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(event_json)
-    else {
-        return (
-            event_json.to_string(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        );
-    };
-
-    let event_type = str_or(&map, "type");
-    match event_type.as_str() {
-        "line" => (
-            "line".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "call" => (
-            "call".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "return" => (
-            "return".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "exception" => (
-            "exception".into(),
-            String::new(),
-            str_or(&map, "message"),
-            String::new(),
-            0,
-        ),
-        "callback_start" => (
-            "callback_start".into(),
-            String::new(),
-            String::new(),
-            str_or(&map, "name"),
-            0,
-        ),
-        "callback_end" => {
-            let duration_ms = map.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            (
-                "callback_end".into(),
-                String::new(),
-                String::new(),
-                str_or(&map, "name"),
-                duration_ms,
-            )
-        }
-        _ => (
-            "unknown".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
+        pid: number("pid")
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or(0),
+        exit_code: map
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
     }
 }
 
@@ -1662,6 +1614,35 @@ mod tests {
         assert_eq!(event.event_type, "exception");
         assert!(!event.message.contains(&placeholder), "{}", event.message);
         assert!(event.message.starts_with("bad "), "{}", event.message);
+    }
+
+    #[test]
+    fn process_events_carry_pid_exit_code_and_error() {
+        let event = |json: serde_json::Value| {
+            trace_event(
+                &TraceRequest {
+                    lineno: 0,
+                    event_json: json.to_string(),
+                    context_json: String::new(),
+                },
+                &HashMap::new(),
+            )
+        };
+        let exited = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 2, "exit_code": 1, "duration_ms": 7,
+        }));
+        assert_eq!(
+            (exited.event_type.as_str(), exited.name.as_str(), exited.pid),
+            ("process_end", "ls", 2)
+        );
+        assert_eq!((exited.exit_code, exited.duration_ms), (Some(1), 7));
+        let killed = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 3, "error": "killed",
+        }));
+        assert_eq!(
+            (killed.exit_code, killed.message.as_str()),
+            (None, "killed")
+        );
     }
 
     #[test]
