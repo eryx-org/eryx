@@ -207,13 +207,30 @@
     // `__eryx_bound({local, ...})` right after it), so a reassignment later
     // in the same script still counts as one.
     const pendingBound = new Map();
-    Object.defineProperty(globalThis, '__eryx_bound', {
-        value: (values) => {
-            for (const name of Object.keys(values)) pendingBound.set(name, values[name]);
-        },
-        writable: true,
-        configurable: true,
+    // Globals that loading an imported module created (zod's
+    // `__zod_globalConfig`, say): the module's, made again when a restore
+    // re-imports it, so never session state. The rewrite calls
+    // `__eryx_loading()` before each import; its `var`s already exist then.
+    const importOwned = new Set();
+    let loadingFrom = null;
+    const defineHidden = (name, value) =>
+        Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
+    defineHidden('__eryx_loading', () => {
+        loadingFrom = new Set(Object.getOwnPropertyNames(globalThis));
     });
+    defineHidden('__eryx_bound', (values) => {
+        for (const name of Object.keys(values)) pendingBound.set(name, values[name]);
+        if (loadingFrom === null) return;
+        for (const name of Object.getOwnPropertyNames(globalThis)) {
+            if (!loadingFrom.has(name) && !Object.hasOwn(values, name)) importOwned.add(name);
+        }
+        loadingFrom = null;
+    });
+    // A failed execute commits none of its imports.
+    const discardImports = () => {
+        pendingBound.clear();
+        loadingFrom = null;
+    };
     const importLocals = (record) =>
         record.form === 'named' ? record.bindings.map((pair) => pair[1]) : record.bindings;
     // After an execute (or restore) whose imports all ran.
@@ -234,7 +251,9 @@
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (installed.includes(name) || INSTANCE_GLOBALS.has(name)) continue;
+            if (installed.includes(name) || INSTANCE_GLOBALS.has(name) || importOwned.has(name)) {
+                continue;
+            }
             if (HOST_GLOBALS.has(name)) {
                 if (!hostValues.has(name) || !Object.is(globalThis[name], hostValues.get(name))) {
                     entries.push([name, 'var', UNKEPT]);
@@ -353,6 +372,7 @@
         noteCode,
         markHostGlobals,
         commitImports,
+        discardImports,
         stateEntries,
         validateEntries,
         applyEntries,

@@ -94,7 +94,9 @@ when it was loaded, as pools and factories do for every sandbox they make.
 - **`await import("…")`** works anywhere.
 - **`require("…")`** imports synchronously, for CommonJS-style code. A module
   that can't finish without awaiting (top-level await on something
-  asynchronous) can't be required; use `await import()`.
+  asynchronous) can't be required; use `await import()`. `require` settles
+  the import by running queued promise jobs, so pending callbacks may run
+  earlier than they otherwise would.
 - **CommonJS packages** (lodash, say) are bundled as a module whose default
   export is `module.exports`. Named imports of its properties work too:
   `import { chunk } from "lodash"`.
@@ -103,11 +105,16 @@ when it was loaded, as pools and factories do for every sandbox they make.
   module", naming what the environment provides.
 - **Node built-ins** (`node:fs`, or a bare `fs` that no package provides)
   aren't available yet: importing one throws "node:fs isn't available in eryx
-  yet". Packages written for browsers or Workers generally avoid them.
+  yet", and a package that imports one statically fails when it's imported.
+  Packages written for browsers or Workers generally avoid them.
+- **Imports are checked like ES modules:** importing a name a module doesn't
+  export (or a default from a module without one) throws a SyntaxError
+  naming the export and the module.
 
 ## What isn't supported yet
 
 - Python and shell environments (`build` returns `Unsupported`).
 - Node's built-in modules, and web APIs QuickJS lacks (`crypto`,
-  `TextEncoder`, timers). Packages that need them fail when they use them.
+  `TextEncoder`, timers). A package that imports a built-in fails when it's
+  imported; one that uses a missing web API fails when it calls it.
 - Packages with native addons or WebAssembly.

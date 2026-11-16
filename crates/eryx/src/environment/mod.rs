@@ -10,14 +10,14 @@
 //! eryx-precompile env build data-tools.toml --out envs/data-tools
 //! ```
 //!
-//! Building one is [`build`], with the `packages` feature; loading and
+//! Building one is `environment::build`, with the `packages` feature; loading and
 //! mounting one ([`Environment::load`], `SandboxBuilder::with_environment`)
 //! only needs `environment`, without the bundler or an HTTP client.
 //!
 //! What a build does depends on the language:
 //!
 //! - **JavaScript** (`[npm]`): resolves and installs the packages (see
-//!   [`eryx_packages::npm`]), writing or reusing the lockfile, then bundles
+//!   `eryx_packages::npm`), writing or reusing the lockfile, then bundles
 //!   them into ES modules with rolldown. The bundler runs as a WASI command
 //!   inside wasmtime, with only the installed packages and its output
 //!   directory mounted and no network, so the untrusted package source is

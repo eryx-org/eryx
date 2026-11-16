@@ -310,22 +310,24 @@ pub(crate) enum ImportForm {
 }
 
 impl ImportRecord {
-    /// The statement that performs this import in global code, then reports
-    /// what it bound to the prelude (`__eryx_bound`), for snapshots.
+    /// The statement that performs this import in global code. Around it,
+    /// `__eryx_loading()` and `__eryx_bound({local, ...})` tell the prelude
+    /// what the import bound and which globals loading its module created,
+    /// for snapshots; `__eryx_import` checks the imported names exist, as
+    /// ES modules do.
     pub(crate) fn statement(&self) -> String {
-        let import = format!("await import({})", quote(&self.specifier));
-        let locals: Vec<&str> = match &self.form {
-            ImportForm::Named(bindings) => bindings.iter().map(|(_, l)| l.as_str()).collect(),
-            ImportForm::Default(local) | ImportForm::Namespace(local) => vec![local.as_str()],
+        let specifier = quote(&self.specifier);
+        let import = format!("await import({specifier})");
+        let checked = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| quote(n)).collect();
+            format!(
+                "__eryx_import({import}, [{}], {specifier})",
+                names.join(", ")
+            )
         };
-        let bind = if locals.is_empty() {
-            String::new()
-        } else {
-            format!(" __eryx_bound({{{}}});", locals.join(", "))
-        };
-        let statement = match &self.form {
+        let (statement, locals) = match &self.form {
             ImportForm::Named(bindings) => {
-                let bindings: Vec<String> = bindings
+                let pattern: Vec<String> = bindings
                     .iter()
                     .map(|(imported, local)| {
                         if imported == local {
@@ -337,12 +339,24 @@ impl ImportRecord {
                         }
                     })
                     .collect();
-                format!("var {{{}}} = __eryx_import({import});", bindings.join(", "))
+                let imported: Vec<&str> = bindings.iter().map(|(i, _)| i.as_str()).collect();
+                (
+                    format!("var {{{}}} = {};", pattern.join(", "), checked(&imported)),
+                    bindings.iter().map(|(_, l)| l.as_str()).collect(),
+                )
             }
-            ImportForm::Default(local) => format!("var {local} = __eryx_import({import}).default;"),
-            ImportForm::Namespace(local) => format!("var {local} = {import};"),
+            ImportForm::Default(local) => (
+                format!("var {local} = {}.default;", checked(&["default"])),
+                vec![local.as_str()],
+            ),
+            ImportForm::Namespace(local) => {
+                (format!("var {local} = {import};"), vec![local.as_str()])
+            }
         };
-        statement + &bind
+        format!(
+            "__eryx_loading(); {statement} __eryx_bound({{{}}});",
+            locals.join(", ")
+        )
     }
 
     /// As `{specifier, form, bindings}`, the prelude's session-state shape:
@@ -712,31 +726,31 @@ mod tests {
         for (code, expected) in [
             (
                 r#"import x from "m";"#,
-                r#"var x = __eryx_import(await import("m")).default; __eryx_bound({x});"#,
+                r#"__eryx_loading(); var x = __eryx_import(await import("m"), ["default"], "m").default; __eryx_bound({x});"#,
             ),
             (
                 "import { a, b as c } from 'm'",
-                r#"var {a, b: c} = __eryx_import(await import("m")); __eryx_bound({a, c});"#,
+                r#"__eryx_loading(); var {a, b: c} = __eryx_import(await import("m"), ["a", "b"], "m"); __eryx_bound({a, c});"#,
             ),
             (
                 r#"import x, { a, } from "m";"#,
-                r#"var {default: x, a} = __eryx_import(await import("m")); __eryx_bound({x, a});"#,
+                r#"__eryx_loading(); var {default: x, a} = __eryx_import(await import("m"), ["default", "a"], "m"); __eryx_bound({x, a});"#,
             ),
             (
                 r#"import * as ns from "m";"#,
-                r#"var ns = await import("m"); __eryx_bound({ns});"#,
+                r#"__eryx_loading(); var ns = await import("m"); __eryx_bound({ns});"#,
             ),
             (
                 r#"import x, * as ns from "m";"#,
-                r#"var ns = await import("m"); __eryx_bound({ns}); var x = __eryx_import(await import("m")).default; __eryx_bound({x});"#,
+                r#"__eryx_loading(); var ns = await import("m"); __eryx_bound({ns}); __eryx_loading(); var x = __eryx_import(await import("m"), ["default"], "m").default; __eryx_bound({x});"#,
             ),
             (
                 r#"import "m";"#,
-                r#"var {} = __eryx_import(await import("m"));"#,
+                r#"__eryx_loading(); var {} = __eryx_import(await import("m"), [], "m"); __eryx_bound({});"#,
             ),
             (
                 r#"import {} from "m";"#,
-                r#"var {} = __eryx_import(await import("m"));"#,
+                r#"__eryx_loading(); var {} = __eryx_import(await import("m"), [], "m"); __eryx_bound({});"#,
             ),
         ] {
             assert_eq!(rewrite(code), expected, "{code}");
@@ -749,7 +763,7 @@ mod tests {
         let (rewritten, statements) = rewrite_imports(code);
         assert_eq!(
             rewritten,
-            "// a script\n/* imports: */ var {a, b} = __eryx_import(await import(\"m\")); __eryx_bound({a, b});\n\n\n\nvar z = __eryx_import(await import(\"z\")).default; __eryx_bound({z}); // why\nconsole.log(a, b, z)\n"
+            "// a script\n/* imports: */ __eryx_loading(); var {a, b} = __eryx_import(await import(\"m\"), [\"a\", \"b\"], \"m\"); __eryx_bound({a, b});\n\n\n\n__eryx_loading(); var z = __eryx_import(await import(\"z\"), [\"default\"], \"z\").default; __eryx_bound({z}); // why\nconsole.log(a, b, z)\n"
         );
         assert_eq!(rewritten.lines().count(), code.lines().count());
         assert_eq!(statements.len(), 2);

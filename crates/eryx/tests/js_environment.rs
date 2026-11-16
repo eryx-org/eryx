@@ -142,11 +142,32 @@ async fn unknown_modules_and_builtins_fail_clearly() {
             "relative imports only work",
         ),
         ("require('waits')", "uses top-level await"),
+        // Missing exports throw, as ES module imports do.
+        (
+            "import df from 'date-fns'\n",
+            "module 'date-fns' does not provide an export named 'default'",
+        ),
+        (
+            "import { nosuch } from 'zod'\n",
+            "module 'zod' does not provide an export named 'nosuch'",
+        ),
     ] {
         let err = sandbox.execute(code).await.unwrap_err();
         let message = err.to_string();
         assert!(message.contains(expected), "{code}: {message}");
     }
+
+    // A CommonJS package's default, and its properties as named exports,
+    // are there.
+    assert_eq!(
+        run(
+            &sandbox,
+            "import _, { chunk } from 'lodash'\nconsole.log(chunk([1, 2], 1).length, typeof _.chunk)"
+        )
+        .await
+        .unwrap(),
+        "2 function\n"
+    );
 
     // Without an environment.
     let bare = Sandbox::embedded().javascript().build().unwrap();
@@ -263,6 +284,33 @@ async fn snapshots_import_again_on_restore() {
     );
 }
 
+/// Globals a module creates when it's loaded (zod's `__zod_globalConfig`)
+/// are the module's: the restore's import makes them again.
+#[tokio::test]
+async fn module_globals_are_not_session_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = environment(dir.path());
+    let mut session = new_session(&env).await;
+    stdout(
+        &mut session,
+        "import { z } from 'zod'\nconst ok = z.string().safeParse('x').success",
+    )
+    .await;
+    let snapshot = session.snapshot_state().await.unwrap();
+    assert_eq!(snapshot.skipped(), &[] as &[String]);
+
+    let mut restored = new_session(&env).await;
+    restored.restore_state(&snapshot).await.unwrap();
+    assert_eq!(
+        stdout(
+            &mut restored,
+            "console.log(ok, z.number().safeParse(1).success, typeof globalThis.__zod_globalConfig)"
+        )
+        .await,
+        "true true object\n"
+    );
+}
+
 #[tokio::test]
 async fn crafted_or_failing_imports_fail_the_restore() {
     let dir = tempfile::tempdir().unwrap();
@@ -300,7 +348,8 @@ async fn layout_1_snapshots_still_restore() {
     let env = environment(dir.path());
     let mut session = new_session(&env).await;
     stdout(&mut session, "const n = 5").await;
-    // Layout 1 is layout 2 without imports.
+    // Layout 1 is layout 2 without imports, so this relabels a layout 2
+    // snapshot rather than using one an older eryx wrote.
     let snapshot = patched(
         &session.snapshot_state().await.unwrap(),
         "eryx-js-state/2 ",

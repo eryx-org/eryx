@@ -534,6 +534,7 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         Err(msg) => {
             // Consume the result variable so it can't leak into a later run.
             let _ = call_hook::<()>(hooks, "discardResult", (result_variable,));
+            let _ = call_hook::<()>(hooks, "discardImports", ());
             // execute-error { message, exit-code, stdout, stderr }; a JS script
             // fails by throwing, so it has no exit code.
             cx.stack.push(WitValue::Record(vec![
