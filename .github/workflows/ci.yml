@@ -226,7 +226,7 @@ jobs:
           # crates/eryx/src/wasm.rs). The version itself comes from Cargo.toml,
           # which the key covers. v7 -> v8: the engine enables the component
           # model's more async builtins (#816).
-          key: wasm-runtime-v8-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-v8-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -389,7 +389,7 @@ jobs:
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v3 -> v4:
           # more async builtins (#816).
-          key: wasm-runtime-javascript-v4-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-javascript-v4-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -485,7 +485,7 @@ jobs:
           # cwasms were built without the CPU presets (host features). v2 -> v3:
           # the shell's embedded coreutils (#809). v3 -> v4: the shell is
           # built for wasm32-wasip3. v4 -> v5: more async builtins (#816).
-          key: wasm-runtime-shell-v5-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-shell-v5-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -633,7 +633,7 @@ jobs:
           # As for the runtimes, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: more
           # async builtins (#816).
-          key: wasm-bundler-v2-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-bundler-v2-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -1929,7 +1929,9 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
@@ -1963,15 +1965,15 @@ jobs:
           # Push or load, never both: some BuildKit versions refuse the pair
           # on the default docker driver (docker/build-push-action#727). The
           # docker job only pushes too.
-          push: ${{ github.event_name == 'push' }}
-          load: ${{ github.event_name != 'push' }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+          load: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
           tags: |
             eryx-server:python-only
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Report image size
-        if: github.event_name != 'push'
+        if: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
         run: |
           size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
           echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -2009,7 +2011,9 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
@@ -2041,6 +2045,6 @@ jobs:
           build-args: |
             RUNTIME_SOURCE=custom
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

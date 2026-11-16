@@ -71,7 +71,7 @@ jobs:
         with:
           path: |
             crates/eryx-runtime/runtime-python.wasm
-          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached WASM
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/eryx-runtime/runtime-javascript.wasm
-          key: wasm-runtime-javascript-wasm-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-javascript-wasm-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Cache shell runtime
         id: wasm-cache-shell
@@ -94,7 +94,7 @@ jobs:
         with:
           # The WASI 0.2 build, which this package uses (see js/mise.toml).
           path: crates/eryx-runtime/runtime-shell-p2.wasm
-          key: wasm-runtime-shell-p2-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml') }}
+          key: wasm-runtime-shell-p2-wasm-v1-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached guest WASM
         if: steps.wasm-cache-javascript.outputs.cache-hit == 'true' && steps.wasm-cache-shell.outputs.cache-hit == 'true'
