@@ -67,6 +67,63 @@ inputs, what it exports, and a hash of everything sandboxes rely on), the
 lockfile and the modules. Rebuilding from the same lockfile gives the same
 hash.
 
+## Packing installed packages
+
+When the packages are already installed (by `npm ci`, pnpm, or a service
+that resolves and fetches them), `env pack` turns them into an environment
+without resolving or fetching anything:
+
+```bash
+npm ci --ignore-scripts --omit=dev
+eryx-precompile env pack . --name data-tools --entry date-fns/format \
+    --lockfile package-lock.json --out envs/data-tools
+```
+
+- **Entries:** what's importable. Without `--entry`, the tree's
+  `package.json` `dependencies`, skipping (with a warning in the manifest)
+  any with nothing to import, such as `@types/*` or CLI-only packages; with
+  it, exactly the entries given.
+- **Layouts:** npm's, and pnpm's isolated one (`node_modules/.pnpm`), work
+  as installed, symlinks included. Packages are looked for in `node_modules`
+  from the tree up to `--root` (default: the tree itself), as Node does, so
+  for a workspace member with hoisted dependencies, workspace packages or
+  `file:` dependencies outside the tree, pass a `--root` that holds them (a
+  monorepo's root, say). Every package symlink must be relative and lead
+  inside the root. An absolute symlink, or one that leads outside the root,
+  fails before bundling, naming the link. Links that aren't packages
+  (`node_modules/.bin`) and links that lead nowhere are left alone. Yarn's
+  Plug'n'Play has no `node_modules`, so use its `nodeLinker: node-modules`.
+- **Safety:** the bundler parses the packages in a sandbox. What it can
+  read, and so what can end up in the environment, is exactly:
+  - the contents of the `node_modules` dirs from the tree up to the root;
+  - the whole directory each package symlink points at (a workspace
+    member's or `file:` package's directory, everything in it).
+
+  Nothing else of the tree or the root is visible: a package that imports
+  the app's own files (a `../../service-account.json`), or a workspace
+  member that imports a file beside its directory, fails the pack instead.
+  (The bundler reads a mirror of just those paths, hard-linked next to the
+  output, so links resolve from packages' real paths as Node's do.)
+- **Unresolved imports fail the pack:** an import the installed packages
+  don't provide is an error listing each one, rather than an environment
+  that fails when imported. Two kinds stay external, with a warning in the
+  manifest, so they fail only if the code imports them at run time: one the
+  importing package declares optional (`optionalDependencies`, or an
+  optional peer in `peerDependenciesMeta`), which `npm ci --omit=dev`
+  leaves out, and one passed to `--allow-unresolved` (repeatable). A
+  `require` in a `try`/`catch`, the usual way to use an optional
+  dependency (`ws` and `bufferutil`), is left external without a warning.
+  Nothing is fetched, and pass `--ignore-scripts` to the install so no
+  package code runs there either.
+- `--lockfile` copies the given file into the environment and records it
+  and its hash in the manifest's `inputs`, with the installed versions of
+  the entries' packages. None of that is part of the hash: packing the same
+  installed tree again gives the same environment.
+
+In Rust, the same is `eryx::environment::pack(tree, out, &PackOptions::new(name, Language::JavaScript))`,
+with the `packages` feature. The directory format is described in
+[Environment Format](../api/environment-format.md).
+
 ## Using it
 
 ```rust,ignore

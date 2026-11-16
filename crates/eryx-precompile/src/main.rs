@@ -97,13 +97,13 @@ enum Command {
     /// format and can be rebuilt too.
     Upgrade(UpgradeArgs),
 
-    /// Build and manage environments: package sets built ahead of time for
-    /// sandboxes to mount.
     /// Check shell commands: what a `.wasm` CLI imports, and whether eryx
     /// can run it.
     #[command(subcommand)]
     Commands(CommandsCommand),
 
+    /// Build and manage environments: package sets built ahead of time for
+    /// sandboxes to mount.
     #[cfg(feature = "env")]
     #[command(subcommand)]
     Env(EnvCommand),
@@ -137,6 +137,55 @@ enum EnvCommand {
     /// matches, otherwise writing it), installs them, and for JavaScript
     /// bundles them into ES modules, writing the environment to `--out`.
     Build(EnvBuildArgs),
+    /// Pack packages already installed in a directory (`npm ci
+    /// --ignore-scripts --omit=dev`, or pnpm) into an environment.
+    ///
+    /// Bundles them into ES modules in a sandbox that sees only the
+    /// node_modules dirs and the packages they link to, read-only; nothing
+    /// is fetched or run. Package symlinks (pnpm, workspaces, `file:`
+    /// dependencies) must be relative and stay inside `--root`.
+    Pack(EnvPackArgs),
+}
+
+#[cfg(feature = "env")]
+#[derive(Parser, Debug)]
+struct EnvPackArgs {
+    /// The directory holding `node_modules` (and usually `package.json`)
+    tree: PathBuf,
+
+    /// Where to write the environment: replaced if it's one already, filled
+    /// if it's an empty directory, refused otherwise
+    #[arg(short, long)]
+    out: PathBuf,
+
+    /// The environment's name
+    #[arg(long)]
+    name: String,
+
+    /// Where to look for packages up to (default: TREE): a monorepo's root,
+    /// for hoisted node_modules, workspace members or `file:` dependencies
+    /// outside TREE. The bundler still sees only the node_modules dirs and
+    /// the packages they link to (whole), never the rest of ROOT
+    #[arg(long)]
+    root: Option<PathBuf>,
+
+    /// A specifier to make importable (`zod`, `date-fns/format`). Repeat for
+    /// more. Default: TREE/package.json's dependencies, skipping (with a
+    /// warning) any with nothing to import, such as `@types/*`
+    #[arg(long = "entry", value_name = "SPECIFIER")]
+    entries: Vec<String>,
+
+    /// A lockfile to copy into the environment and record (e.g.
+    /// package-lock.json)
+    #[arg(long)]
+    lockfile: Option<PathBuf>,
+
+    /// Let imports of SPECIFIER stay unresolved (left external, with a
+    /// warning) instead of failing the pack, for code that copes without
+    /// it. Repeat for more. Imports a package declares optional are allowed
+    /// already
+    #[arg(long = "allow-unresolved", value_name = "SPECIFIER")]
+    allow_unresolved: Vec<String>,
 }
 
 #[cfg(feature = "env")]
@@ -423,6 +472,8 @@ async fn main() -> Result<()> {
         Command::Commands(CommandsCommand::Inspect(args)) => run_inspect(&args),
         #[cfg(feature = "env")]
         Command::Env(EnvCommand::Build(args)) => run_env_build(args).await,
+        #[cfg(feature = "env")]
+        Command::Env(EnvCommand::Pack(args)) => run_env_pack(args).await,
     }
 }
 
@@ -515,6 +566,47 @@ fn run_inspect(args: &InspectArgs) -> Result<()> {
 }
 
 #[cfg(feature = "env")]
+async fn run_env_pack(args: EnvPackArgs) -> Result<()> {
+    use eryx::environment::{Language, PackOptions};
+
+    let mut options = PackOptions::new(&args.name, Language::JavaScript);
+    if let Some(root) = args.root {
+        options = options.root(root);
+    }
+    for entry in args.entries {
+        options = options.entry(entry);
+    }
+    if let Some(lockfile) = args.lockfile {
+        options = options.lockfile(lockfile);
+    }
+    for specifier in args.allow_unresolved {
+        options = options.allow_unresolved(specifier);
+    }
+    println!("Packing {:?} from {}", args.name, args.tree.display());
+    let start = Instant::now();
+    let environment = eryx::environment::pack(&args.tree, &args.out, &options).await?;
+    print_environment(&environment, start.elapsed());
+    Ok(())
+}
+
+/// What `env build` and `env pack` print about the environment they wrote.
+#[cfg(feature = "env")]
+fn print_environment(environment: &eryx::environment::Environment, elapsed: Duration) {
+    let manifest = environment.manifest();
+    println!(
+        "  {} files, {} bytes, {} in {elapsed:?}",
+        manifest.content.files, manifest.content.bytes, manifest.content.hash,
+    );
+    for (name, path) in environment.exports() {
+        println!("  {name} -> {path}");
+    }
+    for warning in &manifest.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!("Wrote {}", environment.root().display());
+}
+
+#[cfg(feature = "env")]
 async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
     use eryx::environment::{BuildOptions, EnvironmentDefinition};
 
@@ -540,21 +632,7 @@ async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
     );
     let start = Instant::now();
     let environment = eryx::environment::build(&definition, &options).await?;
-    let manifest = environment.manifest();
-    println!(
-        "  {} files, {} bytes, {} in {:?}",
-        manifest.content.files,
-        manifest.content.bytes,
-        manifest.content.hash,
-        start.elapsed()
-    );
-    for (name, path) in environment.exports() {
-        println!("  {name} -> {path}");
-    }
-    for warning in &manifest.warnings {
-        eprintln!("warning: {warning}");
-    }
-    println!("Wrote {}", environment.root().display());
+    print_environment(&environment, start.elapsed());
     Ok(())
 }
 

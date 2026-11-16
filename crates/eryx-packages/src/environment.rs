@@ -436,9 +436,11 @@ pub struct Manifest {
     pub name: String,
     /// The language it's for; a sandbox for another refuses it.
     pub language: Language,
-    /// What it was built from.
+    /// What it was built from (informational: a writer may leave it out).
+    #[serde(default)]
     pub inputs: Inputs,
-    /// What built it.
+    /// What built it (informational: a writer may leave it out).
+    #[serde(default)]
     pub builder: Builder,
     /// What sandboxes use.
     pub content: Content,
@@ -454,11 +456,12 @@ pub struct Manifest {
 }
 
 /// [`Manifest::inputs`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Inputs {
     /// The package specs, sorted.
+    #[serde(default)]
     pub packages: Vec<String>,
     /// The registry, if packages came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,11 +488,12 @@ impl Inputs {
 }
 
 /// [`Manifest::builder`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Builder {
     /// The eryx version that built it.
+    #[serde(default)]
     pub eryx: String,
     /// Tools it used and their versions, e.g. `bundler: rolldown 1.3.2`.
     #[serde(default)]
@@ -514,9 +518,11 @@ impl Builder {
 pub struct Content {
     /// The directory, relative to the environment's root.
     pub dir: String,
-    /// Files in it.
+    /// Files in it (informational).
+    #[serde(default)]
     pub files: u64,
-    /// Bytes in them.
+    /// Bytes in them (informational).
+    #[serde(default)]
     pub bytes: u64,
     /// The environment's identity: a hash over its name, language, content
     /// dir and exports, and every file in the content dir (see
@@ -998,6 +1004,104 @@ mod tests {
             dangling.verify(root.path()),
             Err(Error::Definition(_))
         ));
+    }
+
+    /// A fixed environment: two modules, one export.
+    fn golden(root: &Path) -> Manifest {
+        std::fs::create_dir_all(root.join("modules/sub")).unwrap();
+        std::fs::write(root.join("modules/a.js"), "export const a = 1;\n").unwrap();
+        std::fs::write(root.join("modules/sub/b.js"), "export const b = 2;\n").unwrap();
+        Manifest::new(
+            "golden",
+            Language::JavaScript,
+            Inputs::new(vec!["a@1.0.0".to_string()]),
+            Builder::new("0.0.0"),
+            root,
+            "modules",
+            BTreeMap::from([("a".to_string(), "modules/a.js".to_string())]),
+        )
+        .unwrap()
+    }
+
+    /// The identity hash is part of the environment format
+    /// (book/src/api/environment-format.md): environments packed by one eryx
+    /// are loaded by another, so it must never change by accident. Changing
+    /// it means a new MANIFEST_VERSION.
+    #[test]
+    fn the_identity_hash_is_stable() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        assert_eq!(
+            manifest.content.hash,
+            "sha256-8ff8b91932effce64fd2558d104dcb20164ecc63aa2772e65792e36aa4ab5c4d"
+        );
+        // What isn't identity doesn't move it.
+        let mut informational = manifest.clone();
+        informational.inputs = Inputs::new(vec!["other@2".to_string()]);
+        informational.builder = Builder::new("9.9.9");
+        informational.warnings = vec!["w".to_string()];
+        informational.verify(root.path()).unwrap();
+    }
+
+    /// Readers ignore fields they don't know, so a newer eryx can add
+    /// informational ones without a new format version.
+    #[test]
+    fn unknown_manifest_fields_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        json["futureField"] = serde_json::json!({"x": 1});
+        json["content"]["futureField"] = serde_json::json!(true);
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let read = Manifest::read(root.path()).unwrap();
+        assert_eq!(read, manifest);
+        read.verify(root.path()).unwrap();
+    }
+
+    /// The informational fields are optional, so another writer (a different
+    /// eryx, or a service) may leave them out.
+    #[test]
+    fn informational_fields_are_optional() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("inputs");
+        object.remove("builder");
+        let content = object["content"].as_object_mut().unwrap();
+        content.remove("files");
+        content.remove("bytes");
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let read = Manifest::read(root.path()).unwrap();
+        read.verify(root.path()).unwrap();
+        assert_eq!(read.content.hash, manifest.content.hash);
+        assert_eq!(read.inputs, Inputs::default());
+        assert_eq!(read.builder, Builder::default());
+
+        // And inside them: `inputs: {}` and `builder: {}` load too.
+        json["inputs"] = serde_json::json!({});
+        json["builder"] = serde_json::json!({});
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        Manifest::read(root.path())
+            .unwrap()
+            .verify(root.path())
+            .unwrap();
+    }
+
+    /// An environment in a format version this eryx doesn't know is refused,
+    /// naming both.
+    #[test]
+    fn unknown_format_versions_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let mut json = serde_json::to_value(golden(root.path())).unwrap();
+        json["formatVersion"] = serde_json::json!(MANIFEST_VERSION + 1);
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let err = Manifest::read(root.path()).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("version {}", MANIFEST_VERSION + 1))
+                && err.contains(&format!("reads {MANIFEST_VERSION}")),
+            "{err}"
+        );
     }
 
     #[test]
