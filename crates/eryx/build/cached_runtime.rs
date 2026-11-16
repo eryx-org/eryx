@@ -1,13 +1,21 @@
 //! Checks a runtime cached by `eryx-precompile setup` before `build.rs`
 //! embeds it.
 //!
-//! This lives in its own file so `tests/cached_runtime_check.rs` can test it;
-//! build scripts have no test harness of their own.
+//! This lives in its own file so `tests/cached_runtime_check.rs` can test it
+//! (build scripts have no test harness of their own), and so `eryx::cache`
+//! reads the cache, and `eryx-precompile` names what it writes, the same way.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+
+/// The name `setup` caches `stem` (e.g. `runtime-python`, `coreutils`,
+/// `eryx-bundler`) under for eryx `version` on `target` (`<arch>-<os>`, e.g.
+/// `x86_64-linux`).
+pub fn file_name(stem: &str, version: &str, target: &str) -> String {
+    format!("{stem}-v{version}-{target}.cwasm")
+}
 
 /// Path of the checksum file `setup` writes next to a cached runtime.
 pub fn checksum_path(path: &Path) -> PathBuf {

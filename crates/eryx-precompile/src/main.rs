@@ -455,13 +455,6 @@ fn cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Build a short platform target string like "x86_64-linux" or "aarch64-macos".
-fn platform_target() -> String {
-    let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
-    let os = std::env::consts::OS; // "linux", "macos", "windows"
-    format!("{arch}-{os}")
-}
-
 fn parse_language(s: &str) -> Result<eryx::Language, String> {
     s.parse()
 }
@@ -598,9 +591,7 @@ fn verify_sha256(bytes: &[u8], expected: &[u8; 32]) -> Result<()> {
 
 /// Path of the checksum file kept next to a cached runtime.
 fn checksum_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".sha256");
-    PathBuf::from(name)
+    eryx::cache::setup_checksum_path(path)
 }
 
 /// Whether `path` holds a complete runtime written by `setup`, according to
@@ -664,7 +655,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         );
     }
     let components = setup_components(&args)?;
-    let target = platform_target();
+    let target = eryx::cache::setup_target();
     let cache = cache_dir()?;
 
     println!("eryx-precompile setup");
@@ -785,7 +776,11 @@ fn cached_component_path(
     version: &str,
     target: &str,
 ) -> PathBuf {
-    cache.join(format!("{}-v{version}-{target}.cwasm", component.stem()))
+    cache.join(eryx::cache::setup_file_name(
+        &component.stem(),
+        version,
+        target,
+    ))
 }
 
 /// Download, precompile and cache one component.
@@ -1880,6 +1875,50 @@ mod tests {
         write_cached_runtime(&path, b"compiled runtime")?;
         std::fs::remove_file(checksum_path(&path))?;
         assert!(!cached_runtime_is_valid(&path));
+        Ok(())
+    }
+
+    /// What `setup` writes is where eryx looks: each component, cached under
+    /// `cache_dir()` for this version and platform, is found by eryx's
+    /// readers, and the bundler passes their checksum check.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn eryx_finds_what_setup_caches() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        // SAFETY: nextest runs each test in its own process, so nothing else
+        // reads the environment concurrently.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+        let cache = cache_dir()?;
+        std::fs::create_dir(&cache)?;
+        let version = env!("CARGO_PKG_VERSION");
+        let target = eryx::cache::setup_target();
+        for component in [
+            Component::Runtime(eryx::Language::Shell),
+            Component::Coreutils,
+            Component::Bundler,
+        ] {
+            let path = cached_component_path(&cache, component, version, &target);
+            write_cached_runtime(&path, component.stem().as_bytes())?;
+        }
+
+        let path = |component| cached_component_path(&cache, component, version, &target);
+        assert_eq!(
+            eryx::cache::setup_runtime(eryx::Language::Shell),
+            Some(path(Component::Runtime(eryx::Language::Shell)))
+        );
+        assert_eq!(
+            eryx::cache::setup_coreutils(),
+            Some(path(Component::Coreutils))
+        );
+        assert_eq!(
+            eryx::cache::setup_bundler(),
+            Some(Ok(b"eryx-bundler".to_vec()))
+        );
+
+        // A bundler that no longer matches its checksum is refused.
+        std::fs::write(path(Component::Bundler), b"tampered")?;
+        assert!(matches!(eryx::cache::setup_bundler(), Some(Err(_))));
         Ok(())
     }
 
