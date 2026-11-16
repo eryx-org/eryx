@@ -532,7 +532,7 @@ async fn callbacks_named_like_builtins_or_commands_are_refused() {
         .unwrap_err();
     assert!(
         err.to_string()
-            .contains("callback 'echo' collides with the shell builtin 'echo'"),
+            .contains("callback 'echo' collides with the shell builtin or reserved word 'echo'"),
         "{err}"
     );
     // The embedded coreutils' `cat`.

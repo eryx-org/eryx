@@ -131,7 +131,7 @@ describe("reserved callback names", () => {
 
   it("refuses shell builtins and the commands a callback would hide", () => {
     expect(() => new Sandbox({ language: "shell", callbacks: { echo: () => 1 } })).toThrow(
-      "collides with the shell builtin 'echo'",
+      "collides with the shell builtin or reserved word 'echo'",
     );
     expect(() => new Sandbox({ language: "shell", callbacks: { cat: () => 1 } })).toThrow(
       "collides with the command 'cat'",

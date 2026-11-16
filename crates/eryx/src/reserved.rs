@@ -38,7 +38,7 @@ pub(crate) fn names(list: &'static str) -> impl Iterator<Item = &'static str> {
 fn reserved(language: Language) -> (&'static str, &'static str, Policy) {
     match language {
         Language::JavaScript => (JAVASCRIPT, "the JavaScript global", Policy::Refuse),
-        Language::Shell => (SHELL, "the shell builtin", Policy::Refuse),
+        Language::Shell => (SHELL, "the shell builtin or reserved word", Policy::Refuse),
         _ => (PYTHON, "the Python builtin", PYTHON_POLICY),
     }
 }
@@ -53,41 +53,82 @@ fn installed_as(language: Language, name: &str) -> &str {
     name.split('.').next().unwrap_or(name)
 }
 
+/// Why `name` can't be a callback in `language`'s guest, if it can't: it
+/// collides with something the guest already has, or, in the shell, with a
+/// host command of the same name, which the callback would hide.
+fn collision(
+    language: Language,
+    name: &str,
+    commands: &std::collections::HashSet<&str>,
+) -> Option<String> {
+    let (list, what, _) = reserved(language);
+    let root = installed_as(language, name);
+    if names(list).any(|reserved| reserved == root) {
+        Some(format!(
+            "callback '{name}' collides with {what} '{root}': the guest keeps its own, \
+             so the callback could only be reached through invoke(); give it another name"
+        ))
+    } else if language == Language::Shell && commands.contains(root) {
+        Some(format!(
+            "callback '{name}' collides with the command '{root}', which it would hide; \
+             give one of them another name"
+        ))
+    } else {
+        None
+    }
+}
+
 /// Fail (or, for Python, warn) if a callback would collide with something
-/// the guest already has, or, in the shell, with a host command of the same
-/// name, which the callback would hide. Reports the first collision by name,
-/// so the error is stable.
+/// the guest already has (see [`collision`]). Reports the first collision
+/// by name, so the error is stable. A warning is logged once per callback
+/// name in the process, since pools and the server set callbacks per
+/// request.
 pub(crate) fn check<'a>(
     language: Language,
     callbacks: impl IntoIterator<Item = &'a str>,
     commands: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), Error> {
-    let (list, what, policy) = reserved(language);
+    let (_, _, policy) = reserved(language);
     let mut callbacks: Vec<&str> = callbacks.into_iter().collect();
     callbacks.sort_unstable();
     let commands: std::collections::HashSet<&str> = commands.into_iter().collect();
     for name in callbacks {
-        let root = installed_as(language, name);
-        let message = if names(list).any(|reserved| reserved == root) {
-            format!(
-                "callback '{name}' collides with {what} '{root}': the guest keeps its own, \
-                 so the callback could only be reached through invoke(); give it another name"
-            )
-        } else if language == Language::Shell && commands.contains(root) {
-            format!(
-                "callback '{name}' collides with the command '{root}', which it would hide; \
-                 give one of them another name"
-            )
-        } else {
+        let Some(message) = collision(language, name, &commands) else {
             continue;
         };
-        if policy == Policy::Warn {
-            tracing::warn!(callback = name, "{message}");
-            continue;
+        if policy == Policy::Refuse {
+            return Err(ErrorKind::Initialization(message).into());
         }
-        return Err(ErrorKind::Initialization(message).into());
+        static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let mut warned = WARNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !warned.iter().any(|w| w == name) {
+            warned.push(name.to_string());
+            tracing::warn!(callback = name, "{message}");
+        }
     }
     Ok(())
+}
+
+/// The warnings building a `language` sandbox with these callbacks logs (one
+/// per callback whose name the guest already uses, where that's a warning
+/// rather than an error: today, Python builtins), for bindings to show
+/// their users in their own way (pyeryx: Python's `warnings.warn`).
+pub fn callback_name_warnings<'a>(
+    language: Language,
+    callbacks: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let (_, _, policy) = reserved(language);
+    if policy == Policy::Refuse {
+        return Vec::new();
+    }
+    let mut callbacks: Vec<&str> = callbacks.into_iter().collect();
+    callbacks.sort_unstable();
+    callbacks
+        .into_iter()
+        .filter_map(|name| collision(language, name, &std::collections::HashSet::new()))
+        .collect()
 }
 
 /// The JS SDK's copy of the lists (js/eryx/shims/reserved-names.js), as
@@ -180,9 +221,17 @@ mod tests {
         assert!(!refused(Language::Shell, "echo.*"));
         assert!(check(Language::Shell, ["cat"], ["cat"]).is_err());
         assert!(check(Language::Shell, ["cat"], ["ls"]).is_ok());
-        // Python only warns (PYTHON_POLICY).
+        // Python only warns (PYTHON_POLICY), and says so for bindings.
         assert!(!refused(Language::Python, "print"));
         assert!(!refused(Language::Python, "json.dumps"));
+        assert_eq!(
+            callback_name_warnings(Language::Python, ["json.dumps", "fetch", "print"]).len(),
+            2
+        );
+        assert!(callback_name_warnings(Language::JavaScript, ["fetch"]).is_empty());
+        // Shell reserved words are syntax, so a command can't take one.
+        assert!(refused(Language::Shell, "time"));
+        assert!(refused(Language::Shell, "[["));
     }
 
     #[test]

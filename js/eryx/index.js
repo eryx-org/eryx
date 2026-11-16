@@ -293,7 +293,7 @@ function _toResult(output, stateWasReset, stats) {
  */
 function checkCallbackNames(language, names, commands) {
   const reserved = new Set(RESERVED_CALLBACK_NAMES[language] ?? []);
-  const what = { javascript: "the JavaScript global", shell: "the shell builtin" }[language] ?? "the Python builtin";
+  const what = { javascript: "the JavaScript global", shell: "the shell builtin or reserved word" }[language] ?? "the Python builtin";
   for (const name of [...names].sort()) {
     const root = language === "shell" ? name : name.split(".")[0];
     let message;
