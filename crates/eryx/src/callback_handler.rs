@@ -204,8 +204,16 @@ fn scrub_trace_event(event: &mut TraceEvent, secrets: &HashMap<String, SecretCon
         TraceEventKind::Call { function } | TraceEventKind::Return { function } => {
             *function = crate::secrets::scrub_placeholders(function, secrets);
         }
-        TraceEventKind::CallbackStart { name } | TraceEventKind::CallbackEnd { name, .. } => {
+        TraceEventKind::CallbackStart { name }
+        | TraceEventKind::CallbackEnd { name, .. }
+        | TraceEventKind::ProcessStart { name, .. } => {
             *name = crate::secrets::scrub_placeholders(name, secrets);
+        }
+        TraceEventKind::ProcessEnd { name, error, .. } => {
+            *name = crate::secrets::scrub_placeholders(name, secrets);
+            if let Some(error) = error {
+                *error = crate::secrets::scrub_placeholders(error, secrets);
+            }
         }
         TraceEventKind::Line => {}
     }
