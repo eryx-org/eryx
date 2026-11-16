@@ -42,6 +42,14 @@ npm = [
     "dep:webpki-roots",
 ]
 
+[package.metadata.cargo-all-features]
+# CI checks eryx's feature powerset with `cargo check-all-features -- -p eryx`,
+# which runs once per workspace package with that package's features but
+# always `-p eryx`, so `npm` (a feature of this package) would be passed to
+# eryx. The default build covers `npm`, and CI checks
+# `--no-default-features` on its own.
+skip_package = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

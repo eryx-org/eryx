@@ -1050,6 +1050,9 @@ jobs:
           cargo check -p eryx --features native-extensions
           cargo check -p eryx --features embedded,native-extensions
 
+          echo "=== Checking eryx-packages without npm (skipped by cargo-all-features) ==="
+          cargo check -p eryx-packages --no-default-features
+
   # Run examples to ensure they don't bitrot
   examples:
     name: Examples
