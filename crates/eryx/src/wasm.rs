@@ -887,12 +887,13 @@ impl AllocatorSettings {
 
     /// Upper bound on one core instance's `VMContext` metadata.
     ///
-    /// The largest with numpy linked in needs 242,088 bytes
-    /// (measured), so wasmtime's 1 MiB default leaves headroom for bigger
-    /// extensions. Like the component limit below, this is only checked at
-    /// instantiation: the metadata is heap-allocated at its actual size, never
-    /// reserved per slot.
-    const CORE_INSTANCE_SIZE: usize = 1 << 20;
+    /// The largest with numpy linked in needs 242,088 bytes (measured), but
+    /// child commands are bigger: Go's `gh` (wasip3) needs 1,276,940, almost
+    /// all of it per-function metadata, past wasmtime's 1 MiB default. 4 MiB
+    /// is about 3x that. Like the component limit below, this is only
+    /// checked at instantiation: the metadata is heap-allocated at its actual
+    /// size, never reserved per slot.
+    const CORE_INSTANCE_SIZE: usize = 4 << 20;
 
     /// Upper bound on one runtime instance's metadata: its
     /// `VMComponentContext` plus every core instance's `VMContext`.
