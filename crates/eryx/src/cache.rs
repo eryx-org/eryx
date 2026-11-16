@@ -452,8 +452,44 @@ pub fn setup_coreutils() -> Option<PathBuf> {
 /// its bytes, once they match the checksum `setup` wrote next to them and
 /// pass the same privacy checks as [`setup_runtime`], or why they don't.
 #[must_use]
-pub fn setup_bundler() -> Option<Result<Vec<u8>, String>> {
-    setup_file("eryx-bundler").map(|path| cached_runtime::read_verified(&path))
+pub fn setup_bundler() -> Option<(PathBuf, Result<Vec<u8>, String>)> {
+    setup_file("eryx-bundler").map(|path| {
+        let bytes = setup_read_verified(&path);
+        (path, bytes)
+    })
+}
+
+/// The bytes of a file `eryx-precompile setup` cached at `path`, if they
+/// match the checksum next to them and the file, its checksum and their
+/// directory are private to this user (as for [`setup_runtime`]), or why
+/// they can't be used. `setup` and eryx's build script check its cache with
+/// this too.
+///
+/// # Errors
+///
+/// Why the cached file can't be used.
+pub fn setup_read_verified(path: &Path) -> Result<Vec<u8>, String> {
+    cached_runtime::read_verified(path)
+}
+
+/// The directory `eryx-precompile setup` caches into and eryx reads from:
+/// `$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx` (`%USERPROFILE%` without a
+/// `HOME`). A relative or empty `XDG_CACHE_HOME` or `HOME` is ignored, as for
+/// the embedded runtime's cache. `None` without either.
+#[must_use]
+pub fn setup_dir() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    Some(match absolute("XDG_CACHE_HOME") {
+        Some(xdg) => xdg.join("eryx"),
+        None => absolute("HOME")
+            .or_else(|| absolute("USERPROFILE"))?
+            .join(".cache")
+            .join("eryx"),
+    })
 }
 
 /// The name `eryx-precompile setup` caches `stem` (e.g. `runtime-python`,
@@ -482,18 +518,7 @@ pub fn setup_checksum_path(path: &Path) -> PathBuf {
 /// [`setup_file_name`] for this eryx version and platform in the setup
 /// cache, if it's there and private.
 fn setup_file(stem: &str) -> Option<PathBuf> {
-    let absolute = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    let dir = match absolute("XDG_CACHE_HOME") {
-        Some(xdg) => xdg.join("eryx"),
-        None => absolute("HOME")
-            .or_else(|| absolute("USERPROFILE"))?
-            .join(".cache")
-            .join("eryx"),
-    };
+    let dir = setup_dir()?;
     let dir_meta = fs::symlink_metadata(&dir).ok()?;
     if !dir_meta.is_dir() || !is_private(&dir_meta) {
         return None;

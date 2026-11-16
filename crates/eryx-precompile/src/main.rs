@@ -442,17 +442,12 @@ async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Determine the cache directory for eryx runtime artifacts.
+/// The cache directory for eryx runtime artifacts: the one eryx reads them
+/// from ([`eryx::cache::setup_dir`]).
 fn cache_dir() -> Result<PathBuf> {
-    let dir = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("eryx")
-    } else {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .context("Could not determine home directory (set HOME or XDG_CACHE_HOME)")?;
-        PathBuf::from(home).join(".cache").join("eryx")
-    };
-    Ok(dir)
+    eryx::cache::setup_dir().context(
+        "Could not determine the cache directory (set HOME or XDG_CACHE_HOME to an absolute path)",
+    )
 }
 
 fn parse_language(s: &str) -> Result<eryx::Language, String> {
@@ -594,16 +589,11 @@ fn checksum_path(path: &Path) -> PathBuf {
     eryx::cache::setup_checksum_path(path)
 }
 
-/// Whether `path` holds a complete runtime written by `setup`, according to
-/// the checksum file stored next to it.
+/// Whether `path` holds a complete runtime written by `setup` that eryx will
+/// use: matching the checksum file stored next to it, and private, as
+/// eryx's readers check it.
 fn cached_runtime_is_valid(path: &Path) -> bool {
-    let (Ok(bytes), Ok(checksum)) = (
-        std::fs::read(path),
-        std::fs::read_to_string(checksum_path(path)),
-    ) else {
-        return false;
-    };
-    parse_sha256(&checksum).is_ok_and(|expected| verify_sha256(&bytes, &expected).is_ok())
+    eryx::cache::setup_read_verified(path).is_ok()
 }
 
 /// Write `bytes` to `path` through a temp file in the same directory, so
@@ -800,10 +790,7 @@ async fn setup_component(
     // Check if already cached. A file another user could have written, or one
     // without a matching checksum (from an interrupted run or an older version
     // of this tool), is rebuilt.
-    if std::fs::symlink_metadata(&cwasm_path)
-        .is_ok_and(|meta| meta.is_file() && eryx::cache::is_private(&meta))
-        && cached_runtime_is_valid(&cwasm_path)
-    {
+    if cached_runtime_is_valid(&cwasm_path) {
         println!("Already cached: {}", cwasm_path.display());
         println!();
         println!(
@@ -854,6 +841,14 @@ async fn setup_component(
     // the same owner-only permissions it requires.
     eryx::cache::ensure_private_dir(cache)
         .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
+    // eryx doesn't read its setup cache through a symlink.
+    if std::fs::symlink_metadata(cache).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!(
+            "{} is a symlink, which eryx won't read its cache from: replace it with a \
+             directory, or set XDG_CACHE_HOME",
+            cache.display()
+        );
+    }
     write_cached_runtime(&cwasm_path, &precompiled)?;
     println!("  Saved to: {}", cwasm_path.display());
     println!();
@@ -1890,7 +1885,7 @@ mod tests {
         // reads the environment concurrently.
         unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
         let cache = cache_dir()?;
-        std::fs::create_dir(&cache)?;
+        eryx::cache::ensure_private_dir(&cache)?;
         let version = env!("CARGO_PKG_VERSION");
         let target = eryx::cache::setup_target();
         for component in [
@@ -1913,12 +1908,12 @@ mod tests {
         );
         assert_eq!(
             eryx::cache::setup_bundler(),
-            Some(Ok(b"eryx-bundler".to_vec()))
+            Some((path(Component::Bundler), Ok(b"eryx-bundler".to_vec())))
         );
 
         // A bundler that no longer matches its checksum is refused.
         std::fs::write(path(Component::Bundler), b"tampered")?;
-        assert!(matches!(eryx::cache::setup_bundler(), Some(Err(_))));
+        assert!(matches!(eryx::cache::setup_bundler(), Some((_, Err(_)))));
         Ok(())
     }
 
