@@ -141,6 +141,9 @@
 
     // Loaded with the context, so they're in the preinitialized snapshot:
     // loading them on first use instead costs about 8 ms per instance.
+    // ponytail: the snapshot is ~0.7 MB bigger and a fresh instance ~18 µs
+    // slower (#953); if JS cold start matters, compile url_globals.js to
+    // QuickJS bytecode at build time and load that on first use instead.
     define('URL', native.url.URL);
     define('URLSearchParams', native.url.URLSearchParams);
     // core-js keeps its shared state on this global while it loads; its
