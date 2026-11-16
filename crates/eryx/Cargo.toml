@@ -203,8 +203,9 @@ unstable-vfs = ["dep:eryx-vfs"]
 # Outside semver, like `unstable-vfs`.
 unstable-internals = []
 # Environments (`eryx::environment`): build package sets ahead of time for
-# sandboxes to mount. Embeds the JavaScript bundler (eryx-bundler.cwasm, from
-# `mise run precompile-bundler`; ERYX_BUNDLER_CWASM names another).
+# sandboxes to mount. Embeds the JavaScript bundler (eryx-bundler.cwasm: from
+# `eryx-precompile setup --bundler`, or `mise run precompile-bundler` in the
+# workspace; ERYX_BUNDLER_CWASM names another).
 packages = ["dep:eryx-packages", "dep:blake3"]
 
 

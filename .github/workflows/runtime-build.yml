@@ -3,8 +3,9 @@
 # Called by the release workflows and the release dry run; it publishes
 # nothing. Two artifacts:
 # - `runtime-assets`: runtime-{python,javascript,shell}.wasm, the shell's
-#   embedded commands coreutils.wasm, and their .sha256: the release assets
-#   `eryx-precompile setup` downloads.
+#   embedded commands coreutils.wasm, the JavaScript bundler
+#   eryx-bundler.wasm (eryx's `packages` feature), and their .sha256: the
+#   release assets `eryx-precompile setup` downloads.
 # - `wasm-runtime`: what the pyeryx wheel jobs need to precompile the Python
 #   runtime on each platform (runtime-python.wasm, prebuilt/ and the stdlib).
 #
@@ -44,6 +45,8 @@ jobs:
           # The shell's embedded commands (the eryx `coreutils` feature),
           # from the pinned clis/coreutils.toml.
           mise run build-coreutils
+          # The bundler environment builds run (the eryx `packages` feature).
+          mise run build-bundler
         env:
           BUILD_ERYX_RUNTIME: "1"
 
@@ -51,7 +54,7 @@ jobs:
       - name: Hash the runtimes
         working-directory: crates/eryx-runtime
         run: |
-          for component in runtime-python runtime-javascript runtime-shell coreutils; do
+          for component in runtime-python runtime-javascript runtime-shell coreutils eryx-bundler; do
             sha256sum "$component.wasm" > "$component.wasm.sha256"
           done
           cat ./*.wasm.sha256
@@ -63,6 +66,7 @@ jobs:
           path: |
             crates/eryx-runtime/runtime-*.wasm
             crates/eryx-runtime/coreutils.wasm
+            crates/eryx-runtime/eryx-bundler.wasm
             crates/eryx-runtime/*.wasm.sha256
           if-no-files-found: error
           retention-days: 5

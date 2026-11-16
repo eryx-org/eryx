@@ -172,8 +172,15 @@ struct SetupArgs {
     /// Guest language whose runtime to set up: python, javascript or shell.
     /// Repeat to set up several. `shell` also sets up the shell's embedded
     /// commands (`coreutils.wasm`), which eryx's `shell` feature embeds.
-    #[arg(long = "language", value_name = "LANGUAGE", default_value = "python", value_parser = parse_language)]
+    /// Defaults to python, unless only `--bundler` is given.
+    #[arg(long = "language", value_name = "LANGUAGE", value_parser = parse_language)]
     languages: Vec<eryx::Language>,
+
+    /// Also set up the JavaScript bundler (`eryx-bundler.wasm`), which eryx's
+    /// `packages` feature embeds to build environments. On its own (no
+    /// `--language`), sets up only the bundler.
+    #[arg(long)]
+    bundler: bool,
 
     /// Expected SHA-256 of `runtime-<language>.wasm`, as hex
     ///
@@ -642,7 +649,10 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     init_tracing(args.verbose);
 
     let own_version = env!("CARGO_PKG_VERSION");
-    let version = args.version.unwrap_or_else(|| own_version.to_string());
+    let version = args
+        .version
+        .clone()
+        .unwrap_or_else(|| own_version.to_string());
     // The runtime is compiled by the eryx inside this binary, and a precompiled
     // runtime only loads in the eryx version that compiled it.
     if version != own_version {
@@ -653,9 +663,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
              cargo binstall eryx-precompile@{version}"
         );
     }
-    if args.sha256.is_some() && args.languages.len() > 1 {
-        anyhow::bail!("--sha256 checks a single download; pass one --language with it");
-    }
+    let components = setup_components(&args)?;
     let target = platform_target();
     let cache = cache_dir()?;
 
@@ -675,28 +683,32 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    for &language in &args.languages {
-        let mut components = vec![(Component::Runtime(language), args.sha256.as_deref())];
-        // The `shell` feature turns on `coreutils`, which embeds these.
-        if language == eryx::Language::Shell {
-            components.push((Component::Coreutils, None));
-        }
-        for (component, sha256) in components {
-            setup_component(
-                &client,
-                &version,
-                &target,
-                &cache,
-                args.release_url.as_deref(),
-                component,
-                sha256,
-            )
-            .await?;
-        }
+    for &(component, sha256) in &components {
+        setup_component(
+            &client,
+            &version,
+            &target,
+            &cache,
+            args.release_url.as_deref(),
+            component,
+            sha256,
+        )
+        .await?;
     }
 
+    // Say what `cargo build` will now find, and with which feature.
+    let set_up: Vec<String> = components.iter().map(|(c, _)| c.to_string()).collect();
+    let feature = if components
+        .iter()
+        .all(|(c, _)| matches!(c, Component::Bundler))
+    {
+        "packages"
+    } else {
+        "embedded"
+    };
     println!(
-        "Setup complete! `cargo build` with `features = [\"embedded\"]` will now find the cached runtime."
+        "Setup complete! `cargo build` with `features = [\"{feature}\"]` will now find the cached {}.",
+        set_up.join(", ")
     );
     println!();
     println!(
@@ -704,6 +716,31 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// What `setup` sets up, each with the `--sha256` to check it against: the
+/// `--language` runtimes (python if neither they nor `--bundler` are given),
+/// the shell's coreutils with the shell, and the bundler.
+fn setup_components(args: &SetupArgs) -> Result<Vec<(Component, Option<&str>)>> {
+    let mut languages = args.languages.clone();
+    if languages.is_empty() && !args.bundler {
+        languages.push(eryx::Language::Python);
+    }
+    if args.sha256.is_some() && languages.len() != 1 {
+        anyhow::bail!("--sha256 checks a single download; pass one --language with it");
+    }
+    let mut components = Vec::new();
+    for language in languages {
+        components.push((Component::Runtime(language), args.sha256.as_deref()));
+        // The `shell` feature turns on `coreutils`, which embeds these.
+        if language == eryx::Language::Shell {
+            components.push((Component::Coreutils, None));
+        }
+    }
+    if args.bundler {
+        components.push((Component::Bundler, None));
+    }
+    Ok(components)
 }
 
 /// A component `setup` downloads, precompiles and caches.
@@ -714,6 +751,9 @@ enum Component {
     /// The shell's embedded commands, `coreutils.wasm` (eryx's `coreutils`
     /// feature).
     Coreutils,
+    /// The JavaScript bundler environment builds run, `eryx-bundler.wasm`
+    /// (eryx's `packages` feature).
+    Bundler,
 }
 
 impl Component {
@@ -723,6 +763,7 @@ impl Component {
         match self {
             Self::Runtime(language) => format!("runtime-{language}"),
             Self::Coreutils => "coreutils".to_owned(),
+            Self::Bundler => "eryx-bundler".to_owned(),
         }
     }
 }
@@ -732,6 +773,7 @@ impl std::fmt::Display for Component {
         match self {
             Self::Runtime(language) => write!(f, "{language} runtime"),
             Self::Coreutils => f.write_str("shell commands (coreutils)"),
+            Self::Bundler => f.write_str("JavaScript bundler"),
         }
     }
 }
@@ -1767,6 +1809,38 @@ mod tests {
             ),
             Path::new("/cache/runtime-shell-v0.15.1-x86_64-linux.cwasm")
         );
+        assert_eq!(
+            cached_component_path(cache, Component::Bundler, "0.15.1", "x86_64-linux"),
+            Path::new("/cache/eryx-bundler-v0.15.1-x86_64-linux.cwasm")
+        );
+    }
+
+    /// The components `setup` sets up for its flags, by name.
+    fn components_for(args: &[&str]) -> Result<Vec<String>> {
+        let Command::Setup(setup) = Cli::try_parse_from(args)?.command else {
+            anyhow::bail!("not a setup command");
+        };
+        Ok(setup_components(&setup)?
+            .into_iter()
+            .map(|(component, _)| component.stem())
+            .collect())
+    }
+
+    #[test]
+    fn setup_sets_up_python_unless_only_the_bundler_is_asked_for() -> Result<()> {
+        let setup = ["eryx-precompile", "setup"];
+        assert_eq!(components_for(&setup)?, ["runtime-python"]);
+        assert_eq!(
+            components_for(&[&setup[..], &["--bundler"]].concat())?,
+            ["eryx-bundler"]
+        );
+        assert_eq!(
+            components_for(&[&setup[..], &["--language", "shell", "--bundler"]].concat())?,
+            ["runtime-shell", "coreutils", "eryx-bundler"]
+        );
+        // --sha256 pins one language runtime, so it needs exactly one.
+        assert!(components_for(&[&setup[..], &["--bundler", "--sha256", "00"]].concat()).is_err());
+        Ok(())
     }
 
     #[test]
