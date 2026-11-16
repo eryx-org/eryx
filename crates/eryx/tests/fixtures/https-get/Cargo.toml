@@ -1,0 +1,14 @@
+# A tiny WASI 0.2 HTTPS client for tests/child_network.rs, built by the test
+# itself: `GET`s a URL through `$HTTPS_PROXY`, trusting `$SSL_CERT_FILE`, as
+# a real client (curl, Python requests) would.
+[package]
+name = "eryx-test-https-get"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# Not part of the eryx workspace: it only builds for wasm32-wasip2.
+[workspace]

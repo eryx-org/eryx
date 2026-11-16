@@ -82,6 +82,170 @@ const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 const MAX_LIVE_CHILDREN: usize = 64;
 /// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
+/// TCP sockets one child may hold open at once. Creating one opens a host
+/// socket before any address is checked, so this, with
+/// [`MAX_EXECUTION_SOCKETS`] and the process-wide limit, keeps a script from
+/// exhausting the host's file descriptors.
+const MAX_CHILD_SOCKETS: usize = 32;
+/// TCP sockets an execution's children may hold open at once, together.
+const MAX_EXECUTION_SOCKETS: usize = 128;
+/// TCP sockets children may hold open at once across the process.
+static PROCESS_CHILD_SOCKETS: AtomicUsize = AtomicUsize::new(0);
+
+/// The process-wide limit on children's sockets: a quarter of the soft
+/// `RLIMIT_NOFILE` (at least 64, at most 4096), or 1024 where there's none.
+fn max_process_child_sockets() -> usize {
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(|| {
+        #[cfg(unix)]
+        let soft = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
+        #[cfg(not(unix))]
+        let soft: Option<u64> = None;
+        soft.map_or(1024, |n| {
+            usize::try_from(n / 4).unwrap_or(4096).clamp(64, 4096)
+        })
+    })
+}
+
+/// A child's open TCP sockets, counted against the child's, its execution's
+/// and the process's limits, and given back as they close (or the child's
+/// store is dropped).
+#[derive(Default)]
+struct ChildSockets {
+    /// Table indices of the sockets it created; dropped ones are pruned.
+    live: Vec<u32>,
+    /// Sockets its execution's children hold.
+    execution: Arc<AtomicUsize>,
+}
+
+impl ChildSockets {
+    fn new(execution: Arc<AtomicUsize>) -> Self {
+        Self {
+            live: Vec::new(),
+            execution,
+        }
+    }
+
+    fn release(&self, n: usize) {
+        self.execution.fetch_sub(n, Ordering::Relaxed);
+        PROCESS_CHILD_SOCKETS.fetch_sub(n, Ordering::Relaxed);
+    }
+
+    /// Forget sockets the child has dropped.
+    fn prune(&mut self, table: &ResourceTable) {
+        let before = self.live.len();
+        self.live.retain(|&rep| {
+            table
+                .get(&Resource::<wasmtime_wasi::p2::TcpSocket>::new_borrow(rep))
+                .is_ok()
+        });
+        self.release(before - self.live.len());
+    }
+
+    /// Reserve one more socket, if every limit allows it.
+    fn admit(&self) -> bool {
+        if self.live.len() >= MAX_CHILD_SOCKETS {
+            return false;
+        }
+        if self.execution.fetch_add(1, Ordering::Relaxed) >= MAX_EXECUTION_SOCKETS {
+            self.execution.fetch_sub(1, Ordering::Relaxed);
+            return false;
+        }
+        if PROCESS_CHILD_SOCKETS.fetch_add(1, Ordering::Relaxed) >= max_process_child_sockets() {
+            self.release(1);
+            return false;
+        }
+        true
+    }
+}
+
+impl Drop for ChildSockets {
+    fn drop(&mut self) {
+        self.release(self.live.len());
+    }
+}
+
+/// `wasi:sockets/tcp-create-socket` for children: wasmtime-wasi's, counted
+/// against [`ChildSockets`].
+struct CountedSockets;
+
+impl wasmtime::component::HasData for CountedSockets {
+    type Data<'a> = CountedSocketsView<'a>;
+}
+
+struct CountedSocketsView<'a> {
+    sockets: wasmtime_wasi::sockets::WasiSocketsCtxView<'a>,
+    budget: &'a mut ChildSockets,
+}
+
+// The interface's error conversions, as wasmtime-wasi's.
+impl wasmtime_wasi::p2::bindings::sockets::network::Host for CountedSocketsView<'_> {
+    fn convert_error_code(
+        &mut self,
+        error: wasmtime_wasi::p2::SocketError,
+    ) -> wasmtime::Result<wasmtime_wasi::p2::bindings::sockets::network::ErrorCode> {
+        self.sockets.convert_error_code(error)
+    }
+
+    fn network_error_code(
+        &mut self,
+        err: Resource<wasmtime::Error>,
+    ) -> wasmtime::Result<Option<wasmtime_wasi::p2::bindings::sockets::network::ErrorCode>> {
+        self.sockets.network_error_code(err)
+    }
+}
+
+impl wasmtime_wasi::p2::bindings::sockets::network::HostNetwork for CountedSocketsView<'_> {
+    fn drop(
+        &mut self,
+        this: Resource<wasmtime_wasi::p2::bindings::sockets::network::Network>,
+    ) -> wasmtime::Result<()> {
+        wasmtime_wasi::p2::bindings::sockets::network::HostNetwork::drop(&mut self.sockets, this)
+    }
+}
+
+impl wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host for CountedSocketsView<'_> {
+    fn create_tcp_socket(
+        &mut self,
+        family: wasmtime_wasi::p2::bindings::sockets::network::IpAddressFamily,
+    ) -> wasmtime_wasi::p2::SocketResult<Resource<wasmtime_wasi::p2::TcpSocket>> {
+        self.budget.prune(self.sockets.table);
+        if !self.budget.admit() {
+            return Err(
+                wasmtime_wasi::p2::bindings::sockets::network::ErrorCode::NewSocketLimit.into(),
+            );
+        }
+        let created =
+            wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host::create_tcp_socket(
+                &mut self.sockets,
+                family,
+            );
+        match created {
+            Ok(socket) => {
+                self.budget.live.push(socket.rep());
+                Ok(socket)
+            }
+            Err(e) => {
+                self.budget.release(1);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Where a child finds the proxy's CA certificate (see [`ChildNet`]).
+const CA_DIR: &str = "/etc/ssl/certs";
+/// The CA bundle's file name in [`CA_DIR`].
+const CA_FILE: &str = "ca-certificates.crt";
+/// The env vars naming the proxy.
+const PROXY_ENV: [&str; 4] = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"];
+/// The env vars naming the CA bundle.
+const CA_ENV: [&str; 4] = [
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+];
 /// Default for [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes).
 pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -153,6 +317,8 @@ pub(crate) fn add_to_linker(linker: &mut Linker<ExecutorState>) -> wasmtime::Res
 #[derive(Clone)]
 pub struct Command {
     pre: CommandPre<ChildState>,
+    /// Whether its children's `CONNECT`s are blind tunnels.
+    tunnels: bool,
 }
 
 impl std::fmt::Debug for Command {
@@ -245,7 +411,118 @@ impl Command {
             .instantiate_pre(component)
             .map_err(ErrorKind::wasm_component)?;
         let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
-        Ok(Self { pre })
+        Ok(Self {
+            pre,
+            tunnels: false,
+        })
+    }
+
+    /// Let this command's children open blind `CONNECT` tunnels through the
+    /// child proxy, for protocols the proxy can't inspect (e.g. git over
+    /// SSH-in-TLS, or a client pinning certificates), when the sandbox gives
+    /// children network (see
+    /// [`SandboxBuilder::with_child_network`](crate::SandboxBuilder::with_child_network)).
+    ///
+    /// A tunnel skips everything the proxy does with requests: **no** secret
+    /// substitution (placeholders go out as they are), **no** HTTP rules (a
+    /// host with rules is refused a tunnel), **no** scrubbing of responses,
+    /// and nothing is checked beyond the `CONNECT` host and the addresses it
+    /// resolves to, so the child can reach other virtual hosts served from
+    /// the same address (e.g. behind a CDN). Every `CONNECT` from such a
+    /// child is a tunnel.
+    #[must_use]
+    pub fn allow_tunnels(mut self) -> Self {
+        self.tunnels = true;
+        self
+    }
+}
+
+/// An execution's network for its children: the sandbox's policy and secrets,
+/// and the proxies started for them, at most one inspecting and one
+/// tunnelling. They live as long as the execution (see
+/// [`ExecutorState::disconnect`]), well inside their CAs' validity.
+pub(crate) struct ChildNet {
+    config: crate::net::NetConfig,
+    secrets: HashMap<String, crate::secrets::SecretConfig>,
+    network: crate::net::ChildNetwork,
+    proxies: [Option<ProxyLink>; 2],
+    /// TCP sockets its children hold, together.
+    sockets: Arc<AtomicUsize>,
+}
+
+/// A started proxy, and the host directory holding its CA certificate for
+/// children to mount read-only at [`CA_DIR`].
+struct ProxyLink {
+    proxy: crate::net::ChildProxy,
+    ca_dir: tempfile::TempDir,
+}
+
+impl ChildNet {
+    /// `None` for [`ChildNetwork::None`](crate::net::ChildNetwork::None):
+    /// children stay offline.
+    pub(crate) fn new(
+        config: crate::net::NetConfig,
+        secrets: HashMap<String, crate::secrets::SecretConfig>,
+        network: crate::net::ChildNetwork,
+    ) -> Option<Self> {
+        (!matches!(network, crate::net::ChildNetwork::None)).then_some(Self {
+            config,
+            secrets,
+            network,
+            proxies: [None, None],
+            sockets: Arc::default(),
+        })
+    }
+
+    /// The proxy for a child that may (`tunnels`) or may not open blind
+    /// tunnels, started on first use.
+    fn link(&mut self, tunnels: bool) -> std::io::Result<ChildLink> {
+        let slot = &mut self.proxies[usize::from(tunnels)];
+        let link = match slot {
+            Some(link) => link,
+            None => {
+                let Some(proxy) = crate::net::ChildProxy::start(
+                    self.config.clone(),
+                    self.secrets.clone(),
+                    self.network.clone(),
+                    tunnels,
+                )?
+                else {
+                    return Err(std::io::Error::other("children have no network"));
+                };
+                let ca_dir = tempfile::tempdir()?;
+                std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
+                slot.insert(ProxyLink { proxy, ca_dir })
+            }
+        };
+        Ok(ChildLink {
+            proxy: link.proxy.addr(),
+            ca_dir: link.ca_dir.path().to_path_buf(),
+            sockets: Arc::clone(&self.sockets),
+        })
+    }
+}
+
+/// What a child needs to reach its proxy.
+#[derive(Clone)]
+struct ChildLink {
+    proxy: std::net::SocketAddr,
+    ca_dir: std::path::PathBuf,
+    /// Its execution's count of children's sockets.
+    sockets: Arc<AtomicUsize>,
+}
+
+impl ChildLink {
+    /// The env vars pointing a child's HTTP clients at the proxy and its CA.
+    fn env(&self) -> Vec<(String, String)> {
+        let proxy = format!("http://{}", self.proxy);
+        let ca = format!("{CA_DIR}/{CA_FILE}");
+        let named =
+            |names: [&str; 4], value: String| names.map(|name| (name.to_owned(), value.clone()));
+        named(PROXY_ENV, proxy)
+            .into_iter()
+            .chain(named(CA_ENV, ca))
+            .collect()
     }
 }
 
@@ -292,7 +569,10 @@ impl Command {
             .instantiate_pre(&component)
             .map_err(ErrorKind::wasm_component)?;
         let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
-        Ok(Self { pre })
+        Ok(Self {
+            pre,
+            tunnels: false,
+        })
     }
 
     /// Run the command on its own, outside any sandbox, with `argv`, no
@@ -342,6 +622,8 @@ impl Command {
                     held: 0,
                     limit: limits.memory,
                 },
+                // No network: TCP is off.
+                sockets: ChildSockets::default(),
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             },
@@ -405,13 +687,23 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     let wasm_err = |e: wasmtime::Error| ErrorKind::WasmEngine(e.to_string());
     let mut linker = Linker::<ChildState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(wasm_err)?;
+    linker.allow_shadowing(true);
+    // Count children's sockets (see ChildSockets).
+    wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::add_to_linker::<_, CountedSockets>(
+        &mut linker,
+        |state: &mut ChildState| CountedSocketsView {
+            sockets: wasmtime_wasi::sockets::WasiSocketsCtxView {
+                ctx: state.wasi.sockets(),
+                table: &mut state.table,
+            },
+            budget: &mut state.sockets,
+        },
+    )
+    .map_err(wasm_err)?;
     #[cfg(feature = "unstable-vfs")]
-    {
-        linker.allow_shadowing(true);
-        eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
-            .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
-        linker.allow_shadowing(false);
-    }
+    eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
+        .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+    linker.allow_shadowing(false);
     Ok(LINKER.get_or_init(|| linker))
 }
 
@@ -433,6 +725,7 @@ pub(crate) struct ChildState {
     wasi: WasiCtx,
     table: ResourceTable,
     limits: ChildMemory,
+    sockets: ChildSockets,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -554,6 +847,8 @@ struct ChildRun {
     memory: Arc<AtomicUsize>,
     /// Its live slot, given back when the run ends or is dropped.
     _live: LiveSlot,
+    /// Its proxy, if children have network.
+    network: Option<ChildLink>,
     #[cfg(feature = "unstable-vfs")]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -562,13 +857,69 @@ impl ChildRun {
     /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
     async fn run(self) -> (Result<i32, String>, u64) {
-        let wasi = WasiCtxBuilder::new()
-            .args(&self.argv)
-            .envs(&self.env)
+        // With a proxy, its env vars replace any of the same names the script
+        // passed (libc takes a name's first value).
+        let env: Vec<(String, String)> = match &self.network {
+            Some(link) => self
+                .env
+                .iter()
+                .filter(|(k, _)| !PROXY_ENV.contains(&k.as_str()) && !CA_ENV.contains(&k.as_str()))
+                .cloned()
+                .chain(link.env())
+                .collect(),
+            None => self.env.clone(),
+        };
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.args(&self.argv)
+            .envs(&env)
             .stdin(AsyncStdinStream::new(self.stdin))
             .stdout(AsyncStdoutStream::new(PIPE_CAPACITY, self.stdout))
             .stderr(AsyncStdoutStream::new(PIPE_CAPACITY, self.stderr))
-            .build();
+            // The proxy resolves names; children reach it by address.
+            .allow_ip_name_lookup(false)
+            .allow_udp(false);
+        #[cfg(feature = "unstable-vfs")]
+        let mut vfs = self.vfs;
+        // Without a proxy TCP stays off (wasmtime-wasi's default) and every
+        // address is refused, so the child is offline. With one, it may only
+        // connect to the proxy.
+        if let Some(link) = &self.network {
+            let proxy = link.proxy;
+            wasi.allow_tcp(true).socket_addr_check(move |addr, use_| {
+                use wasmtime_wasi::sockets::SocketAddrUse;
+                let ok = match use_ {
+                    SocketAddrUse::TcpConnect => addr == proxy,
+                    // A connect checks the implicit bind to an ephemeral
+                    // port first; nothing else may bind.
+                    SocketAddrUse::TcpBind => addr.ip().is_unspecified() && addr.port() == 0,
+                    _ => false,
+                };
+                Box::pin(async move { ok })
+            });
+            // The CA certificate only, read-only, at CA_DIR.
+            #[cfg(feature = "unstable-vfs")]
+            let mounted = match vfs.as_mut() {
+                Some(vfs) => vfs.add_real_preopen_path(
+                    CA_DIR,
+                    &link.ca_dir,
+                    eryx_vfs::DirPerms::READ,
+                    eryx_vfs::FilePerms::READ,
+                ),
+                None => wasi
+                    .preopened_dir(&link.ca_dir, CA_DIR, wasmtime_wasi::FsPerms::ReadOnly)
+                    .map(|_| ())
+                    .map_err(std::io::Error::other),
+            };
+            #[cfg(not(feature = "unstable-vfs"))]
+            let mounted = wasi
+                .preopened_dir(&link.ca_dir, CA_DIR, wasmtime_wasi::FsPerms::ReadOnly)
+                .map(|_| ())
+                .map_err(std::io::Error::other);
+            if let Err(e) = mounted {
+                return (Err(format!("mounting the proxy CA: {e}")), 0);
+            }
+        }
+        let wasi = wasi.build();
         let mut store = Store::new(
             self.pre.engine(),
             ChildState {
@@ -579,8 +930,14 @@ impl ChildRun {
                     held: 0,
                     limit: CHILD_MEMORY_LIMIT,
                 },
+                sockets: ChildSockets::new(
+                    self.network
+                        .as_ref()
+                        .map(|link| Arc::clone(&link.sockets))
+                        .unwrap_or_default(),
+                ),
                 #[cfg(feature = "unstable-vfs")]
-                vfs: self.vfs,
+                vfs,
             },
         );
         store.limiter(|s| &mut s.limits);
@@ -761,6 +1118,20 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
         }
+        // With network, children get the proxy. (Secrets' placeholders come
+        // from the shell, which exports them.)
+        let network = match state
+            .child_net
+            .as_mut()
+            .map(|net| net.link(command.tunnels))
+        {
+            Some(Ok(link)) => Some(link),
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "starting the child proxy failed");
+                return Err(ProcessError::SpawnFailed);
+            }
+            None => None,
+        };
         let mut argv = vec![cmd];
         argv.extend(args);
         let args_bytes = argv.iter().map(String::len).sum::<usize>()
@@ -794,6 +1165,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 fuel_used: Arc::default(),
                 memory: Arc::default(),
                 _live: live,
+                network,
                 #[cfg(feature = "unstable-vfs")]
                 vfs: state
                     .hybrid_vfs_ctx
@@ -928,6 +1300,7 @@ mod tests {
                 fuel_used: Arc::default(),
                 memory: Arc::default(),
                 _live: LiveSlot::take(&Arc::default()).unwrap(),
+                network: None,
                 #[cfg(feature = "unstable-vfs")]
                 vfs: None,
             };

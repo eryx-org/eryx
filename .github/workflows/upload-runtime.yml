@@ -1,5 +1,6 @@
-# Upload runtime-{python,javascript,shell}.wasm and the shell's coreutils.wasm
-# (with their .sha256) to the main eryx GitHub release, for `eryx-precompile setup`.
+# Upload runtime-{python,javascript,shell}.wasm, the shell's coreutils.wasm and
+# the JavaScript bundler eryx-bundler.wasm (with their .sha256) to the main eryx
+# GitHub release, for `eryx-precompile setup`.
 # Runs separately from the release workflows to avoid conflicts over the release.
 
 name: Upload Runtime Artifacts

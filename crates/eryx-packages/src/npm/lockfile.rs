@@ -85,7 +85,8 @@ impl Lockfile {
         Ok(lock)
     }
 
-    /// Write it, pretty-printed with a trailing newline.
+    /// Write it, pretty-printed with a trailing newline. Atomically (a temp
+    /// file renamed over it), so a concurrent build never reads half of one.
     ///
     /// # Errors
     ///
@@ -94,7 +95,8 @@ impl Lockfile {
         let mut json = serde_json::to_vec_pretty(self)
             .map_err(|e| Error::Lockfile(format!("serializing: {e}")))?;
         json.push(b'\n');
-        std::fs::write(path, json).map_err(Error::io(format!("writing {}", path.display())))
+        super::packument::write_atomic(path, &json)
+            .map_err(Error::io(format!("writing {}", path.display())))
     }
 
     /// A short hash of what's installed, naming its `node_modules` tree in

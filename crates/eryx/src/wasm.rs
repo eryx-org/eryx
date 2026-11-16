@@ -1377,6 +1377,9 @@ pub struct ExecutorState {
     pub(crate) commands: crate::process::Commands,
     /// Host memory the execution's child processes may hold.
     pub(crate) child_budget: crate::process::ChildBudget,
+    /// The execution's children's network, if they have one. Dropped (with
+    /// its proxies) when the execution ends.
+    pub(crate) child_net: Option<crate::process::ChildNet>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1424,15 +1427,18 @@ impl ExecutorState {
             stream_budget: StreamBudget::default(),
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
         }
     }
 
-    /// Drop every channel to the host so their receivers see end-of-stream.
+    /// Drop every channel to the host so their receivers see end-of-stream,
+    /// and stop the children's proxies.
     pub(crate) fn disconnect(&mut self) {
         self.callback_tx = None;
         self.trace_tx = None;
         self.net_tx = None;
         self.output_tx = None;
+        self.child_net = None;
     }
 }
 
@@ -1968,6 +1974,7 @@ pub struct ExecuteBuilder<'a> {
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
     max_child_host_bytes: Option<u64>,
+    child_net: Option<crate::process::ChildNet>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
@@ -2017,6 +2024,7 @@ impl<'a> ExecuteBuilder<'a> {
             cancellation_token: None,
             fuel_limit: None,
             max_child_host_bytes: None,
+            child_net: None,
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
@@ -2176,6 +2184,13 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Give this execution's child processes network, through a proxy that
+    /// lives as long as the execution.
+    pub(crate) fn with_child_network(mut self, net: crate::process::ChildNet) -> Self {
+        self.child_net = Some(net);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2195,6 +2210,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.cancellation_token,
                 self.fuel_limit,
                 self.max_child_host_bytes,
+                self.child_net,
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
@@ -2282,6 +2298,8 @@ pub struct Executor {
     packages: Vec<crate::package::ExtractedPackage>,
     /// External commands its guest can spawn (the shell's, via `eryx:process`).
     commands: crate::process::Commands,
+    /// How the commands' children reach the network.
+    child_network: crate::net::ChildNetwork,
 }
 
 impl std::fmt::Debug for Executor {
@@ -2438,6 +2456,17 @@ impl Executor {
         &self.commands
     }
 
+    /// How its commands' children reach the network.
+    pub(crate) fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.child_network = network;
+        self
+    }
+
+    /// How its commands' children reach the network.
+    pub(crate) fn child_network(&self) -> &crate::net::ChildNetwork {
+        &self.child_network
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `Executor`
@@ -2493,6 +2522,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -2524,6 +2554,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -2574,6 +2605,7 @@ impl Executor {
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
                 packages: Vec::new(),
             })
         }
@@ -2632,6 +2664,7 @@ impl Executor {
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
                 packages: Vec::new(),
             });
         }
@@ -2657,6 +2690,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -2732,6 +2766,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -2783,6 +2818,7 @@ impl Executor {
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
                 packages: Vec::new(),
             })
         }
@@ -2841,6 +2877,7 @@ impl Executor {
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
                 packages: Vec::new(),
             });
         }
@@ -2866,6 +2903,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -2922,6 +2960,7 @@ impl Executor {
                 language,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
                 packages: Vec::new(),
             });
         }
@@ -2954,6 +2993,7 @@ impl Executor {
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
             packages: Vec::new(),
         })
     }
@@ -3609,6 +3649,7 @@ impl Executor {
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
         max_child_host_bytes: Option<u64>,
+        child_net: Option<crate::process::ChildNet>,
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
@@ -3727,6 +3768,7 @@ impl Executor {
             stream_budget: StreamBudget::default(),
             commands: self.commands.clone(),
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
+            child_net,
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode

@@ -1,7 +1,8 @@
 //! Environments: package sets built ahead of time and mounted by sandboxes.
 //!
 //! An environment is built once, from an [`EnvironmentDefinition`] (a TOML
-//! file naming the language and its packages), into a directory that
+//! file naming the language and its packages, or one built in code with
+//! [`EnvironmentDefinition::new`]), into a directory that
 //! sandboxes mount read-only. Sandboxes never see package names or a
 //! registry, and building needs the network only to fetch packages, so it
 //! belongs in CI or a deploy step:
@@ -33,6 +34,9 @@
 //!   specifier to its module.
 //! - **Python** and the **shell**: not supported yet
 //!   ([`EnvironmentError::Unsupported`]).
+//!
+//! The bundler is embedded by the `packages` feature. A crates.io build
+//! gets it from `eryx-precompile setup --bundler`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -98,8 +102,8 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
-    /// Defaults: built into the eryx cache directory, the lockfile resolved
-    /// against the current directory, online, not frozen.
+    /// Defaults: built into the eryx cache directory, the lockfile kept there
+    /// too (see [`base_dir`](Self::base_dir)), online, not frozen.
     pub fn new() -> Self {
         Self::default()
     }
@@ -118,6 +122,16 @@ impl BuildOptions {
 
     /// Resolve the definition's relative paths (its lockfile) against `dir`,
     /// usually the definition file's directory.
+    ///
+    /// Without one, the lockfile goes in the cache directory
+    /// (`<cache>/packages/lockfiles/`, or `lockfiles/` under
+    /// [`cache_dir`](Self::cache_dir)), never the process's current
+    /// directory, so a server whose working directory is read-only still
+    /// builds. A lockfile there isn't shared across machines, though, so two
+    /// builds can resolve different versions, and definitions with the same
+    /// name share it, so two with different packages re-resolve each other's.
+    /// For reproducible builds, commit the lockfile next to the definition,
+    /// point `base_dir` at it, and build with [`frozen`](Self::frozen).
     pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.base_dir = Some(dir.into());
         self
@@ -236,6 +250,8 @@ pub async fn build(
     definition: &EnvironmentDefinition,
     options: &BuildOptions,
 ) -> Result<Environment, EnvironmentError> {
+    // A definition built in code hasn't been through `from_toml`'s checks.
+    definition.check()?;
     match (definition.language, &definition.npm) {
         (Language::JavaScript, Some(npm)) => build_javascript(definition, npm, options).await,
         (other, _) => Err(EnvironmentError::Unsupported(other)),
@@ -253,15 +269,24 @@ async fn build_javascript(
             .map_err(|e| EnvironmentError::Build(e.to_string()))?
             .join("packages"),
     };
+    // Not the current directory: a library or server caller may run anywhere.
     let base_dir = options
         .base_dir
         .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| cache_dir.join("lockfiles"));
     let lockfile = base_dir.join(
         npm.lockfile
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("{}.lock", definition.name))),
     );
+    // The cache's lockfile directory (and any subdirectory the definition's
+    // `lockfile` names) may not exist yet.
+    if options.base_dir.is_none()
+        && let Some(dir) = lockfile.parent()
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| EnvironmentError::Build(format!("creating {}: {e}", dir.display())))?;
+    }
 
     let mut registry = match &npm.registry {
         Some(url) => Registry::new(url)?,

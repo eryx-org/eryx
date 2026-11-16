@@ -286,12 +286,20 @@ struct Sandbox;
 
 impl Guest for Sandbox {
     async fn execute(code: String) -> Result<ExecuteOutput, ExecuteError> {
-        // A preamble is Python code, which the host only sends the Python
-        // guest, so only the user code is run.
-        let (_, code) = split_preamble(&code);
+        // The host's preamble exports the secrets' placeholders, for child
+        // commands; it runs first, and its status doesn't count.
+        let (preamble, code) = split_preamble(&code);
         let mut shell = lock(&SHELL).take().unwrap_or_else(new_shell);
         // Callbacks can differ per execution; re-register the current set.
         register_builtins(&mut shell);
+        if !preamble.is_empty() {
+            let _ = run_local(shell.run_string(
+                preamble,
+                &SourceInfo::default(),
+                &ExecutionParameters::default(),
+            ))
+            .await;
+        }
         let status = run_local(shell.run_string(
             code,
             &SourceInfo::default(),

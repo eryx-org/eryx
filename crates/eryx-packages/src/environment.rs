@@ -119,6 +119,94 @@ pub struct NpmSection {
     pub lockfile: Option<PathBuf>,
 }
 
+impl NpmSection {
+    /// An `[npm]` section installing `packages` (`zod`, `zod@^3`,
+    /// `@scope/pkg@next`), with the defaults for everything else.
+    pub fn new<I, S>(packages: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            packages: packages.into_iter().map(Into::into).collect(),
+            entries: Vec::new(),
+            registry: None,
+            tarball_hosts: Vec::new(),
+            min_release_age: None,
+            lockfile: None,
+        }
+    }
+
+    /// Specifiers to make importable beyond each package's root, e.g.
+    /// `date-fns/format`.
+    #[must_use]
+    pub fn entries<I, S>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.entries = entries.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The registry (default: the public npm registry).
+    #[must_use]
+    pub fn registry(mut self, url: impl Into<String>) -> Self {
+        self.registry = Some(url.into());
+        self
+    }
+
+    /// More hosts the registry may serve tarballs from.
+    #[must_use]
+    pub fn tarball_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tarball_hosts = hosts.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Don't install versions published more recently than this: `3d`,
+    /// `12h`, `30m`, `90s`, or `0` for no minimum (default `3d`).
+    #[must_use]
+    pub fn min_release_age(mut self, age: impl Into<String>) -> Self {
+        self.min_release_age = Some(age.into());
+        self
+    }
+
+    /// The lockfile, relative to the build's base directory (default
+    /// `<name>.lock`).
+    #[must_use]
+    pub fn lockfile(mut self, path: impl Into<PathBuf>) -> Self {
+        self.lockfile = Some(path.into());
+        self
+    }
+}
+
+impl LimitsSection {
+    /// The most packages the environment may hold.
+    #[must_use]
+    pub fn max_packages(mut self, max: usize) -> Self {
+        self.max_packages = Some(max);
+        self
+    }
+
+    /// The most bytes one downloaded package may be.
+    #[must_use]
+    pub fn max_package_bytes(mut self, max: u64) -> Self {
+        self.max_package_bytes = Some(Size(max));
+        self
+    }
+
+    /// The most bytes all packages may unpack to.
+    #[must_use]
+    pub fn max_total_bytes(mut self, max: u64) -> Self {
+        self.max_total_bytes = Some(Size(max));
+        self
+    }
+}
+
 /// A definition's `[limits]` section. Sizes are bytes, as a number or with
 /// a unit (`32MiB`, `1GiB`, `500KB`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -214,6 +302,50 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
 }
 
 impl EnvironmentDefinition {
+    /// Start a definition in code, as an alternative to TOML: add the
+    /// language's section with [`with_npm`](Self::with_npm) (JavaScript) and
+    /// any [`with_limits`](Self::with_limits). The whole definition is
+    /// checked as a parsed one is when it's built, or with
+    /// [`check`](Self::check).
+    ///
+    /// ```
+    /// use eryx_packages::environment::{EnvironmentDefinition, Language, NpmSection};
+    ///
+    /// let definition = EnvironmentDefinition::new("data-tools", Language::JavaScript)?
+    ///     .with_npm(NpmSection::new(["zod@^3", "date-fns"]).entries(["date-fns/format"]));
+    /// definition.check()?;
+    /// # Ok::<(), eryx_packages::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails for a bad name: use letters, digits, `-`, `_` and `.`, not
+    /// starting with `.`.
+    pub fn new(name: impl Into<String>, language: Language) -> Result<Self> {
+        let definition = Self {
+            name: name.into(),
+            language,
+            npm: None,
+            limits: LimitsSection::default(),
+        };
+        definition.check_name()?;
+        Ok(definition)
+    }
+
+    /// Set the `[npm]` section (JavaScript).
+    #[must_use]
+    pub fn with_npm(mut self, npm: NpmSection) -> Self {
+        self.npm = Some(npm);
+        self
+    }
+
+    /// Set the `[limits]` section.
+    #[must_use]
+    pub fn with_limits(mut self, limits: LimitsSection) -> Self {
+        self.limits = limits;
+        self
+    }
+
     /// Parse and check a definition.
     ///
     /// # Errors
@@ -239,8 +371,7 @@ impl EnvironmentDefinition {
             .map_err(|e| Error::Definition(format!("{}: {}", path.display(), strip(e))))
     }
 
-    fn check(&self) -> Result<()> {
-        let bad = |message: String| Err(Error::Definition(message));
+    fn check_name(&self) -> Result<()> {
         if self.name.is_empty()
             || self.name.starts_with('.')
             || !self
@@ -248,11 +379,23 @@ impl EnvironmentDefinition {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
         {
-            return bad(format!(
+            return Err(Error::Definition(format!(
                 "invalid environment name {:?}: use letters, digits, -, _ and .",
                 self.name
-            ));
+            )));
         }
+        Ok(())
+    }
+
+    /// Check the definition as [`from_toml`](Self::from_toml) does: its name,
+    /// sizes and durations, and that its sections match its language.
+    ///
+    /// # Errors
+    ///
+    /// Describes the first problem.
+    pub fn check(&self) -> Result<()> {
+        let bad = |message: String| Err(Error::Definition(message));
+        self.check_name()?;
         match (self.language, &self.npm) {
             (Language::JavaScript, None) => {
                 bad("a javascript environment needs an [npm] section".into())
@@ -655,6 +798,68 @@ mod tests {
         assert_eq!(npm.entries, ["date-fns/format"]);
         assert_eq!(definition.limits.max_package_bytes, Some(Size(8 << 20)));
         assert_eq!(definition.limits.max_total_bytes, Some(Size(1000)));
+    }
+
+    /// A definition built in code is the one the same TOML parses to, and
+    /// gets the same checks.
+    #[test]
+    fn builds_a_definition_in_code() {
+        let parsed = EnvironmentDefinition::from_toml(
+            r#"
+            name = "data-tools"
+            language = "javascript"
+
+            [npm]
+            packages = ["zod@^3", "date-fns"]
+            entries = ["date-fns/format"]
+            registry = "https://registry.example/"
+            tarball-hosts = ["cdn.example"]
+            min-release-age = "12h"
+            lockfile = "locks/data-tools.lock"
+
+            [limits]
+            max-packages = 50
+            max-package-bytes = "8MiB"
+            max-total-bytes = 1000
+            "#,
+        )
+        .unwrap();
+        let built = EnvironmentDefinition::new("data-tools", Language::JavaScript)
+            .unwrap()
+            .with_npm(
+                NpmSection::new(["zod@^3", "date-fns"])
+                    .entries(["date-fns/format"])
+                    .registry("https://registry.example/")
+                    .tarball_hosts(["cdn.example"])
+                    .min_release_age("12h")
+                    .lockfile("locks/data-tools.lock"),
+            )
+            .with_limits(
+                LimitsSection::default()
+                    .max_packages(50)
+                    .max_package_bytes(8 << 20)
+                    .max_total_bytes(1000),
+            );
+        assert_eq!(built, parsed);
+        built.check().unwrap();
+
+        assert!(EnvironmentDefinition::new(".hidden", Language::JavaScript).is_err());
+        assert!(EnvironmentDefinition::new("a/b", Language::JavaScript).is_err());
+        let js = EnvironmentDefinition::new("x", Language::JavaScript).unwrap();
+        assert!(
+            js.clone().check().is_err(),
+            "a javascript environment needs [npm]"
+        );
+        assert!(
+            js.clone()
+                .with_npm(NpmSection::new(Vec::<String>::new()))
+                .check()
+                .is_err()
+        );
+        let late = js.with_npm(NpmSection::new(["zod"]).min_release_age("soon"));
+        assert!(late.check().is_err());
+        let python = EnvironmentDefinition::new("x", Language::Python).unwrap();
+        assert!(python.with_npm(NpmSection::new(["zod"])).check().is_err());
     }
 
     #[test]
