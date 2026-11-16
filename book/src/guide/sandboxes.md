@@ -87,13 +87,19 @@ functions, `queueMicrotask`, and `node:timers` and `node:timers/promises`
 iterator). Waiting burns no fuel, but it counts towards the execution
 timeout.
 
-- **An execute waits for referenced timers**, as a Node process does. So
-  `setTimeout(() => console.log("hi"), 100)` prints `hi` without an `await`,
-  and a `setInterval` that's never cleared runs until the execution timeout
-  fails the execute (`ErrorKind::Timeout`).
-- **`timer.unref()`** lets the execute finish without that timer. Timers still
-  pending when the execute finishes are dropped: none carries over to a
-  session's next execute.
+- **An execute waits for referenced timers**, as a Node process does, and for
+  callbacks that timer work started (`setTimeout(async () => await tool(),
+  10)`). So `setTimeout(() => console.log("hi"), 100)` prints `hi` without an
+  `await`, and a `setInterval` that's never cleared runs until the execution
+  timeout fails the execute (`ErrorKind::Timeout`). A callback the script
+  itself starts and never awaits is still released when the script ends.
+- **`timer.unref()`** lets the execute finish without that timer, and an
+  unref'd timer alone (like `AbortSignal.timeout()`'s) doesn't keep a script
+  that never settles waiting. Timers still pending when the execute finishes
+  are dropped: none carries over to a session's next execute.
+- Each turn of the event loop runs the timers due when it started, then lets
+  finished callbacks in, so timers that are always due (a `setImmediate`
+  loop) don't starve callback results.
 - An exception thrown in a timer callback fails the execute.
 - `fetch` is synchronous inside the guest: it blocks until the response has
   been read, so timers don't fire during a fetch, only after it returns.

@@ -23,6 +23,8 @@
     let nextId = 1;
     let nextSeq = 0;
     let referenced = 0;
+    let passTime = -Infinity;
+    let passSeq = 0;
 
     const before = (a, b) => a.deadline < b.deadline || (a.deadline === b.deadline && a.seq < b.seq);
     const push = (entry) => {
@@ -68,6 +70,14 @@
         const entry = { timer, deadline: native.now() + delay, seq: nextSeq++ };
         timer.entry = entry;
         push(entry);
+        // Rescheduling (`refresh`, intervals) leaves the old entry behind;
+        // rebuild the heap from live entries once they're the minority, so
+        // it stays proportional to the timers.
+        if (heap.length > 2 * active.size + 32) {
+            const live = heap.filter((e) => active.get(e.timer.id) === e.timer && e.timer.entry === e);
+            heap = [];
+            for (const e of live) push(e);
+        }
     };
 
     const remove = (timer) => {
@@ -144,11 +154,18 @@
     define('clearImmediate', clear);
 
     return {
-        // Run the earliest timer that's due, if one is; true if one ran. A
-        // callback's exception propagates (and fails the execute).
+        // Start a pass of the event loop's timers phase: it runs the timers
+        // due now, not ones their callbacks schedule (or reschedule), so a
+        // pass always ends and the host gets a turn between passes.
+        startPass() {
+            passTime = native.now();
+            passSeq = nextSeq;
+        },
+        // Run the earliest timer due in this pass, if one is; true if one
+        // ran. A callback's exception propagates (and fails the execute).
         runDue() {
             const top = peek();
-            if (!top || top.deadline > native.now()) return false;
+            if (!top || top.deadline > passTime || top.seq >= passSeq) return false;
             pop();
             const { timer } = top;
             if (timer.repeat) {

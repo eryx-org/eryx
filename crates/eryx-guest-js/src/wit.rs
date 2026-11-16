@@ -14,6 +14,10 @@ unsafe extern "C" {
     pub(crate) fn waitable_set_new() -> u32;
     #[link_name = "[waitable-set-drop]"]
     pub(crate) fn waitable_set_drop(set: u32);
+    /// The next event in `set` without blocking: its code, with the
+    /// waitable's handle and status written to `payload`.
+    #[link_name = "[waitable-set-poll]"]
+    pub(crate) fn waitable_set_poll(set: u32, payload: *mut [u32; 2]) -> u32;
     #[link_name = "[waitable-join]"]
     pub(crate) fn waitable_join(waitable: u32, set: u32);
     #[link_name = "[context-set-0]"]

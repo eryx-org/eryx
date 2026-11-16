@@ -10,11 +10,24 @@
 
 use std::time::{Duration, Instant};
 
-use eryx::{Error, ErrorKind, ResourceLimits, Sandbox, SessionExecutor};
+use eryx::{DynamicCallback, Error, ErrorKind, ResourceLimits, Sandbox, SessionExecutor};
+use serde_json::json;
+
+/// `slow()`: a host callback that takes 50 ms.
+fn slow() -> DynamicCallback {
+    DynamicCallback::builder("slow", "Takes 50 ms", |_| {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(json!("slept"))
+        })
+    })
+    .build()
+}
 
 fn sandbox(timeout: Duration) -> Sandbox {
     Sandbox::embedded()
         .javascript()
+        .with_callback(slow())
         .with_resource_limits(ResourceLimits::default().with_execution_timeout(timeout))
         .build()
         .unwrap()
@@ -212,4 +225,83 @@ async fn ten_thousand_timers() {
         "{:?}",
         start.elapsed()
     );
+}
+
+/// Timers that are always due don't starve host callbacks: each pass runs
+/// the timers due when it started, and the host gets a turn between passes.
+#[tokio::test]
+async fn due_timers_dont_starve_callbacks() {
+    let start = Instant::now();
+    let out = run(r"
+        let done = false;
+        slow().then(() => { done = true; });
+        let spins = 0;
+        while (!done) { spins++; await new Promise((r) => setImmediate(r)); }
+        console.log('immediates', spins > 0);
+        // An interval whose work outlasts its period, alongside a callback.
+        const busy = setInterval(() => { const end = Date.now() + 3; while (Date.now() < end); }, 1);
+        console.log(await slow());
+        clearInterval(busy);
+        ")
+    .await
+    .unwrap();
+    assert_eq!(out, "immediates true\nslept\n");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// An invoke a timer starts keeps the execute running until it's done, as
+/// I/O keeps a Node process running.
+#[tokio::test]
+async fn invokes_from_timers_keep_the_execute_running() {
+    let out = run("setTimeout(async () => console.log('got', await slow()), 10)")
+        .await
+        .unwrap();
+    assert_eq!(out, "got slept\n");
+}
+
+/// Only referenced timers (and invokes) keep a script that never settles
+/// running; an unref'd one, like `AbortSignal.timeout()`'s, doesn't.
+#[tokio::test]
+async fn unref_timers_dont_keep_a_pending_script_running() {
+    let start = Instant::now();
+    let err = run("AbortSignal.timeout(2000); await new Promise(() => {})")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("execution never completed"),
+        "{err}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Refreshing a timer over and over doesn't grow the timer queue.
+#[tokio::test]
+async fn refresh_doesnt_grow_the_queue() {
+    let sandbox = sandbox(Duration::from_secs(10));
+    let peak = |refreshes: u32| {
+        let sandbox = &sandbox;
+        async move {
+            let code = format!(
+                "const t = setTimeout(() => {{}}, 10000); for (let i = 0; i < {refreshes}; i++) t.refresh(); clearTimeout(t)"
+            );
+            sandbox
+                .execute(&code)
+                .await
+                .unwrap()
+                .stats
+                .peak_memory_bytes
+                .unwrap()
+        }
+    };
+    let few = peak(10).await;
+    let many = peak(200_000).await;
+    assert!(many < few + 4_000_000, "few {few}, many {many}");
 }
