@@ -571,10 +571,13 @@ sandbox = eryx.Sandbox(network=config)
 ## Traffic Limits
 
 In Rust, `NetConfig::with_max_bytes` caps the bytes an execution sends and
-receives, in all, across its connections. Reads stop at the cap, and past it
-reads and writes raise `OSError` (`network limit reached`). Either way, the
-result's `stats.network_bytes_sent` and `stats.network_bytes_received` say how
-much it moved, as the code wrote and read it (TLS overhead isn't counted):
+receives, in all, across its connections, a shell's child processes'
+included. Reads stop at the cap, and past it reads and writes raise `OSError`
+(`network limit reached`); a child's request gets a `403` from its proxy, or
+its connection closes if a response had started. Either way, the result's
+`stats.network_bytes_sent` and `stats.network_bytes_received` say how much it
+moved, children included, as the code wrote and read it (TLS overhead isn't
+counted):
 
 ```rust,ignore
 let sandbox = Sandbox::embedded()

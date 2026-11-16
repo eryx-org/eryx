@@ -3572,9 +3572,11 @@ pub struct ExecuteStats {
     /// is always present when the engine has fuel consumption enabled,
     /// regardless of whether a fuel limit was set.
     pub fuel_consumed: Option<u64>,
-    /// Bytes the execution sent over the network, as the guest wrote them.
+    /// Bytes the execution sent over the network, as the guest and its
+    /// child processes wrote them.
     pub network_bytes_sent: u64,
-    /// Bytes the execution received over the network, as the guest read them.
+    /// Bytes the execution received over the network, as the guest and its
+    /// child processes read them.
     pub network_bytes_received: u64,
 }
 

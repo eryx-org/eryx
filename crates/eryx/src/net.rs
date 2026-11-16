@@ -337,8 +337,10 @@ impl NetConfig {
     }
 
     /// Limit the bytes the execution may send and receive, in all, across
-    /// every connection. Past it, reads and writes fail with
-    /// [`TcpError::NotPermitted`].
+    /// every connection, its child processes' included (see
+    /// [`ConnectionManager::child_network`]). Past it, reads and writes fail
+    /// with [`TcpError::NotPermitted`]; a child's request gets a `403`, or its
+    /// connection is closed if a response had started.
     #[must_use]
     pub fn with_max_bytes(mut self, max: u64) -> Self {
         self.max_bytes = Some(max);
@@ -1027,26 +1029,128 @@ impl Chunked {
     }
 }
 
-/// Upstream connections one execution may hold at once, shared by its
-/// guest's [`ConnectionManager`] and its children's proxies: the request's
-/// [`NetConfig::max_connections`], or unlimited for 0.
+/// What one execution may use of the network, shared by its guest's
+/// [`ConnectionManager`] and its children's proxies: upstream connections
+/// held at once ([`NetConfig::max_connections`], unlimited for 0) and bytes
+/// moved ([`NetConfig::max_bytes`]).
 #[derive(Clone, Debug)]
-pub(crate) struct ConnectionBudget(Option<Arc<tokio::sync::Semaphore>>);
+pub(crate) struct NetBudget {
+    connections: Option<Arc<tokio::sync::Semaphore>>,
+    bytes: Arc<ByteMeter>,
+}
 
-impl ConnectionBudget {
-    pub(crate) fn new(max: u32) -> Self {
-        Self((max > 0).then(|| Arc::new(tokio::sync::Semaphore::new(max as usize))))
+impl NetBudget {
+    pub(crate) fn new(max_connections: u32, max_bytes: Option<u64>) -> Self {
+        Self {
+            connections: (max_connections > 0)
+                .then(|| Arc::new(tokio::sync::Semaphore::new(max_connections as usize))),
+            bytes: Arc::new(ByteMeter {
+                max: max_bytes,
+                ..ByteMeter::default()
+            }),
+        }
     }
 
-    /// A share of the budget, to hold while a connection is open (`None` if
-    /// it's unlimited), or an error when it's spent.
+    /// A connection's share, to hold while it's open (`None` if connections
+    /// are unlimited), or an error when they're all taken.
     pub(crate) fn try_acquire(
         &self,
     ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, tokio::sync::TryAcquireError> {
-        self.0
+        self.connections
             .as_ref()
             .map(|budget| Arc::clone(budget).try_acquire_owned())
             .transpose()
+    }
+
+    pub(crate) fn bytes(&self) -> &ByteMeter {
+        &self.bytes
+    }
+}
+
+/// Bytes moved against an optional limit, by the guest and its children's
+/// proxies at once. A read is capped at what's left when it starts and
+/// charged for what arrived, with anything past the limit dropped; a write
+/// is charged in full before it starts, or refused. So nothing idle holds
+/// any of the limit, and transfers racing on several connections never go
+/// over it together.
+#[derive(Debug, Default)]
+pub(crate) struct ByteMeter {
+    max: Option<u64>,
+    /// Moved, or being written, counted against `max`.
+    used: std::sync::atomic::AtomicU64,
+    sent: std::sync::atomic::AtomicU64,
+    received: std::sync::atomic::AtomicU64,
+}
+
+impl ByteMeter {
+    pub(crate) fn max(&self) -> Option<u64> {
+        self.max
+    }
+
+    /// What's left of the limit, if there is one.
+    pub(crate) fn remaining(&self) -> Option<u64> {
+        let used = self.used.load(std::sync::atomic::Ordering::Acquire);
+        self.max.map(|max| max.saturating_sub(used))
+    }
+
+    /// Charge up to `n` bytes received: all of them, or what's left. Returns
+    /// how many were charged, the ones that may be passed on.
+    pub(crate) fn take_received(&self, n: u64) -> u64 {
+        let granted = self.reserve(n, false);
+        self.count(granted, false);
+        granted
+    }
+
+    /// Charge all `n` bytes about to be sent, or none if they don't fit.
+    pub(crate) fn take_sent(&self, n: u64) -> bool {
+        let fits = self.reserve(n, true) == n;
+        if fits {
+            self.count(n, true);
+        }
+        fits
+    }
+
+    /// Give back `n` bytes charged by [`take_sent`](Self::take_sent) that
+    /// weren't sent after all.
+    pub(crate) fn refund_sent(&self, n: u64) {
+        use std::sync::atomic::Ordering;
+        if self.max.is_some() {
+            self.used.fetch_sub(n, Ordering::AcqRel);
+        }
+        self.sent.fetch_sub(n, Ordering::Relaxed);
+    }
+
+    /// Add up to `want` to `used`: all of it or what fits (or, with `whole`,
+    /// none unless all of it fits). Returns what was added.
+    fn reserve(&self, want: u64, whole: bool) -> u64 {
+        use std::sync::atomic::Ordering;
+        let Some(max) = self.max else { return want };
+        let mut granted = 0;
+        let _ = self
+            .used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                let left = max.saturating_sub(used);
+                granted = if whole && want > left {
+                    0
+                } else {
+                    want.min(left)
+                };
+                Some(used + granted)
+            });
+        granted
+    }
+
+    fn count(&self, n: u64, sent: bool) {
+        let counter = if sent { &self.sent } else { &self.received };
+        counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn traffic(&self) -> NetTraffic {
+        use std::sync::atomic::Ordering;
+        NetTraffic {
+            sent: self.sent.load(Ordering::Relaxed),
+            received: self.received.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -1059,7 +1163,7 @@ pub struct ConnectionManager {
     /// The network policy, shared with each connection's framer and masker.
     policy: Arc<NetPolicy>,
     /// The execution's connection budget, shared with its children's proxies.
-    budget: ConnectionBudget,
+    budget: NetBudget,
     /// Each open connection's share of `budget`, by handle.
     permits: HashMap<u32, tokio::sync::OwnedSemaphorePermit>,
     tcp_connections: HashMap<u32, CheckedTcp>,
@@ -1069,8 +1173,6 @@ pub struct ConnectionManager {
     http_states: HashMap<u32, RequestFramer>,
     /// Track which host each connection is connected to
     connection_hosts: HashMap<u32, String>,
-    /// Bytes sent and received so far, across all connections
-    traffic: NetTraffic,
     /// Response masking per connection handle, created on first read.
     read_states: HashMap<u32, ResponseMasker>,
 }
@@ -1085,59 +1187,53 @@ pub struct NetTraffic {
     pub received: u64,
 }
 
-impl NetTraffic {
-    fn total(self) -> u64 {
-        self.sent.saturating_add(self.received)
-    }
-}
-
 impl ConnectionManager {
-    /// Bytes sent and received so far.
+    /// Bytes sent and received so far, by the guest and by its children
+    /// through proxies started from [`child_network`](Self::child_network).
     #[must_use]
     pub fn traffic(&self) -> NetTraffic {
-        self.traffic
-    }
-
-    /// How many more bytes the execution may move, if it's limited; `Err`
-    /// once it can't move any.
-    fn remaining(&self) -> Result<Option<u64>, TcpError> {
-        let Some(max) = self.policy.config.max_bytes else {
-            return Ok(None);
-        };
-        match max.saturating_sub(self.traffic.total()) {
-            0 => Err(self.over_limit()),
-            left => Ok(Some(left)),
-        }
+        self.budget.bytes().traffic()
     }
 
     fn over_limit(&self) -> TcpError {
         TcpError::NotPermitted(format!(
             "network limit reached: {} bytes sent and received",
-            self.policy.config.max_bytes.unwrap_or_default()
+            self.budget.bytes().max().unwrap_or_default()
         ))
     }
 
-    /// Refuse a write of `len` bytes that would go over the limit.
-    fn check_write(&self, len: usize) -> Result<(), TcpError> {
-        match self.remaining()? {
-            Some(left) if len as u64 > left => Err(self.over_limit()),
-            _ => Ok(()),
+    /// Charge a write of all `len` bytes, or refuse it if they'd go over the
+    /// limit.
+    fn take_write(&self, len: usize) -> Result<(), TcpError> {
+        if self.budget.bytes().take_sent(len as u64) {
+            Ok(())
+        } else {
+            Err(self.over_limit())
         }
     }
 
-    /// `len` capped at what's left of the limit.
+    /// `len` capped at what's left of the limit; `Err` once none is.
     fn read_len(&self, len: u32) -> Result<u32, TcpError> {
-        Ok(match self.remaining()? {
+        Ok(match self.budget.bytes().remaining() {
+            Some(0) => return Err(self.over_limit()),
             Some(left) => len.min(u32::try_from(left).unwrap_or(u32::MAX)),
             None => len,
         })
+    }
+
+    /// Charge `data` as received, dropping what's past the limit (if others
+    /// on the budget got there first).
+    fn charge_read(&self, mut data: Vec<u8>) -> Vec<u8> {
+        let granted = self.budget.bytes().take_received(data.len() as u64);
+        data.truncate(usize::try_from(granted).unwrap_or(usize::MAX));
+        data
     }
 
     /// Create a new connection manager with the given config and secrets.
     #[must_use]
     pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
         Self {
-            budget: ConnectionBudget::new(config.max_connections),
+            budget: NetBudget::new(config.max_connections, config.max_bytes),
             permits: HashMap::new(),
             policy: Arc::new(NetPolicy::new(config, secrets)),
             tcp_connections: HashMap::new(),
@@ -1145,7 +1241,6 @@ impl ConnectionManager {
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
-            traffic: NetTraffic::default(),
             read_states: HashMap::new(),
         }
     }
@@ -1154,7 +1249,8 @@ impl ConnectionManager {
     /// them one: this manager's policy (narrowed, for
     /// [`ChildNetwork::Narrow`]) and secrets, and its connection budget, so
     /// that the guest and its children together never hold more than
-    /// [`NetConfig::max_connections`] connections.
+    /// [`NetConfig::max_connections`] connections or move more than
+    /// [`NetConfig::max_bytes`] bytes.
     #[must_use]
     pub fn child_network(&self, network: ChildNetwork) -> Option<ChildNetPolicy> {
         ChildNetPolicy::new(Arc::clone(&self.policy), self.budget.clone(), network)
@@ -1295,8 +1391,7 @@ impl ConnectionManager {
                 std::io::ErrorKind::TimedOut => TcpError::TimedOut,
                 _ => TcpError::IoError(e.to_string()),
             })?;
-        self.traffic.received += data.len() as u64;
-        Ok(data)
+        Ok(self.charge_read(data))
     }
 
     /// Write to a TCP connection.
@@ -1315,8 +1410,24 @@ impl ConnectionManager {
         if !self.tcp_connections.contains_key(&handle) {
             return Err(TcpError::InvalidHandle);
         }
-        self.check_write(data.len())?;
+        self.take_write(data.len())?;
+        let written = self.write_framed_tcp(handle, data, timeout_ms).await;
+        if written.is_err() {
+            self.budget.bytes().refund_sent(data.len() as u64);
+        }
+        written?;
+        // Report what the guest wrote: substitution changes the length on the wire.
+        Ok(data.len() as u32)
+    }
 
+    /// Write `data`, substituting secrets and checking HTTP rules if the
+    /// connection frames requests.
+    async fn write_framed_tcp(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<(), TcpError> {
         // Fast path: nothing to substitute or check = no parsing
         if !self.frames_requests(handle) {
             self.tcp_write_raw(handle, data, timeout_ms).await?;
@@ -1326,9 +1437,7 @@ impl ConnectionManager {
                 self.tcp_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
-        self.traffic.sent += data.len() as u64;
-        // Report what the guest wrote: substitution changes the length on the wire.
-        Ok(data.len() as u32)
+        Ok(())
     }
 
     /// Write all of `data` to a TCP connection without HTTP parsing.
@@ -1459,8 +1568,7 @@ impl ConnectionManager {
                 std::io::ErrorKind::TimedOut => TlsError::Tcp(TcpError::TimedOut),
                 _ => TlsError::Tcp(TcpError::IoError(e.to_string())),
             })?;
-        self.traffic.received += data.len() as u64;
-        Ok(data)
+        Ok(self.charge_read(data))
     }
 
     /// Write to a TLS connection.
@@ -1477,8 +1585,24 @@ impl ConnectionManager {
         if !self.tls_connections.contains_key(&handle) {
             return Err(TlsError::InvalidHandle);
         }
-        self.check_write(data.len()).map_err(TlsError::Tcp)?;
+        self.take_write(data.len()).map_err(TlsError::Tcp)?;
+        let written = self.write_framed_tls(handle, data, timeout_ms).await;
+        if written.is_err() {
+            self.budget.bytes().refund_sent(data.len() as u64);
+        }
+        written?;
+        // Report what the guest wrote: substitution changes the length on the wire.
+        Ok(data.len() as u32)
+    }
 
+    /// Write `data`, substituting secrets and checking HTTP rules if the
+    /// connection frames requests.
+    async fn write_framed_tls(
+        &mut self,
+        handle: u32,
+        data: &[u8],
+        timeout_ms: u32,
+    ) -> Result<(), TlsError> {
         // Fast path: nothing to substitute or check = no parsing
         if !self.frames_requests(handle) {
             self.tls_write_raw(handle, data, timeout_ms).await?;
@@ -1488,9 +1612,7 @@ impl ConnectionManager {
                 self.tls_write_raw(handle, &bytes, timeout_ms).await?;
             }
         }
-        self.traffic.sent += data.len() as u64;
-        // Report what the guest wrote: substitution changes the length on the wire.
-        Ok(data.len() as u32)
+        Ok(())
     }
 
     /// Write all of `data` to a TLS connection without HTTP parsing.
