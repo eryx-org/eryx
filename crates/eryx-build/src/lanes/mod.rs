@@ -30,10 +30,6 @@ pub(crate) fn path_str(p: &Path) -> Result<String> {
         .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
 }
 
-/// Optionally pre-compile a built component to `.cwasm` for fast startup, per
-/// the manifest's `[cwasm]` settings. Shared by the lanes; a no-op when
-/// `cwasm.enabled` is false. `cwasm.flags` carries any engine knobs the target
-/// needs (e.g. the Go lane's async/stackful flags).
 /// Compile `src/cwd_from_pwd.rs`'s constructor to a `wasm32-wasip2`
 /// object in `output_dir`, for the C and Rust lanes to link into every
 /// component (#978). Built with `rustc`, which both lanes have.
@@ -61,10 +57,15 @@ pub(crate) fn cwd_from_pwd_obj(output_dir: &Path) -> Result<String> {
         ],
         output_dir,
         &[],
-    )?;
+    )
+    .context("building the start-in-$PWD object needs the wasm32-wasip2 Rust target (`rustup target add wasm32-wasip2`)")?;
     Ok(obj)
 }
 
+/// Optionally pre-compile a built component to `.cwasm` for fast startup, per
+/// the manifest's `[cwasm]` settings. Shared by the lanes; a no-op when
+/// `cwasm.enabled` is false. `cwasm.flags` carries any engine knobs the target
+/// needs (e.g. the Go lane's async/stackful flags).
 pub(crate) fn compile_cwasm(
     manifest: &Manifest,
     component: &Path,

@@ -171,6 +171,8 @@ jobs:
           cache: false
       # The CMake builds use Ninja, which the runner doesn't ship.
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      # Every C build links the rustc-built start-in-$PWD object (#978).
+      - run: rustup target add wasm32-wasip2
       - run: mise run ensure-wasi-sdk
       - run: mise run build-cli -- "$MANIFEST"
         env:

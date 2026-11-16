@@ -16,15 +16,20 @@
 unsafe extern "C" {
     fn getenv(name: *const u8) -> *const u8;
     fn chdir(path: *const u8) -> i32;
+    fn __errno_location() -> *mut i32;
 }
 
 extern "C" fn cwd_from_pwd() {
     // SAFETY: wasi-libc's getenv and chdir, on a NUL-terminated name and the
-    // NUL-terminated value getenv returns.
+    // NUL-terminated value getenv returns, and its errno, which a failed
+    // chdir mustn't leave set for the program to see.
     unsafe {
         let pwd = getenv(c"PWD".as_ptr().cast());
         if !pwd.is_null() && *pwd == b'/' {
+            let errno = __errno_location();
+            let saved = *errno;
             let _ = chdir(pwd);
+            *errno = saved;
         }
     }
 }
