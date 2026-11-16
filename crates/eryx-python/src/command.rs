@@ -9,9 +9,9 @@ use pyo3::prelude::*;
 use crate::error::eryx_error_to_py;
 use crate::sandbox::RuntimeSource;
 
-/// A WASI 0.2 command component that a shell sandbox can run as an external
-/// command, such as uutils coreutils, ripgrep or curl built for
-/// `wasm32-wasip2`.
+/// A WASI 0.2 or 0.3 command component that a shell sandbox can run as an
+/// external command, such as uutils coreutils, ripgrep or curl built for
+/// `wasm32-wasip2`, or `gh` built for `wasm32-wasip3`.
 ///
 /// Pass commands by name to a shell `Sandbox` or `Session`:
 /// `Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`.
@@ -30,7 +30,7 @@ impl Command {
     ///
     /// Raises:
     ///     InitializationError: If the file can't be read or compiled, or
-    ///         isn't a WASI 0.2 command.
+    ///         isn't a WASI 0.2 or 0.3 command.
     #[staticmethod]
     fn from_file(path: PathBuf) -> PyResult<Self> {
         eryx::Command::from_file(path)
@@ -42,7 +42,7 @@ impl Command {
     ///
     /// Raises:
     ///     InitializationError: If the bytes don't compile, or aren't a WASI
-    ///         0.2 command.
+    ///         0.2 or 0.3 command.
     #[staticmethod]
     fn from_bytes(wasm: Vec<u8>) -> PyResult<Self> {
         eryx::Command::from_bytes(&wasm)
@@ -58,7 +58,7 @@ impl Command {
     ///
     /// Raises:
     ///     InitializationError: If another eryx version precompiled it, or it
-    ///         isn't a WASI 0.2 command.
+    ///         isn't a WASI 0.2 or 0.3 command.
     #[staticmethod]
     fn from_precompiled_file(path: PathBuf) -> PyResult<Self> {
         // SAFETY: documented above; the caller vouches for the file.

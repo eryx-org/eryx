@@ -34,6 +34,9 @@ use wasmtime_wasi::p2::{InputStream, OutputStream, Pollable, StreamError, Stream
 /// exits, since each stage writes on for a slice before it sees `EPIPE`.
 const YIELD_EVERY: Duration = Duration::from_micros(100);
 
+/// How long a WASI 0.3 child's write waits for its reader after a slice.
+const READER_GRACE: Duration = Duration::from_millis(1);
+
 /// A pipe holding at most `capacity` bytes.
 pub(super) fn pipe(capacity: usize) -> (Writer, Reader) {
     let shared = Arc::new(Shared {
@@ -46,7 +49,7 @@ pub(super) fn pipe(capacity: usize) -> (Writer, Reader) {
             writable: Vec::new(),
         }),
     });
-    (Writer(Arc::clone(&shared), None), Reader(shared))
+    (Writer(Arc::clone(&shared), None, None), Reader(shared))
 }
 
 struct Shared {
@@ -131,8 +134,13 @@ impl Shared {
 }
 
 /// A pipe's writing end: a child's stdout or stderr, or a child's stdin from
-/// the parent's side, with when its p2 writes last yielded.
-pub(super) struct Writer(Arc<Shared>, Option<Instant>);
+/// the parent's side, with when its child's writes last finished yielding,
+/// and a WASI 0.3 child's wait for its reader.
+pub(super) struct Writer(
+    Arc<Shared>,
+    Option<Instant>,
+    Option<Pin<Box<tokio::time::Sleep>>>,
+);
 
 /// A pipe's reading end.
 pub(super) struct Reader(Arc<Shared>);
@@ -140,7 +148,7 @@ pub(super) struct Reader(Arc<Shared>);
 impl Clone for Writer {
     fn clone(&self) -> Self {
         self.0.state().writers += 1;
-        Self(Arc::clone(&self.0), None)
+        Self(Arc::clone(&self.0), None, None)
     }
 }
 
@@ -172,6 +180,12 @@ impl Drop for Reader {
 }
 
 impl Writer {
+    /// Whether this handle has written for `YIELD_EVERY` since its last
+    /// yield ended.
+    fn slice_used(&self) -> bool {
+        self.1.is_none_or(|t| t.elapsed() >= YIELD_EVERY)
+    }
+
     pub(super) fn poll_write(&self, cx: &Context<'_>, data: &[u8]) -> Poll<Option<usize>> {
         self.0.poll_write(cx, data)
     }
@@ -221,8 +235,8 @@ impl StdinStream for Reader {
 impl Pollable for Writer {
     /// Ready once there's space, or no reader (the next write fails).
     async fn ready(&mut self) {
-        // See `YIELD_EVERY`.
-        if self.1.is_none_or(|t| t.elapsed() >= YIELD_EVERY) {
+        // A WASI 0.2 child's writes; see `YIELD_EVERY`.
+        if self.slice_used() {
             tokio::task::yield_now().await;
             self.1 = Some(Instant::now());
         }
@@ -305,10 +319,31 @@ impl InputStream for Reader {
 
 impl AsyncWrite for Writer {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        // A WASI 0.3 child's writes; see `YIELD_EVERY`. The child runs its
+        // own event loop, which polls a self-woken write again at once
+        // rather than yield to the parent. So wait for the reader to take
+        // what's been written, or for `READER_GRACE` if it doesn't (it may
+        // be waiting for this writer to finish).
+        let this = &mut *self;
+        if this.slice_used() {
+            let mut state = this.0.state();
+            if state.readers > 0 && !state.buf.is_empty() {
+                let grace = this
+                    .2
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(READER_GRACE)));
+                if grace.as_mut().poll(cx).is_pending() {
+                    register(&mut state.writable, cx);
+                    return Poll::Pending;
+                }
+            }
+            drop(state);
+            this.2 = None;
+            this.1 = Some(Instant::now());
+        }
         self.0
             .poll_write(cx, data)
             .map(|n| n.ok_or_else(|| std::io::ErrorKind::BrokenPipe.into()))

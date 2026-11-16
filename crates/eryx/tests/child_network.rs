@@ -28,6 +28,11 @@ const REAL: &str = "real-child-secret-0123456789";
 /// Build the wasip2 fixture `name` (tests/fixtures/<name>), whose binary is
 /// `bin`.
 fn fixture(name: &str, bin: &str) -> Vec<u8> {
+    fixture_for(name, bin, "wasm32-wasip2")
+}
+
+/// Build fixture `name` for `target`.
+fn fixture_for(name: &str, bin: &str, target: &str) -> Vec<u8> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name)
@@ -35,18 +40,27 @@ fn fixture(name: &str, bin: &str) -> Vec<u8> {
     let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let status = std::process::Command::new(env!("CARGO"))
         .args(["build", "--quiet", "--release", "--locked"])
-        .args(["--target", "wasm32-wasip2", "--manifest-path"])
+        .args(["--target", target, "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TARGET_DIR", &target_dir)
         .status()
         .expect("running cargo");
     assert!(status.success(), "building the {name} fixture failed");
-    std::fs::read(target_dir.join(format!("wasm32-wasip2/release/{bin}.wasm"))).unwrap()
+    std::fs::read(target_dir.join(format!("{target}/release/{bin}.wasm"))).unwrap()
 }
 
 fn test_cmd() -> Command {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     Command::from_bytes(WASM.get_or_init(|| fixture("test-cmd", "eryx-test-cmd"))).unwrap()
+}
+
+/// The test command built for WASI 0.3 (`rustup target add wasm32-wasip3`).
+fn test_cmd_p3() -> Command {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    Command::from_bytes(
+        WASM.get_or_init(|| fixture_for("test-cmd", "eryx-test-cmd", "wasm32-wasip3")),
+    )
+    .unwrap()
 }
 
 /// A rustls HTTPS client going through `$HTTPS_PROXY` and trusting
@@ -145,6 +159,7 @@ fn shell(network: NetConfig) -> SandboxBuilder<Shell, state::Has> {
     Sandbox::embedded()
         .shell()
         .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
         .with_network(network)
         .with_secret("TOKEN", REAL, vec!["api.test".to_string()])
         .with_child_network(ChildNetwork::Inherit)
@@ -470,4 +485,83 @@ async fn pooled_sandboxes_use_each_leases_network() {
         !out.contains("http://") && !out.contains("connected"),
         "{out}"
     );
+}
+
+/// A WASI 0.3 child is offline without `with_child_network`, and with it
+/// gets the proxy, its CA and nothing else, as a 0.2 one does.
+#[tokio::test]
+async fn p3_children_get_the_proxy_and_nothing_else() {
+    let (port, seen) = upstream(None).await;
+    let sandbox = Sandbox::embedded()
+        .shell()
+        .with_command("tc3", test_cmd_p3())
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!("tc3 connect 127.0.0.1:{port}; tc3 env HTTPS_PROXY"),
+    )
+    .await;
+    assert!(
+        !out.contains("connected") && out.contains("error:") && !out.contains("http://"),
+        "{out}"
+    );
+
+    let sandbox = shell(network().allow_plaintext_secrets(true))
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        "tc3 env HTTPS_PROXY; tc3 env SSL_CERT_FILE; tc3 cat /etc/ssl/certs/ca-certificates.crt",
+    )
+    .await;
+    assert!(out.contains("http://127.0.0.1:"), "{out}");
+    assert!(out.contains("BEGIN CERTIFICATE"), "{out}");
+    let out = run(&sandbox, &format!("tc3 proxy-get http://api.test:{port}/x")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(seen.lock().unwrap().contains(&format!("Bearer {REAL}")));
+    assert!(!out.contains(REAL), "{out}");
+    // Not the upstream directly, and no listening.
+    let out = run(&sandbox, &format!("tc3 connect 127.0.0.1:{port}")).await;
+    assert!(!out.contains("connected"), "{out}");
+    let out = run(&sandbox, "tc3 listen").await;
+    assert!(
+        !out.contains("listening") && out.contains("error:"),
+        "{out}"
+    );
+}
+
+/// WASI 0.3 sockets count against the same limits as 0.2 ones: a child
+/// can't hold a 33rd, and its sockets are given back when it exits.
+#[tokio::test]
+async fn p3_sockets_are_limited() {
+    let sandbox = shell(network()).build().unwrap();
+    let out = run(&sandbox, "tc3 hold 100").await;
+    assert!(out.starts_with("held 32 error:"), "{out}");
+    let out = run(&sandbox, "tc3 hold 10; tc3 hold 10; tc hold 10").await;
+    assert_eq!(out, "held 10\nheld 10\nheld 10\n");
+}
+
+/// Opt-in: a Go-built `gh` (WASI 0.3) runs as a child and reaches
+/// api.github.com through the child proxy. Set ERYX_TEST_GH_WASM to its
+/// component, e.g. the `gh-component` artifact of the CLI components
+/// workflow. Needs internet access; a placeholder token gets a real 401.
+/// gh needs a writable config dir, which children only get from the VFS.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+#[ignore = "needs ERYX_TEST_GH_WASM and internet access"]
+async fn p3_gh_reaches_github_through_the_proxy() {
+    let gh = std::env::var_os("ERYX_TEST_GH_WASM").expect("ERYX_TEST_GH_WASM");
+    let sandbox = Sandbox::embedded()
+        .shell()
+        .with_command("gh", Command::from_file(gh).unwrap())
+        .with_network(NetConfig::default().allow_host("api.github.com"))
+        .with_child_network(ChildNetwork::Inherit)
+        .build()
+        .unwrap();
+    let env = "HOME=/tmp GH_CONFIG_DIR=/tmp/gh GH_NO_UPDATE_NOTIFIER=1 TERM=dumb";
+    let out = run(&sandbox, &format!("{env} gh --version")).await;
+    assert!(out.contains("gh version"), "{out}");
+    let out = run(&sandbox, &format!("{env} GH_TOKEN=placeholder gh api /zen")).await;
+    assert!(out.contains("HTTP 401"), "{out}");
 }

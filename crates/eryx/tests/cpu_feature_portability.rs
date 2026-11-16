@@ -61,6 +61,8 @@ fn reference_config(level: CpuFeatureLevel) -> Config {
     set_eryx_module_version(&mut config);
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
+    // As eryx's engine (wasm features are part of the compiled bytes).
+    config.wasm_component_model_more_async_builtins(true);
     config.epoch_interruption(true);
     config.consume_fuel(true);
     config.memory_init_cow(true);
@@ -235,6 +237,7 @@ mod aarch64 {
         super::set_eryx_module_version(&mut config);
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
+        config.wasm_component_model_more_async_builtins(true);
         config.epoch_interruption(true);
         config.consume_fuel(true);
         config.memory_init_cow(true);
