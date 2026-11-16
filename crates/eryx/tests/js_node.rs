@@ -156,7 +156,7 @@ async fn buffer_is_not_a_global() {
 
 #[tokio::test]
 async fn other_builtins_still_fail_clearly() {
-    for module in ["fs", "node:url", "child_process", "net"] {
+    for module in ["fs", "node:os", "child_process", "net"] {
         let err = run(&format!("await import('{module}')")).await.unwrap_err();
         let name = module.trim_start_matches("node:");
         assert!(

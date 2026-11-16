@@ -110,8 +110,10 @@ impl Engine {
             )?;
             let prelude: Function<'_> = ctx.eval(PRELUDE)?;
             let hooks: Object<'_> = prelude.call((native,))?;
-            crate::fetch::install(&ctx)?;
+            // Before fetch: core-js's URLSearchParams wraps a `Request` it
+            // finds while loading (patching Request.prototype.constructor).
             crate::web::install(&ctx)?;
+            crate::fetch::install(&ctx)?;
             hooks.set("timers", crate::timers::install(&ctx)?)?;
             crate::modules::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
