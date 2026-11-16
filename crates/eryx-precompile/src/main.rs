@@ -179,6 +179,13 @@ struct EnvPackArgs {
     /// package-lock.json)
     #[arg(long)]
     lockfile: Option<PathBuf>,
+
+    /// Let imports of SPECIFIER stay unresolved (left external, with a
+    /// warning) instead of failing the pack, for code that copes without
+    /// it. Repeat for more. Imports a package declares optional are allowed
+    /// already
+    #[arg(long = "allow-unresolved", value_name = "SPECIFIER")]
+    allow_unresolved: Vec<String>,
 }
 
 #[cfg(feature = "env")]
@@ -571,6 +578,9 @@ async fn run_env_pack(args: EnvPackArgs) -> Result<()> {
     }
     if let Some(lockfile) = args.lockfile {
         options = options.lockfile(lockfile);
+    }
+    for specifier in args.allow_unresolved {
+        options = options.allow_unresolved(specifier);
     }
     println!("Packing {:?} from {}", args.name, args.tree.display());
     let start = Instant::now();

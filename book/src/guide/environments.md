@@ -105,8 +105,14 @@ eryx-precompile env pack . --name data-tools --entry date-fns/format \
   (The bundler reads a mirror of just those paths, hard-linked next to the
   output, so links resolve from packages' real paths as Node's do.)
 - **Unresolved imports fail the pack:** an import the installed packages
-  don't provide (a missing dependency or optional peer) is an error listing
-  each one, rather than an environment that fails when imported.
+  don't provide is an error listing each one, rather than an environment
+  that fails when imported. Two kinds stay external, with a warning in the
+  manifest, so they fail only if the code imports them at run time: one the
+  importing package declares optional (`optionalDependencies`, or an
+  optional peer in `peerDependenciesMeta`), which `npm ci --omit=dev`
+  leaves out, and one passed to `--allow-unresolved` (repeatable). A
+  `require` in a `try`/`catch`, the usual way to use an optional
+  dependency (`ws` and `bufferutil`), is left external without a warning.
   Nothing is fetched, and pass `--ignore-scripts` to the install so no
   package code runs there either.
 - `--lockfile` copies the given file into the environment and records it

@@ -540,3 +540,140 @@ async fn a_package_symlink_to_the_apps_files_doesnt_resolve() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+/// Links in a package to above the mirror, or absolute ones, resolve to
+/// nothing the bundler can read: importing through them fails the pack.
+#[tokio::test]
+async fn a_package_symlink_out_of_the_mirror_or_absolute_doesnt_resolve() {
+    let up = "../".repeat(14);
+    for (name, target) in [
+        ("above", format!("{up}etc/hostname")),
+        ("absolute", "/etc/hostname".to_string()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        let evil = app.join("node_modules/evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        symlink(&target, evil.join("data.txt")).unwrap();
+        std::fs::write(
+            evil.join("package.json"),
+            r#"{"name": "evil", "version": "1.0.0", "main": "index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            evil.join("index.js"),
+            "import text from \"./data.txt\";\nexport default text;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("env");
+        let result = pack(&app, &out, &options(name).entry("evil")).await;
+        assert!(result.is_err(), "{name}: packed");
+        assert!(!out.exists(), "{name}: nothing was written");
+    }
+}
+
+/// A package with nothing to import at its main path, for the tests below.
+fn package(dir: &Path, json: &str, index: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("package.json"), json).unwrap();
+    std::fs::write(dir.join("index.js"), index).unwrap();
+}
+
+/// Optional dependencies (`ws`'s `bufferutil`, `node-fetch`'s `encoding`)
+/// aren't installed by `npm ci --omit=dev`.
+/// - A `require` of one in a try/catch, as those packages do it, is left
+///   external without a warning: the pack succeeds, and the code copes.
+/// - A static import of one the package declares optional (an optional peer
+///   or an `optionalDependencies` entry) stays external with a warning.
+/// - Any other unresolved import fails the pack, unless allowed.
+#[tokio::test]
+async fn optional_imports_may_stay_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let nm = app.join("node_modules");
+    package(
+        &nm.join("ws-like"),
+        r#"{"name": "ws-like", "version": "1.0.0", "main": "index.js",
+            "peerDependencies": {"bufferutil": "^4"},
+            "peerDependenciesMeta": {"bufferutil": {"optional": true}}}"#,
+        "let found = null;\ntry { found = require(\"bufferutil\"); } catch {}\n\
+         module.exports = { found: found !== null };\n",
+    );
+    package(
+        &nm.join("peer-import"),
+        r#"{"name": "peer-import", "version": "1.0.0", "main": "index.js", "type": "module",
+            "peerDependencies": {"bufferutil": "^4"},
+            "peerDependenciesMeta": {"bufferutil": {"optional": true}}}"#,
+        "import * as b from \"bufferutil\";\nexport const has = () => b;\n",
+    );
+    package(
+        &nm.join("optional-import"),
+        r#"{"name": "optional-import", "version": "1.0.0", "main": "index.js", "type": "module",
+            "optionalDependencies": {"encoding": "^0.1"}}"#,
+        "import * as e from \"encoding\";\nexport const has = () => e;\n",
+    );
+    package(
+        &nm.join("undeclared"),
+        r#"{"name": "undeclared", "version": "1.0.0", "main": "index.js", "type": "module"}"#,
+        "import * as l from \"left-pad\";\nexport const has = () => l;\n",
+    );
+
+    let environment = pack(
+        &app,
+        &dir.path().join("env"),
+        &options("try").entry("ws-like"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        environment.manifest().warnings.is_empty(),
+        "{:?}",
+        environment.manifest().warnings
+    );
+    imports(
+        &environment,
+        r#"import ws from "ws-like"; console.log(ws.found);"#,
+        "false\n",
+    )
+    .await;
+
+    let declared = options("declared")
+        .entry("peer-import")
+        .entry("optional-import");
+    let environment = pack(&app, &dir.path().join("env2"), &declared)
+        .await
+        .unwrap();
+    let warnings = &environment.manifest().warnings;
+    for name in ["bufferutil", "encoding"] {
+        assert!(
+            warnings.iter().any(|w| w.contains(&format!("'{name}'"))),
+            "{name}: {warnings:?}"
+        );
+    }
+
+    let err = pack(
+        &app,
+        &dir.path().join("env3"),
+        &options("undeclared").entry("undeclared"),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("left-pad") && err.contains("--allow-unresolved"),
+        "{err}"
+    );
+    let allowed = options("allowed")
+        .entry("undeclared")
+        .allow_unresolved("left-pad");
+    let environment = pack(&app, &dir.path().join("env4"), &allowed)
+        .await
+        .unwrap();
+    assert!(
+        environment
+            .manifest()
+            .warnings
+            .iter()
+            .any(|w| w.contains("'left-pad'"))
+    );
+}

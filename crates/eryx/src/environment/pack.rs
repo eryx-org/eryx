@@ -20,6 +20,7 @@ pub struct PackOptions {
     inputs: Option<Inputs>,
     lockfile: Option<PathBuf>,
     warnings: Vec<String>,
+    allow_unresolved: Vec<String>,
 }
 
 impl PackOptions {
@@ -34,6 +35,7 @@ impl PackOptions {
             inputs: None,
             lockfile: None,
             warnings: Vec::new(),
+            allow_unresolved: Vec::new(),
         }
     }
 
@@ -70,6 +72,17 @@ impl PackOptions {
     /// record it and its hash in the inputs.
     pub fn lockfile(mut self, path: impl Into<PathBuf>) -> Self {
         self.lockfile = Some(path.into());
+        self
+    }
+
+    /// Let imports of `specifier` (`bufferutil`, or a subpath) stay
+    /// unresolved: left external, with a warning in the manifest, so they
+    /// fail only if the code imports them at run time. Imports a package
+    /// declares optional (`optionalDependencies`, or
+    /// `peerDependenciesMeta.<name>.optional`) are allowed already; any
+    /// other unresolved import fails the pack.
+    pub fn allow_unresolved(mut self, specifier: impl Into<String>) -> Self {
+        self.allow_unresolved.push(specifier.into());
         self
     }
 
@@ -195,15 +208,27 @@ pub async fn pack(
     drop(source);
     // An import the bundler couldn't resolve would be left external, and
     // fail when the environment is imported, so it fails the pack.
+    // ... unless it's one its package declares optional (`ws` tries
+    // `bufferutil` in a try/catch) or the caller allowed; those stay external
+    // with their warning.
     let unresolved: Vec<&String> = report
         .warnings
         .iter()
-        .filter(|w| w.starts_with("Could not resolve"))
+        .filter(|w| {
+            unresolved_import(w).is_some_and(|(specifier, importer)| {
+                !options
+                    .allow_unresolved
+                    .iter()
+                    .any(|allowed| allowed == specifier || allowed == package_of(specifier))
+                    && !declared_optional(&root, importer, package_of(specifier))
+            })
+        })
         .collect();
     if !unresolved.is_empty() {
         return Err(build(format!(
             "some imports can't be resolved from the installed packages, so they'd be \
-             missing at run time:\n  {}",
+             missing at run time (allow one with `allow_unresolved`, `--allow-unresolved`, \
+             if the code copes without it):\n  {}",
             unresolved
                 .iter()
                 .map(|w| w.as_str())
@@ -262,6 +287,50 @@ fn guest_path(root: &Path, path: &Path) -> Option<String> {
         guest.push_str(component.as_os_str().to_str()?);
     }
     Some(guest)
+}
+
+/// The specifier and importing file (a guest path without its leading `/`)
+/// of a bundler warning about an import it couldn't resolve: `Could not
+/// resolve 'x' in src/node_modules/a/index.js`.
+fn unresolved_import(warning: &str) -> Option<(&str, &str)> {
+    let rest = warning.strip_prefix("Could not resolve '")?;
+    let (specifier, importer) = rest.split_once("' in ")?;
+    Some((specifier, importer))
+}
+
+/// Whether the package holding `importer` (a guest path, `src/…`, under
+/// `root`) declares `name` optional: in `optionalDependencies`, or as an
+/// optional peer (`peerDependenciesMeta.<name>.optional`).
+fn declared_optional(root: &Path, importer: &str, name: &str) -> bool {
+    let Some(relative) = importer.strip_prefix("src/") else {
+        return false;
+    };
+    let file = root.join(relative);
+    for dir in file
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(root))
+    {
+        let Ok(bytes) = std::fs::read(dir.join("package.json")) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        // The nearest package.json is the importer's package.
+        return json
+            .get("optionalDependencies")
+            .and_then(|deps| deps.get(name))
+            .is_some()
+            || json
+                .pointer(&format!(
+                    "/peerDependenciesMeta/{}/optional",
+                    name.replace('~', "~0").replace('/', "~1")
+                ))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+    }
+    false
 }
 
 /// The keys of `tree/package.json`'s `dependencies`, if it has any.
@@ -576,6 +645,17 @@ fn check_link(path: &Path, tree: &Path, root: &Path) -> Result<Option<PathBuf>, 
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_warnings_parse() {
+        assert_eq!(
+            unresolved_import(
+                "Could not resolve 'bufferutil' in src/node_modules/ws/lib/buffer-util.js"
+            ),
+            Some(("bufferutil", "src/node_modules/ws/lib/buffer-util.js"))
+        );
+        assert_eq!(unresolved_import("something else"), None);
+    }
 
     #[test]
     fn entries_name_their_packages() {
