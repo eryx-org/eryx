@@ -399,13 +399,17 @@ impl Sandbox {
         };
 
         // Spawn network handler if networking is enabled
-        let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
+        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
             let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
+            // Children draw on the guest's budget.
+            let child_net = manager
+                .child_network(self.executor.child_network().clone())
+                .map(crate::process::ChildNet::new);
             let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler))
+            (Some(tx), Some(handler), child_net)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Spawn output collector for real-time streaming if handler is configured
@@ -449,7 +453,7 @@ impl Sandbox {
         if let Some(tx) = net_tx {
             execute_builder = execute_builder.with_network(tx);
         }
-        if let Some(net) = self.child_net() {
+        if let Some(net) = child_net {
             execute_builder = execute_builder.with_child_network(net);
         }
 
@@ -675,16 +679,6 @@ impl Sandbox {
         self.net_config.as_ref()
     }
 
-    /// The network for one execution's child processes, if they have one:
-    /// this request's policy and secrets.
-    pub(crate) fn child_net(&self) -> Option<crate::process::ChildNet> {
-        crate::process::ChildNet::new(
-            self.net_config.clone()?,
-            self.secrets.clone(),
-            self.executor.child_network().clone(),
-        )
-    }
-
     /// Whether stdout should be scrubbed of secret placeholders.
     #[must_use]
     pub(crate) fn scrub_stdout(&self) -> bool {
@@ -759,7 +753,7 @@ impl Sandbox {
     ///
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
     /// name, or if one collides with a name the guest uses itself (a
-    /// JavaScript global, a shell builtin or command; Python only warns);
+    /// JavaScript global, a Python builtin, a shell builtin or command);
     /// the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
@@ -3677,9 +3671,11 @@ pub struct ExecuteStats {
     /// is always present when the engine has fuel consumption enabled,
     /// regardless of whether a fuel limit was set.
     pub fuel_consumed: Option<u64>,
-    /// Bytes the execution sent over the network, as the guest wrote them.
+    /// Bytes the execution sent over the network, as the guest and its
+    /// child processes wrote them.
     pub network_bytes_sent: u64,
-    /// Bytes the execution received over the network, as the guest read them.
+    /// Bytes the execution received over the network, as the guest and its
+    /// child processes read them.
     pub network_bytes_received: u64,
 }
 

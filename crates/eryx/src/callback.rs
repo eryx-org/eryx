@@ -955,7 +955,7 @@ impl DynamicCallbackBuilder {
     /// ```rust,ignore
     /// use eryx::schemars::json_schema;
     ///
-    /// DynamicCallback::builder("complex", "A callback with complex schema", handler)
+    /// DynamicCallback::builder("configure", "A callback with complex schema", handler)
     ///     .schema(Schema::try_from_value(json!({
     ///         "type": "object",
     ///         "properties": {

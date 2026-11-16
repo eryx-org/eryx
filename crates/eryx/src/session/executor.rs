@@ -413,20 +413,19 @@ impl<'a> SessionExecuteBuilder<'a> {
     }
 
     unstable_pub! {
-    /// Give this execution's child processes `network`, through a proxy that
-    /// lives as long as the execution, under `config` (this execution's own
-    /// policy, as given to [`with_network`](Self::with_network)) and with
-    /// `secrets` substituted by it.
-    /// [`ChildNetwork::None`](crate::net::ChildNetwork::None) leaves them
-    /// offline.
+    /// Give this execution's child processes `net`, through proxies that
+    /// live as long as the execution: from
+    /// [`ConnectionManager::child_network`](crate::ConnectionManager::child_network)
+    /// on the manager given to [`with_network`](Self::with_network), so the
+    /// guest and its children share one connection and byte budget.
+    ///
+    /// Make a fresh `ChildNetPolicy` from that manager for every execution.
+    /// The policy carries its manager's budget, so one kept from an earlier
+    /// execution would charge the children to that execution's spent budget
+    /// rather than this one's.
     #[must_use]
-    fn with_child_network(
-        mut self,
-        network: crate::net::ChildNetwork,
-        config: crate::net::NetConfig,
-        secrets: std::collections::HashMap<String, crate::secrets::SecretConfig>,
-    ) -> Self {
-        self.child_net = crate::process::ChildNet::new(config, secrets, network);
+    fn with_child_network(mut self, net: crate::net::ChildNetPolicy) -> Self {
+        self.child_net = Some(crate::process::ChildNet::new(net));
         self
     }
     }

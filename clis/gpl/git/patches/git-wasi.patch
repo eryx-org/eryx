@@ -2,7 +2,7 @@ SPDX-License-Identifier: GPL-2.0-only
 
 Modifications to git v2.56.1 for the wasip2 build (see ../NOTICE.md):
 a run-command.c backend over eryx:process/run, merge's pre-merge stash
-through capture_command, a start in $PWD, and no /dev/null in setup.c.
+through capture_command, and no /dev/null in setup.c.
 
 diff --git a/builtin/merge.c b/builtin/merge.c
 index 5b4eb23..b4aa695 100644
@@ -34,28 +34,6 @@ index 5b4eb23..b4aa695 100644
  		goto out;
  	strbuf_setlen(&buffer, buffer.len-1);
  	if (repo_get_oid(the_repository, buffer.buf, stash))
-diff --git a/common-main.c b/common-main.c
-index 6b7ab07..7bf0685 100644
---- a/common-main.c
-+++ b/common-main.c
-@@ -3,6 +3,17 @@
- 
- int main(int argc, const char **argv)
- {
-+#ifdef __wasi__
-+	/*
-+	 * WASI has no working directory; eryx passes the caller's in PWD.
-+	 * Relative paths resolve against wasi-libc's own, so start there.
-+	 */
-+	{
-+		const char *pwd = getenv("PWD");
-+		if (pwd && *pwd == '/')
-+			chdir(pwd);
-+	}
-+#endif
- 	int result;
- 
- 	init_git(argv);
 diff --git a/run-command.c b/run-command.c
 index ce84db8..f6ebdf6 100644
 --- a/run-command.c

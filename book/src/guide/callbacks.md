@@ -122,7 +122,7 @@ A guest installs each callback under its name (for a dotted name like `http.get`
 
 - **JavaScript:** the guest's globals (`fetch`, `crypto`, `URL`, `setTimeout`, `console`, `require`, `invoke`, the built-ins like `JSON` and `Map`, ...), including as a dotted name's first part (`fetch.get`, `crypto.*`).
 - **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke` and `grep`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
-- **Python:** the builtins (`print`, `list`, `open`, ...) and the names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`, ...) only warn for now, once per name: a log warning in Rust, a `UserWarning` in pyeryx, `console.warn` in the JavaScript SDK. The callback is still reachable through `invoke()`.
+- **Python:** the builtins (`print`, `list`, `open`, ...) and the names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`, ...), including as a dotted name's first part (`json.dumps`).
 
 In JavaScript, `process` is reserved even in a sandbox without secrets, where the guest only defines it when there are some.
 

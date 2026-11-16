@@ -275,9 +275,9 @@ message NetworkConfig {
 // NetworkConfig allows. Only shell requests may set it (INVALID_ARGUMENT
 // otherwise).
 //
-// max_connections bounds each proxy separately: children whose commands use
-// both the inspecting and the tunnelling proxy can hold up to twice it, on
-// top of the guest's own connections.
+// The request's max_connections bounds the guest's connections and its
+// children's together, across both proxies (inspecting and tunnelling); a
+// narrow max_connections bounds the children's, below that.
 //
 // Children see secrets only as their placeholders (the shell exports each
 // secret's placeholder as an environment variable). The proxy substitutes a

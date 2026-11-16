@@ -85,17 +85,22 @@ async fn javascript_refuses_globals_at_build() {
         .unwrap();
 }
 
-/// Python only warns for now: the callback builds, and is still reachable
-/// through invoke().
-#[tokio::test]
-async fn python_warns_and_still_builds() {
-    let sandbox = Sandbox::embedded()
-        .with_callback(callback("print"))
+/// Python refuses a builtin's name, and a name the guest defines itself,
+/// as the other guests do.
+#[test]
+fn python_refuses_its_builtins() {
+    for name in ["print", "json.dumps", "invoke"] {
+        let err = Sandbox::embedded()
+            .with_callback(callback(name))
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("collides with the Python builtin"),
+            "{name}: {err}"
+        );
+    }
+    Sandbox::embedded()
+        .with_callback(callback("print_report"))
         .build()
         .unwrap();
-    let out = sandbox
-        .execute("print(await invoke('print'))")
-        .await
-        .unwrap();
-    assert_eq!(out.stdout_text(), "None\n");
 }

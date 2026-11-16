@@ -202,7 +202,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   callbacks, then registered commands. An unregistered name exits 127.
 - **Running:** each command runs as a child process with `argv[0]` set to the
   name it was called by, which is how a multicall binary picks its tool. It gets
-  the shell's environment, with `PWD` set to the shell's directory.
+  the shell's environment, with `PWD` set to the shell's directory, which is
+  also its WASI initial working directory. Children built with `eryx-build`
+  start in that directory; other wasi-libc programs start in `/`, because
+  wasi-libc ignores both (WebAssembly/wasi-libc#915).
 - **What children get:** WASI 0.2.x and 0.3.x `wasi:cli`, `wasi:clocks`,
   `wasi:filesystem`, `wasi:random` and `wasi:sockets` (and 0.2's `wasi:io`),
   plus `eryx:process/run@0.1` for commands registered with `allow_spawn`.

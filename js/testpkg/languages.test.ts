@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { PythonExceptionError, Sandbox } from "@eryx-org/eryx";
 
 const callbacks = { add: ({ a, b }: Record<string, number>) => a + b };
@@ -140,11 +140,9 @@ describe("reserved callback names", () => {
     expect(free).toBeDefined();
   });
 
-  it("only warns for Python builtins", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    using sandbox = new Sandbox({ callbacks: { print: () => 1 } });
-    expect(sandbox).toBeDefined();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("collides with the Python builtin 'print'"));
-    warn.mockRestore();
+  it("refuses Python builtins", () => {
+    expect(() => new Sandbox({ callbacks: { print: () => 1 } })).toThrow(
+      "collides with the Python builtin 'print'",
+    );
   });
 });
