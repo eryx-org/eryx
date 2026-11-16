@@ -29,6 +29,16 @@ thread_local! {
     static TIME_ORIGIN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
+/// Fill `buf` from the host's `wasi:random`.
+pub(crate) fn fill_random(buf: &mut [u8]) {
+    // getentropy takes at most 256 bytes a call.
+    for chunk in buf.chunks_mut(256) {
+        // SAFETY: `chunk` is a valid, writable buffer of the given length.
+        let status = unsafe { getentropy(chunk.as_mut_ptr(), chunk.len()) };
+        assert_eq!(status, 0, "getentropy failed");
+    }
+}
+
 /// Give this instance its own `Math.random()` seed and `performance` clock,
 /// once.
 pub(crate) fn reseed(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
@@ -36,9 +46,7 @@ pub(crate) fn reseed(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         return Ok(());
     }
     let mut seed = [0u8; 8];
-    // SAFETY: `seed` is a valid, writable buffer of the given length.
-    let status = unsafe { getentropy(seed.as_mut_ptr(), seed.len()) };
-    assert_eq!(status, 0, "getentropy failed");
+    fill_random(&mut seed);
     // xorshift64* needs a nonzero state.
     RANDOM_STATE.set(u64::from_ne_bytes(seed).max(1));
     TIME_ORIGIN.set(Some(Instant::now()));

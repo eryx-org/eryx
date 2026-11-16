@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# The shell guest and the bundler target wasm32-wasip2 only and pin their
-# dependencies (brush, rolldown) with their own locks.
+# The shell guest (wasm32-wasip3, plus a wasm32-wasip2 build for js/eryx) and
+# the bundler (wasm32-wasip2) build only for wasm and pin their dependencies
+# (brush, rolldown) with their own locks.
 exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler"]
 
 # Dev tools (install via cargo or mise):
@@ -25,6 +26,7 @@ authors = ["Ben Sully <ben.sully88@gmail.com>"]
 anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.23"
+bytes = "1"
 blake3 = "1.8"
 clap = { version = "^4.6.6", features = ["derive", "env"] } #unified
 criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
@@ -32,7 +34,8 @@ crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
 eryx = { path = "crates/eryx", version = "^0.15.1" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.15.1" }
-eryx-packages = { path = "crates/eryx-packages", version = "^0.15.1" }
+# Without its `npm` client by default: crates that resolve packages enable it.
+eryx-packages = { path = "crates/eryx-packages", version = "^0.15.1", default-features = false }
 eryx-runtime = { path = "crates/eryx-runtime", version = "^0.15.1" } #unified
 eryx-vfs = { path = "crates/eryx-vfs", version = "^0.14.1" } #unified
 flate2 = "1.0"
@@ -100,7 +103,7 @@ wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
 # The wit-dylib value stack shared by the guest runtimes.
 eryx-guest-call = { path = "crates/eryx-guest-call" }
 # QuickJS (quickjs-ng) bindings for the JavaScript guest.
-rquickjs = { version = "0.14", default-features = false, features = ["std"] }
+rquickjs = { version = "0.14", default-features = false, features = ["std", "loader"] }
 # HTTP/1.1 for the JS guest's `fetch` (#825).
 httparse = "1.10"
 wit-parser = "0.263"

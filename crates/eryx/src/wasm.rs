@@ -2289,6 +2289,10 @@ pub struct Executor {
     /// Paths to the guest's library directories (for Python, site-packages).
     /// Each will be mounted at `/site-packages-N` and added to PYTHONPATH.
     library_paths: Vec<PathBuf>,
+    /// An environment's root, mounted read-only at
+    /// [`crate::environment::MOUNT_PATH`].
+    #[cfg(feature = "environment")]
+    environment: Option<PathBuf>,
     /// Name of the user variable captured as the structured result after each
     /// execution. Defaults to `"result"`. Configured via [`Self::with_result_variable`].
     result_variable: String,
@@ -2420,6 +2424,22 @@ impl Executor {
         self
     }
 
+    /// Mount the environment at `root` read-only at
+    /// [`crate::environment::MOUNT_PATH`]. `SandboxBuilder::with_environment`
+    /// checks it first.
+    #[cfg(feature = "environment")]
+    #[must_use]
+    pub(crate) fn with_environment(mut self, root: &std::path::Path) -> Self {
+        self.environment = Some(root.to_path_buf());
+        self
+    }
+
+    /// The environment root this executor mounts, if any.
+    #[cfg(feature = "environment")]
+    pub(crate) fn environment(&self) -> Option<&std::path::Path> {
+        self.environment.as_deref()
+    }
+
     /// Deprecated name for [`with_library_path`](Self::with_library_path).
     #[deprecated(since = "0.16.0", note = "renamed to `with_library_path`")]
     #[must_use]
@@ -2519,6 +2539,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -2551,6 +2573,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -2602,6 +2626,8 @@ impl Executor {
                 instance_pre,
                 stdlib_path: None,
                 library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
@@ -2661,6 +2687,8 @@ impl Executor {
                 instance_pre,
                 stdlib_path: None,
                 library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
@@ -2687,6 +2715,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -2763,6 +2793,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -2815,6 +2847,8 @@ impl Executor {
                 instance_pre,
                 stdlib_path: None,
                 library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
@@ -2874,6 +2908,8 @@ impl Executor {
                 instance_pre,
                 stdlib_path: None,
                 library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
                 language: Language::Python,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
@@ -2900,6 +2936,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -2957,6 +2995,8 @@ impl Executor {
                 instance_pre,
                 stdlib_path,
                 library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
                 language,
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
@@ -2990,6 +3030,8 @@ impl Executor {
             instance_pre,
             stdlib_path: None,
             library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             language: Language::Python,
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
@@ -3715,6 +3757,15 @@ impl Executor {
                 .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
                 .map_err(|e| {
                     ErrorKind::Initialization(format!("Failed to mount {mount_path}: {e}"))
+                })?;
+        }
+
+        #[cfg(feature = "environment")]
+        if let Some(root) = &self.environment {
+            wasi_builder
+                .preopened_dir(root, crate::environment::MOUNT_PATH, FsPerms::ReadOnly)
+                .map_err(|e| {
+                    ErrorKind::Initialization(format!("Failed to mount the environment: {e}"))
                 })?;
         }
 

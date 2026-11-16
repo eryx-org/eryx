@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # multi-guest too, so its merges save the caches its PRs restore (a PR's
+    # own caches are scoped to it). Only pushes save; see the save steps.
+    branches: [main, multi-guest]
     # Release tags (pushed by release-plz via the GitHub App token) so the
     # docker job can publish a version-tagged image, e.g. sd2k/eryx-server:0.5.0.
     tags: ['eryx-v[0-9]+.[0-9]+.[0-9]+']
@@ -142,8 +144,9 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install protoc for eryx-server build.rs
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
@@ -203,7 +206,7 @@ jobs:
         # not evaluate a step `if:` for actions/cache, and lookup-only would
         # report a hit without restoring the files, hence the ignore.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime-python.wasm
@@ -258,8 +261,9 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Force rebuild (cache may have stale timestamps)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -318,6 +322,21 @@ jobs:
           # Use x86-64-v2 for portable cwasm across runner types
           ERYX_CPU_FEATURES: "x86-64-v2"
 
+      - name: Save WASM runtime artifacts
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-python.cwasm
+            crates/eryx-runtime/runtime-windows.cwasm
+            crates/eryx-runtime/runtime-macos.cwasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-guest-python/target/liberyx_runtime.so
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
       - name: Upload WASM artifacts (cache miss)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -358,7 +377,7 @@ jobs:
         id: wasm-cache
         # See the Python runtime's cache step for the tag-build caveats.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime-javascript.wasm
@@ -379,8 +398,9 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build and precompile
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -401,6 +421,19 @@ jobs:
             --output crates/eryx-runtime/runtime-javascript-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save JavaScript runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-javascript.wasm
+            crates/eryx-runtime/runtime-javascript.cwasm
+            crates/eryx-runtime/runtime-javascript-windows.cwasm
+            crates/eryx-runtime/runtime-javascript-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
 
       - name: Upload JavaScript runtime
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -435,7 +468,7 @@ jobs:
         id: wasm-cache
         # See the Python runtime's cache step for the tag-build caveats.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime-shell.wasm
@@ -448,8 +481,9 @@ jobs:
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v2 -> v3:
-          # the shell's embedded coreutils (#809).
-          key: wasm-runtime-shell-v3-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
+          # the shell's embedded coreutils (#809). v3 -> v4: the shell is
+          # built for wasm32-wasip3.
+          key: wasm-runtime-shell-v4-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -460,8 +494,9 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build and precompile
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -493,6 +528,22 @@ jobs:
             --output crates/eryx-runtime/coreutils-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save shell runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-shell.wasm
+            crates/eryx-runtime/runtime-shell.cwasm
+            crates/eryx-runtime/runtime-shell-windows.cwasm
+            crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
 
       - name: Upload shell runtime
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -530,10 +581,12 @@ jobs:
           cmp crates/eryx-runtime/wit/deps/net.wit crates/eryx-guest-shell/wit/deps/net.wit
           cmp crates/eryx-runtime/wit/deps/process.wit crates/eryx-guest-shell/wit/deps/process.wit
 
+      # It ships for WASI 0.3, and for WASI 0.2 in js/eryx.
       - name: Clippy
         working-directory: crates/eryx-guest-shell
         run: |
-          rustup target add wasm32-wasip2
+          rustup target add wasm32-wasip2 wasm32-wasip3
+          cargo clippy --locked --target wasm32-wasip3 -- -D warnings
           cargo clippy --locked --target wasm32-wasip2 -- -D warnings
 
       # The argument parsing and builtins are plain Rust, so their unit tests
@@ -568,7 +621,7 @@ jobs:
         id: wasm-cache
         # See the Python runtime's cache step for the tag-build caveats.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/eryx-bundler.wasm
@@ -602,6 +655,19 @@ jobs:
             --output crates/eryx-runtime/eryx-bundler-macos.cwasm
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save bundler
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/eryx-bundler.wasm
+            crates/eryx-runtime/eryx-bundler.cwasm
+            crates/eryx-runtime/eryx-bundler-windows.cwasm
+            crates/eryx-runtime/eryx-bundler-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
 
       # Named like the guest runtimes, so the jobs that download those get it.
       - name: Upload bundler
@@ -652,7 +718,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -758,9 +824,10 @@ jobs:
 
       # kache (per-crate compiler cache) in place of rust-cache on the two
       # slowest compile-bound jobs. Its store goes in the Actions cache, one
-      # entry per lockfile, saved from main only (like rust-cache's save-if) so
-      # PR runs never evict main's entries. Build-script outputs are cached
-      # too, which a remote (S3/R2) backend can't do.
+      # entry per lockfile, saved from main and multi-guest pushes only (like
+      # rust-cache's save-if) so PR runs never evict their entries.
+      # Build-script outputs are cached too, which a remote (S3/R2) backend
+      # can't do.
       - name: Configure kache
         id: kache
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -772,7 +839,7 @@ jobs:
           # hashes Cargo.lock, and an exact hit never re-saves, so rebuilt deps
           # would otherwise be recompiled every run until the lockfile changes.
           cache-key-prefix: kache-test-p2
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           pr-comment: false
 
       # Tests build small guests of their own: a wasm32-wasip3 probe
@@ -792,7 +859,8 @@ jobs:
 
       # The shell (and JavaScript) without `unstable-vfs`, which --all-features
       # always turns on: bugs gated on its absence (#910's p3 gate, #914's
-      # environment mount) only show up here. Only the suites that exercise
+      # environment mount) only show up here. (`packages` implies
+      # `environment`.) Only the suites that exercise
       # that path, reusing this job's artifacts and compiled dependencies, so
       # it costs about the eryx crate's own rebuild plus a minute of tests.
       - name: Run the shell suites without unstable-vfs
@@ -800,6 +868,7 @@ jobs:
           cargo nextest run -p eryx --profile ci
           --features embedded,shell,javascript,packages
           --test shell_guest --test commands --test p3_guest --test environment
+          --test js_environment
 
   msrv:
     name: MSRV
@@ -817,6 +886,7 @@ jobs:
         uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           mise_toml: |
             [tools]
             rust = "1.100"
@@ -826,7 +896,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -852,7 +922,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install Rust
         # Install the pinned toolchain rather than trusting the runner image's
@@ -921,7 +991,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -950,7 +1020,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build docs (docs.rs simulation)
         run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
@@ -981,7 +1051,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install cargo-semver-checks
         run: cargo install --locked --version 0.51.0 cargo-semver-checks
@@ -1046,7 +1116,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
@@ -1061,6 +1131,9 @@ jobs:
           cargo check -p eryx --features embedded,preinit
           cargo check -p eryx --features native-extensions
           cargo check -p eryx --features embedded,native-extensions
+
+          echo "=== Checking eryx-packages without npm (skipped by cargo-all-features) ==="
+          cargo check -p eryx-packages --no-default-features
 
   # Run examples to ensure they don't bitrot
   examples:
@@ -1101,7 +1174,7 @@ jobs:
           version: v1.2.2
           github-cache: true
           cache-key-prefix: kache-examples
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           pr-comment: false
 
       - name: Run examples
@@ -1170,7 +1243,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -1281,7 +1354,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -1382,7 +1455,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -1534,7 +1607,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install mdbook tools
         run: |
@@ -1751,7 +1824,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown

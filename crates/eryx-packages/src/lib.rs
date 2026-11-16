@@ -18,8 +18,10 @@
 pub mod blobs;
 pub mod environment;
 pub mod extract;
+#[cfg(feature = "npm")]
 pub mod fetch;
 pub mod integrity;
+#[cfg(feature = "npm")]
 pub mod npm;
 
 /// Why resolving, fetching or installing packages failed.

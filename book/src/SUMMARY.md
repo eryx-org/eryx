@@ -19,6 +19,7 @@
 - [Resource Limits](./guide/resource-limits.md)
 - [Networking](./guide/networking.md)
 - [Packages](./guide/packages.md)
+- [Environments](./guide/environments.md)
 - [Secrets](./guide/secrets.md)
 - [Output Streaming](./guide/output-streaming.md)
 - [MCP Integration](./guide/mcp.md)

@@ -1002,6 +1002,26 @@ fn full_preamble(
     preamble
 }
 
+/// Check an environment given to `with_environment` is for `language` and
+/// still the one that was loaded.
+#[cfg(feature = "environment")]
+fn check_environment(
+    pinned: &PinnedEnvironment,
+    language: Language,
+) -> Result<crate::environment::Environment, Error> {
+    let error = |message: String| Error::from(ErrorKind::Initialization(message));
+    let environment = crate::environment::Environment::load_expecting(&pinned.root, &pinned.hash)
+        .map_err(|e| error(format!("environment {}: {e}", pinned.root.display())))?;
+    if environment.language() != language {
+        return Err(error(format!(
+            "{} is a {} environment, so a {language} sandbox can't use it",
+            pinned.root.display(),
+            pinned.language
+        )));
+    }
+    Ok(environment)
+}
+
 /// Register `callback` under its name, recording the first name registered
 /// twice in `duplicate` (the earlier registration is kept).
 fn insert_callback(
@@ -1640,8 +1660,21 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     /// Host filesystem volume mounts.
     #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
+    /// The environment to mount, with the hash and language it was loaded
+    /// with; checked again at `build()`.
+    #[cfg(feature = "environment")]
+    environment: Option<PinnedEnvironment>,
     /// Phantom data for the Lang and Runtime type parameters.
     _state: PhantomData<(Lang, Runtime)>,
+}
+
+/// An environment as [`SandboxBuilder::with_environment`] took it.
+#[cfg(feature = "environment")]
+#[derive(Debug, Clone)]
+struct PinnedEnvironment {
+    root: std::path::PathBuf,
+    hash: String,
+    language: crate::environment::Language,
 }
 
 impl Default for SandboxBuilder<Python, state::Needs> {
@@ -1707,6 +1740,8 @@ impl SandboxBuilder<Python, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             _state: PhantomData,
         }
     }
@@ -1748,6 +1783,8 @@ impl SandboxBuilder<Python, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
             _state: PhantomData,
         }
     }
@@ -1789,6 +1826,8 @@ impl<L, R> SandboxBuilder<L, R> {
             scrub_files: self.scrub_files,
             #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes,
+            #[cfg(feature = "environment")]
+            environment: self.environment,
             _state: PhantomData,
         }
     }
@@ -2790,6 +2829,27 @@ impl<L, R> SandboxBuilder<L, R> {
         self.volumes.extend(volumes);
         self
     }
+
+    /// Mount `environment` (a package set built ahead of time; see
+    /// [`crate::environment`]) read-only into the sandbox, so its code can
+    /// import what it exports: `import { z } from "zod"` in JavaScript.
+    ///
+    /// [`build()`](SandboxBuilder::build) fails if the environment is for
+    /// another language, or if it no longer hashes to what it did when it
+    /// was loaded (load it with
+    /// [`Environment::load_expecting`](crate::environment::Environment::load_expecting)
+    /// to pin a hash). Each sandbox built from this builder, and each one a
+    /// pool or factory makes from it, checks again.
+    #[cfg(feature = "environment")]
+    #[must_use]
+    pub fn with_environment(mut self, environment: &crate::environment::Environment) -> Self {
+        self.environment = Some(PinnedEnvironment {
+            root: environment.root().to_path_buf(),
+            hash: environment.manifest().content.hash.clone(),
+            language: environment.manifest().language,
+        });
+        self
+    }
 }
 
 // Build only available once a runtime is configured
@@ -2834,6 +2894,8 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         };
         let stdlib_path = self.stdlib_path;
         let library_path = self.library_path;
+        #[cfg(feature = "environment")]
+        let environment = self.environment;
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
         let commands = self.commands;
@@ -2845,6 +2907,10 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.wasm_source = wasm_source.clone();
             builder.stdlib_path = stdlib_path.clone();
             builder.library_path = library_path.clone();
+            #[cfg(feature = "environment")]
+            {
+                builder.environment = environment.clone();
+            }
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
             builder.commands = commands.clone();
@@ -3027,6 +3093,14 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let executor = library_paths
             .into_iter()
             .fold(executor, |exec, path| exec.with_library_path(&path));
+        #[cfg(feature = "environment")]
+        let executor = match &self.environment {
+            Some(pinned) => {
+                let environment = check_environment(pinned, L::LANGUAGE)?;
+                executor.with_environment(environment.root())
+            }
+            None => executor,
+        };
 
         // The embedded shell runs the embedded coreutils, except where a
         // command of the same name was registered.

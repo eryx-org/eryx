@@ -18,10 +18,15 @@
 //! - `fetch` and friends over the host's `eryx:net` (`src/fetch.js`,
 //!   `src/fetch.rs`). A fetch blocks the guest until its response is read.
 //! - `process.env`, with secrets' placeholders, when the sandbox has secrets.
+//! - `TextEncoder`, `TextDecoder` and `crypto.getRandomValues`/`randomUUID`
+//!   (`src/web.js`, `src/web.rs`).
+//! - `import`/`require` of an environment's modules and of the Node built-ins
+//!   in `src/node/` (`src/modules.rs`).
 //!
 //! - `snapshot-state` serializes the session's top-level variables (global
 //!   properties and `let`/`const` bindings) with QuickJS's `JS_WriteObject`;
-//!   ones it can't serialize (functions, classes, promises) are skipped by
+//!   ones it can't serialize (functions, classes, promises, and values
+//!   holding a class instance, which would lose their class) are skipped by
 //!   name. See `js::snapshot_state`.
 //!
 //! - Trace events: every callback call reports `callback_start` (with its
@@ -41,7 +46,9 @@
 mod fetch;
 mod fresh;
 mod js;
+mod modules;
 mod url;
+mod web;
 mod wit;
 
 use wit_dylib_ffi::{ExportFunction, Interpreter, Resource, Wit};

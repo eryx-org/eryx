@@ -80,7 +80,7 @@ mod cancel;
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
-#[cfg(feature = "packages")]
+#[cfg(feature = "environment")]
 pub mod environment;
 mod error;
 mod fork_local;

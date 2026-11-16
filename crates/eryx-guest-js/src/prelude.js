@@ -190,6 +190,41 @@
     // Stands in for a variable that can't be kept, so it is named in
     // `skipped`: functions don't serialize.
     const UNKEPT = () => {};
+    // The prototypes a snapshot keeps. JS_WriteObject writes any other
+    // object (a class instance: a Buffer, an EventEmitter) as a plain one,
+    // so a value holding one is skipped rather than restored without its
+    // class.
+    const KEPT_PROTOTYPES = new Set(
+        [
+            Object, Array, Date, RegExp, Map, Set, ArrayBuffer, DataView, Boolean, Number,
+            String, BigInt, Error, EvalError, RangeError, ReferenceError, SyntaxError,
+            TypeError, URIError, Int8Array, Uint8Array, Uint8ClampedArray, Int16Array,
+            Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array,
+            BigUint64Array,
+        ].map((type) => type.prototype),
+    );
+    KEPT_PROTOTYPES.add(null);
+    const losesClass = (root) => {
+        const seen = new Set();
+        const pending = [root];
+        while (pending.length > 0) {
+            const value = pending.pop();
+            if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+            seen.add(value);
+            if (!KEPT_PROTOTYPES.has(Object.getPrototypeOf(value))) return true;
+            if (ArrayBuffer.isView(value)) continue;
+            if (value instanceof Map) {
+                for (const [key, item] of value) pending.push(key, item);
+            } else if (value instanceof Set) {
+                for (const item of value) pending.push(item);
+            }
+            for (const key of Object.getOwnPropertyNames(value)) {
+                const desc = Object.getOwnPropertyDescriptor(value, key);
+                if ('value' in desc) pending.push(desc.value);
+            }
+        }
+        return false;
+    };
     const candidates = new Set();
     // Expressions that look like identifiers but aren't bindings.
     const NOT_BINDINGS = new Set(['this', 'true', 'false', 'null']);
@@ -198,13 +233,62 @@
     const noteCode = (code) => {
         for (const [name] of code.matchAll(IDENTIFIERS)) candidates.add(name);
     };
-    // [name, kind, value] per variable, kind 'var', 'let' or 'const'. An
+    // What the session's `import` declarations bound (`{specifier, form,
+    // bindings}` records from src/modules.rs), and each local's value then:
+    // a snapshot re-imports these rather than keeping module objects.
+    let imports = [];
+    const importBound = new Map();
+    // What each import statement bound, as it ran (the rewrite calls
+    // `__eryx_bound({local, ...})` right after it), so a reassignment later
+    // in the same script still counts as one.
+    const pendingBound = new Map();
+    // Globals that loading an imported module created (zod's
+    // `__zod_globalConfig`, say): the module's, made again when a restore
+    // re-imports it, so never session state. The rewrite calls
+    // `__eryx_loading()` before each import; its `var`s already exist then.
+    const importOwned = new Set();
+    let loadingFrom = null;
+    const defineHidden = (name, value) =>
+        Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
+    defineHidden('__eryx_loading', () => {
+        loadingFrom = new Set(Object.getOwnPropertyNames(globalThis));
+    });
+    defineHidden('__eryx_bound', (values) => {
+        for (const name of Object.keys(values)) pendingBound.set(name, values[name]);
+        if (loadingFrom === null) return;
+        for (const name of Object.getOwnPropertyNames(globalThis)) {
+            if (!loadingFrom.has(name) && !Object.hasOwn(values, name)) importOwned.add(name);
+        }
+        loadingFrom = null;
+    });
+    // A failed execute commits none of its imports.
+    const discardImports = () => {
+        pendingBound.clear();
+        loadingFrom = null;
+    };
+    const importLocals = (record) =>
+        record.form === 'named' ? record.bindings.map((pair) => pair[1]) : record.bindings;
+    // After an execute (or restore) whose imports all ran.
+    const commitImports = (records) => {
+        for (const record of records) {
+            const key = JSON.stringify(record);
+            if (!imports.some((r) => JSON.stringify(r) === key)) imports.push(record);
+            for (const local of importLocals(record)) {
+                if (pendingBound.has(local)) importBound.set(local, pendingBound.get(local));
+            }
+        }
+        pendingBound.clear();
+    };
+    // [name, kind, value] per variable, kind 'var', 'let' or 'const', then
+    // ['', 'imports', records] if anything was imported. An
     // accessor property's getter stands in for its value, so it is skipped.
     // Global properties go by any string key; bindings by identifier.
     const stateEntries = () => {
         const entries = [];
         for (const name of Object.getOwnPropertyNames(globalThis)) {
-            if (installed.includes(name) || INSTANCE_GLOBALS.has(name)) continue;
+            if (installed.includes(name) || INSTANCE_GLOBALS.has(name) || importOwned.has(name)) {
+                continue;
+            }
             if (HOST_GLOBALS.has(name)) {
                 if (!hostValues.has(name) || !Object.is(globalThis[name], hostValues.get(name))) {
                     entries.push([name, 'var', UNKEPT]);
@@ -217,6 +301,8 @@
                 if (!Object.is(desc.value, baseline().get(name))) entries.push([name, 'var', UNKEPT]);
                 continue;
             }
+            // Still what its import bound: the import brings it back.
+            if (importBound.has(name) && Object.is(desc.value, importBound.get(name))) continue;
             entries.push([name, 'var', 'value' in desc ? desc.value : UNKEPT]);
         }
         for (const name of candidates) {
@@ -239,30 +325,68 @@
             }
             entries.push([name, kind, value]);
         }
+        for (const entry of entries) {
+            if (entry[2] !== UNKEPT && losesClass(entry[2])) entry[2] = UNKEPT;
+        }
+        if (imports.length > 0) entries.push(['', 'imports', imports]);
         return entries;
     };
-    // The reverse, into a fresh context. The entries come from untrusted
-    // bytes, so their shape is checked before anything is defined.
+    // The reverse, into a fresh context, in two steps so a malformed
+    // snapshot fails before anything runs: `validateEntries` checks the
+    // entries' shape (they come from untrusted bytes) and returns the import
+    // records, which the guest re-imports and commits; then `applyEntries`
+    // defines the variables, over what the imports bound.
     const RESTORING = '__eryx_restoring__';
-    const restoreEntries = (entries) => {
-        // A binding's name is interpolated into source, so it must be an
-        // identifier; a property's is only ever a key.
+    // A name interpolated into source must be an identifier.
+    const binding = (name) =>
+        typeof name === 'string' &&
+        IDENTIFIER.test(name) &&
+        !NOT_BINDINGS.has(name) &&
+        !baseline().has(name) &&
+        !HOST_GLOBALS.has(name) &&
+        !INSTANCE_GLOBALS.has(name);
+    const validRecord = (r) =>
+        r !== null &&
+        typeof r === 'object' &&
+        typeof r.specifier === 'string' &&
+        Array.isArray(r.bindings) &&
+        (r.form === 'named'
+            ? r.bindings.every(
+                  (pair) =>
+                      Array.isArray(pair) &&
+                      pair.length === 2 &&
+                      typeof pair[0] === 'string' &&
+                      binding(pair[1]),
+              )
+            : ['default', 'namespace'].includes(r.form) &&
+              r.bindings.length === 1 &&
+              binding(r.bindings[0]));
+    const isImports = (e) => Array.isArray(e) && e.length === 3 && e[0] === '' && e[1] === 'imports';
+    const validateEntries = (entries) => {
+        // A property's name is only ever a key; a binding's goes into source.
         const valid = (e) =>
-            Array.isArray(e) &&
-            e.length === 3 &&
-            typeof e[0] === 'string' &&
-            !baseline().has(e[0]) &&
-            !HOST_GLOBALS.has(e[0]) &&
-            !INSTANCE_GLOBALS.has(e[0]) &&
-            e[0] !== '__proto__' &&
-            (e[1] === 'var' ||
-                (['let', 'const'].includes(e[1]) &&
-                    IDENTIFIER.test(e[0]) &&
-                    !NOT_BINDINGS.has(e[0])));
-        if (!Array.isArray(entries) || !entries.every(valid)) {
+            isImports(e)
+                ? Array.isArray(e[2]) && e[2].every(validRecord)
+                : Array.isArray(e) &&
+                  e.length === 3 &&
+                  typeof e[0] === 'string' &&
+                  !baseline().has(e[0]) &&
+                  !HOST_GLOBALS.has(e[0]) &&
+                  !INSTANCE_GLOBALS.has(e[0]) &&
+                  e[0] !== '__proto__' &&
+                  (e[1] === 'var' || (['let', 'const'].includes(e[1]) && binding(e[0])));
+        if (
+            !Array.isArray(entries) ||
+            !entries.every(valid) ||
+            entries.filter(isImports).length > 1
+        ) {
             throw new TypeError('malformed session state');
         }
+        return entries.find(isImports)?.[2] ?? [];
+    };
+    const applyEntries = (entries) => {
         for (const [name, kind, value] of entries) {
+            if (kind === 'imports') continue;
             if (kind === 'var') {
                 globalThis[name] = value;
                 continue;
@@ -285,7 +409,10 @@
         discardResult,
         noteCode,
         markHostGlobals,
+        commitImports,
+        discardImports,
         stateEntries,
-        restoreEntries,
+        validateEntries,
+        applyEntries,
     };
 };

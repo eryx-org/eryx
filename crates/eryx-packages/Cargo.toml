@@ -12,11 +12,11 @@ readme = "README.md"
 [dependencies]
 base64.workspace = true
 flate2.workspace = true
-futures.workspace = true
+futures = { workspace = true, optional = true }
 hex.workspace = true
-nodejs-semver.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
+nodejs-semver = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -24,11 +24,38 @@ tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["fs"] }
-webpki-roots.workspace = true
+tokio = { workspace = true, features = ["fs"], optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+[features]
+default = ["npm"]
+# The npm registry client (`npm`, `fetch`): resolving, downloading and
+# installing packages. Without it the crate is the environment types and the
+# registry-neutral helpers, with no HTTP client, for code that only loads
+# environments.
+npm = [
+    "dep:futures",
+    "dep:nodejs-semver",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:tokio",
+    "dep:webpki-roots",
+]
+
+[package.metadata.cargo-all-features]
+# CI checks eryx's feature powerset with `cargo check-all-features -- -p eryx`,
+# which runs once per workspace package with that package's features but
+# always `-p eryx`, so `npm` (a feature of this package) would be passed to
+# eryx. The default build covers `npm`, and CI checks
+# `--no-default-features` on its own.
+skip_package = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "npm_install"
+required-features = ["npm"]

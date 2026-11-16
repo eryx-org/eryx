@@ -33,7 +33,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use wasmtime::component::{
     Access, Accessor, Component, Destination, HasSelf, Linker, Resource, ResourceTable, Source,
     StreamConsumer, StreamProducer, StreamReader, StreamResult, VecBuffer,
@@ -41,12 +40,13 @@ use wasmtime::component::{
 use wasmtime::{
     AsContext, AsContextMut, Engine, ResourceLimiter, Store, StoreContextMut, UpdateDeadline,
 };
-use wasmtime_wasi::cli::{AsyncStdinStream, AsyncStdoutStream};
 use wasmtime_wasi::p2::bindings::CommandPre;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::error::{Error, ErrorKind};
 use crate::wasm::ExecutorState;
+
+mod pipe;
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -834,11 +834,10 @@ struct ChildRun {
     pre: CommandPre<ChildState>,
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    /// The child's ends of its stdio pipes. (Duplex, not simplex: dropping
-    /// one end of a simplex pipe's split halves doesn't end the other.)
-    stdin: DuplexStream,
-    stdout: DuplexStream,
-    stderr: DuplexStream,
+    /// The child's ends of its stdio pipes.
+    stdin: pipe::Reader,
+    stdout: pipe::Writer,
+    stderr: pipe::Writer,
     /// Fuel the child may burn.
     fuel: u64,
     /// Fuel it has burned so far, as of its last epoch tick.
@@ -872,9 +871,9 @@ impl ChildRun {
         let mut wasi = WasiCtxBuilder::new();
         wasi.args(&self.argv)
             .envs(&env)
-            .stdin(AsyncStdinStream::new(self.stdin))
-            .stdout(AsyncStdoutStream::new(PIPE_CAPACITY, self.stdout))
-            .stderr(AsyncStdoutStream::new(PIPE_CAPACITY, self.stderr))
+            .stdin(self.stdin)
+            .stdout(self.stdout)
+            .stderr(self.stderr)
             // The proxy resolves names; children reach it by address.
             .allow_ip_name_lookup(false)
             .allow_udp(false);
@@ -985,13 +984,13 @@ impl ChildRun {
 }
 
 /// Feeds a guest's `stream<u8>` into a child's stdin pipe.
-struct PipeConsumer(Pin<Box<DuplexStream>>);
+struct PipeConsumer(pipe::Writer);
 
 impl<D> StreamConsumer<D> for PipeConsumer {
     type Item = u8;
 
     fn poll_consume(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         store: StoreContextMut<'_, D>,
         src: Source<'_, Self::Item>,
@@ -1003,8 +1002,8 @@ impl<D> StreamConsumer<D> for PipeConsumer {
         if buf.is_empty() {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
-        match self.0.as_mut().poll_write(cx, buf) {
-            Poll::Ready(Ok(n)) if n > 0 => {
+        match self.0.poll_write(cx, buf) {
+            Poll::Ready(Some(n)) => {
                 src.mark_read(n);
                 Poll::Ready(Ok(StreamResult::Completed))
             }
@@ -1017,14 +1016,14 @@ impl<D> StreamConsumer<D> for PipeConsumer {
 }
 
 /// Feeds a child's stdout or stderr pipe into a `stream<u8>` for the guest.
-struct PipeProducer(Pin<Box<DuplexStream>>);
+struct PipeProducer(pipe::Reader);
 
 impl<D> StreamProducer<D> for PipeProducer {
     type Item = u8;
     type Buffer = VecBuffer<u8>;
 
     fn poll_produce<'a>(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         mut store: StoreContextMut<'a, D>,
         dst: Destination<'a, Self::Item, Self::Buffer>,
@@ -1036,18 +1035,13 @@ impl<D> StreamProducer<D> for PipeProducer {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
         let mut dst = dst.as_direct(store, PIPE_CAPACITY);
-        let mut buf = ReadBuf::new(dst.remaining());
-        match self.0.as_mut().poll_read(cx, &mut buf) {
+        match self.0.poll_read(cx, dst.remaining()) {
             // End of file: the child exited, or closed the stream.
-            Poll::Ready(Ok(())) if buf.filled().is_empty() => {
-                Poll::Ready(Ok(StreamResult::Dropped))
-            }
-            Poll::Ready(Ok(())) => {
-                let n = buf.filled().len();
+            Poll::Ready(0) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Ready(n) => {
                 dst.mark_written(n);
                 Poll::Ready(Ok(StreamResult::Completed))
             }
-            Poll::Ready(Err(_)) => Poll::Ready(Ok(StreamResult::Dropped)),
             Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
             Poll::Pending => Poll::Pending,
         }
@@ -1150,9 +1144,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         let charged = args_bytes as u64;
         state.child_budget.charge(charged)?;
 
-        let (stdin_rx, stdin_tx) = tokio::io::duplex(PIPE_CAPACITY);
-        let (stdout_rx, stdout_tx) = tokio::io::duplex(PIPE_CAPACITY);
-        let (stderr_rx, stderr_tx) = tokio::io::duplex(PIPE_CAPACITY);
+        let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stderr_tx, stderr_rx) = pipe::pipe(PIPE_CAPACITY);
         let child = ChildProcess {
             run: Some(ChildRun {
                 pre: command.pre,
@@ -1175,9 +1169,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             charged,
         };
         let spawned = (|| -> wasmtime::Result<Spawned> {
-            stdin.pipe(&mut host, PipeConsumer(Box::pin(stdin_tx)))?;
-            let stdout = StreamReader::new(&mut host, PipeProducer(Box::pin(stdout_rx)))?;
-            let stderr = StreamReader::new(&mut host, PipeProducer(Box::pin(stderr_rx)))?;
+            stdin.pipe(&mut host, PipeConsumer(stdin_tx))?;
+            let stdout = StreamReader::new(&mut host, PipeProducer(stdout_rx))?;
+            let stderr = StreamReader::new(&mut host, PipeProducer(stderr_rx))?;
             let child = host.get().table.push(child)?;
             Ok(Spawned {
                 child,
@@ -1284,9 +1278,9 @@ mod tests {
         let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
         let compiled = COMPILED.load(Ordering::SeqCst);
         for input in ["one", "two"] {
-            let (stdin, mut stdin_tx) = tokio::io::duplex(PIPE_CAPACITY);
-            let (mut stdout_rx, stdout) = tokio::io::duplex(PIPE_CAPACITY);
-            let (_stderr_rx, stderr) = tokio::io::duplex(PIPE_CAPACITY);
+            let (mut stdin_tx, stdin) = pipe::pipe(PIPE_CAPACITY);
+            let (stdout, mut stdout_rx) = pipe::pipe(PIPE_CAPACITY);
+            let (stderr, _stderr_rx) = pipe::pipe(PIPE_CAPACITY);
             stdin_tx.write_all(input.as_bytes()).await.unwrap();
             drop(stdin_tx);
             let run = ChildRun {
