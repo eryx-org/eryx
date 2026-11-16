@@ -19,11 +19,18 @@ name = "eryx-precompile"
 git_release_enable = false
 
 # eryx-build is a build tool for command components (eryx-commands pins a
-# published version); it versions with the workspace and gets a crates.io
-# release and tag, but no GitHub release of its own.
+# published version); it versions with the workspace and gets no GitHub
+# release of its own.
+#
+# `publish = false` for now: release-plz publishes through crates.io trusted
+# publishing, which only works for a crate that already exists with a
+# trusted publisher. Ben publishes the first version by hand with a token
+# and sets up the trusted publisher; then this line goes, and release-plz
+# publishes it like the other crates.
 [[package]]
 name = "eryx-build"
 git_release_enable = false
+publish = false
 
 [changelog]
 body = """

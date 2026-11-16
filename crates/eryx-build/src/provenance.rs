@@ -146,7 +146,10 @@ fn imports(component: &Path) -> Result<Vec<String>> {
         .args(["component", "wit"])
         .arg(component)
         .output()
-        .context("failed to spawn `wasm-tools` (is it on PATH?)")?;
+        .context(
+            "failed to spawn `wasm-tools`, which every lane needs for provenance.json \
+             (install it, e.g. `cargo install wasm-tools`, and put it on PATH)",
+        )?;
     if !out.status.success() {
         anyhow::bail!(
             "`wasm-tools component wit {}` failed: {}",
@@ -158,7 +161,8 @@ fn imports(component: &Path) -> Result<Vec<String>> {
 }
 
 /// The packages named by the `import ns:pkg/iface@ver;` lines of a
-/// component's WIT, as `ns:pkg@ver`, sorted and without duplicates. Imports
+/// component's WIT, as `ns:pkg@ver` (or `ns:pkg` when unversioned), sorted
+/// and without duplicates. Imports
 /// inside the `package` blocks that follow (`use` and nested worlds) aren't
 /// the component's own, so only the first world's lines count.
 fn imported_packages(wit: &str) -> Vec<String> {
@@ -168,10 +172,18 @@ fn imported_packages(wit: &str) -> Vec<String> {
     let mut packages: Vec<String> = world
         .lines()
         .filter_map(|line| line.trim().strip_prefix("import ")?.strip_suffix(';'))
-        .filter_map(|name| {
-            let (path, version) = name.split_once('@')?;
+        // `ns:pkg/iface[@ver]` names a package; `name: func(...)` and other
+        // local imports don't.
+        .filter(|name| name.contains(':') && !name.contains(char::is_whitespace))
+        .map(|name| {
+            let (path, version) = name
+                .split_once('@')
+                .map_or((name, None), |(p, v)| (p, Some(v)));
             let package = path.split_once('/').map_or(path, |(p, _)| p);
-            Some(format!("{package}@{version}"))
+            match version {
+                Some(version) => format!("{package}@{version}"),
+                None => package.to_string(),
+            }
         })
         .collect();
     packages.sort();
@@ -194,6 +206,7 @@ world root {
   import eryx:process/run@0.1.0;
   import wasi:sockets/types@0.3.0-rc-2026-03-15;
   import local-thing: func();
+  import my:host/log;
 
   export wasi:cli/run@0.2.12;
 }
@@ -210,6 +223,7 @@ package wasi:io@0.2.12 {
             imported_packages(wit),
             [
                 "eryx:process@0.1.0",
+                "my:host",
                 "wasi:cli@0.2.12",
                 "wasi:io@0.2.12",
                 "wasi:sockets@0.3.0-rc-2026-03-15",
