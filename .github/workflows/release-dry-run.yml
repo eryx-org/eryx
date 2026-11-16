@@ -3,8 +3,9 @@
 #
 # Runs the same build workflows the releases call:
 # - runtime-build.yml: runtime-{python,javascript,shell}.wasm, coreutils.wasm,
-#   the JavaScript bundler eryx-bundler.wasm and their .sha256, the GitHub
-#   release assets (kept here as the `runtime-assets` artifact);
+#   the JavaScript bundler eryx-bundler.wasm, their .sha256 and their
+#   .notices.md, the GitHub release assets (kept here as the `runtime-assets`
+#   artifact);
 # - python-build.yml: every pyeryx wheel, the sdist and the companion wheels,
 #   smoke-tested on Linux, macOS and Windows;
 # - js-build.yml: the npm package;
@@ -33,6 +34,14 @@ on:
       - crates/eryx-server/Dockerfile
       - crates/eryx-python/runtimes/**
       - scripts/sync-runtime-versions.sh
+      # What the runtimes' notices are made from.
+      - scripts/notices.py
+      # coreutils' crates are only checked when its notices are written.
+      - clis/coreutils.toml
+      - clis/patches/**
+      - third_party/**
+      - about.toml
+      - mise.toml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
