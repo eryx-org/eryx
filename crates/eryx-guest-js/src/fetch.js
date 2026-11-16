@@ -128,6 +128,14 @@
             const end = body.byteOffset + body.byteLength;
             return [new Uint8Array(body.buffer.slice(body.byteOffset, end)), null];
         }
+        // The global, looked up now: it's a configurable property scripts may
+        // replace.
+        if (typeof URLSearchParams === 'function' && body instanceof URLSearchParams) {
+            return [
+                new Uint8Array(native.encodeUtf8(body.toString())),
+                'application/x-www-form-urlencoded;charset=UTF-8',
+            ];
+        }
         return [new Uint8Array(native.encodeUtf8(String(body).toWellFormed())), 'text/plain;charset=UTF-8'];
     };
 

@@ -13,6 +13,8 @@ their packages' full licences in a comment at the top of the module.
 | `node:string_decoder` | [string_decoder] 1.3.0, with [safe-buffer] 5.2.1 | MIT |
 | `node:util` | `util.js`, written for eryx: a subset | (eryx's) |
 | `node:crypto` | `crypto.js`, written for eryx: random values only | (eryx's) |
+| `node:url` | `url.js`, written for eryx: the globals, `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`, `domainTo*`, and a subset of the legacy `parse`/`format`/`resolve` | (eryx's) |
+| `URL`, `URLSearchParams` globals | [core-js-pure] 3.51.0's URL modules, as `url_globals.js` | MIT |
 | `node:timers`, `node:timers/promises` | `timers.js`, `timers_promises.js`, written for eryx, on the timer globals (`../timers.js`) | (eryx's) |
 
 - `licenses/`: each vendored package's licence file, from its npm tarball.
@@ -21,7 +23,7 @@ their packages' full licences in a comment at the top of the module.
   package bundled into one minified ES module, with named exports so static
   imports link, and its licences in front. Needs the npm registry and node.
 
-The other built-ins (`fs`, `net`, `child_process`, `http`, `url`, ...) throw
+The other built-ins (`fs`, `net`, `child_process`, `http`, `os`, ...) throw
 "node:… isn't available in eryx yet" on import.
 
 [buffer]: https://github.com/feross/buffer
@@ -31,3 +33,4 @@ The other built-ins (`fs`, `net`, `child_process`, `http`, `url`, ...) throw
 [path-browserify]: https://github.com/browserify/path-browserify
 [string_decoder]: https://github.com/nodejs/string_decoder
 [safe-buffer]: https://github.com/feross/safe-buffer
+[core-js-pure]: https://github.com/zloirock/core-js

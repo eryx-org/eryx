@@ -44,6 +44,7 @@ fn node_module(name: &str) -> Option<&'static str> {
         "path" | "path/posix" => include_str!("node/path.js"),
         "string_decoder" => include_str!("node/string_decoder.js"),
         "timers" => include_str!("node/timers.js"),
+        "url" => include_str!("node/url.js"),
         "timers/promises" => include_str!("node/timers_promises.js"),
         "util" => include_str!("node/util.js"),
         _ => return None,

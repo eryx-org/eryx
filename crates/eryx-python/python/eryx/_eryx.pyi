@@ -1598,9 +1598,9 @@ class Session:
             allowed_commands: For ``language="shell"`` only: the commands this
                 call may run, out of the session's. ``None`` (the default)
                 allows them all, ``[]`` allows none, and names the session
-                doesn't have are ignored. Others exit 127. Shell builtins
-                (including ``grep``) and callbacks aren't commands, so they're
-                unaffected. ValueError for other languages.
+                doesn't have are ignored. Others exit 127. The shell's
+                ``grep`` builtin counts as a command; other builtins and
+                callbacks are unaffected. ValueError for other languages.
 
         Returns:
             ExecuteResult containing stdout and execution statistics.
