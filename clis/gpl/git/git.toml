@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Build manifest for git as a WASI (wasip2) component, via the C lane's plain
+# Makefile build. Built by `mise run build-cli -- clis/gpl/git/git.toml`.
+#
+# git is GPL-2.0-only, and so is everything in this directory (the patch, the
+# shims and this recipe): see NOTICE.md. The component is a separate artifact,
+# never linked into or embedded in eryx (#837).
+#
+# git can't fork or exec on WASI. git-wasi.patch gives run-command.c a backend
+# over eryx:process/run, so the subcommands git runs with no live pipe
+# (run_command) or with all their input up front (pipe_command) run through
+# the host: `stash`, `worktree add`, `gc` and the like work when the sandbox
+# registers git with `Command::allow_spawn`. Live pipes and start_async (C
+# git's transports, the pager) still fail with ENOSYS (#815).
+
+name = "git"
+description = "git (C, Makefile; subcommands through eryx:process/run)"
+license = "GPL-2.0-only"
+lang = "c"
+
+[source]
+repo = "https://github.com/git/git.git"
+ref = "v2.56.1"
+commit = "03b41523c576f26ad34085378717a0c1b287470f"
+dir = "scratch/git"
+
+[[deps]]
+name = "zlib"
+# sha256 of the release tarball.
+url = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+ref = "1.3.1"
+sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+license = "Zlib"
+dir = "scratch/zlib"
+system = "cmake"
+config_patch = "clis/gpl/git/patches/patch-zlib.sh"
+cmake_flags = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DZLIB_BUILD_EXAMPLES=OFF",
+]
+
+[build]
+system = "make"
+artifact = "git"
+make_targets = ["git"]
+vendor_patch = "clis/gpl/git/patches/patch-git.sh"
+shims = ["clis/gpl/git/shims/wasi-git-stubs.c"]
+# The run-command.c backend's eryx:process/run bindings.
+wit = { path = "crates/eryx-runtime/wit/deps/process.wit", world = "eryx:process/child" }
+cflags = [
+    "-O2",
+    "-D_WASI_EMULATED_SIGNAL",
+    "-D_WASI_EMULATED_GETPID",
+    "-D_WASI_EMULATED_PROCESS_CLOCKS",
+    # pwd.h, grp.h, termios.h and the like, and the APIs wasi-libc lacks.
+    "-isystem", "{repo}/clis/gpl/git/shims/include",
+    "-include", "{repo}/clis/gpl/git/shims/wasi-git.h",
+    "-I{repo}/scratch/git-component/wit",
+    "-I{dep:zlib:src}",
+    "-I{dep:zlib:build}",
+    "-Wno-error",
+]
+link_flags = [
+    "-L{dep:zlib:build}",
+    "-lwasi-emulated-signal",
+    "-lwasi-emulated-getpid",
+    "-lwasi-emulated-process-clocks",
+    "-Wl,-z,stack-size=8388608",
+]
+# git's Makefile knobs for a platform without threads, mmap, curl, perl,
+# gettext and the rest.
+make_flags = [
+    "uname_S=WASI",
+    "uname_M=wasm32",
+    "uname_O=WASI",
+    "uname_R=0",
+    "uname_V=0",
+    "NO_PTHREADS=YesPlease",
+    "NO_MMAP=YesPlease",
+    "NO_CURL=YesPlease",
+    "NO_EXPAT=YesPlease",
+    "NO_PERL=YesPlease",
+    "NO_PYTHON=YesPlease",
+    "NO_TCLTK=YesPlease",
+    "NO_GETTEXT=YesPlease",
+    "NO_OPENSSL=YesPlease",
+    "NO_ICONV=YesPlease",
+    "NO_UNIX_SOCKETS=YesPlease",
+    "NO_IPV6=YesPlease",
+    "NO_SETITIMER=YesPlease",
+    "NO_STRUCT_ITIMERVAL=YesPlease",
+    "NO_GECOS_IN_PWENT=YesPlease",
+    "NO_TRUSTABLE_FILEMODE=YesPlease",
+    "NO_SYMLINK_HEAD=YesPlease",
+    "NO_REGEX=YesPlease",
+    "NO_INSTALL_HARDLINKS=YesPlease",
+    "NO_RUST=YesPlease",
+    "NO_POSIX_GOODIES=UnfortunatelyYes",
+    "NO_NSEC=YesPlease",
+    "NO_SVN_TESTS=YesPlease",
+    "CSPRNG_METHOD=getentropy",
+    "RUNTIME_PREFIX=",
+    "prefix=/usr",
+    "NO_SYS_SELECT_H=",
+    "NO_POLL=",
+    "HAVE_DEV_TTY=",
+    "NEEDS_LIBICONV=",
+]
+
+[cwasm]
+# Loaded as a plain component; the host compiles it on demand.
+enabled = false
+
+[output]
+dir = "scratch/git-component"

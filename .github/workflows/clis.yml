@@ -22,6 +22,8 @@ on:
     paths: &paths
       - 'clis/**'
       - 'crates/eryx-build/**'
+      # git's eryx:process/run bindings are generated from it.
+      - 'crates/eryx-runtime/wit/deps/process.wit'
       - 'scripts/bootstrap-go-wasip3.sh'
       - 'mise.toml'
       - '.github/workflows/clis.yml'
@@ -82,6 +84,8 @@ jobs:
               - 'clis/patches/patch-curl.sh'
               - 'clis/patches/patch-mbedtls.sh'
               - 'clis/shims/**'
+              - 'clis/gpl/git/**'
+              - 'crates/eryx-runtime/wit/deps/process.wit'
             go:
               - 'clis/gh.toml'
               - 'clis/patches/patch-gh-vendor.sh'
@@ -149,7 +153,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cli: [sqlite3, curl, jq]
+        cli: [sqlite3, curl, jq, git]
+        include:
+          # GPL recipes live apart, in clis/gpl/ (#837).
+          - cli: git
+            manifest: clis/gpl/git/git.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -158,17 +166,22 @@ jobs:
       - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           version: 2026.11.8
-          install_args: rust aqua:bytecodealliance/wasmtime
+          # wit-bindgen for git's bindings, wasm-tools for its smoke check.
+          install_args: rust aqua:bytecodealliance/wasmtime github:bytecodealliance/wit-bindgen cargo:wasm-tools
           cache: false
       # The CMake builds use Ninja, which the runner doesn't ship.
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - run: mise run ensure-wasi-sdk
-      - run: mise run build-cli -- "$CLI"
+      - run: mise run build-cli -- "$MANIFEST"
         env:
-          CLI: ${{ matrix.cli }}
+          MANIFEST: ${{ matrix.manifest || matrix.cli }}
       - run: clis/smoke.sh "$CLI"
         env:
           CLI: ${{ matrix.cli }}
+      # A GPL component ships with its licence and our notice (#837).
+      - name: Add git's licence and notice
+        if: matrix.cli == 'git'
+        run: cp scratch/git/COPYING clis/gpl/git/NOTICE.md scratch/git-component/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.cli }}-component
@@ -177,6 +190,8 @@ jobs:
             scratch/${{ matrix.cli }}-component/*.cwasm
             scratch/${{ matrix.cli }}-component/manifest.toml
             scratch/${{ matrix.cli }}-component/provenance.json
+            scratch/${{ matrix.cli }}-component/COPYING
+            scratch/${{ matrix.cli }}-component/NOTICE.md
           if-no-files-found: error
           retention-days: 14
 

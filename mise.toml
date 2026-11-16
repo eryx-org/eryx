@@ -32,6 +32,11 @@ depends = ["rust"]
 [tools."aqua:bytecodealliance/wasmtime"]
 version = "50.0.1"
 
+# `wit-bindgen c`, for the C lane's `[build] wit` (git's eryx:process/run
+# bindings). Same version as the guests' wit-bindgen crate.
+[tools."github:bytecodealliance/wit-bindgen"]
+version = "0.63.0"
+
 [tools."cargo:mdbook"]
 version = "0.5.4"
 
