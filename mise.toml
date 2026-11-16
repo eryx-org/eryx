@@ -806,6 +806,9 @@ NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. coreutils, curl, 
 if SDK="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}" 2>/dev/null)"; then
     export WASI_SDK_PATH="$SDK"
 fi
+# Every C and Rust lane build links a rustc-built wasm32-wasip2 object (the
+# start-in-$PWD constructor, #978), so even C builds need the target.
+rustup target add wasm32-wasip2
 cargo run -q -p eryx-build -- "$NAME"
 """
 

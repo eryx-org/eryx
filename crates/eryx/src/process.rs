@@ -1398,6 +1398,12 @@ impl ChildRun {
             // The proxy resolves names; children reach it by address.
             .allow_ip_name_lookup(false)
             .allow_udp(false);
+        // Report the shell's directory through `wasi:cli/environment`'s
+        // initial-cwd too. wasi-libc ignores it (WebAssembly/wasi-libc#915);
+        // other guest runtimes may not.
+        if let Some((_, pwd)) = env.iter().find(|(k, _)| k == "PWD") {
+            wasi.initial_cwd(pwd);
+        }
         #[cfg(feature = "unstable-vfs")]
         let mut vfs = self.vfs;
         // Without a proxy TCP stays off (wasmtime-wasi's default) and every
