@@ -9,6 +9,10 @@ shellcheck = "0.11.0"
 [tools."cargo:cargo-nextest"]
 version = "0.9.152"
 
+# Third-party notices for the shipped artifacts (`mise run notices`, #837).
+[tools."cargo:cargo-about"]
+version = "0.7.1"
+
 [tools."cargo:wasm-tools"]
 version = "1.263.0"
 
@@ -676,6 +680,14 @@ sources = [
   "crates/eryx-guest-python/tests/python-stdlib/encodings/__init__.py",
 ]
 outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
+
+[tasks.notices]
+description = "Write each shipped artifact's third-party notices to target/notices (#837)"
+run = "python3 scripts/notices.py generate target/notices"
+
+[tasks.notices-check]
+description = "Check every shipped crate's licence is accepted and every vendored input has a notices entry"
+run = "python3 scripts/notices.py check"
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
