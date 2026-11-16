@@ -554,6 +554,26 @@ impl NetConfig {
         for rule in &self.http_rules {
             rule.validate()?;
         }
+        let patterns = [
+            ("allowed_hosts", &self.allowed_hosts),
+            ("blocked_hosts", &self.blocked_hosts),
+            ("internal_hosts", &self.internal_hosts),
+        ]
+        .into_iter()
+        .flat_map(|(field, patterns)| patterns.iter().map(move |p| (field, p)))
+        .chain(
+            self.http_rules
+                .iter()
+                .map(|rule| ("an HTTP rule's host", &rule.host)),
+        );
+        for (field, pattern) in patterns {
+            if pattern != "*" && !is_host_pattern(&normalize_host(pattern)) {
+                return Err(format!(
+                    "{field} pattern {pattern:?} names no host once its trailing dot is \
+                     ignored"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -863,10 +883,68 @@ fn request_path(target: &str) -> Option<String> {
     Some(decoded)
 }
 
-/// `host` lowercased, without a trailing dot or IPv6 brackets.
+/// `host` lowercased, without a trailing dot or IPv6 brackets, and an IP
+/// address in its canonical form: the resolver accepts other spellings of
+/// the same address (`2130706433`, `0x7f.1`, `0177.0.0.1`,
+/// `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1`), so they must match the same
+/// patterns. An IPv4-mapped IPv6 address becomes its IPv4 address.
 fn normalize_host(host: &str) -> String {
     let host = host.strip_circumfix('[', ']').unwrap_or(host);
-    host.trim_suffix('.').to_ascii_lowercase()
+    let host = host.trim_suffix('.').to_ascii_lowercase();
+    // The resolver accepts a zone (`fe80::1%lo`, `::1%1`, and with
+    // systemd-resolved `203.0.113.5%lo`) after an address and connects to
+    // the address, so match on the address alone.
+    let addr = host
+        .split_once('%')
+        .map_or(host.as_str(), |(addr, _zone)| addr);
+    if let Ok(v6) = addr.parse::<Ipv6Addr>() {
+        return match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => v6.to_string(),
+        };
+    }
+    match parse_inet_aton(addr) {
+        Some(v4) => v4.to_string(),
+        None => host,
+    }
+}
+
+/// `host` as an IPv4 address in any form `inet_aton` (and so the system
+/// resolver) accepts: one to four parts, each decimal, `0x` hex (with at
+/// least one digit) or leading-`0` octal, the last filling the remaining
+/// bytes.
+fn parse_inet_aton(host: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let (digits, radix) = if let Some(hex) = part.strip_prefix("0x") {
+            (hex, 16)
+        } else if part.len() > 1 && part.starts_with('0') {
+            (&part[1..], 8)
+        } else {
+            (*part, 10)
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        values.push(u32::from_str_radix(digits, radix).ok()?);
+    }
+    let (last, init) = values.split_last()?;
+    if init.iter().any(|&v| v > 0xff) {
+        return None;
+    }
+    let last_bits = 8 * (4 - init.len() as u32);
+    if last_bits < 32 && *last >= 1 << last_bits {
+        return None;
+    }
+    let high = init
+        .iter()
+        .enumerate()
+        .fold(0u32, |acc, (i, &v)| acc | (v << (24 - 8 * i)));
+    Some(Ipv4Addr::from(high | last))
 }
 
 // ============================================================================
@@ -2487,18 +2565,28 @@ fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
 /// - `*.example.com` matches `api.example.com` but not `example.com`
 /// - `api.*.com` matches `api.foo.com`
 /// - `exact.host.com` matches only that exact host
+///
+/// Both sides are compared as [`normalize_host`] leaves them: ignoring case,
+/// one trailing dot and IPv6 brackets.
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
+    // `example.com.` is the same host as `example.com`, so a blocked host
+    // must not get through with a trailing dot.
+    let host = normalize_host(host);
+    let pattern = normalize_host(pattern);
+    // A pattern that normalising empties, or turns into `*` (`*.`), names no
+    // host; `NetConfig::validate` refuses them.
+    if !is_host_pattern(&pattern) {
+        return false;
+    }
     if !pattern.contains('*') {
-        return host.eq_ignore_ascii_case(pattern);
+        return host == pattern;
     }
 
     // Glob matching with * as wildcard: the first part anchors at the
     // start, the last at the end, and the parts between match left to right.
-    let host = host.to_ascii_lowercase();
-    let pattern = pattern.to_ascii_lowercase();
     let parts: Vec<&str> = pattern.split('*').collect();
     let (first, last) = (parts[0], parts[parts.len() - 1]);
     if host.len() < first.len() + last.len() || !host.starts_with(first) || !host.ends_with(last) {
@@ -2542,6 +2630,12 @@ async fn write_counted<S: tokio::io::AsyncWrite + Unpin>(
         Err(_) => Err(None),
     };
     (accepted, written)
+}
+
+/// Whether a normalised host pattern names some hosts and not all: not
+/// empty, and not `*` (which is only a pattern as written).
+fn is_host_pattern(normalized: &str) -> bool {
+    !normalized.is_empty() && normalized != "*"
 }
 
 #[cfg(test)]
@@ -4095,6 +4189,203 @@ mod tests {
         let err = m.tls_upgrade(handle, "127.0.0.1", 0).await.unwrap_err();
         assert!(matches!(&err, TlsError::Tcp(e) if limit(e)), "{err}");
         assert!(m.tcp_connections.contains_key(&handle));
+    }
+
+    /// A trailing dot names the same host (`pastebin.com.` is
+    /// `pastebin.com`), so every host check treats the two alike: blocked
+    /// hosts stay blocked, and allowed, internal and secret hosts still match.
+    #[tokio::test]
+    async fn trailing_dot_names_the_same_host_in_every_check() {
+        let config = NetConfig::permissive()
+            .block_host("pastebin.com")
+            .block_host("*.internal.corp")
+            .block_host("Evil.Example.");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "pastebin.com",
+            "pastebin.com.",
+            "PASTEBIN.COM.",
+            "db.internal.corp.",
+            "evil.example",
+            "evil.example.",
+        ] {
+            assert!(m.check_host_allowed(host).is_err(), "{host} got through");
+        }
+        assert!(m.check_host_allowed("example.com.").is_ok());
+
+        let config = NetConfig::default()
+            .allow_host("api.example.com")
+            .allow_host("*.github.com");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in ["api.example.com.", "API.github.com."] {
+            assert!(m.check_host_allowed(host).is_ok(), "{host} refused");
+        }
+        assert!(m.check_host_allowed("example.com.").is_err());
+
+        // Secrets go to their allowed hosts with or without the dot.
+        let m = framing_manager();
+        assert!(
+            m.substitute_placeholders("PH", "authorization", "api.example.com.")
+                .is_ok()
+        );
+        assert!(
+            m.substitute_placeholders("PH", "authorization", "other.example.com.")
+                .is_err()
+        );
+
+        // An internal host skips the network checks with the dot too.
+        let config = NetConfig::default()
+            .allow_host("svc.internal")
+            .with_internal_hosts(["svc.internal"])
+            .with_resolver(Fixed);
+        let m = ConnectionManager::new(config, HashMap::new());
+        assert!(m.resolve_allowed("svc.internal.", 443).await.is_ok());
+    }
+
+    /// Other spellings of an IP address (the forms the resolver accepts)
+    /// match the patterns its canonical form does.
+    #[test]
+    fn numeric_hosts_match_in_canonical_form() {
+        let config = NetConfig::permissive()
+            .block_host("127.0.0.1")
+            .block_host("10.*")
+            .block_host("::1")
+            .block_host("[fe80::1]");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "127.0.0.1",
+            "2130706433",
+            "0x7f000001",
+            "0x7f.1",
+            "0177.0.0.1",
+            "127.1",
+            "127.0.1",
+            "0x7F.0.0.01",
+            "127.0.0.1.",
+            "::ffff:127.0.0.1",
+            "[::ffff:7f00:1]",
+            "0xa.0.0.1",
+            "167772161",
+            "012.1.2.3",
+            "::1",
+            "[::1]",
+            "0:0:0:0:0:0:0:1",
+            "0000::0001",
+            "FE80:0:0::1",
+            "::1%1",
+            "[::1%lo]",
+            "::ffff:127.0.0.1%1",
+            "fe80::1%lo",
+            "fe80::1%25eth0",
+            "127.0.0.1%lo",
+        ] {
+            assert!(m.check_host_allowed(host).is_err(), "{host} got through");
+        }
+        for host in [
+            "127.0.0.2",
+            "11.0.0.1",
+            "::2",
+            "example.com",
+            "1.2.3.4.5",
+            "08.1.2.3",
+        ] {
+            assert!(m.check_host_allowed(host).is_ok(), "{host} refused");
+        }
+        for (host, ip) in [
+            ("2130706433", "127.0.0.1"),
+            ("0x7f.1", "127.0.0.1"),
+            ("0177.0.0.1", "127.0.0.1"),
+            ("1.2.3", "1.2.0.3"),
+            ("0x0", "0.0.0.0"),
+            ("fe80::1%lo", "fe80::1"),
+            ("::ffff:127.0.0.1%1", "127.0.0.1"),
+            ("203.0.113.5%lo", "203.0.113.5"),
+            ("::ffff:10.0.0.1", "10.0.0.1"),
+            ("0:0:0:0:0:0:0:1", "::1"),
+        ] {
+            assert_eq!(normalize_host(host), ip, "{host}");
+        }
+        for host in [
+            "256.1.1.1",
+            "1.256.1.1",
+            "1.2.65536",
+            "4294967296",
+            "1..2",
+            "0xg",
+            "09",
+            "0x",
+            "0x.1",
+            "0x7f.0x",
+            "example.com%lo",
+        ] {
+            assert_eq!(normalize_host(host), host, "{host}");
+        }
+    }
+
+    /// A pattern that's empty or only a wildcard once its trailing dot is
+    /// ignored (`.`, `*.`) names no host: it matches none, and a config
+    /// with one doesn't validate. Bare `*` still matches every host.
+    #[test]
+    fn degenerate_host_patterns_name_no_host() {
+        for pattern in ["", ".", "*.", "[]", "[*.]"] {
+            assert!(!host_matches_pattern("example.com", pattern), "{pattern:?}");
+            for config in [
+                NetConfig::default().allow_host(pattern),
+                NetConfig::default().block_host(pattern),
+                NetConfig::default().with_internal_hosts([pattern]),
+                NetConfig::default().allow_http(HttpRule::new(pattern)),
+            ] {
+                assert!(config.validate().is_err(), "{pattern:?}");
+            }
+        }
+        assert!(host_matches_pattern("example.com", "*"));
+        assert!(NetConfig::default().allow_host("*").validate().is_ok());
+    }
+
+    /// Wildcard patterns with a trailing dot match like their undotted form,
+    /// `::1` and `[::1]` are the same host, and a host not in
+    /// `internal_hosts` doesn't skip the network checks, dot or no dot.
+    #[tokio::test]
+    async fn host_pattern_spellings_match_alike() {
+        let config = NetConfig::permissive()
+            .block_host("*.internal.corp.")
+            .block_host("api.*.com.");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "db.internal.corp",
+            "db.internal.corp.",
+            "api.x.com",
+            "api.x.com.",
+        ] {
+            assert!(m.check_host_allowed(host).is_err(), "{host} got through");
+        }
+        assert!(m.check_host_allowed("internal.corp").is_ok());
+
+        assert!(same_host("::1", "[::1]"));
+        assert!(host_matches_pattern("[::1]", "::1"));
+        assert!(host_matches_pattern("::1", "[::1]"));
+
+        let config = NetConfig::default()
+            .allow_host("svc.internal")
+            .allow_host("other.internal")
+            .with_internal_hosts(["svc.internal"])
+            .with_resolver(Fixed);
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in ["other.internal", "other.internal.", "svc.internal.evil"] {
+            assert!(m.resolve_allowed(host, 443).await.is_err(), "{host}");
+        }
+    }
+
+    /// Resolves every name to a loopback address, which the default
+    /// network blocklist refuses.
+    #[derive(Debug)]
+    struct Fixed;
+
+    #[async_trait::async_trait]
+    impl Resolver for Fixed {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+        }
     }
 
     /// The certificate must be checked for the host the connection was made
