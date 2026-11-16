@@ -80,6 +80,17 @@
         return args.length === 0 ? {} : { [POSITIONAL]: args };
     };
 
+    // The arguments as JSON with every object's keys sorted, so equal
+    // arguments are equal text however the script ordered them: callback
+    // replay journals key on this text (as the CPython guest's sorted
+    // json.dumps does).
+    const canonicalJson = (value) =>
+        JSON.stringify(value, (_key, v) =>
+            v !== null && typeof v === 'object' && !Array.isArray(v)
+                ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+                : v,
+        );
+
     // `await invoke("name", {arg: 1})` (or `invoke("name", 1, 2)`) — the JS
     // analog of Python's `await invoke("name", arg=1)`. Resolves to the parsed
     // JSON result.
@@ -87,7 +98,7 @@
     // CPython guest's shape, the arguments as callback_start's context.
     globalThis.invoke = async (name, ...args) => {
         name = String(name);
-        const payload = JSON.stringify(callArgs(name, args));
+        const payload = canonicalJson(callArgs(name, args));
         native.trace(0, JSON.stringify({ type: 'callback_start', name }), payload);
         let json;
         try {

@@ -266,9 +266,30 @@ fn coerce(props: &[(String, Value)], key: &str, text: &str) -> Result<Value, Str
     })
 }
 
+/// `value` with every object's keys sorted, recursively: the arguments'
+/// canonical form, which callback replay journals key on.
+pub(crate) fn canonical(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> =
+                map.into_iter().map(|(k, v)| (k, canonical(v))).collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            Value::Object(entries.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonical).collect()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_sorts_keys_recursively() {
+        let v = canonical(json!({"b": 1, "a": {"d": [{"z": 0, "y": 1}], "c": 2}}));
+        assert_eq!(v.to_string(), r#"{"a":{"c":2,"d":[{"y":1,"z":0}]},"b":1}"#);
+    }
     use serde_json::json;
 
     fn def(schema: Value) -> CallbackDef {

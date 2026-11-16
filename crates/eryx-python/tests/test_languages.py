@@ -99,3 +99,60 @@ def test_companion_versions_match_pyeryx():
         assert pin in extras[language] and pin in extras["all"]
         package = tomllib.loads((root / "runtimes" / language / "pyproject.toml").read_text())
         assert package["project"]["version"] == version
+
+
+@pytest.mark.parametrize(
+    ("language", "first", "reordered", "suspending"),
+    [
+        (
+            "javascript",
+            "await tool({ b: 1, a: { d: 2, c: 3 } })",
+            "await tool({ a: { c: 3, d: 2 }, b: 1 })",
+            "await before({ n: 1 }); await approve(); await after()",
+        ),
+        ("shell", "tool --b 1 --a 2", "tool --a 2 --b 1", "before --n 1; approve; after"),
+    ],
+)
+def test_replay_and_suspension(language, first, reordered, suspending):
+    """Callback replay and suspension work in every guest, and a call
+    replays whatever order its arguments' keys were written in."""
+    calls = []
+
+    def tool(**kwargs):
+        calls.append(kwargs)
+        return kwargs
+
+    path = runtime(language)
+    sandbox = eryx.Sandbox(language=language, runtime_path=path, callbacks=[{"name": "tool", "fn": tool}])
+    recorded = sandbox.execute_with_journal(first)
+    assert recorded.error is None, recorded.error
+    replayed = sandbox.execute_with_journal(reordered, journal=recorded.journal)
+    assert replayed.error is None, replayed.error
+    assert replayed.replayed_callbacks == 1
+    assert len(calls) == 1
+
+    live = []
+
+    def approve():
+        raise eryx.SuspendCallback("needs approval")
+
+    def callbacks(approve_fn):
+        return [
+            {"name": "before", "fn": lambda **kw: live.append("before") or kw},
+            {"name": "approve", "fn": approve_fn},
+            {"name": "after", "fn": lambda **kw: live.append("after") or kw},
+        ]
+
+    halted = eryx.Sandbox(language=language, runtime_path=path, callbacks=callbacks(approve)).execute_with_journal(
+        suspending
+    )
+    assert halted.suspended is not None and halted.suspended.name == "approve"
+    assert live == ["before"]
+
+    live.clear()
+    resumed = eryx.Sandbox(
+        language=language, runtime_path=path, callbacks=callbacks(lambda: True)
+    ).execute_with_journal(suspending, journal=halted.journal)
+    assert resumed.error is None, resumed.error
+    assert resumed.replayed_callbacks == 1
+    assert live == ["after"]
