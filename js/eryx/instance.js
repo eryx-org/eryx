@@ -282,6 +282,7 @@ export async function instantiateSandbox(
   stdlib?.catch(() => {}); // surfaced by the await below
   const instantiate = await components[language]();
   const fd = createFdCapture();
+  const processHost = createProcessHost(fileTree, commandLoaders(commands, getModule));
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),
     preopens: { "/": fileTree },
@@ -296,7 +297,7 @@ export async function instantiateSandbox(
     "eryx:net/tcp": net.tcp,
     "eryx:net/tls": net.tls,
     // Only the shell imports it; see shims/process.js.
-    "eryx:process/process": createProcessHost(fileTree, commandLoaders(commands, getModule)),
+    "eryx:process/process": processHost,
     "wasi:cli/environment": environment,
     "wasi:cli/exit": exit,
     "wasi:cli/stderr": fd.stderr,
@@ -343,6 +344,7 @@ export async function instantiateSandbox(
   return {
     ...instance,
     async execute(code) {
+      processHost.startExecution();
       let output;
       try {
         output = await instance.execute(code);
