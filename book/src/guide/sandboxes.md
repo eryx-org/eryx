@@ -202,7 +202,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   callbacks, then registered commands. An unregistered name exits 127.
 - **Running:** each command runs as a child process with `argv[0]` set to the
   name it was called by, which is how a multicall binary picks its tool. It gets
-  the shell's environment, with `PWD` set to the shell's directory.
+  the shell's environment, with `PWD` set to the shell's directory, which is
+  also its WASI initial working directory. Children built with `eryx-build`
+  start in that directory; other wasi-libc programs start in `/`, because
+  wasi-libc ignores both (WebAssembly/wasi-libc#915).
 - **Files:** with `unstable-vfs`, a child sees the shell's filesystem (below):
   the session's VFS mounts, `/tmp`, `/dev` and the read-only root, and nothing
   else of the host. Without it, children have no filesystem yet (#812).
