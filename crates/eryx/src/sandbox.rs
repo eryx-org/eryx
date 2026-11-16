@@ -738,7 +738,7 @@ impl Sandbox {
         crate::reserved::check(
             self.executor.language(),
             map.keys().map(String::as_str),
-            self.executor.commands().names(),
+            self.executor.commands().registered_names(),
         )?;
         self.callbacks = Arc::new(map);
         Ok(())
@@ -3143,7 +3143,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         crate::reserved::check(
             L::LANGUAGE,
             self.callbacks.keys().map(String::as_str),
-            commands.names(),
+            commands.registered_names(),
         )?;
 
         // Apply the configured result-capture variable name, and hand the

@@ -800,9 +800,9 @@ pub(crate) struct Commands {
 }
 
 impl Commands {
-    /// The commands' names.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(String::as_str)
+    /// The registered commands' names.
+    pub(crate) fn registered_names(&self) -> impl Iterator<Item = &str> {
+        self.registered.keys().map(String::as_str)
     }
 
     pub(crate) fn insert(&mut self, name: String, command: Command) {
