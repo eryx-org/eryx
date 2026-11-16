@@ -6,7 +6,7 @@
 //! executable is already a component (it imports `wasi:*@0.2.x` and exports
 //! `wasi:cli/run`).
 //!
-//! Two build systems, selected by `[build] system`:
+//! The build systems, selected by `[build] system`:
 //! - `single` — one `clang` invocation over `[build] sources` (amalgamation
 //!   style, e.g. sqlite3).
 //! - `cmake` — configure + build a CMake project with the wasi-sdk toolchain
@@ -14,6 +14,14 @@
 //! - `autotools` — run the project's `configure` cross-compiling to wasip2
 //!   with wasi-sdk's clang, then `make`, and copy `[build] artifact` out of
 //!   the build dir (e.g. jq).
+//! - `make` — run a plain Makefile in the source tree with wasi-sdk's clang
+//!   and the build's flags as make variables, and copy `[build] artifact`
+//!   out (e.g. git).
+//!
+//! `[build] shims` are compiled with the build's own `cflags` and linked in,
+//! and `[build] wit` generates `wit-bindgen c` bindings into `<output>/wit`
+//! (compiled and linked the same way) for sources that call component
+//! imports.
 //!
 //! Dependencies: `[[deps]]` libraries (e.g. mbedTLS for curl's TLS) are built
 //! first into `<dep.dir>/build`; their `shims` are compiled and linked into the
@@ -31,7 +39,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::{compile_cwasm, path_str, run};
-use crate::manifest::{CBuildSystem, Dep, Manifest};
+use crate::manifest::{CBuildSystem, Dep, Manifest, WitBindings};
 
 pub fn build(manifest: &Manifest) -> Result<()> {
     let repo_root = std::env::current_dir().context("getting current dir")?;
@@ -76,6 +84,12 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
+    // The main build's own glue: WIT bindings, then shims.
+    if let Some(wit) = &manifest.build.wit {
+        shim_objs.extend(build_wit(manifest, wit, &clang, &output_dir, &repo_root)?);
+    }
+    shim_objs.extend(build_shims(manifest, &clang, &output_dir, &repo_root)?);
+
     let component = output_dir.join("component.wasm");
     match manifest.build.system {
         CBuildSystem::Single => {
@@ -87,6 +101,16 @@ pub fn build(manifest: &Manifest) -> Result<()> {
                 &toolchain,
                 &source_dir,
                 &output_dir,
+                &component,
+                &repo_root,
+                &shim_objs,
+            )?;
+        }
+        CBuildSystem::Make => {
+            build_make(
+                manifest,
+                &sdk,
+                &source_dir,
                 &component,
                 &repo_root,
                 &shim_objs,
@@ -381,6 +405,153 @@ fn build_autotools(
     run("make", &[&jobs], &build_dir, &[])?;
 
     copy_artifact(&build_dir.join(artifact_rel), component)
+}
+
+/// Compile one C source with the build's `cflags` (placeholders substituted)
+/// to `<output>/<name>.o`.
+fn compile_c(
+    manifest: &Manifest,
+    clang: &Path,
+    source: &Path,
+    name: &str,
+    extra: &[String],
+    output_dir: &Path,
+    repo_root: &Path,
+) -> Result<String> {
+    let obj = path_str(&output_dir.join(format!("{name}.o")))?;
+    let mut args: Vec<String> = vec!["--target=wasm32-wasip2".into()];
+    for flag in &manifest.build.cflags {
+        args.push(substitute(flag, &manifest.deps, repo_root)?);
+    }
+    args.extend(extra.iter().cloned());
+    args.extend(["-c".into(), path_str(source)?, "-o".into(), obj.clone()]);
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(&path_str(clang)?, &args_ref, repo_root, &[])?;
+    Ok(obj)
+}
+
+/// Compile `[build] shims`; returns their objects.
+fn build_shims(
+    manifest: &Manifest,
+    clang: &Path,
+    output_dir: &Path,
+    repo_root: &Path,
+) -> Result<Vec<String>> {
+    let mut objs = Vec::new();
+    for shim in &manifest.build.shims {
+        let shim_abs = repo_root.join(shim);
+        if !shim_abs.exists() {
+            bail!("shim {} not found", shim_abs.display());
+        }
+        let stem = shim.file_stem().and_then(|s| s.to_str()).unwrap_or("shim");
+        eprintln!(
+            "=== [{}] compile shim {} ===",
+            manifest.name,
+            shim.display()
+        );
+        let name = format!("shim-{stem}");
+        objs.push(compile_c(
+            manifest,
+            clang,
+            &shim_abs,
+            &name,
+            &[],
+            output_dir,
+            repo_root,
+        )?);
+    }
+    Ok(objs)
+}
+
+/// Generate `wit-bindgen c` bindings for `wit` into `<output>/wit` and
+/// compile them; returns the objects to link (the bindings and the
+/// component-type object `wasm-component-ld` reads the world from).
+fn build_wit(
+    manifest: &Manifest,
+    wit: &WitBindings,
+    clang: &Path,
+    output_dir: &Path,
+    repo_root: &Path,
+) -> Result<Vec<String>> {
+    let out = output_dir.join("wit");
+    let out_s = path_str(&out)?;
+    let wit_path = path_str(&repo_root.join(&wit.path))?;
+    eprintln!("=== [{}] wit-bindgen c {} ===", manifest.name, wit.world);
+    run(
+        "wit-bindgen",
+        &["c", "--world", &wit.world, &wit_path, "--out-dir", &out_s],
+        repo_root,
+        &[],
+    )
+    .with_context(|| {
+        // An older wit-bindgen elsewhere on PATH can't parse async WIT.
+        let found = std::process::Command::new("wit-bindgen")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+        format!("wit-bindgen c failed (found {found:?}; mise.toml pins the version that works)")
+    })?;
+    // wit-bindgen names its files after the world's name.
+    let world = wit.world.rsplit('/').next().unwrap_or(&wit.world);
+    let source = out.join(format!("{world}.c"));
+    let obj = compile_c(
+        manifest,
+        clang,
+        &source,
+        &format!("wit-{world}"),
+        &[format!("-I{out_s}")],
+        output_dir,
+        repo_root,
+    )?;
+    let component_type = path_str(&out.join(format!("{world}_component_type.o")))?;
+    Ok(vec![obj, component_type])
+}
+
+/// `make` mode: run the project's Makefile in its source tree, with
+/// wasi-sdk's clang and tools, `cflags` as `CFLAGS`, `link_flags` (plus shim
+/// objects) as `LDFLAGS` and `make_flags` as further variables, all with
+/// placeholders substituted, then copy the artifact to `component.wasm`.
+fn build_make(
+    manifest: &Manifest,
+    sdk: &Path,
+    source_dir: &Path,
+    component: &Path,
+    repo_root: &Path,
+    shim_objs: &[String],
+) -> Result<()> {
+    let artifact_rel = manifest.build.artifact.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "the C lane (system=make) needs `[build] artifact = \"...\"` for '{}'",
+            manifest.name
+        )
+    })?;
+    let subst = |flags: &[String]| -> Result<Vec<String>> {
+        flags
+            .iter()
+            .map(|f| substitute(f, &manifest.deps, repo_root))
+            .collect()
+    };
+    let mut ldflags = subst(&manifest.build.link_flags)?;
+    ldflags.extend(shim_objs.iter().cloned());
+    let bin = |tool: &str| path_str(&sdk.join("bin").join(tool));
+    let mut args = vec![
+        format!(
+            "-j{}",
+            std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+        ),
+        format!("CC={} --target=wasm32-wasip2", bin("clang")?),
+        format!("AR={}", bin("llvm-ar")?),
+        format!("RANLIB={}", bin("llvm-ranlib")?),
+        format!("CFLAGS={}", subst(&manifest.build.cflags)?.join(" ")),
+        format!("LDFLAGS={}", ldflags.join(" ")),
+    ];
+    args.extend(subst(&manifest.build.make_flags)?);
+    args.extend(manifest.build.make_targets.iter().cloned());
+    eprintln!("=== [{}] make ===", manifest.name);
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    run("make", &args_ref, source_dir, &[])?;
+    copy_artifact(&source_dir.join(artifact_rel), component)
 }
 
 /// Copy a built executable (already a component) to `component.wasm`.
