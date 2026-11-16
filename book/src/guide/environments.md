@@ -80,19 +80,27 @@ eryx-precompile env pack . --name data-tools --entry date-fns/format \
 ```
 
 - **Entries:** what's importable. Without `--entry`, the tree's
-  `package.json` `dependencies`; with it, exactly the entries given.
+  `package.json` `dependencies`, skipping (with a warning in the manifest)
+  any with nothing to import, such as `@types/*` or CLI-only packages; with
+  it, exactly the entries given.
 - **Layouts:** npm's, and pnpm's isolated one (`node_modules/.pnpm`), work
-  as installed, symlinks included. Every package symlink must be relative
-  and lead somewhere the bundler can see: by default the tree itself. For
-  workspace packages or `file:` dependencies outside it, pass a `--root`
-  that holds them (a monorepo's root, say). An absolute symlink, or one that
-  leads outside the root, fails before bundling, naming the link. Links that
-  aren't packages (`node_modules/.bin`) and links that lead nowhere are left
-  alone. Yarn's Plug'n'Play has no `node_modules`, so use its
-  `nodeLinker: node-modules`.
-- **Safety:** as for `build`, the bundler parses the packages in a sandbox
-  that sees only the root, read-only, and its output. Pass
-  `--ignore-scripts` to the install so no package code runs there either.
+  as installed, symlinks included. Packages are looked for in `node_modules`
+  from the tree up to `--root` (default: the tree itself), as Node does, so
+  for a workspace member with hoisted dependencies, workspace packages or
+  `file:` dependencies outside the tree, pass a `--root` that holds them (a
+  monorepo's root, say). Every package symlink must be relative and lead
+  inside the root. An absolute symlink, or one that leads outside the root,
+  fails before bundling, naming the link. Links that aren't packages
+  (`node_modules/.bin`) and links that lead nowhere are left alone. Yarn's
+  Plug'n'Play has no `node_modules`, so use its `nodeLinker: node-modules`.
+- **Safety:** the bundler parses the packages in a sandbox that sees only,
+  read-only, those `node_modules` dirs and the packages they link to, plus
+  its output: never the rest of the tree or the root, so a package can't
+  import the app's own files (a `../../service-account.json`) into the
+  environment; the pack fails instead. A linked package is visible whole,
+  so a workspace member's own files can end up in the bundle if it imports
+  them. Pass `--ignore-scripts` to the install so no package code runs
+  there either.
 - `--lockfile` copies the given file into the environment and records it
   and its hash in the manifest's `inputs`, with the installed versions of
   the entries' packages. None of that is part of the hash: packing the same

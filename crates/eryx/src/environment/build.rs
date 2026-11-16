@@ -225,7 +225,8 @@ async fn build_javascript(
         .ok_or_else(|| EnvironmentError::Build("installed tree has no root".to_string()))?;
     // `modules` is new and empty: the bundler doesn't clear its output dir,
     // so a fresh staging dir is what keeps stale chunks out of the hash.
-    let mut report = run_bundler(tree_root, "/src", &modules, &entries).await?;
+    let sources = [(tree_root.to_path_buf(), "/src".to_string())];
+    let mut report = run_bundler(&sources, "/src", &modules, &entries).await?;
     std::fs::remove_file(modules.join("bundle.json")).map_err(io("removing bundle.json"))?;
 
     let exports = std::mem::take(&mut report.entries)
@@ -411,11 +412,10 @@ pub(super) struct BundleReport {
     pub(super) warnings: Vec<String>,
 }
 
-/// Bundle `entries` from the tree at `tree_root` into `out`. `root` is
-/// mounted (read-only) and `cwd` is the tree inside it, as a guest path
-/// under `/src`.
+/// Bundle `entries` into `out`. `sources` are mounted read-only at their
+/// guest paths (under `/src`), and `cwd` is where the tree is among them.
 pub(super) async fn run_bundler(
-    root: &Path,
+    sources: &[(PathBuf, String)],
     cwd: &str,
     out: &Path,
     entries: &[String],
@@ -428,18 +428,19 @@ pub(super) async fn run_bundler(
         argv.push("--entry".to_string());
         argv.push(entry.clone());
     }
-    let mounts = [
-        Mount {
-            host: root,
-            guest: "/src",
+    let mut mounts: Vec<Mount<'_>> = sources
+        .iter()
+        .map(|(host, guest)| Mount {
+            host,
+            guest,
             writable: false,
-        },
-        Mount {
-            host: out,
-            guest: "/out",
-            writable: true,
-        },
-    ];
+        })
+        .collect();
+    mounts.push(Mount {
+        host: out,
+        guest: "/out",
+        writable: true,
+    });
     let limits = IsolatedLimits {
         memory: 1024 * 1024 * 1024,
         fuel: 500_000_000_000,

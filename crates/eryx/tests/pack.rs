@@ -225,7 +225,7 @@ async fn bad_trees_fail_clearly() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("has no node_modules") && err.contains("npm ci"),
+        err.contains("no node_modules in") && err.contains("npm ci"),
         "{err}"
     );
 
@@ -247,4 +247,104 @@ async fn bad_trees_fail_clearly() {
     .await
     .unwrap();
     assert_eq!(environment.manifest().inputs.packages, ["cjs-pkg@^1"]);
+}
+
+/// The bundler sees only node_modules and the packages linked from them, so
+/// a package can't pull the app's own files into the environment: a
+/// relative import of `../../service-account.json` fails the pack instead.
+#[tokio::test]
+async fn packages_cant_import_the_apps_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let evil = app.join("node_modules/evil");
+    std::fs::create_dir_all(&evil).unwrap();
+    std::fs::write(app.join("service-account.json"), r#"{"key": "CANARY"}"#).unwrap();
+    std::fs::write(
+        evil.join("package.json"),
+        r#"{"name": "evil", "version": "1.0.0", "main": "index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("index.js"),
+        "import key from \"../../service-account.json\";\nexport default key;\n",
+    )
+    .unwrap();
+    let out = dir.path().join("env");
+    let err = pack(&app, &out, &options("evil").entry("evil"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("service-account.json"), "{err}");
+    assert!(!out.exists(), "nothing was written");
+}
+
+/// A workspace member whose dependencies are hoisted to the repo's
+/// node_modules (it has none of its own) packs with the repo as its root,
+/// with the root's files still out of reach.
+#[tokio::test]
+async fn packs_a_hoisted_workspace_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    copy_package("esm-pkg", &repo.join("node_modules/esm-pkg"));
+    copy_package("cjs-pkg", &repo.join("node_modules/cjs-pkg"));
+    let app = repo.join("apps/web");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{"dependencies": {"esm-pkg": "^1"}}"#,
+    )
+    .unwrap();
+
+    let err = pack(&app, &dir.path().join("env"), &options("web"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no node_modules in"), "{err}");
+
+    let environment = pack(&app, &dir.path().join("env"), &options("web").root(&repo))
+        .await
+        .unwrap();
+    assert_eq!(environment.manifest().inputs.packages, ["esm-pkg@1.0.0"]);
+    imports(
+        &environment,
+        r#"import { doubled } from "esm-pkg"; console.log(doubled);"#,
+        "42\n",
+    )
+    .await;
+}
+
+/// With entries defaulted from package.json, a dependency with nothing to
+/// import (types-only, CLI-only) is skipped with a warning; named, it isn't.
+#[tokio::test]
+async fn defaulted_entries_skip_packages_with_nothing_to_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    copy_package("cjs-pkg", &app.join("node_modules/cjs-pkg"));
+    let types = app.join("node_modules/@types/cjs-pkg");
+    std::fs::create_dir_all(&types).unwrap();
+    std::fs::write(types.join("package.json"), r#"{"types": "index.d.ts"}"#).unwrap();
+    std::fs::write(types.join("index.d.ts"), "export {};").unwrap();
+    std::fs::write(
+        app.join("package.json"),
+        r#"{"dependencies": {"cjs-pkg": "^1", "@types/cjs-pkg": "^1"}}"#,
+    )
+    .unwrap();
+
+    let environment = pack(&app, &dir.path().join("env"), &options("skip"))
+        .await
+        .unwrap();
+    assert_eq!(
+        environment.exports().keys().collect::<Vec<_>>(),
+        ["cjs-pkg"]
+    );
+    let warnings = &environment.manifest().warnings;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.starts_with("@types/cjs-pkg isn't exported")),
+        "{warnings:?}"
+    );
+
+    let named = options("named").entry("@types/cjs-pkg");
+    assert!(pack(&app, &dir.path().join("env2"), &named).await.is_err());
 }

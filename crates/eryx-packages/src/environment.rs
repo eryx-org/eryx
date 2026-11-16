@@ -436,9 +436,11 @@ pub struct Manifest {
     pub name: String,
     /// The language it's for; a sandbox for another refuses it.
     pub language: Language,
-    /// What it was built from.
+    /// What it was built from (informational: a writer may leave it out).
+    #[serde(default)]
     pub inputs: Inputs,
-    /// What built it.
+    /// What built it (informational: a writer may leave it out).
+    #[serde(default)]
     pub builder: Builder,
     /// What sandboxes use.
     pub content: Content,
@@ -454,11 +456,12 @@ pub struct Manifest {
 }
 
 /// [`Manifest::inputs`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Inputs {
     /// The package specs, sorted.
+    #[serde(default)]
     pub packages: Vec<String>,
     /// The registry, if packages came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,11 +488,12 @@ impl Inputs {
 }
 
 /// [`Manifest::builder`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Builder {
     /// The eryx version that built it.
+    #[serde(default)]
     pub eryx: String,
     /// Tools it used and their versions, e.g. `bundler: rolldown 1.3.2`.
     #[serde(default)]
@@ -514,9 +518,11 @@ impl Builder {
 pub struct Content {
     /// The directory, relative to the environment's root.
     pub dir: String,
-    /// Files in it.
+    /// Files in it (informational).
+    #[serde(default)]
     pub files: u64,
-    /// Bytes in them.
+    /// Bytes in them (informational).
+    #[serde(default)]
     pub bytes: u64,
     /// The environment's identity: a hash over its name, language, content
     /// dir and exports, and every file in the content dir (see
@@ -1050,6 +1056,36 @@ mod tests {
         let read = Manifest::read(root.path()).unwrap();
         assert_eq!(read, manifest);
         read.verify(root.path()).unwrap();
+    }
+
+    /// The informational fields are optional, so another writer (a different
+    /// eryx, or a service) may leave them out.
+    #[test]
+    fn informational_fields_are_optional() {
+        let root = tempfile::tempdir().unwrap();
+        let manifest = golden(root.path());
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("inputs");
+        object.remove("builder");
+        let content = object["content"].as_object_mut().unwrap();
+        content.remove("files");
+        content.remove("bytes");
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        let read = Manifest::read(root.path()).unwrap();
+        read.verify(root.path()).unwrap();
+        assert_eq!(read.content.hash, manifest.content.hash);
+        assert_eq!(read.inputs, Inputs::default());
+        assert_eq!(read.builder, Builder::default());
+
+        // And inside them: `inputs: {}` and `builder: {}` load too.
+        json["inputs"] = serde_json::json!({});
+        json["builder"] = serde_json::json!({});
+        std::fs::write(root.path().join(MANIFEST_FILE), json.to_string()).unwrap();
+        Manifest::read(root.path())
+            .unwrap()
+            .verify(root.path())
+            .unwrap();
     }
 
     /// An environment in a format version this eryx doesn't know is refused,

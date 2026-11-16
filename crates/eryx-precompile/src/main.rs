@@ -140,10 +140,10 @@ enum EnvCommand {
     /// Pack packages already installed in a directory (`npm ci
     /// --ignore-scripts --omit=dev`, or pnpm) into an environment.
     ///
-    /// Bundles them into ES modules in a sandbox that sees only `--root`,
-    /// read-only; nothing is fetched or run. Package symlinks (pnpm,
-    /// workspaces, `file:` dependencies) must be relative and stay inside
-    /// `--root`.
+    /// Bundles them into ES modules in a sandbox that sees only the
+    /// node_modules dirs and the packages they link to, read-only; nothing
+    /// is fetched or run. Package symlinks (pnpm, workspaces, `file:`
+    /// dependencies) must be relative and stay inside `--root`.
     Pack(EnvPackArgs),
 }
 
@@ -162,14 +162,16 @@ struct EnvPackArgs {
     #[arg(long)]
     name: String,
 
-    /// The directory the bundler sees (default: TREE). Use a monorepo's
-    /// root when packages link to workspace packages or `file:`
-    /// dependencies outside TREE
+    /// Where to look for packages up to (default: TREE): a monorepo's root,
+    /// for hoisted node_modules, workspace members or `file:` dependencies
+    /// outside TREE. The bundler still sees only the node_modules dirs and
+    /// the packages they link to (whole), never the rest of ROOT
     #[arg(long)]
     root: Option<PathBuf>,
 
     /// A specifier to make importable (`zod`, `date-fns/format`). Repeat for
-    /// more. Default: TREE/package.json's dependencies
+    /// more. Default: TREE/package.json's dependencies, skipping (with a
+    /// warning) any with nothing to import, such as `@types/*`
     #[arg(long = "entry", value_name = "SPECIFIER")]
     entries: Vec<String>,
 

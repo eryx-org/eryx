@@ -37,6 +37,10 @@ fields aren't: they record how it was made.
 | `builder` | informational | `eryx` (the version that wrote it) and `tools` (e.g. `"bundler": "rolldown 1.3.2"`) |
 | `warnings` | informational | What the build warned about, if anything |
 
+Every informational field is optional: a writer may leave out `inputs`,
+`builder`, `warnings`, `content.files` or `content.bytes` (or any field
+inside `inputs` and `builder`), and readers fill in empty values.
+
 Paths use `/`, are relative, and must stay inside the environment. The
 content directory may only hold regular files and directories: a symlink is
 refused.
