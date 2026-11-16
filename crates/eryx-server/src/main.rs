@@ -182,20 +182,25 @@ struct Args {
     #[arg(long, env = "ERYX_TLS_CLIENT_CA", requires = "tls_cert")]
     tls_client_ca: Option<PathBuf>,
 
-    /// An external command for the shell, `NAME=PATH`; repeat for more.
-    /// `NAME1,NAME2=PATH` registers one multicall binary (e.g. busybox-style)
-    /// under several names, compiled once. PATH is a WASI 0.2 or 0.3 command
-    /// component or a WASI preview 1 command module (`.wasm`), or one precompiled by this eryx version's
-    /// `eryx-precompile compile` (`.cwasm`, trusted like --runtime-cwasm). A
-    /// name overrides the embedded coreutils tool of the same name. In the
-    /// environment, separate entries with `;`.
+    /// An external command for the shell, `NAME=PATH[@sha256:<hex>]`; repeat
+    /// for more. `NAME1,NAME2=PATH` registers one multicall binary (e.g.
+    /// busybox-style) under several names, compiled once. PATH is a WASI 0.2
+    /// or 0.3 command component or a WASI preview 1 command module (`.wasm`),
+    /// or one precompiled by this eryx version's `eryx-precompile compile`
+    /// (`.cwasm`, trusted like --runtime-cwasm). A name overrides the embedded
+    /// coreutils tool of the same name.
+    ///
+    /// `@sha256:<hex>` pins a `.wasm` to that digest: startup fails if the
+    /// file differs, and the command is compiled once into eryx's cache
+    /// directory. In the environment, separate entries with `;`; empty
+    /// entries, and an empty ERYX_SHELL_COMMANDS, mean no commands.
     #[arg(
         long = "shell-command",
         env = "ERYX_SHELL_COMMANDS",
-        value_delimiter = ';',
-        value_parser = parse_shell_command
+        value_name = "NAME=PATH[@sha256:<hex>]",
+        value_delimiter = ';'
     )]
-    shell_commands: Vec<ShellCommand>,
+    shell_commands: Vec<String>,
 
     /// Let a --shell-command NAME open blind CONNECT tunnels through the
     /// child proxy, for protocols it can't inspect (e.g. git over SSH):
@@ -217,24 +222,44 @@ struct Args {
     no_shell_coreutils: bool,
 }
 
-/// One `--shell-command`: the names to register and the component's path.
+/// One `--shell-command`: the names to register, the component's path, and
+/// the digest it's pinned to, if any.
 #[derive(Debug, Clone)]
 struct ShellCommand {
     names: Vec<String>,
     path: PathBuf,
+    /// `sha256:<hex>`, from `PATH@sha256:<hex>`.
+    sha256: Option<String>,
+}
+
+/// Parse the `--shell-command` values, skipping empty ones, so an empty
+/// ERYX_SHELL_COMMANDS (or a stray `;`) means no commands.
+fn parse_shell_commands(values: &[String]) -> Result<Vec<ShellCommand>, String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(parse_shell_command)
+        .collect()
 }
 
 fn parse_shell_command(value: &str) -> Result<ShellCommand, String> {
-    let (names, path) = value
-        .split_once('=')
-        .ok_or_else(|| format!("expected NAME[,NAME...]=PATH, got {value:?}"))?;
+    let invalid =
+        || format!("--shell-command: expected NAME[,NAME...]=PATH[@sha256:<hex>], got {value:?}");
+    let (names, path) = value.split_once('=').ok_or_else(invalid)?;
     let names: Vec<String> = names.split(',').map(|n| n.trim().to_owned()).collect();
+    // The pin is the last `@sha256:`, so a path may contain `@`.
+    let (path, sha256) = match path.rsplit_once("@sha256:") {
+        Some((path, hex)) => (path, Some(format!("sha256:{hex}"))),
+        None => (path, None),
+    };
     if names.iter().any(String::is_empty) || path.is_empty() {
-        return Err(format!("expected NAME[,NAME...]=PATH, got {value:?}"));
+        return Err(invalid());
     }
     Ok(ShellCommand {
         names,
         path: path.into(),
+        sha256,
     })
 }
 
@@ -255,24 +280,40 @@ fn load_shell_commands(
         ));
     }
     let mut loaded = Vec::new();
-    for ShellCommand { names, path } in commands {
-        let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
-        let command = if precompiled {
-            // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
-            #[allow(unsafe_code)]
-            unsafe {
-                eryx::Command::from_precompiled_file(path)
-            }
-        } else {
-            eryx::Command::from_file(path)
-        };
-        let command = command.map_err(|e| {
+    for ShellCommand {
+        names,
+        path,
+        sha256,
+    } in commands
+    {
+        let flag = || {
+            let pin = sha256
+                .as_deref()
+                .map(|d| format!("@{d}"))
+                .unwrap_or_default();
             format!(
-                "--shell-command {}={}: {e}",
+                "--shell-command {}={}{pin}",
                 names.join(","),
                 path.display()
             )
-        })?;
+        };
+        let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
+        let command = match (precompiled, sha256) {
+            // A pin is for the `.wasm` eryx compiles itself; a `.cwasm` is
+            // trusted as a whole, like --runtime-cwasm.
+            (true, Some(_)) => {
+                return Err(format!(
+                    "{}: only a .wasm can be pinned; pin the .wasm and let eryx compile it",
+                    flag()
+                ));
+            }
+            // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
+            #[allow(unsafe_code)]
+            (true, None) => unsafe { eryx::Command::from_precompiled_file(path) },
+            (false, Some(sha256)) => eryx::Command::load_cached(path, Some(sha256)),
+            (false, None) => eryx::Command::from_file(path),
+        };
+        let command = command.map_err(|e| format!("{}: {e}", flag()))?;
         let (tunnelling, plain): (Vec<String>, Vec<String>) = names
             .iter()
             .cloned()
@@ -534,7 +575,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
 
     let shell = ShellCommands {
-        commands: load_shell_commands(&args.shell_commands, &args.shell_command_tunnels)?,
+        commands: load_shell_commands(
+            &parse_shell_commands(&args.shell_commands)?,
+            &args.shell_command_tunnels,
+        )?,
         coreutils: !args.no_shell_coreutils,
     };
     let shell_configured = !shell.commands.is_empty() || !shell.coreutils;
@@ -694,10 +738,20 @@ mod tests {
         let one = parse_shell_command("rg=/opt/rg.wasm").unwrap();
         assert_eq!(one.names, ["rg"]);
         assert_eq!(one.path, PathBuf::from("/opt/rg.wasm"));
+        assert_eq!(one.sha256, None);
+        let pinned = parse_shell_command("rg=/opt/a@b/rg.wasm@sha256:00ff").unwrap();
+        assert_eq!(pinned.path, PathBuf::from("/opt/a@b/rg.wasm"));
+        assert_eq!(pinned.sha256.as_deref(), Some("sha256:00ff"));
         let multi = parse_shell_command("cat,head=/opt/coreutils.cwasm").unwrap();
         assert_eq!(multi.names, ["cat", "head"]);
 
-        for bad in ["rg", "=/opt/rg.wasm", "rg=", "a,,b=/x.wasm"] {
+        for bad in [
+            "rg",
+            "=/opt/rg.wasm",
+            "rg=",
+            "a,,b=/x.wasm",
+            "rg=@sha256:00",
+        ] {
             assert!(parse_shell_command(bad).is_err(), "{bad}");
         }
 
@@ -710,7 +764,7 @@ mod tests {
             "--no-shell-coreutils",
         ])
         .unwrap();
-        assert_eq!(args.shell_commands.len(), 2);
+        assert_eq!(parse_shell_commands(&args.shell_commands).unwrap().len(), 2);
         assert!(args.no_shell_coreutils);
     }
 
@@ -726,6 +780,7 @@ mod tests {
                 &[ShellCommand {
                     names: vec!["cat".into()],
                     path: coreutils,
+                    sha256: None,
                 }],
                 &[],
             )
@@ -770,6 +825,7 @@ mod tests {
         let coreutils = ShellCommand {
             names: vec!["cat".into(), "head".into()],
             path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm"),
+            sha256: None,
         };
         let loaded =
             load_shell_commands(std::slice::from_ref(&coreutils), &["head".into()]).unwrap();
@@ -789,6 +845,7 @@ mod tests {
             &[ShellCommand {
                 names: vec!["rg".into()],
                 path: "/nonexistent/rg.wasm".into(),
+                sha256: None,
             }],
             &[],
         )
@@ -797,5 +854,48 @@ mod tests {
             err.starts_with("--shell-command rg=/nonexistent/rg.wasm: "),
             "{err}"
         );
+    }
+
+    /// An empty ERYX_SHELL_COMMANDS, and empty `;` entries, mean no commands
+    /// rather than an error.
+    #[test]
+    fn empty_shell_commands_are_skipped() {
+        let parse = |value: &str| {
+            let args = Args::try_parse_from(["eryx-server", "--shell-command", value]).unwrap();
+            parse_shell_commands(&args.shell_commands)
+        };
+        assert!(parse("").unwrap().is_empty());
+        assert_eq!(parse(";rg=/opt/rg.wasm;; ").unwrap().len(), 1);
+        assert!(parse("rg").is_err());
+    }
+
+    /// A pinned `.wasm` must have its digest, and only a `.wasm` can be
+    /// pinned; both fail startup naming the flag.
+    #[test]
+    fn pinned_shell_commands_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("rg.wasm");
+        std::fs::write(&wasm, b"not the pinned file").unwrap();
+        let pin = format!("sha256:{}", "0".repeat(64));
+        let pinned = |path: &std::path::Path| {
+            load_shell_commands(
+                &[ShellCommand {
+                    names: vec!["rg".into()],
+                    path: path.to_owned(),
+                    sha256: Some(pin.clone()),
+                }],
+                &[],
+            )
+            .map(|_| ())
+            .unwrap_err()
+        };
+        let err = pinned(&wasm);
+        assert!(
+            err.starts_with(&format!("--shell-command rg={}@{pin}: ", wasm.display())),
+            "{err}"
+        );
+        assert!(err.contains(&pin), "{err}");
+        let err = pinned(&dir.path().join("rg.cwasm"));
+        assert!(err.contains("only a .wasm can be pinned"), "{err}");
     }
 }

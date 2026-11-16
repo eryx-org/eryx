@@ -54,9 +54,35 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-open-host-files` | `ERYX_MAX_OPEN_HOST_FILES` | `256` | Most host files (stdlib and site-packages) one execution may hold open; opens past it fail with `EDQUOT`. Not settable per request. |
 | `--max-open-host-files-total` | `ERYX_MAX_OPEN_HOST_FILES_TOTAL` | *(half the soft `RLIMIT_NOFILE`, at least 256)* | Most host files all executions in the server may hold open together. |
 | `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
+| `--shell-command` | `ERYX_SHELL_COMMANDS` (`;`-separated) | *(none)* | A shell command, `NAME[,NAME...]=PATH[@sha256:<hex>]`: a `.wasm` or `.cwasm` file, the `.wasm` optionally pinned to its digest. Repeatable; empty entries and an empty variable mean none. See [Commands from a registry](#commands-from-a-registry) and [External Commands](./sandboxes.md#external-commands). |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
+
+### Commands from a registry
+
+eryx-server doesn't fetch commands: it loads `--shell-command` files. To run commands published to an OCI registry (such as `ghcr.io/eryx-org/commands/eryx/rg`), fetch them into a volume first, for example in an init container, and pin each one to its digest:
+
+```yaml
+# Kubernetes: fetch the commands into a shared volume before the server starts.
+initContainers:
+  - name: commands
+    image: <an image with wkg or oras>
+    command: ["wkg", "oci", "pull", "ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2", "-o", "/commands/rg.wasm"]
+    volumeMounts: [{ name: commands, mountPath: /commands }]
+containers:
+  - name: eryx-server
+    env:
+      - name: ERYX_SHELL_COMMANDS
+        value: "rg=/commands/rg.wasm@sha256:<hex>"
+    volumeMounts: [{ name: commands, mountPath: /commands, readOnly: true }]
+```
+
+- **Fetching:** [Commands from a Registry](./precompile.md#commands-from-a-registry) shows the wkg and oras commands. For a private registry, give the init container credentials the way those tools take them, such as `docker login` or a mounted Docker config. For ghcr.io, that's a token with `read:packages`.
+- **The pin:** `@sha256:<hex>` is the digest of the `.wasm` itself. That's the manifest's layer digest, which eryx-commands' `commands.lock` records. It isn't the manifest digest.
+- **At startup:** a pinned file that doesn't match fails startup, naming the flag. The command is then checked (a command importing what the shell doesn't provide is refused) and compiled once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx`), so a later start with the same file skips compiling.
+- **The cache directory** must be writable and private to the server's user. Mount it as a volume to keep compiled commands across restarts.
+- **Pins and `.cwasm`:** only a `.wasm` can be pinned. A `.cwasm` is native code and is trusted as a whole, like `--runtime-cwasm`.
 
 ### Request limits
 
