@@ -27,8 +27,9 @@
 //! - **Python** and the **shell**: not supported yet
 //!   ([`EnvironmentError::Unsupported`]).
 //!
-//! The bundler is embedded by the `packages` feature. A crates.io build
-//! gets it from `eryx-precompile setup --bundler`.
+//! The `packages` feature embeds the bundler if it's there at build time;
+//! otherwise (e.g. a crates.io build) it's loaded from the cache
+//! `eryx-precompile setup --bundler` writes ([`crate::cache::setup_bundler`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

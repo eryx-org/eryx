@@ -1023,6 +1023,10 @@ struct SessionParams<'a> {
     allowed_commands: Option<Vec<String>>,
 }
 
+/// Longest an execution waits for its trace events to reach the client
+/// before sending its result.
+const TRACE_RELAY_DRAIN: Duration = Duration::from_secs(1);
+
 /// Execute Python code using a session executor.
 ///
 /// Creates a [`SessionExecutor`] from the sandbox's Python executor, mounts any
@@ -1175,7 +1179,7 @@ async fn execute_with_session(
 
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-    if params.enable_tracing {
+    let trace_relay = params.enable_tracing.then(|| {
         let trace_server_tx = server_tx.clone();
         let trace_secrets = params.secrets.clone();
         tokio::spawn(async move {
@@ -1190,8 +1194,8 @@ async fn execute_with_session(
                     break;
                 }
             }
-        });
-    }
+        })
+    });
 
     // Stream output to the client as it arrives, and keep the raw (pre-scrub)
     // bytes for the final ExecuteResult. Both stop at `max_output_bytes`.
@@ -1289,6 +1293,14 @@ async fn execute_with_session(
 
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // The execution's trace senders are gone, so the relay ends once it has
+    // forwarded what's queued. Let it, so the last events (such as a killed
+    // child's `process_end`) reach the client before the ExecuteResult; bounded,
+    // in case the client has stopped reading.
+    if let Some(relay) = trace_relay {
+        let _ = tokio::time::timeout(TRACE_RELAY_DRAIN, relay).await;
+    }
 
     // The output channel sender is dropped once execution completes, so the
     // accumulator task has now (or will shortly) finish draining. Its captured
@@ -1580,108 +1592,61 @@ fn classify_failure(error: &Error) -> FailureKind {
 }
 
 /// Convert a guest trace event to its proto form, scrubbing secret
-/// placeholders from its text fields.
+/// placeholders from its text fields and context.
+///
+/// The event JSON uses serde's internally-tagged format with a `"type"` key
+/// (`{"type":"line"}`, `{"type":"call","function":"foo"}`, ...); each proto
+/// field is read from the key of the same name, and `message` also from
+/// `error`. JSON that doesn't parse becomes the event type as is.
 fn trace_event(
     req: &TraceRequest,
     secrets: &HashMap<String, SecretConfig>,
 ) -> crate::proto::eryx::v1::TraceEvent {
-    let (event_type, function, message, name, duration_ms) =
-        parse_trace_event_json(&req.event_json);
-    let scrub = |s: String| {
+    let scrub = |s: &str| {
         if secrets.is_empty() {
-            s
+            s.to_owned()
         } else {
-            scrub_placeholders(&s, secrets)
+            scrub_placeholders(s, secrets)
         }
+    };
+    let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_str::<serde_json::Value>(&req.event_json)
+    else {
+        return crate::proto::eryx::v1::TraceEvent {
+            lineno: req.lineno,
+            event_type: scrub(&req.event_json),
+            context_json: scrub(&req.context_json),
+            ..Default::default()
+        };
+    };
+    let text = |key: &str| scrub(map.get(key).and_then(|v| v.as_str()).unwrap_or(""));
+    let number = |key: &str| map.get(key).and_then(serde_json::Value::as_u64);
+    let event_type = match map.get("type").and_then(|v| v.as_str()) {
+        Some(
+            kind @ ("line" | "call" | "return" | "exception" | "callback_start" | "callback_end"
+            | "process_start" | "process_end"),
+        ) => kind.to_owned(),
+        _ => "unknown".to_owned(),
+    };
+    let message = match text("message") {
+        message if message.is_empty() => text("error"),
+        message => message,
     };
     crate::proto::eryx::v1::TraceEvent {
         lineno: req.lineno,
-        event_type: scrub(event_type),
-        function: scrub(function),
-        message: scrub(message),
-        name: scrub(name),
-        duration_ms,
-        context_json: String::new(),
-    }
-}
-
-/// Parse a trace event JSON string into its proto components.
-///
-/// The event_json uses serde's internally-tagged format with a `"type"` key:
-/// `{"type":"line"}`, `{"type":"call","function":"foo"}`, etc.
-fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, u64) {
-    let str_or = |map: &serde_json::Map<String, serde_json::Value>, key: &str| -> String {
-        map.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(event_json)
-    else {
-        return (
-            event_json.to_string(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        );
-    };
-
-    let event_type = str_or(&map, "type");
-    match event_type.as_str() {
-        "line" => (
-            "line".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "call" => (
-            "call".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "return" => (
-            "return".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "exception" => (
-            "exception".into(),
-            String::new(),
-            str_or(&map, "message"),
-            String::new(),
-            0,
-        ),
-        "callback_start" => (
-            "callback_start".into(),
-            String::new(),
-            String::new(),
-            str_or(&map, "name"),
-            0,
-        ),
-        "callback_end" => {
-            let duration_ms = map.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            (
-                "callback_end".into(),
-                String::new(),
-                String::new(),
-                str_or(&map, "name"),
-                duration_ms,
-            )
-        }
-        _ => (
-            "unknown".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
+        event_type,
+        function: text("function"),
+        message,
+        name: text("name"),
+        duration_ms: number("duration_ms").unwrap_or(0),
+        context_json: scrub(&req.context_json),
+        pid: number("pid")
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or(0),
+        exit_code: map
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
     }
 }
 
@@ -1708,6 +1673,55 @@ mod tests {
         assert_eq!(event.event_type, "exception");
         assert!(!event.message.contains(&placeholder), "{}", event.message);
         assert!(event.message.starts_with("bad "), "{}", event.message);
+    }
+
+    #[test]
+    fn trace_context_is_forwarded_and_scrubbed() {
+        let secret = SecretConfig::new("real", vec![]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+        let req = TraceRequest {
+            lineno: 0,
+            event_json: serde_json::json!({"type": "process_start", "name": "curl", "pid": 1})
+                .to_string(),
+            context_json: serde_json::json!({"args": ["-H", format!("token: {placeholder}")]})
+                .to_string(),
+        };
+        let event = trace_event(&req, &secrets);
+        let context: serde_json::Value = serde_json::from_str(&event.context_json).unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!({"args": ["-H", "token: [REDACTED]"]})
+        );
+    }
+
+    #[test]
+    fn process_events_carry_pid_exit_code_and_error() {
+        let event = |json: serde_json::Value| {
+            trace_event(
+                &TraceRequest {
+                    lineno: 0,
+                    event_json: json.to_string(),
+                    context_json: String::new(),
+                },
+                &HashMap::new(),
+            )
+        };
+        let exited = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 2, "exit_code": 1, "duration_ms": 7,
+        }));
+        assert_eq!(
+            (exited.event_type.as_str(), exited.name.as_str(), exited.pid),
+            ("process_end", "ls", 2)
+        );
+        assert_eq!((exited.exit_code, exited.duration_ms), (Some(1), 7));
+        let killed = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 3, "error": "killed",
+        }));
+        assert_eq!(
+            (killed.exit_code, killed.message.as_str()),
+            (None, "killed")
+        );
     }
 
     #[test]

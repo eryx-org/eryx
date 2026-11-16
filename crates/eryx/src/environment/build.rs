@@ -199,7 +199,9 @@ async fn build_javascript(
                     "{}\0{}\0{}\0{}",
                     definition.name,
                     installed.lockfile.content_hash(),
-                    env!("ERYX_EMBEDDED_BUNDLER_HASH"),
+                    // Which bundler builds it: an environment cached by
+                    // another (e.g. after an upgrade) is rebuilt.
+                    bundler()?.1,
                     entries.join("\0")
                 )
                 .as_bytes(),
@@ -442,6 +444,7 @@ async fn run_bundler(
         output: 1024 * 1024,
     };
     let (code, _stdout, stderr) = bundler()?
+        .0
         .run_isolated(&argv, &mounts, &limits)
         .await
         .map_err(|e| EnvironmentError::Build(format!("bundling: {e}")))?;
@@ -456,30 +459,122 @@ async fn run_bundler(
         .map_err(|e| EnvironmentError::Build(format!("the bundler's bundle.json: {e}")))
 }
 
-/// The embedded bundler, loaded on first use.
-fn bundler() -> Result<crate::Command, EnvironmentError> {
-    static BUNDLER: OnceLock<Result<crate::Command, String>> = OnceLock::new();
-    BUNDLER
-        .get_or_init(|| {
-            let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/eryx-bundler.cwasm"));
-            if bytes.is_empty() {
-                return Err("this eryx was built without the bundler (a placeholder is \
-                            embedded): build it with `mise run precompile-bundler`"
-                    .to_string());
-            }
-            // SAFETY: the build script embeds a bundler that eryx's precompile
-            // produced, as it does the runtimes.
-            #[allow(unsafe_code)]
-            unsafe { crate::Command::from_precompiled_isolated(bytes) }.map_err(|e| e.to_string())
+/// The bundler, loaded on first use: the embedded one, or, if this eryx was
+/// built without it (a placeholder is embedded), the one `eryx-precompile
+/// setup --bundler` cached. Returns it and a hash identifying it, for
+/// environments' cache keys. Only a loaded bundler is kept: after a failure,
+/// the next build looks again, so running `setup` fixes a running process.
+fn bundler() -> Result<(crate::Command, &'static str), EnvironmentError> {
+    static BUNDLER: OnceLock<(crate::Command, String)> = OnceLock::new();
+    let (command, hash) = match BUNDLER.get() {
+        Some(loaded) => loaded,
+        None => {
+            let loaded = load_bundler(
+                include_bytes!(concat!(env!("OUT_DIR"), "/eryx-bundler.cwasm")),
+                crate::cache::setup_bundler,
+            )
+            .map_err(|e| EnvironmentError::Build(format!("the bundler: {e}")))?;
+            // Another build may have loaded it meanwhile; either will do.
+            BUNDLER.get_or_init(|| loaded)
+        }
+    };
+    Ok((command.clone(), hash.as_str()))
+}
+
+/// Load `embedded`, or what `cached` finds if it's empty.
+/// Also returns the bundler's hash: the build script's for `embedded`, or
+/// the cached bytes' own.
+fn load_bundler(
+    embedded: &[u8],
+    cached: impl FnOnce() -> Option<(std::path::PathBuf, Result<Vec<u8>, String>)>,
+) -> Result<(crate::Command, String), String> {
+    let setup = "run `eryx-precompile setup --bundler` (or, in the eryx workspace, \
+                 `mise run precompile-bundler`)";
+    if !embedded.is_empty() {
+        // SAFETY: the build script embeds a bundler that eryx's precompile
+        // produced, as it does the runtimes.
+        #[allow(unsafe_code)]
+        return unsafe { crate::Command::from_precompiled_isolated(embedded) }
+            .map(|command| (command, env!("ERYX_EMBEDDED_BUNDLER_HASH").to_owned()))
+            .map_err(|e| format!("the embedded bundler: {e}"));
+    }
+    let (path, bytes) = match cached() {
+        None => {
+            return Err(format!(
+                "this eryx was built without the bundler, and none is cached: {setup}"
+            ));
+        }
+        // `setup` rebuilds an entry that fails these checks.
+        Some((_, Err(reason))) => {
+            return Err(format!(
+                "not using the cached bundler: {reason}; {setup} again"
+            ));
+        }
+        Some((path, Ok(bytes))) => (path, bytes),
+    };
+    // SAFETY: `setup` precompiled it with this eryx's precompile, and it's
+    // checked against the checksum `setup` wrote, in a directory only this
+    // user can write, as eryx's build script checks a cached runtime before
+    // embedding it. Its name carries this eryx's version, and one another
+    // eryx precompiled fails to load.
+    #[allow(unsafe_code)]
+    unsafe { crate::Command::from_precompiled_isolated(&bytes) }
+        .map(|command| (command, blake3::hash(&bytes).to_hex()[..16].to_owned()))
+        // `setup` would keep an entry that matches its checksum, so it has
+        // to go first.
+        .map_err(|e| {
+            format!(
+                "the cached bundler {} doesn't load: {e}; delete it and {}, then {setup} again",
+                path.display(),
+                crate::cache::setup_checksum_path(&path).display()
+            )
         })
-        .clone()
-        .map_err(|e| EnvironmentError::Build(format!("the embedded bundler: {e}")))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The embedded bundler wins; without one, the cached one is used if it
+    /// checked out, and otherwise the error says to run `setup --bundler`.
+    #[test]
+    fn the_bundler_falls_back_to_the_setup_cache() {
+        let embedded: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/eryx-bundler.cwasm"));
+        if !embedded.is_empty() {
+            assert!(load_bundler(embedded, || panic!("the cache was consulted")).is_ok());
+            // A cached bundler keys environments by its own bytes, not the
+            // build script's hash of the empty placeholder.
+            let (_, hash) =
+                load_bundler(b"", || Some(("b.cwasm".into(), Ok(embedded.to_vec())))).unwrap();
+            assert_eq!(hash, blake3::hash(embedded).to_hex()[..16]);
+        }
+
+        let err = load_bundler(b"", || None).unwrap_err();
+        assert!(
+            err.contains("built without the bundler")
+                && err.contains("eryx-precompile setup --bundler"),
+            "{err}"
+        );
+        let err = load_bundler(b"", || {
+            Some(("b.cwasm".into(), Err("it doesn't match".into())))
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("not using the cached bundler: it doesn't match")
+                && err.contains("setup --bundler"),
+            "{err}"
+        );
+        let err = load_bundler(b"", || {
+            Some(("b.cwasm".into(), Ok(b"not a cwasm".to_vec())))
+        })
+        .unwrap_err();
+        assert!(
+            err.starts_with("the cached bundler b.cwasm doesn't load: ")
+                && err.contains("delete it and b.cwasm.sha256"),
+            "{err}"
+        );
+    }
 
     #[tokio::test]
     async fn other_languages_are_unsupported() {

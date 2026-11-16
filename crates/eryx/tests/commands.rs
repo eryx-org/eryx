@@ -980,6 +980,166 @@ async fn pipe_throughput() {
     }
 }
 
+/// A `process_start` or `process_end` trace event: `(event, name, pid,
+/// exit_code, error)`.
+type ProcessEvent = (&'static str, String, u32, Option<i32>, Option<String>);
+
+/// The `process_start`/`process_end` trace events of `events`.
+fn process_events(events: &[eryx::TraceEvent]) -> Vec<ProcessEvent> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            eryx::TraceEventKind::ProcessStart { name, pid, .. } => {
+                Some(("start", name.clone(), *pid, None, None))
+            }
+            eryx::TraceEventKind::ProcessEnd {
+                name,
+                pid,
+                exit_code,
+                error,
+                ..
+            } => Some(("end", name.clone(), *pid, *exit_code, error.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each child reports `process_start` (its arguments as context) and
+/// `process_end` with its exit code, paired by a per-execution pid; secret
+/// placeholders in arguments are scrubbed.
+#[tokio::test]
+async fn children_report_trace_events() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_secret("TOKEN", "real", vec![])
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+
+    let out = sandbox
+        .execute("tc exit 3 || true; echo hi | tc | tc >/dev/null; tc env \"$TOKEN\" >/dev/null")
+        .await
+        .unwrap();
+    let mut events = process_events(&out.trace);
+    // Pipeline stages start and end in any order; pair them by pid.
+    events.sort_by_key(|&(event, _, pid, ..)| (pid, event == "end"));
+    let expected = |pid, exit_code| {
+        [
+            ("start", "tc".to_string(), pid, None, None),
+            ("end", "tc".to_string(), pid, Some(exit_code), None),
+        ]
+    };
+    assert_eq!(
+        events,
+        [
+            expected(1, 3),
+            expected(2, 0),
+            expected(3, 0),
+            expected(4, 0)
+        ]
+        .concat(),
+        "{:?}",
+        out.trace
+    );
+
+    let args: Vec<_> = out
+        .trace
+        .iter()
+        .filter(|e| matches!(e.event, eryx::TraceEventKind::ProcessStart { .. }))
+        .map(|e| e.context.clone().unwrap())
+        .collect();
+    assert_eq!(args[0], serde_json::json!({ "args": ["exit", "3"] }));
+    let last = args[3].to_string();
+    assert!(
+        last.contains("[REDACTED]") && !last.contains("real"),
+        "{last}"
+    );
+}
+
+/// Collects the trace events a sandbox's handler receives.
+#[derive(Clone, Default)]
+struct CollectTrace(std::sync::Arc<std::sync::Mutex<Vec<eryx::TraceEvent>>>);
+
+#[async_trait::async_trait]
+impl eryx::TraceHandler for CollectTrace {
+    async fn on_trace(&self, event: eryx::TraceEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+/// A child the parent's timeout kills still reports its `process_end`, to a
+/// trace handler (a failed execution returns no collected trace).
+#[tokio::test]
+async fn a_child_killed_by_the_timeout_reports_its_end() {
+    let handler = CollectTrace::default();
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_trace_handler(handler.clone())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let err = sandbox.execute("tc spin").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+
+    let events = handler.0.lock().unwrap().clone();
+    assert_eq!(
+        process_events(&events),
+        [
+            ("start", "tc".to_string(), 1, None, None),
+            ("end", "tc".to_string(), 1, None, Some("killed".to_string())),
+        ],
+        "{events:?}"
+    );
+}
+
+/// In a session, a timeout leaves the child's `wait` parked in the store
+/// rather than dropping it; the execution still ends, and reports the child
+/// killed. The next execution numbers its children afresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_reports_a_child_its_timeout_killed() {
+    use eryx::session::{InProcessSession, Session};
+
+    let handler = CollectTrace::default();
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_trace_handler(handler.clone())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+
+    let err = tokio::time::timeout(Duration::from_secs(10), session.execute("tc spin"))
+        .await
+        .expect("the timed-out execution never finished")
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    let events = std::mem::take(&mut *handler.0.lock().unwrap());
+    assert_eq!(
+        process_events(&events),
+        [
+            ("start", "tc".to_string(), 1, None, None),
+            ("end", "tc".to_string(), 1, None, Some("killed".to_string())),
+        ],
+        "{events:?}"
+    );
+
+    session.reset().await.unwrap();
+    session.execute("tc exit 0").await.unwrap();
+    let events = handler.0.lock().unwrap().clone();
+    assert_eq!(
+        process_events(&events),
+        [
+            ("start", "tc".to_string(), 1, None, None),
+            ("end", "tc".to_string(), 1, Some(0), None),
+        ],
+        "{events:?}"
+    );
+}
+
 /// `with_allowed_commands` narrows one execution's commands: the guest sees
 /// only those, others exit 127, an empty list allows none, and names that
 /// aren't registered are ignored. The next execution without it gets them

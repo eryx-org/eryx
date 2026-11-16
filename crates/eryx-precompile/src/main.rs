@@ -442,24 +442,12 @@ async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Determine the cache directory for eryx runtime artifacts.
+/// The cache directory for eryx runtime artifacts: the one eryx reads them
+/// from ([`eryx::cache::setup_dir`]).
 fn cache_dir() -> Result<PathBuf> {
-    let dir = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("eryx")
-    } else {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .context("Could not determine home directory (set HOME or XDG_CACHE_HOME)")?;
-        PathBuf::from(home).join(".cache").join("eryx")
-    };
-    Ok(dir)
-}
-
-/// Build a short platform target string like "x86_64-linux" or "aarch64-macos".
-fn platform_target() -> String {
-    let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
-    let os = std::env::consts::OS; // "linux", "macos", "windows"
-    format!("{arch}-{os}")
+    eryx::cache::setup_dir().context(
+        "Could not determine the cache directory (set HOME or XDG_CACHE_HOME to an absolute path)",
+    )
 }
 
 fn parse_language(s: &str) -> Result<eryx::Language, String> {
@@ -598,21 +586,14 @@ fn verify_sha256(bytes: &[u8], expected: &[u8; 32]) -> Result<()> {
 
 /// Path of the checksum file kept next to a cached runtime.
 fn checksum_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".sha256");
-    PathBuf::from(name)
+    eryx::cache::setup_checksum_path(path)
 }
 
-/// Whether `path` holds a complete runtime written by `setup`, according to
-/// the checksum file stored next to it.
+/// Whether `path` holds a complete runtime written by `setup` that eryx will
+/// use: matching the checksum file stored next to it, and private, as
+/// eryx's readers check it.
 fn cached_runtime_is_valid(path: &Path) -> bool {
-    let (Ok(bytes), Ok(checksum)) = (
-        std::fs::read(path),
-        std::fs::read_to_string(checksum_path(path)),
-    ) else {
-        return false;
-    };
-    parse_sha256(&checksum).is_ok_and(|expected| verify_sha256(&bytes, &expected).is_ok())
+    eryx::cache::setup_read_verified(path).is_ok()
 }
 
 /// Write `bytes` to `path` through a temp file in the same directory, so
@@ -664,7 +645,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         );
     }
     let components = setup_components(&args)?;
-    let target = platform_target();
+    let target = eryx::cache::setup_target();
     let cache = cache_dir()?;
 
     println!("eryx-precompile setup");
@@ -785,7 +766,11 @@ fn cached_component_path(
     version: &str,
     target: &str,
 ) -> PathBuf {
-    cache.join(format!("{}-v{version}-{target}.cwasm", component.stem()))
+    cache.join(eryx::cache::setup_file_name(
+        &component.stem(),
+        version,
+        target,
+    ))
 }
 
 /// Download, precompile and cache one component.
@@ -805,10 +790,7 @@ async fn setup_component(
     // Check if already cached. A file another user could have written, or one
     // without a matching checksum (from an interrupted run or an older version
     // of this tool), is rebuilt.
-    if std::fs::symlink_metadata(&cwasm_path)
-        .is_ok_and(|meta| meta.is_file() && eryx::cache::is_private(&meta))
-        && cached_runtime_is_valid(&cwasm_path)
-    {
+    if cached_runtime_is_valid(&cwasm_path) {
         println!("Already cached: {}", cwasm_path.display());
         println!();
         println!(
@@ -859,6 +841,14 @@ async fn setup_component(
     // the same owner-only permissions it requires.
     eryx::cache::ensure_private_dir(cache)
         .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
+    // eryx doesn't read its setup cache through a symlink.
+    if std::fs::symlink_metadata(cache).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!(
+            "{} is a symlink, which eryx won't read its cache from: replace it with a \
+             directory, or set XDG_CACHE_HOME",
+            cache.display()
+        );
+    }
     write_cached_runtime(&cwasm_path, &precompiled)?;
     println!("  Saved to: {}", cwasm_path.display());
     println!();
@@ -1880,6 +1870,50 @@ mod tests {
         write_cached_runtime(&path, b"compiled runtime")?;
         std::fs::remove_file(checksum_path(&path))?;
         assert!(!cached_runtime_is_valid(&path));
+        Ok(())
+    }
+
+    /// What `setup` writes is where eryx looks: each component, cached under
+    /// `cache_dir()` for this version and platform, is found by eryx's
+    /// readers, and the bundler passes their checksum check.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn eryx_finds_what_setup_caches() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        // SAFETY: nextest runs each test in its own process, so nothing else
+        // reads the environment concurrently.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+        let cache = cache_dir()?;
+        eryx::cache::ensure_private_dir(&cache)?;
+        let version = env!("CARGO_PKG_VERSION");
+        let target = eryx::cache::setup_target();
+        for component in [
+            Component::Runtime(eryx::Language::Shell),
+            Component::Coreutils,
+            Component::Bundler,
+        ] {
+            let path = cached_component_path(&cache, component, version, &target);
+            write_cached_runtime(&path, component.stem().as_bytes())?;
+        }
+
+        let path = |component| cached_component_path(&cache, component, version, &target);
+        assert_eq!(
+            eryx::cache::setup_runtime(eryx::Language::Shell),
+            Some(path(Component::Runtime(eryx::Language::Shell)))
+        );
+        assert_eq!(
+            eryx::cache::setup_coreutils(),
+            Some(path(Component::Coreutils))
+        );
+        assert_eq!(
+            eryx::cache::setup_bundler(),
+            Some((path(Component::Bundler), Ok(b"eryx-bundler".to_vec())))
+        );
+
+        // A bundler that no longer matches its checksum is refused.
+        std::fs::write(path(Component::Bundler), b"tampered")?;
+        assert!(matches!(eryx::cache::setup_bundler(), Some((_, Err(_)))));
         Ok(())
     }
 

@@ -66,6 +66,13 @@ const MAX_CACHED_HOSTS: usize = 256;
 /// Size of each read from either side of a proxied connection.
 const BUF_LEN: usize = 16 * 1024;
 
+/// Longest the proxy waits for an upstream's TLS handshake on a `CONNECT`
+/// (or less, with a shorter connect timeout). A server that isn't TLS, such
+/// as plain HTTP waiting for a request line, may never answer the
+/// ClientHello, and the child should hear so well before its execution
+/// times out.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A forward proxy for one sandbox's child processes, listening on
 /// `127.0.0.1`. It stops when dropped, closing every connection.
 #[derive(Debug)]
@@ -416,9 +423,29 @@ async fn connect(
         return Ok(());
     }
 
+    let handshake = shared.connect_timeout.min(TLS_HANDSHAKE_TIMEOUT);
+    let not_tls = "CONNECT is for TLS; if it serves plain HTTP, send the http:// URL to \
+                   HTTP_PROXY instead";
     let upstream = policy
-        .tls_connect(upstream, host, shared.connect_timeout)
-        .await?;
+        .tls_connect(upstream, host, handshake)
+        .await
+        .map_err(|e| match e {
+            TlsError::Tcp(TcpError::TimedOut) => ProxyError::Upstream(format!(
+                "TLS handshake with {host}:{port} timed out after {handshake:?} ({not_tls})"
+            )),
+            // rustls reports bytes that aren't TLS records, such as a plain
+            // HTTP reply, as a corrupt message; other failures (e.g. an
+            // untrusted certificate) are TLS servers, and get no hint.
+            TlsError::HandshakeFailed(reason) if reason.contains("corrupt message") => {
+                ProxyError::Upstream(format!(
+                    "TLS handshake with {host}:{port} failed: {reason} ({not_tls})"
+                ))
+            }
+            TlsError::HandshakeFailed(reason) => {
+                ProxyError::Upstream(format!("TLS handshake with {host}:{port} failed: {reason}"))
+            }
+            other => other.into(),
+        })?;
     let config = shared
         .ca
         .server_config(host)
@@ -754,6 +781,80 @@ mod tests {
             "{response}"
         );
         assert!(!response.contains(REAL), "{response}");
+    }
+
+    /// A `CONNECT` to a server that isn't TLS gets a 502 naming the TLS
+    /// handshake: soon if the server answers the ClientHello with plain
+    /// HTTP, and within the handshake bound if it waits for a request.
+    #[tokio::test]
+    async fn plain_http_upstreams_fail_the_tls_handshake_clearly() {
+        /// The whole response to `CONNECT api.test:{port}`.
+        async fn refusal(proxy: &ChildProxy, port: u16) -> String {
+            let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+            let target = format!("api.test:{port}");
+            stream
+                .write_all(
+                    format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            let _ = stream.read_to_end(&mut response).await;
+            String::from_utf8_lossy(&response).into_owned()
+        }
+
+        // Waits for a request head, which a ClientHello never completes.
+        let (port, cert, _) = upstream(false).await;
+        let timeout = Duration::from_millis(300);
+        let proxy = proxy(
+            config(&cert).with_connect_timeout(timeout),
+            ChildNetwork::Inherit,
+            false,
+        );
+        let started = std::time::Instant::now();
+        let message = refusal(&proxy, port).await;
+        assert!(message.starts_with("HTTP/1.1 502 "), "{message}");
+        assert!(
+            message.contains(&format!(
+                "TLS handshake with api.test:{port} timed out after 300ms"
+            )) && message.contains("http:// URL to HTTP_PROXY"),
+            "{message}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // Answers with a plain HTTP error and closes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let _ = stream.read(&mut [0u8; 1024]).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        let proxy = super::tests::proxy(config(&cert), ChildNetwork::Inherit, false);
+        let started = std::time::Instant::now();
+        let message = refusal(&proxy, port).await;
+        assert!(message.starts_with("HTTP/1.1 502 "), "{message}");
+        assert!(
+            message.contains(&format!("TLS handshake with api.test:{port} failed:"))
+                && message.contains("http:// URL to HTTP_PROXY"),
+            "{message}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        // A TLS server with a certificate the proxy doesn't trust gets no
+        // plain-HTTP hint.
+        let (port, _, _) = upstream(true).await;
+        let proxy = super::tests::proxy(config(&[]), ChildNetwork::Inherit, false);
+        let message = refusal(&proxy, port).await;
+        assert!(
+            message.starts_with("HTTP/1.1 502 ")
+                && message.contains(&format!("TLS handshake with api.test:{port} failed:"))
+                && !message.contains("plain HTTP"),
+            "{message}"
+        );
     }
 
     /// Hosts the policy refuses get a 403, before anything is dialled.

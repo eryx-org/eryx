@@ -27,8 +27,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 walkdir.workspace = true
 
 [features]
-# `env build`: build environments (embeds the JavaScript bundler; see eryx's
-# `packages` feature). Off by default until releases ship the bundler.
+default = ["env"]
+# `env build`: build environments (eryx's `packages` feature). The JavaScript
+# bundler is embedded if it's built; otherwise, as in releases, it's loaded
+# from `eryx-precompile setup --bundler`'s cache.
 env = ["eryx/packages"]
 
 [package.metadata.cargo-all-features]
