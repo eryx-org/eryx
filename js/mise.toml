@@ -145,19 +145,54 @@ rm -f eryx/eryx-sandbox-*.js eryx/eryx-sandbox-*.wasm
 cp "$out"/eryx-sandbox-*.js "$out"/eryx-sandbox-*.wasm eryx/
 """
 
+[tasks.coreutils-build]
+description = "Build uutils coreutils (the shell's bundled commands; delegates to the root mise task)"
+sources = ["../clis/coreutils.toml", "../clis/patches/patch-uucore-wasip2.sh"]
+outputs = ["../crates/eryx-runtime/coreutils.wasm"]
+run = """
+cd .. && mise run build-coreutils
+"""
+
+[tasks.transpile-coreutils]
+description = "Transpile coreutils for the shell sandbox's external commands (loaded on first use)"
+depends = ["coreutils-build"]
+sources = ["../crates/eryx-runtime/coreutils.wasm"]
+outputs = ["eryx/eryx-coreutils.js"]
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+# A WASI 0.2 command, run with JSPI so that blocking on a pollable (`sleep`)
+# suspends it; without, jco drops the wait and the child runs on. Typings are
+# dropped, as for the guests.
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+jco transpile ../crates/eryx-runtime/coreutils.wasm \
+  --name eryx-coreutils \
+  --out-dir "$out" \
+  --quiet \
+  --instantiation async \
+  --async-mode jspi \
+  --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' \
+  --async-exports 'wasi:cli/run#run'
+rm -f eryx/eryx-coreutils.js eryx/eryx-coreutils.*.wasm
+cp "$out"/eryx-coreutils.js "$out"/eryx-coreutils.*.wasm eryx/
+"""
+
 [tasks.patch-js]
 description = "Patch generated JS for webpack compat and jco codegen bugs"
-depends = ["transpile", "transpile-guests"]
+depends = ["transpile", "transpile-guests", "transpile-coreutils"]
 sources = [
   "eryx/eryx-sandbox.js",
   "eryx/eryx-sandbox-javascript.js",
   "eryx/eryx-sandbox-shell.js",
+  "eryx/eryx-coreutils.js",
   "patch-jco.cjs",
 ]
 outputs = [
   "eryx/eryx-sandbox.js",
   "eryx/eryx-sandbox-javascript.js",
   "eryx/eryx-sandbox-shell.js",
+  "eryx/eryx-coreutils.js",
 ]
 run = "node patch-jco.cjs"
 

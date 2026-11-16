@@ -84,6 +84,8 @@ js/eryx/eryx-sandbox.d.ts
 js/eryx/eryx-sandbox.*.wasm
 js/eryx/eryx-sandbox-*.js
 js/eryx/eryx-sandbox-*.wasm
+js/eryx/eryx-coreutils.js
+js/eryx/eryx-coreutils.*.wasm
 js/eryx/interfaces/
 js/eryx/python-stdlib.tar.gz
 js/eryx/node_modules/

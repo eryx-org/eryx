@@ -9,7 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 describe("in Chromium", () => {
   // A browser drops a message that reaches a module Worker before its
   // listener exists, which Node.js queues, so only a browser catches this.
-  it("runs timeoutMs sandboxes in every language", async () => {
+  it("runs timeoutMs sandboxes in every language, and shell commands", async () => {
     const server = await createServer({ root, logLevel: "silent", server: { port: 0 } });
     await server.listen();
     const address = server.httpServer!.address();
@@ -20,7 +20,13 @@ describe("in Chromium", () => {
       await page.goto(`http://localhost:${port}/test/worker-timeout.html`);
       await page.waitForFunction(() => "results" in window, null, { timeout: 120000 });
       const results = await page.evaluate(() => (window as any).results);
-      expect(results).toEqual({ python: "ok\n", javascript: "ok\n", shell: "ok\n" });
+      expect(results).toEqual({
+        python: "ok\n",
+        javascript: "ok\n",
+        shell: "ok\n",
+        commands: "a\n",
+        "commands-worker": "a\n",
+      });
     } finally {
       await browser.close();
       await server.close();
