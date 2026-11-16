@@ -227,7 +227,9 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).
   The running children share 256 MiB of memory, outside `max_memory_bytes`;
-  a child that can't grow fails like one out of memory.
+  a child that can't grow fails like one out of memory. Children run on an
+  engine of their own that allocates on demand, so they take none of the
+  pooling allocator's slots (`ERYX_POOL_INSTANCES`).
   The host memory children's arguments and environment hold is capped per
   execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64

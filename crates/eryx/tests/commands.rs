@@ -1684,3 +1684,27 @@ git st
     assert!(stdout.ends_with(" M f.txt\n"), "{stdout}");
     assert_eq!(storage.read("/data/repo/f.txt").await.unwrap(), b"two\n");
 }
+
+/// Children run on their own on-demand engine (#833), so running ones take
+/// none of the pooling allocator's slots: only the shell holds one.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn children_take_no_pool_slots() {
+    let engine = eryx::Executor::shared_engine().unwrap();
+    let Some(before) = engine.pooling_allocator_metrics() else {
+        return; // On-demand (Windows, or ERYX_ALLOCATOR): there's no pool.
+    };
+    let (instances, memories) = (before.component_instances(), before.memories());
+    let sandbox = shell().build().unwrap();
+    let run = tokio::spawn(async move { sandbox.execute("sleep 1 | sleep 1 | sleep 1").await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let during = engine.pooling_allocator_metrics().unwrap();
+    // The shell itself, and nothing for its three sleeping children.
+    assert!(
+        during.component_instances() <= instances + 1,
+        "{}",
+        during.component_instances()
+    );
+    assert!(during.memories() <= memories + 1, "{}", during.memories());
+    run.await.unwrap().unwrap();
+}
