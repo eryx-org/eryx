@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Third-party notices for eryx's shipped artifacts (#837).
 
-    scripts/notices.py generate OUTDIR   # write OUTDIR/<artifact>.notices.md
+    scripts/notices.py generate OUTDIR [ARTIFACT...]
+                                         # write OUTDIR/<artifact>.notices.md
     scripts/notices.py check             # what CI runs; writes nothing
 
 Each artifact's notices are cargo-about's rendering of the Rust crates in its
@@ -14,6 +15,12 @@ std's own dependencies are rendered the same way, from the toolchain's
 rust-src (`library/`, whose Cargo.lock pins them and whose vendor/ holds
 their sources). That needs rust-src installed for each toolchain, which the
 `notices` and `notices-check` mise tasks do first.
+
+coreutils (the shell's embedded commands) is built by eryx-build from
+upstream source (CLIS). Its crates come from cargo-about over its checkout,
+with the features it's built with, so they're only listed once it has been
+built (`mise run build-coreutils`). Naming it on the command line requires
+that; generating everything leaves an unbuilt one's crates out.
 
 The host artifacts embed every runtime, so host's notices take in theirs in
 full (EMBEDS).
@@ -78,9 +85,16 @@ ARTIFACTS = {
     "eryx-bundler": [
         "-m", "crates/eryx-bundler/Cargo.toml", "--target", "wasm32-wasip2",
     ],
-    # Built by eryx-build from upstream source (clis/coreutils.toml).
+    # Built by eryx-build from upstream source: see CLIS.
     "coreutils": None,
 }
+
+# Command components built from clis/, and their manifests.
+CLIS = {"coreutils": "clis/coreutils.toml"}
+
+# The cargo flags of a CLI manifest that choose its crates, which cargo-about
+# takes too.
+FEATURE_FLAGS = {"--no-default-features", "--all-features", "--features"}
 
 # The toolchains the Rust artifacts are built with.
 def stable_toolchain():
@@ -107,6 +121,8 @@ STD = {
     "runtime-javascript": (GUEST, ["wasm32-wasip1"]),
     "runtime-shell": (STABLE, ["wasm32-wasip3", "wasm32-wasip2"]),
     "eryx-bundler": (STABLE, ["wasm32-wasip2"]),
+    # eryx-build's Rust lane.
+    "coreutils": (STABLE, ["wasm32-wasip2"]),
 }
 
 # Artifacts whose notices also take in others' in full, because they embed
@@ -346,35 +362,79 @@ def manual_section(artifact):
     return "\n".join(out)
 
 
-def fetch():
+def bin_package(checkout, bin_name):
+    """The Cargo.toml of the package in `checkout` that builds `bin_name`,
+    found the way eryx-build's Rust lane finds it (`package_of`)."""
+    metadata = json.loads(run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"], cwd=checkout,
+    ))
+    for package in metadata["packages"]:
+        if any(t["name"] == bin_name and "bin" in t["kind"] for t in package["targets"]):
+            return Path(package["manifest_path"])
+    sys.exit(f"no package in {checkout} builds the binary {bin_name}")
+
+
+def cli_about_args(artifact, required):
+    """cargo-about arguments for a Rust CLI's crates, from its checkout.
+
+    None if the artifact isn't a Rust CLI, or (unless `required`) its
+    checkout isn't there because it hasn't been built.
+    """
+    if artifact not in CLIS:
+        return None
+    manifest = tomllib.loads((ROOT / CLIS[artifact]).read_text())
+    if manifest["lang"] != "rust":
+        return None
+    checkout = ROOT / manifest["source"]["dir"]
+    if not (checkout / "Cargo.toml").is_file():
+        if required:
+            sys.exit(f"{artifact}: {checkout} isn't checked out; run `mise run build-cli -- {artifact}` first")
+        return None
+    cargo_toml = bin_package(checkout, manifest["build"]["bin"])
+    flags = manifest["build"].get("cargo_flags", [])
+    for flag in flags:
+        if flag.startswith("--") and flag not in FEATURE_FLAGS:
+            sys.exit(f"{artifact}: cargo flag {flag} in {CLIS[artifact]} isn't one cargo-about takes")
+    return ["-m", str(cargo_toml), "--target", "wasm32-wasip2", *flags]
+
+
+def fetch(about_args):
     """Download the crates cargo-about reads (it runs offline)."""
-    manifests = {"Cargo.toml"} | {
-        args[args.index("-m") + 1] for args in ARTIFACTS.values() if args and "-m" in args
-    }
+    # The root workspace's for the artifacts without a -m of their own.
+    manifests = {args[args.index("-m") + 1] if "-m" in args else "Cargo.toml" for args in about_args.values() if args}
     for manifest in sorted(manifests):
         subprocess.run(
             ["cargo", "fetch", "--locked", "--manifest-path", manifest], cwd=ROOT, check=True
         )
 
 
-def generate(outdir):
-    """Write every artifact's notices; return the artifacts cargo-about failed on."""
-    fetch()
+def generate(outdir, only=None):
+    """Write the notices of `only` (default: every artifact); return the
+    artifacts cargo-about failed on."""
+    names = only or list(ARTIFACTS)
+    if unknown := [a for a in names if a not in ARTIFACTS]:
+        sys.exit(f"unknown artifact {', '.join(unknown)}; known: {', '.join(ARTIFACTS)}")
+    about_args = {a: ARTIFACTS[a] or cli_about_args(a, required=only is not None) for a in names}
+    fetch(about_args)
     outdir.mkdir(parents=True, exist_ok=True)
     failed = []
-    for artifact, args in ARTIFACTS.items():
+    for artifact, args in about_args.items():
         path = outdir / f"{artifact}.notices.md"
         if args is None:
             path.write_text("# Third-party notices\n")
         elif not cargo_about(args, path, artifact):
             failed.append(artifact)
             continue
-        if not std_section(artifact, path):
+        # An unbuilt CLI's standard library would be listed without its
+        # crates; leave both out.
+        if (artifact not in CLIS or args is not None) and not std_section(artifact, path):
             failed.append(artifact)
             continue
         with path.open("a") as f:
             f.write(manual_section(artifact))
     for artifact, embedded in EMBEDS.items():
+        if artifact not in names or any(other not in names for other in embedded):
+            continue
         if artifact in failed or any(other in failed for other in embedded):
             continue
         with (outdir / f"{artifact}.notices.md").open("a") as f:
@@ -497,8 +557,8 @@ def check_manual():
 
 def main():
     match sys.argv[1:]:
-        case ["generate", outdir]:
-            if failed := generate(Path(outdir)):
+        case ["generate", outdir, *only]:
+            if failed := generate(Path(outdir), only or None):
                 sys.exit(f"cargo-about failed for {', '.join(failed)}; see its output above")
         case ["check"]:
             errors = check_manual()
