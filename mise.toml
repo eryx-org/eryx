@@ -695,9 +695,9 @@ depends = ["ensure-rust-src"]
 run = "python3 scripts/notices.py generate target/notices"
 
 [tasks.ensure-rust-src]
-description = "Install rust-src for both pinned toolchains, which the notices read the standard library's dependencies from"
+description = "Install rust-src for both pinned toolchains, which the notices read the standard library's dependencies from, and the wasm targets whose sysroots they check"
 depends = ["ensure-guest-toolchain"]
-run = "rustup component add rust-src"
+run = "rustup component add rust-src && rustup target add wasm32-wasip2 wasm32-wasip3"
 
 [tasks.update-reserved-names]
 description = "Regenerate the JS SDK's copy of the callback names each guest reserves (#962)"

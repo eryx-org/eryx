@@ -444,7 +444,13 @@ def check_manual():
                 capture_output=True, text=True, check=True,
             ).stdout.strip())
             for rel in c["sysroot_strings"]["paths"]:
-                data = (sysroot / rel).read_bytes() if (sysroot / rel).is_file() else b""
+                if not (sysroot / rel).is_file():
+                    errors.append(
+                        f"{c['name']}: {c['rust_toolchain']} has no {rel}; install its target "
+                        f"(`mise run ensure-rust-src` adds them)"
+                    )
+                    continue
+                data = (sysroot / rel).read_bytes()
                 for string in c["sysroot_strings"]["strings"]:
                     if string.encode() not in data:
                         errors.append(f"{c['name']}: {c['rust_toolchain']}'s {rel} doesn't contain {string!r}; update the entry")
