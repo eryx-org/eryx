@@ -110,12 +110,59 @@ The real value is only sent to the host the connection was opened to:
 
 ## Responses
 
-If a server sends the real value back (an echo endpoint, or an error message
-quoting the key), the sandbox sees the placeholder instead. This also works
-when the value is split across reads: bytes that may be the start of a secret
-are held back for up to 100 ms waiting for the rest. Only verbatim copies are
-replaced; compressed, chunk-split or otherwise encoded copies are passed through
-unchanged.
+If a host a secret is allowed for sends its real value back (an echo endpoint,
+or an error message quoting the key), the sandbox sees the placeholder instead.
+Other hosts never receive the value, and nor does a connection whose requests
+don't get values substituted (plain TCP without `allow_plaintext_secrets`), so
+those responses aren't masked: a host that has the real value some other way
+(it was given it outside the sandbox, say) shows it to the sandbox as it is.
+That includes a value the sandbox planted itself, through another connection
+that did get it substituted: a request-inspection or audit-log endpoint on the
+secret's host can store it, and a connection the sandbox opens to read it back
+without its first write being a request (e.g. with a space before `GET`, which
+a lenient server accepts) only gets the best-effort masking of other protocols
+described below. Don't allow a secret for a host that hands back what it was
+sent.
+
+Responses are masked where the sandbox's HTTP client sees the value whole:
+
+- **Headers** are masked as one block once they've all arrived.
+- **A chunked body** is masked after de-chunking, so a value split across
+  chunks is masked too. It's re-chunked on the way: the body is the server's,
+  masked, but the chunk sizes are eryx's.
+- **Holding back:** the last bytes of a body (one less than the host's longest
+  secret value) are held back so a value split across reads is whole before
+  any of it reaches the sandbox. Inside a `Content-Length` body or one chunk's
+  data they wait for more of it, or for its end, however long that takes, and
+  in a body that ends when the connection closes, for the close. Between
+  chunks they also go out after 100 ms with nothing new, so a token stream's
+  events are late by at most that, and so do bytes after a `101` or a
+  `CONNECT`'s `2xx` (another protocol, where nothing is substituted). They're
+  held back whatever they contain, so read sizes and timing don't reveal
+  whether they match a secret. A value an allowed host splits between chunks,
+  or after a `101`, more than 100 ms apart, isn't masked.
+- **Anything else fails closed:** on such a connection, a reply that isn't an
+  HTTP/1.x response to a request the sandbox sent (another protocol, a
+  response nobody asked for) or a response whose framing can't be followed
+  (malformed chunks, ambiguous lengths) ends the connection: the sandbox's
+  reads fail from there on, and nothing held back reaches it. (A response
+  nobody asked for on an idle connection, such as a `408` before the server
+  closes it, ends the stream cleanly instead.)
+- **Other protocols from the start:** a connection whose first write isn't an
+  HTTP request, or whose server speaks first (Postgres after `SSLRequest`,
+  SMTP, Redis), never has anything substituted, now or later, so its replies
+  are held back and released the same best-effort way as after a `101`
+  rather than failing.
+
+A secret without `allowed_hosts` applies to every host the sandbox may reach,
+so every TLS connection then gets these HTTP-only rules. Give each secret the
+`allowed_hosts` it's for.
+
+Only verbatim copies are replaced; compressed or otherwise encoded copies are
+passed through unchanged. Masking can change a body's length: a
+`Content-Length` body that contains a real value reaches the sandbox with the
+placeholder in its place, so its length no longer matches the header.
+
 The sandbox picks the encoding, too: a secret allowed in `Authorization` can be
 sent base64-wrapped as `Basic` credentials (e.g. `Basic b64("x:PLACEHOLDER")`),
 so an allowed host that echoes request headers returns the base64 of the real

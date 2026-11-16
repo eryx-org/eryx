@@ -20,7 +20,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 pub use ipnet::IpNet;
+
+mod response;
 use ipnet::{Ipv4Net, Ipv6Net};
+use response::{CARRY_GRACE, RequestKind, ResponseMasker, UNSOLICITED};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -968,6 +971,9 @@ struct HttpParsingState {
     skipped_crlf: bool,
     /// Whether a write was refused, after which every write is.
     failed: bool,
+    /// The kinds of the requests sent and still awaiting a response, which
+    /// the read side frames those responses by.
+    requests: std::collections::VecDeque<RequestKind>,
 }
 
 /// The body of the request currently being written.
@@ -1106,9 +1112,7 @@ pub struct ConnectionManager {
     traffic: NetTraffic,
     /// Secrets configuration for substitution
     secrets: HashMap<String, crate::secrets::SecretConfig>,
-    /// `(real value, placeholder)` of each secret, for masking reads.
-    read_masks: Vec<(Vec<u8>, Vec<u8>)>,
-    /// Per-connection read buffering for that masking.
+    /// Per-connection read masking state.
     read_states: HashMap<u32, ReadState>,
 }
 
@@ -1131,22 +1135,37 @@ impl NetTraffic {
 /// Read data held back from the guest by one connection.
 #[derive(Debug, Default)]
 struct ReadState {
-    /// Masked bytes the guest hasn't read yet.
-    ready: Vec<u8>,
-    /// Trailing bytes that may be the start of a secret split across reads.
-    carry: Vec<u8>,
+    /// Frames and masks its responses, if any secret may be sent to its
+    /// host (see [`response`]).
+    masker: Option<ResponseMasker>,
+    /// A read error that came with held-back bytes still to deliver: those
+    /// go out first, and this on the next read.
+    error: Option<std::io::Error>,
 }
 
-/// How long a read waits for more data before releasing bytes held back as
-/// the possible start of a secret.
-const CARRY_GRACE: Duration = Duration::from_millis(100);
+impl ReadState {
+    fn new(masks: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self {
+            masker: ResponseMasker::new(masks),
+            error: None,
+        }
+    }
+}
 
-/// Read up to `len` bytes from `stream`, replacing each real secret value in
-/// `masks` with its placeholder, including values split across reads.
+/// Read up to `len` bytes from `stream`, replacing each real secret value
+/// with its placeholder wherever the guest's HTTP client will see it whole
+/// (see [`response`]). `http` is the connection's request framing, whose
+/// requests still awaiting a response frame the responses.
+///
+/// What the guest gets, and when, depends only on the responses' framing
+/// and on when bytes arrive, not on whether they look like a secret. The
+/// read gives up after `io_timeout` in all, except that held-back bytes the
+/// grace period applies to always wait all of it: `io_timeout` comes from
+/// the guest, which must not be able to shorten it.
 async fn read_masked<S: tokio::io::AsyncRead + Unpin>(
     stream: &mut S,
     state: &mut ReadState,
-    masks: &[(Vec<u8>, Vec<u8>)],
+    http: &mut HttpParsingState,
     len: u32,
     io_timeout: Duration,
 ) -> std::io::Result<Vec<u8>> {
@@ -1154,49 +1173,102 @@ async fn read_masked<S: tokio::io::AsyncRead + Unpin>(
     if want == 0 {
         return Ok(Vec::new());
     }
-    while state.ready.is_empty() {
-        let timeout = if state.carry.is_empty() {
-            io_timeout
-        } else {
-            CARRY_GRACE.min(io_timeout)
-        };
+    let ReadState { masker, error } = state;
+    let Some(masker) = masker else {
         let mut buf = vec![0u8; want];
-        let n = match tokio::time::timeout(timeout, stream.read(&mut buf)).await {
-            Ok(n) => n?,
-            // Nothing followed: the held-back bytes weren't a secret after all.
-            Err(_) if !state.carry.is_empty() => 0,
-            Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
-        };
-        let mut data = std::mem::take(&mut state.carry);
-        data.extend_from_slice(&buf[..n]);
-        if n > 0 {
-            for (real, placeholder) in masks {
-                data = crate::secrets::replace_bytes(&data, real, placeholder);
-            }
-            let keep = partial_secret_len(&data, masks);
-            state.carry = data.split_off(data.len() - keep);
+        let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
+            .await
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+        buf.truncate(n);
+        return Ok(buf);
+    };
+    let deadline = tokio::time::Instant::now() + io_timeout;
+    while masker.out.is_empty() {
+        if let Some(e) = error.take() {
+            return Err(e);
         }
-        state.ready = data;
-        if n == 0 {
-            break;
+        // Responses it can't frame end the connection for the guest; an
+        // unsolicited one (a 408 before an idle close) ends it cleanly.
+        match masker.failure() {
+            Some(UNSOLICITED) => return Ok(Vec::new()),
+            Some(why) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why)),
+            None => {}
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let quiet = masker.may_release_on_quiet();
+        let wait = if quiet { CARRY_GRACE } else { left };
+        let mut buf = vec![0u8; want];
+        match tokio::time::timeout(wait, stream.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                masker.finish();
+                if masker.out.is_empty() {
+                    return Ok(Vec::new());
+                }
+            }
+            Ok(Ok(n)) => {
+                // Decided by the connection's first bytes: if its first write
+                // wasn't a request, or the server spoke before anything was
+                // written, it's another protocol, which nothing is ever
+                // substituted on (and never will be: the write side stays
+                // raw).
+                if masker.at_start()
+                    && !http.started
+                    && http.buffer.is_empty()
+                    && http.requests.is_empty()
+                {
+                    http.raw = true;
+                }
+                if masker.at_start() && http.raw && !http.started {
+                    masker.raw_from_start();
+                }
+                masker.feed(&buf[..n], &mut http.requests);
+            }
+            // The held-back bytes were received: deliver them before the
+            // error rather than lose them.
+            Ok(Err(e)) => {
+                masker.finish();
+                if masker.out.is_empty() {
+                    return Err(e);
+                }
+                *error = Some(e);
+            }
+            Err(_) if quiet => masker.release_on_quiet(),
+            Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
         }
     }
-    let rest = state.ready.split_off(want.min(state.ready.len()));
-    Ok(std::mem::replace(&mut state.ready, rest))
+    let rest = masker.out.split_off(want.min(masker.out.len()));
+    Ok(std::mem::replace(&mut masker.out, rest))
 }
 
-/// Length of the longest suffix of `data` that is a proper prefix of a
-/// secret value in `masks`.
-fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
-    let longest = masks.iter().map(|(real, _)| real.len()).max().unwrap_or(0);
-    (1..longest.min(data.len() + 1))
-        .rev()
-        .find(|&k| {
-            masks
+/// `(real value, placeholder)` of each secret that may be sent to `host`,
+/// the only secrets its responses can legitimately contain, if `substituted`
+/// (requests on the connection get real values substituted): on any other
+/// connection no real value was ever sent, so nothing is masked.
+fn read_masks(
+    config: &NetConfig,
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    host: Option<&String>,
+    substituted: bool,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let Some(host) = host.filter(|_| substituted) else {
+        return Vec::new();
+    };
+    secrets
+        .values()
+        .filter(|s| !s.real_value.is_empty())
+        .filter(|s| {
+            config
+                .secret_hosts(s)
                 .iter()
-                .any(|(real, _)| real.len() > k && data.ends_with(&real[..k]))
+                .any(|p| host_matches_pattern(host, p))
         })
-        .unwrap_or(0)
+        .map(|s| {
+            (
+                s.real_value.clone().into_bytes(),
+                s.placeholder.clone().into_bytes(),
+            )
+        })
+        .collect()
 }
 
 impl ConnectionManager {
@@ -1269,16 +1341,6 @@ impl ConnectionManager {
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
             traffic: NetTraffic::default(),
-            read_masks: secrets
-                .values()
-                .filter(|s| !s.real_value.is_empty())
-                .map(|s| {
-                    (
-                        s.real_value.clone().into_bytes(),
-                        s.placeholder.clone().into_bytes(),
-                    )
-                })
-                .collect(),
             read_states: HashMap::new(),
             secrets,
         }
@@ -1332,9 +1394,12 @@ impl ConnectionManager {
         let result = self.frame_requests(handle, &mut state, data);
         // After an error the buffered bytes are dropped, and the connection
         // refuses further writes: its framing can't be trusted any more.
+        // The requests already sent still get their responses framed.
         if result.is_err() {
             state = HttpParsingState {
                 failed: true,
+                started: state.started,
+                requests: std::mem::take(&mut state.requests),
                 ..HttpParsingState::default()
             };
         }
@@ -1435,6 +1500,7 @@ impl ConnectionManager {
                     state.started = true;
                     state.skipped_crlf = false;
                     state.switches = switches_protocols(&headers);
+                    state.requests.push_back(RequestKind::of(&headers));
                     if !self.config.http_rules.is_empty() {
                         self.check_http_rules(&headers, handle)?;
                     }
@@ -1717,8 +1783,16 @@ impl ConnectionManager {
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
     /// bytes than requested. Real secret values that appear verbatim in the
     /// data (even split across reads) are replaced with their placeholders;
-    /// compressed or otherwise encoded copies are not. Bytes that may start a
-    /// secret are held back for up to 100 ms waiting for the rest.
+    /// compressed or otherwise encoded copies are not. Only secrets allowed
+    /// for this connection's host are masked, and only on a connection whose
+    /// requests get real values substituted. There, responses are framed:
+    /// a header block is masked whole, a chunked body after de-chunking
+    /// (and re-chunked), and the last few bytes of a body (one less than the
+    /// longest secret value) are held back until more of it arrives or it
+    /// ends (for a close-delimited body, until the connection closes), or,
+    /// between chunks and after a `101` or a `CONNECT`'s `2xx`, the stream
+    /// goes quiet for 100 ms. A reply that isn't a response to a request
+    /// sent, or can't be framed, fails this and every later read.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -1727,13 +1801,24 @@ impl ConnectionManager {
     ) -> Result<Vec<u8>, TcpError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let len = self.read_len(len)?;
+        // Only responses to requests that can carry a real value are masked:
+        // anywhere else none was ever sent.
+        let masks_responses = self.substitutes_secrets(handle);
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?;
 
-        let state = self.read_states.entry(handle).or_default();
-        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let state = self.read_states.entry(handle).or_insert_with(|| {
+            ReadState::new(read_masks(
+                &self.config,
+                &self.secrets,
+                self.connection_hosts.get(&handle),
+                masks_responses,
+            ))
+        });
+        let http = self.http_states.entry(handle).or_default();
+        let data = read_masked(stream, state, http, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TcpError::ConnectionReset,
@@ -2030,8 +2115,16 @@ impl ConnectionManager {
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
     /// bytes than requested. Real secret values that appear verbatim in the
     /// data (even split across reads) are replaced with their placeholders;
-    /// compressed or otherwise encoded copies are not. Bytes that may start a
-    /// secret are held back for up to 100 ms waiting for the rest.
+    /// compressed or otherwise encoded copies are not. Only secrets allowed
+    /// for this connection's host are masked, and only on a connection whose
+    /// requests get real values substituted. There, responses are framed:
+    /// a header block is masked whole, a chunked body after de-chunking
+    /// (and re-chunked), and the last few bytes of a body (one less than the
+    /// longest secret value) are held back until more of it arrives or it
+    /// ends (for a close-delimited body, until the connection closes), or,
+    /// between chunks and after a `101` or a `CONNECT`'s `2xx`, the stream
+    /// goes quiet for 100 ms. A reply that isn't a response to a request
+    /// sent, or can't be framed, fails this and every later read.
     pub async fn tls_read(
         &mut self,
         handle: u32,
@@ -2040,13 +2133,24 @@ impl ConnectionManager {
     ) -> Result<Vec<u8>, TlsError> {
         let io_timeout = Self::effective_timeout(self.config.io_timeout, timeout_ms);
         let len = self.read_len(len).map_err(TlsError::Tcp)?;
+        // Only responses to requests that can carry a real value are masked:
+        // anywhere else none was ever sent.
+        let masks_responses = self.substitutes_secrets(handle);
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
 
-        let state = self.read_states.entry(handle).or_default();
-        let data = read_masked(stream, state, &self.read_masks, len, io_timeout)
+        let state = self.read_states.entry(handle).or_insert_with(|| {
+            ReadState::new(read_masks(
+                &self.config,
+                &self.secrets,
+                self.connection_hosts.get(&handle),
+                masks_responses,
+            ))
+        });
+        let http = self.http_states.entry(handle).or_default();
+        let data = read_masked(stream, state, http, len, io_timeout)
             .await
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::ConnectionReset => TlsError::Tcp(TcpError::ConnectionReset),
@@ -4353,29 +4457,716 @@ mod tests {
         let handle = handle.unwrap();
         let mut server = server;
 
-        async fn read_until(m: &mut ConnectionManager, handle: u32, want: usize) -> String {
-            let mut got = Vec::new();
-            while got.len() < want {
-                let chunk = m.tcp_read(handle, 2, 0).await.unwrap();
-                assert!(!chunk.is_empty(), "unexpected EOF");
-                got.extend(chunk);
-            }
-            String::from_utf8(got).unwrap()
-        }
-
-        server.write_all(b"a re").await.unwrap();
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        // The value is split across chunks, and across writes.
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\na re\r\n")
+            .await
+            .unwrap();
         server.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
-        server.write_all(b"al b real").await.unwrap();
+        server.write_all(b"9\r\nal b real\r\n").await.unwrap();
+        // A possible start of a secret that nothing completes is still
+        // delivered.
+        server.write_all(b"3\r\n re\r\n0\r\n\r\n").await.unwrap();
         server.flush().await.unwrap();
+        let mut got = Vec::new();
+        while !got.ends_with(b"0\r\n\r\n") {
+            let chunk = m.tcp_read(handle, 7, 0).await.unwrap();
+            assert!(!chunk.is_empty(), "unexpected EOF");
+            got.extend(chunk);
+        }
+        let (head, body) = got.split_at(got.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4);
         assert_eq!(
-            read_until(&mut m, handle, "a PH b PH".len()).await,
-            "a PH b PH"
+            head,
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        );
+        assert_eq!(dechunk(body), b"a PH b PH re");
+    }
+
+    /// The body a client gets from a chunked message: the chunks' data.
+    fn dechunk(mut wire: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        loop {
+            let line = wire.windows(2).position(|w| w == b"\r\n").unwrap();
+            let size =
+                usize::from_str_radix(std::str::from_utf8(&wire[..line]).unwrap(), 16).unwrap();
+            wire = &wire[line + 2..];
+            if size == 0 {
+                return body;
+            }
+            body.extend_from_slice(&wire[..size]);
+            wire = &wire[size + 2..];
+        }
+    }
+
+    /// A framing manager connected to a local server on handle `handle`,
+    /// with the server's side of the connection.
+    async fn connected() -> (ConnectionManager, u32, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        (m, handle.unwrap(), server)
+    }
+
+    /// Requests recorded by `tcp_write` frame their responses: a refused
+    /// write doesn't forget the requests sent before it, and a response
+    /// to no recorded request (unsolicited, or after writes that weren't
+    /// requests) fails the connection rather than going through unframed.
+    #[tokio::test]
+    async fn responses_are_framed_by_the_requests_written() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        assert!(
+            m.tcp_write(handle, b"\r\n\r\nGET / HTTP/1.1\r\n\r\n", 0)
+                .await
+                .is_err()
+        );
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Echo: real\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            m.tcp_read(handle, 1024, 0).await.unwrap(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Echo: PH\r\n\r\n"
         );
 
-        // A possible start of a secret that nothing completes is still delivered.
-        server.write_all(b" re").await.unwrap();
-        server.flush().await.unwrap();
-        assert_eq!(read_until(&mut m, handle, 3).await, " re");
+        // Unsolicited, on an idle keep-alive connection (a 408 before the
+        // server closes it): the stream ends cleanly, and stays ended.
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        server
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 408 Request Timeout\r\n\r\nre")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        loop {
+            let data = m.tcp_read(handle, 1024, 0).await.unwrap();
+            if data.is_empty() {
+                break;
+            }
+            got.extend(data);
+        }
+        assert_eq!(got, b"HTTP/1.1 204 No Content\r\n\r\n");
+        assert!(m.tcp_read(handle, 64, 0).await.unwrap().is_empty());
+    }
+
+    /// Everything the server sends on `handle` until it closes.
+    async fn read_to_end(m: &mut ConnectionManager, handle: u32) -> Vec<u8> {
+        let mut got = Vec::new();
+        loop {
+            let data = m.tcp_read(handle, 1024, 0).await.unwrap();
+            if data.is_empty() {
+                return got;
+            }
+            got.extend(data);
+        }
+    }
+
+    /// A connection that's another protocol from the start (its first write
+    /// isn't a request, or the server speaks first) never has anything
+    /// substituted, so its replies get best-effort masking (held back until
+    /// a quiet spell) instead of failing: a one-byte reply comes through,
+    /// an echoed real value is still masked, and a request-shaped write
+    /// later isn't substituted.
+    #[tokio::test]
+    async fn other_protocols_from_the_start_pass_masked() {
+        let (mut m, handle, mut server) = connected().await;
+        // Postgres's SSLRequest, and its one-byte answer.
+        m.tcp_write(handle, b"\x00\x00\x00\x08\x04\xd2\x16\x2f", 0)
+            .await
+            .unwrap();
+        server.write_all(b"S").await.unwrap();
+        assert_eq!(m.tcp_read(handle, 64, 0).await.unwrap(), b"S");
+        let later = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: PH\r\n\r\n";
+        m.tcp_write(handle, later, 0).await.unwrap();
+        let mut received = vec![0; 8 + later.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert!(
+            received.ends_with(later),
+            "{:?}",
+            String::from_utf8_lossy(&received)
+        );
+        server.write_all(b"+echo real").await.unwrap();
+        drop(server);
+        assert_eq!(read_to_end(&mut m, handle).await, b"+echo PH");
+
+        // The server speaks first (e.g. an SMTP greeting).
+        let (mut m, handle, mut server) = connected().await;
+        server.write_all(b"220 ready real").await.unwrap();
+        let mut got = Vec::new();
+        while got.len() < b"220 ready PH".len() {
+            got.extend(m.tcp_read(handle, 64, 0).await.unwrap());
+        }
+        assert_eq!(got, b"220 ready PH");
+        m.tcp_write(handle, later, 0).await.unwrap();
+        let mut received = vec![0; later.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received[..], &later[..]);
+    }
+
+    /// A response head with bare-LF line endings is read as clients read
+    /// it, and masked; malformed framing fails the connection.
+    #[tokio::test]
+    async fn bare_lf_heads_are_framed_and_bad_framing_fails() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        server
+            .write_all(b"HTTP/1.1 200 OK\nX-Echo: real\nContent-Length: 6\n\nreal!!")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while !got.ends_with(b"PH!!") {
+            got.extend(m.tcp_read(handle, 1024, 0).await.unwrap());
+        }
+        assert_eq!(
+            got,
+            b"HTTP/1.1 200 OK\nX-Echo: PH\nContent-Length: 6\n\nPH!!"
+        );
+
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nre"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nre",
+            b"HTTP/1.1 2000 OK\r\n\r\n",
+        ] {
+            let (mut m, handle, mut server) = connected().await;
+            m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+                .await
+                .unwrap();
+            server.write_all(response).await.unwrap();
+            let mut result = m.tcp_read(handle, 1024, 0).await;
+            // The head may come first; the connection fails before the body.
+            if result.as_ref().is_ok_and(|data| !data.is_empty()) {
+                result = m.tcp_read(handle, 1024, 0).await;
+            }
+            assert!(result.is_err(), "{:?}", String::from_utf8_lossy(response));
+        }
+    }
+
+    /// One read, and whether it waited out the grace period first.
+    async fn timed_read(
+        stream: &mut tokio::io::DuplexStream,
+        state: &mut ReadState,
+        len: u32,
+    ) -> (Vec<u8>, bool) {
+        let start = tokio::time::Instant::now();
+        let data = read_masked(stream, state, &mut sent([]), len, Duration::from_secs(30))
+            .await
+            .unwrap();
+        (data, start.elapsed() >= CARRY_GRACE)
+    }
+
+    fn masks(values: &[&str]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        values
+            .iter()
+            .map(|v| (v.as_bytes().to_vec(), b"PH".to_vec()))
+            .collect()
+    }
+
+    /// Request framing with `requests` sent and awaiting responses.
+    fn sent(requests: impl IntoIterator<Item = RequestKind>) -> HttpParsingState {
+        let requests: std::collections::VecDeque<_> = requests.into_iter().collect();
+        HttpParsingState {
+            started: !requests.is_empty(),
+            requests,
+            ..HttpParsingState::default()
+        }
+    }
+
+    /// A read state past a `101`, where bytes aren't framed HTTP and held
+    /// ones go out after the grace period.
+    fn upgraded(values: &[&str]) -> ReadState {
+        let mut state = ReadState::new(masks(values));
+        let masker = state.masker.as_mut().unwrap();
+        masker.feed(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n",
+            &mut std::collections::VecDeque::from([RequestKind::Other]),
+        );
+        masker.out.clear();
+        state
+    }
+
+    /// The server sends `probe` in one write; the length of each read the
+    /// guest gets and whether it was delayed, until it has every byte.
+    async fn read_pattern(values: &[&str], probe: &[u8], len: u32) -> Vec<(usize, bool)> {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(values);
+        server.write_all(probe).await.unwrap();
+        let mut pattern = Vec::new();
+        let mut total = 0;
+        while total < probe.len() {
+            let (data, delayed) = timed_read(&mut guest, &mut state, len).await;
+            assert!(!data.is_empty());
+            total += data.len();
+            pattern.push((data.len(), delayed));
+        }
+        pattern
+    }
+
+    /// An echoing server sends back bytes the guest chose. Whether they're a
+    /// prefix of a real secret value must not change how they're delivered:
+    /// read lengths and delays are the same for matching and non-matching
+    /// probes of the same length, with two secrets of different lengths on
+    /// the host. Holding back only possible prefixes made these differ.
+    #[tokio::test(start_paused = true)]
+    async fn masking_hold_back_is_not_a_prefix_oracle() {
+        let long = "SECRETVALUE";
+        let short = "abc";
+        let filler = b"qrstuvwxyz";
+        for (secret, k) in [(long, 2), (long, 7), (short, 2)] {
+            for trial in 0..50_usize {
+                let pad = vec![b'-'; 12 + trial % 7];
+                let len = u32::try_from(1 + trial % 40).unwrap();
+                let matching = [&pad[..], &secret.as_bytes()[..k]].concat();
+                let other: Vec<u8> = (0..k).map(|i| filler[(trial + i) % filler.len()]).collect();
+                let non_matching = [&pad[..], &other[..]].concat();
+                let a = read_pattern(&[long, short], &matching, len).await;
+                let b = read_pattern(&[long, short], &non_matching, len).await;
+                assert_eq!(a, b, "{secret}[..{k}], trial {trial}");
+            }
+        }
+    }
+
+    /// Both secrets are masked when they arrive one byte per write and the
+    /// guest reads one byte at a time.
+    #[tokio::test(start_paused = true)]
+    async fn masking_handles_byte_by_byte_values() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE", "abc"]);
+        assert_eq!(state.masker.as_ref().unwrap().hold(), 10);
+        let written = b"x SECRETVALUE y abc z";
+        let mut got = Vec::new();
+        for &byte in written {
+            server.write_all(&[byte]).await.unwrap();
+            if let Ok(data) = tokio::time::timeout(
+                Duration::from_millis(1),
+                read_masked(
+                    &mut guest,
+                    &mut state,
+                    &mut sent([]),
+                    1,
+                    Duration::from_secs(30),
+                ),
+            )
+            .await
+            {
+                got.extend(data.unwrap());
+            }
+        }
+        drop(server);
+        loop {
+            let (data, _) = timed_read(&mut guest, &mut state, 1).await;
+            if data.is_empty() {
+                break;
+            }
+            got.extend(data);
+        }
+        assert_eq!(got, b"x PH y PH z");
+    }
+
+    /// The held-back tail goes out at once when the stream ends, and after
+    /// the grace period when it goes quiet.
+    #[tokio::test(start_paused = true)]
+    async fn masking_releases_tail_on_eof_and_quiet() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        server.write_all(b"hello").await.unwrap();
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"hello".to_vec(), true)
+        );
+        server.write_all(b"bye").await.unwrap();
+        drop(server);
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"bye".to_vec(), false)
+        );
+    }
+
+    /// Only secrets allowed for a connection's host are masked on it, so
+    /// other hosts' reads are neither masked nor held back.
+    #[tokio::test(start_paused = true)]
+    async fn masking_only_applies_to_secret_hosts() {
+        let m = framing_manager();
+        let host = |h: &str| read_masks(&m.config, &m.secrets, Some(&h.to_string()), true);
+        assert_eq!(host("api.example.com"), masks(&["real"]));
+        assert!(host("echo.example.net").is_empty());
+        assert!(read_masks(&m.config, &m.secrets, None, true).is_empty());
+        // Nor on a connection whose requests don't get values substituted.
+        assert!(
+            read_masks(
+                &m.config,
+                &m.secrets,
+                Some(&"api.example.com".into()),
+                false
+            )
+            .is_empty()
+        );
+
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(host("echo.example.net"));
+        server.write_all(b"a real").await.unwrap();
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"a real".to_vec(), false)
+        );
+    }
+
+    /// Reads until the stream ends or a read fails (after `io_timeout`),
+    /// returning each read's length and whether it waited out the grace
+    /// period, and everything read.
+    async fn read_all(
+        stream: &mut (impl tokio::io::AsyncRead + Unpin),
+        state: &mut ReadState,
+        requests: &mut HttpParsingState,
+        io_timeout: Duration,
+    ) -> (Vec<(usize, bool)>, Vec<u8>) {
+        let (mut pattern, mut got) = (Vec::new(), Vec::new());
+        loop {
+            let start = tokio::time::Instant::now();
+            match read_masked(stream, state, requests, 7, io_timeout).await {
+                Ok(data) if !data.is_empty() => {
+                    pattern.push((data.len(), start.elapsed() >= CARRY_GRACE));
+                    got.extend(data);
+                }
+                _ => return (pattern, got),
+            }
+        }
+    }
+
+    /// A server that splits a secret value inside a framed response and
+    /// pauses (as an echo of the guest's own bytes can be made to) doesn't
+    /// get the first part past the masking: in a header, a `Content-Length`
+    /// body and a chunk's data, held bytes wait for the rest, however long.
+    #[tokio::test(start_paused = true)]
+    async fn framed_responses_stay_masked_across_pauses() {
+        for (before, after) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nX-Echo: SECRETVA"[..],
+                &b"LUE\r\nContent-Length: 0\r\n\r\n"[..],
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nx SECRETVA",
+                b"LUE y",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nf\r\nx SECRETVA",
+                b"LUE y\r\n0\r\n\r\n",
+            ),
+        ] {
+            let (mut guest, mut server) = tokio::io::duplex(4096);
+            let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+            let mut requests = sent([RequestKind::Other]);
+            let send = async {
+                server.write_all(before).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                server.write_all(after).await.unwrap();
+                drop(server);
+            };
+            let ((_, got), ()) = tokio::join!(
+                read_all(
+                    &mut guest,
+                    &mut state,
+                    &mut requests,
+                    Duration::from_secs(30)
+                ),
+                send
+            );
+            let got = String::from_utf8(got).unwrap();
+            assert!(got.contains("PH") && !got.contains("SECRET"), "{got:?}");
+        }
+    }
+
+    /// Whether an echoed probe is a prefix of a real value doesn't change
+    /// how a framed response is delivered either: in a `Content-Length`
+    /// body and in a chunk followed by a quiet spell, read lengths and
+    /// delays match those of a non-matching probe of the same length.
+    #[tokio::test(start_paused = true)]
+    async fn framed_hold_back_is_not_a_prefix_oracle() {
+        let long = "SECRETVALUE";
+        let filler = b"qrstuvwxyz";
+        let pattern = |wire: Vec<u8>| async move {
+            let (mut guest, mut server) = tokio::io::duplex(4096);
+            let mut state = ReadState::new(masks(&[long, "abc"]));
+            let mut requests = sent([RequestKind::Other]);
+            server.write_all(&wire).await.unwrap();
+            read_all(
+                &mut guest,
+                &mut state,
+                &mut requests,
+                Duration::from_secs(1),
+            )
+            .await
+            .0
+        };
+        for k in [2, 7, 10] {
+            for trial in 0..50_usize {
+                let pad = vec![b'-'; 12 + trial % 7];
+                let matching = [&pad[..], &long.as_bytes()[..k]].concat();
+                let other: Vec<u8> = (0..k).map(|i| filler[(trial + i) % filler.len()]).collect();
+                let non_matching = [&pad[..], &other[..]].concat();
+                for body in [&matching, &non_matching] {
+                    assert_eq!(body.len(), matching.len());
+                }
+                let length = |body: &[u8]| {
+                    [
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                            .as_bytes(),
+                        body,
+                    ]
+                    .concat()
+                };
+                let chunk = |body: &[u8]| {
+                    [
+                        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+                        format!("{:x}\r\n", body.len()).as_bytes(),
+                        body,
+                        b"\r\n",
+                    ]
+                    .concat()
+                };
+                assert_eq!(
+                    pattern(length(&matching)).await,
+                    pattern(length(&non_matching)).await,
+                    "length, [..{k}], trial {trial}"
+                );
+                assert_eq!(
+                    pattern(chunk(&matching)).await,
+                    pattern(chunk(&non_matching)).await,
+                    "chunked, [..{k}], trial {trial}"
+                );
+            }
+        }
+    }
+
+    /// A stream that returns each scripted result once, then ends.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl tokio::io::AsyncRead for Scripted {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(match self.0.pop_front() {
+                Some(Ok(data)) => {
+                    buf.put_slice(&data);
+                    Ok(())
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(()),
+            })
+        }
+    }
+
+    /// Bytes held back when a read fails are delivered first, and the error
+    /// on the next read, rather than lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_error_delivers_held_bytes_first() {
+        let mut stream = Scripted(
+            [
+                Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhello".to_vec()),
+                Err(std::io::ErrorKind::ConnectionReset.into()),
+            ]
+            .into(),
+        );
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        let mut got = Vec::new();
+        let err = loop {
+            match read_masked(
+                &mut stream,
+                &mut state,
+                &mut requests,
+                64,
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(data) => {
+                    assert!(!data.is_empty());
+                    got.extend(data);
+                }
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(
+            got.ends_with(b"hello"),
+            "{:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+
+    /// Through the manager, a guest's `timeout_ms = 1` doesn't shorten the
+    /// grace period either. (Real time: paused time would advance past real
+    /// I/O.)
+    #[tokio::test]
+    async fn guest_timeout_ms_doesnt_shorten_the_grace() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(
+            handle,
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: x\r\n\r\n",
+            0,
+        )
+        .await
+        .unwrap();
+        server
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\nre")
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.extend(m.tcp_read(handle, 64, 0).await.unwrap());
+        }
+        let start = tokio::time::Instant::now();
+        assert_eq!(m.tcp_read(handle, 64, 1).await.unwrap(), b"re");
+        assert!(start.elapsed() >= CARRY_GRACE);
+    }
+
+    /// One read's result and how long it took.
+    async fn timed(
+        guest: &mut tokio::io::DuplexStream,
+        state: &mut ReadState,
+        requests: &mut HttpParsingState,
+        timeout: Duration,
+    ) -> (Result<Vec<u8>, std::io::ErrorKind>, Duration) {
+        let start = tokio::time::Instant::now();
+        let result = read_masked(guest, state, requests, 64, timeout).await;
+        (result.map_err(|e| e.kind()), start.elapsed())
+    }
+
+    /// A guest reading with `timeout_ms = 1` can't make the grace period
+    /// release half a value either: bytes after a `101` split mid-value,
+    /// with a pause shorter than the grace, stay masked however short each
+    /// read's timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_short_guest_timeout_doesnt_split_a_value() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        let mut requests = sent([]);
+        let send = async {
+            server.write_all(b"x SECRETVA").await.unwrap();
+            tokio::time::sleep(CARRY_GRACE / 2).await;
+            server.write_all(b"LUE y").await.unwrap();
+            drop(server);
+        };
+        let read = async {
+            let mut got = Vec::new();
+            loop {
+                match read_masked(
+                    &mut guest,
+                    &mut state,
+                    &mut requests,
+                    64,
+                    Duration::from_millis(1),
+                )
+                .await
+                {
+                    Ok(data) if data.is_empty() => return got,
+                    Ok(data) => got.extend(data),
+                    Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::TimedOut),
+                }
+            }
+        };
+        let (got, ()) = tokio::join!(read, send);
+        assert_eq!(got, b"x PH y");
+    }
+
+    /// Held bytes after a `101` go out after the full grace period, however
+    /// short the read timeout (here 1 ms, as a guest's `timeout_ms` can ask);
+    /// held bytes in a framed body, a close-delimited one included, wait
+    /// for more of it or its end, and the read times out at its own timeout
+    /// instead.
+    #[tokio::test(start_paused = true)]
+    async fn quiet_release_waits_the_full_grace() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        let mut requests = sent([]);
+        server.write_all(b"hello").await.unwrap();
+        for timeout in [Duration::from_secs(30), Duration::from_millis(1)] {
+            let (body, waited) = timed(&mut guest, &mut state, &mut requests, timeout).await;
+            assert_eq!(
+                (body.unwrap(), waited),
+                (b"hello".to_vec(), CARRY_GRACE),
+                "{timeout:?}"
+            );
+            server.write_all(b"hello").await.unwrap();
+        }
+
+        // A close-delimited body's tail waits for the close.
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        server
+            .write_all(b"HTTP/1.0 200 OK\r\n\r\nhello")
+            .await
+            .unwrap();
+        let (head, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(head.unwrap(), b"HTTP/1.0 200 OK\r\n\r\n");
+        let (err, waited) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(
+            (err.unwrap_err(), waited),
+            (std::io::ErrorKind::TimedOut, Duration::from_secs(30))
+        );
+        drop(server);
+        let (body, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(body.unwrap(), b"hello");
+
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhello")
+            .await
+            .unwrap();
+        let (head, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(head.unwrap().ends_with(b"\r\n\r\n"));
+        let (err, waited) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_millis(30),
+        )
+        .await;
+        assert_eq!(
+            (err.unwrap_err(), waited),
+            (std::io::ErrorKind::TimedOut, Duration::from_millis(30))
+        );
     }
 }
