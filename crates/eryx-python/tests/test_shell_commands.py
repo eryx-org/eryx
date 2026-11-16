@@ -145,6 +145,54 @@ def test_another_sources_broken_coreutils_is_ignored(monkeypatch, tmp_path):
         eryx.Sandbox(language="shell")
 
 
+CA = "/etc/ssl/certs/ca-certificates.crt"
+
+
+@pytest.mark.parametrize(
+    "child_network", ["inherit", eryx.NetConfig(allowed_hosts=["api.test"])]
+)
+def test_child_network_gives_commands_the_proxy(child_network):
+    # A child with network gets the proxy's CA certificate mounted.
+    coreutils = eryx.Command.from_precompiled_file(
+        built("coreutils.cwasm"), allow_tunnels=True
+    )
+    network = eryx.NetConfig(allowed_hosts=["api.test"])
+    sandbox = eryx.Sandbox(
+        language="shell",
+        commands={"cat": coreutils},
+        network=network,
+        child_network=child_network,
+    )
+    assert b"BEGIN CERTIFICATE" in sandbox.execute(f"cat {CA}").stdout
+
+    session = eryx.Session(
+        language="shell",
+        commands={"cat": coreutils},
+        network=network,
+        child_network=child_network,
+    )
+    assert b"BEGIN CERTIFICATE" in session.execute(f"cat {CA}").stdout
+
+    # Without it, children stay offline.
+    offline = eryx.Sandbox(
+        language="shell", commands={"cat": coreutils}, network=network
+    )
+    with pytest.raises(eryx.PythonExceptionError):
+        offline.execute(f"cat {CA}")
+
+
+def test_child_network_is_checked():
+    network = eryx.NetConfig(allowed_hosts=["api.test"])
+    with pytest.raises(ValueError, match="needs network="):
+        eryx.Sandbox(language="shell", child_network="inherit")
+    with pytest.raises(ValueError, match='only for language="shell"'):
+        eryx.Sandbox(network=network, child_network="inherit")
+    with pytest.raises(ValueError, match='not "all"'):
+        eryx.Sandbox(language="shell", network=network, child_network="all")
+    with pytest.raises(TypeError):
+        eryx.Session(language="shell", network=network, child_network=1)
+
+
 def test_allowed_commands_narrow_one_session_call(monkeypatch):
     companion(monkeypatch)
     session = eryx.Session(language="shell")

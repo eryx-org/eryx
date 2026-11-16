@@ -81,7 +81,11 @@ pub struct ServerLimits {
     pub max_fuel: Option<u64>,
     /// Most callback invocations a request may allow.
     pub max_callback_invocations: u32,
-    /// Most concurrent network connections a request may allow.
+    /// Most concurrent network connections a request may allow. This bounds
+    /// each proxy on its own: the guest's connections, and its children's
+    /// through an inspecting and a tunnelling proxy, so a shell request whose
+    /// commands use both can hold up to 3x this (process-wide socket caps
+    /// still apply).
     pub max_connections: u32,
     /// Longest network connect or I/O timeout a request may set.
     pub max_io_timeout: Duration,
@@ -122,6 +126,86 @@ impl Default for ServerLimits {
 }
 
 impl ServerLimits {
+    /// Parse a request's `network_config`, clamped to these limits, and the
+    /// network it gives the shell's children.
+    fn network_with_children(
+        &self,
+        mut nc: crate::proto::eryx::v1::NetworkConfig,
+    ) -> Result<(NetConfig, eryx::net::ChildNetwork), Status> {
+        use crate::proto::eryx::v1::child_network::Mode;
+        let child = nc.child_network.take().unwrap_or_default();
+        let config = self.network(nc)?;
+        let invalid = |msg: &str| {
+            Err(Status::invalid_argument(format!(
+                "network_config.child_network: {msg}"
+            )))
+        };
+        let child = match (child.mode(), child.narrow) {
+            (Mode::None, None) => eryx::net::ChildNetwork::None,
+            (Mode::Inherit, None) => eryx::net::ChildNetwork::Inherit,
+            (Mode::Narrow, Some(narrow)) => {
+                if narrow.child_network.is_some() || narrow.allow_plaintext_secrets {
+                    return invalid("narrow can't set child_network or allow_plaintext_secrets");
+                }
+                eryx::net::ChildNetwork::Narrow(Box::new(self.network(*narrow)?))
+            }
+            (Mode::Narrow, None) => return invalid("MODE_NARROW needs narrow"),
+            (_, Some(_)) => return invalid("narrow is only for MODE_NARROW"),
+        };
+        Ok((config, child))
+    }
+
+    /// Parse one `NetworkConfig`, clamped to these limits.
+    fn network(&self, nc: crate::proto::eryx::v1::NetworkConfig) -> Result<NetConfig, Status> {
+        if nc.allow_plaintext_secrets && !self.allow_plaintext_secrets {
+            return Err(Status::invalid_argument(
+                "network_config.allow_plaintext_secrets is not enabled on this server \
+                 (start it with --allow-plaintext-secrets)",
+            ));
+        }
+        let base = NetConfig::default();
+        let max_connections = if nc.max_connections > 0 {
+            nc.max_connections
+        } else {
+            base.max_connections()
+        };
+        let connect_timeout = if nc.connect_timeout_ms > 0 {
+            Duration::from_millis(nc.connect_timeout_ms)
+        } else {
+            base.connect_timeout()
+        };
+        let io_timeout = if nc.io_timeout_ms > 0 {
+            Duration::from_millis(nc.io_timeout_ms)
+        } else {
+            base.io_timeout()
+        };
+        let mut config = base
+            .allow_all_hosts(nc.allow_all_hosts)
+            .with_allowed_hosts(nc.allowed_hosts)
+            .with_max_connections(max_connections.min(self.max_connections))
+            .with_connect_timeout(connect_timeout.min(self.max_io_timeout))
+            .with_io_timeout(io_timeout.min(self.max_io_timeout))
+            .with_allowed_networks(parse_networks("allowed_networks", &nc.allowed_networks)?)
+            .with_internal_hosts(nc.internal_hosts)
+            .with_http_rules(nc.http_rules.into_iter().map(|r| {
+                HttpRule::new(r.host)
+                    .with_methods(r.methods)
+                    .with_paths(r.paths)
+            }))
+            .allow_plaintext_secrets(nc.allow_plaintext_secrets);
+        if !nc.blocked_hosts.is_empty() {
+            config = config.with_blocked_hosts(nc.blocked_hosts);
+        }
+        if !nc.blocked_networks.is_empty() {
+            config = config
+                .with_blocked_networks(parse_networks("blocked_networks", &nc.blocked_networks)?);
+        }
+        config
+            .validate()
+            .map_err(|e| Status::invalid_argument(format!("network_config: {e}")))?;
+        Ok(config)
+    }
+
     /// Resolve a request's limits: zero fields take the defaults, then every
     /// value is clamped to its ceiling.
     fn resource_limits(
@@ -407,64 +491,20 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .transpose()?;
 
         // Parse network config: present = networking enabled, absent = disabled.
-        let net_config = execute_req
-            .network_config
-            .map(|nc| -> Result<NetConfig, Status> {
-                if nc.allow_plaintext_secrets && !self.limits.allow_plaintext_secrets {
-                    return Err(Status::invalid_argument(
-                        "network_config.allow_plaintext_secrets is not enabled on this server \
-                         (start it with --allow-plaintext-secrets)",
-                    ));
-                }
-                let base = NetConfig::default();
-                let max_connections = if nc.max_connections > 0 {
-                    nc.max_connections
-                } else {
-                    base.max_connections()
-                };
-                let connect_timeout = if nc.connect_timeout_ms > 0 {
-                    Duration::from_millis(nc.connect_timeout_ms)
-                } else {
-                    base.connect_timeout()
-                };
-                let io_timeout = if nc.io_timeout_ms > 0 {
-                    Duration::from_millis(nc.io_timeout_ms)
-                } else {
-                    base.io_timeout()
-                };
-                let mut config = base
-                    .allow_all_hosts(nc.allow_all_hosts)
-                    .with_allowed_hosts(nc.allowed_hosts)
-                    .with_max_connections(max_connections.min(self.limits.max_connections))
-                    .with_connect_timeout(connect_timeout.min(self.limits.max_io_timeout))
-                    .with_io_timeout(io_timeout.min(self.limits.max_io_timeout))
-                    .with_allowed_networks(parse_networks(
-                        "allowed_networks",
-                        &nc.allowed_networks,
-                    )?)
-                    .with_internal_hosts(nc.internal_hosts)
-                    .with_http_rules(nc.http_rules.into_iter().map(|r| {
-                        HttpRule::new(r.host)
-                            .with_methods(r.methods)
-                            .with_paths(r.paths)
-                    }))
-                    .allow_plaintext_secrets(nc.allow_plaintext_secrets);
-                if !nc.blocked_hosts.is_empty() {
-                    config = config.with_blocked_hosts(nc.blocked_hosts);
-                }
-                if !nc.blocked_networks.is_empty() {
-                    config = config.with_blocked_networks(parse_networks(
-                        "blocked_networks",
-                        &nc.blocked_networks,
-                    )?);
-                }
-                config
-                    .validate()
-                    .map_err(|e| Status::invalid_argument(format!("network_config: {e}")))?;
-                Ok(config)
-            })
-            .transpose()?;
-
+        let (net_config, child_network) = match execute_req.network_config {
+            Some(nc) => {
+                let (config, child) = self.limits.network_with_children(nc)?;
+                (Some(config), child)
+            }
+            None => (None, eryx::net::ChildNetwork::None),
+        };
+        if language != eryx::Language::Shell
+            && !matches!(child_network, eryx::net::ChildNetwork::None)
+        {
+            return Err(Status::invalid_argument(format!(
+                "network_config.child_network is only for shell requests, not {language}"
+            )));
+        }
         if language != eryx::Language::Shell && execute_req.allowed_commands.is_some() {
             return Err(Status::invalid_argument(format!(
                 "allowed_commands is only for the shell, not {language}"
@@ -472,21 +512,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         }
         let allowed_commands = execute_req.allowed_commands.map(|allowed| allowed.names);
 
-        // Python and JavaScript get the secrets' placeholders from a preamble
-        // (`os.environ`, `process.env`); the shell takes none.
-        if language == eryx::Language::Shell && !execute_req.secrets.is_empty() {
-            return Err(Status::invalid_argument(format!(
-                "secrets are only supported for Python and JavaScript, not {language}"
-            )));
-        }
-
-        // Parse and validate secrets: generate placeholders and build env preamble.
-        let (secrets, secrets_preamble) = {
+        // Parse and validate secrets, generating their placeholders.
+        let secrets = {
             let mut map = HashMap::new();
-            let mut preamble = String::new();
-            if !execute_req.secrets.is_empty() {
-                preamble.push_str("import os\n");
-            }
             for s in &execute_req.secrets {
                 // Validate secret name: must be a valid Python env var name.
                 if !is_identifier(&s.name) {
@@ -502,14 +530,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     )));
                 }
                 let secret = SecretConfig::new(s.value.clone(), s.allowed_hosts.clone());
-                preamble.push_str(&format!(
-                    "os.environ[{:?}] = {:?}\n",
-                    s.name,
-                    secret.placeholder()
-                ));
                 map.insert(s.name.clone(), secret);
             }
-            (map, preamble)
+            map
         };
         // A secret with no host to go to would never be substituted; say so
         // now rather than letting the script fail later.
@@ -530,6 +553,21 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         } else {
             Some(create_vfs_with_files(&files, VFS_MOUNT_PATH).await?)
         };
+
+        // The secrets' placeholders (`os.environ`, `process.env`, or exported
+        // to the shell's children), then the Python builtins injection, so
+        // callbacks are reachable from imported modules, and the sys.path
+        // setup for supporting files. As a preamble, it doesn't shift the
+        // user code's line numbers.
+        let library_preamble = match language {
+            eryx::Language::Python if vfs_storage.is_some() => {
+                format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}")
+            }
+            eryx::Language::Python => BUILTINS_INJECT.to_owned(),
+            _ => String::new(),
+        };
+        let preamble = eryx::language_preamble(language, &secrets, &library_preamble)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let has_secrets = !secrets.is_empty();
         let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
@@ -721,8 +759,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     enable_tracing,
                     resource_limits,
                     net_config,
+                    child_network,
                     secrets,
-                    secrets_preamble,
+                    preamble,
                     scrub_stdout,
                     scrub_stderr,
                     scrub_result,
@@ -957,8 +996,12 @@ struct SessionParams<'a> {
     enable_tracing: bool,
     resource_limits: ResourceLimits,
     net_config: Option<NetConfig>,
+    /// The network for the shell's children, under `net_config`.
+    child_network: eryx::net::ChildNetwork,
     secrets: HashMap<String, SecretConfig>,
-    secrets_preamble: String,
+    /// The secrets' placeholders, then (for Python) the builtins and
+    /// sys.path setup.
+    preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
     /// Enable scrubbing of the structured result/result_error. Default OFF (opt-in).
@@ -1215,26 +1258,9 @@ async fn execute_with_session(
         (None, None)
     };
 
-    // Run builtins injection before the user code so callbacks are accessible
-    // from imported modules. Also add sys.path setup when supporting files are
-    // present — merged here to avoid a separate WASM execution cycle. As a
-    // preamble, it doesn't shift the user code's line numbers. The preamble
-    // is Python; JavaScript only gets the secrets' `process.env`.
-    let preamble = if params.language == eryx::Language::JavaScript {
-        eryx::secrets::javascript_preamble(&params.secrets)
-    } else if params.language != eryx::Language::Python {
-        String::new()
-    } else if params.vfs_storage.is_some() {
-        format!(
-            "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}",
-            params.secrets_preamble
-        )
-    } else {
-        format!("{}{BUILTINS_INJECT}", params.secrets_preamble)
-    };
     let mut builder = session
         .execute(params.code)
-        .with_preamble(preamble)
+        .with_preamble(params.preamble.as_str())
         .with_callbacks(&callbacks_arc, callback_tx)
         .with_output_streaming(output_tx)
         // Lets a disconnect interrupt CPU-bound code too; without a token the
@@ -1248,6 +1274,13 @@ async fn execute_with_session(
     }
     if let Some(tx) = net_tx {
         builder = builder.with_network(tx);
+    }
+    if let Some(config) = &params.net_config {
+        builder = builder.with_child_network(
+            params.child_network.clone(),
+            config.clone(),
+            params.secrets.clone(),
+        );
     }
     if let Some(names) = &params.allowed_commands {
         builder = builder.with_allowed_commands(names.iter().cloned());

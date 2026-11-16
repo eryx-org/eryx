@@ -3202,3 +3202,247 @@ async fn state_was_reset_reports_an_interrupted_restore() {
     );
     assert!(second.state_was_reset);
 }
+
+/// The test-cmd fixture from the eryx crate (crates/eryx/tests/fixtures,
+/// which needs `rustup target add wasm32-wasip2`), as a child command.
+#[cfg(feature = "shell")]
+fn test_cmd() -> eryx::Command {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../eryx/tests/fixtures/test-cmd/Cargo.toml");
+    let target_dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-cmd");
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "--release", "--locked"])
+        .args(["--target", "wasm32-wasip2", "--manifest-path"])
+        .arg(&manifest)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .status()
+        .expect("running cargo");
+    assert!(status.success(), "building the test-cmd fixture failed");
+    eryx::Command::from_file(target_dir.join("wasm32-wasip2/release/eryx-test-cmd.wasm")).unwrap()
+}
+
+/// A plain-HTTP upstream on 127.0.0.1 answering 200 to every request.
+/// Returns its port and the requests' heads.
+#[cfg(feature = "shell")]
+async fn http_upstream() -> (u16, Arc<std::sync::Mutex<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::<std::sync::Mutex<String>>::default();
+    let received = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let received = Arc::clone(&received);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                received
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&head));
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// `network_config.child_network` gives the shell's children the request's
+/// network and never more: INHERIT is exactly the request's policy, NARROW
+/// only what both allow, and without it children stay offline. Children see
+/// a secret only as its placeholder, and the real value isn't sent where the
+/// request doesn't allow it (here, plain HTTP).
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_children_get_the_requests_network_and_no_more() {
+    use eryx_server::proto::eryx::v1::child_network::Mode;
+    use eryx_server::proto::eryx::v1::{ChildNetwork, Language, NetworkConfig, SecretConfig};
+
+    const REAL: &str = "real-grpc-child-secret-0123456789";
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let builder = Sandbox::embedded()
+                .shell()
+                .with_command("tc", test_cmd())
+                .with_command("tt", test_cmd().allow_tunnels());
+            Ok(Arc::new(
+                SandboxPool::new(builder, PoolConfig::default().with_max_size(2)).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(1, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+    let (port, seen) = http_upstream().await;
+
+    // Only `host` on loopback (the defaults block it by name and address).
+    let allowing = |host: &str| NetworkConfig {
+        allowed_hosts: vec![host.to_string()],
+        blocked_hosts: vec!["blocked.invalid".to_string()],
+        allowed_networks: vec!["127.0.0.0/8".to_string()],
+        ..Default::default()
+    };
+    let with_children = |mut network: NetworkConfig, mode: Mode, narrow: Option<NetworkConfig>| {
+        network.child_network = Some(Box::new(ChildNetwork {
+            mode: mode as i32,
+            narrow: narrow.map(Box::new),
+        }));
+        network
+    };
+    let run_script = |code: String, network: Option<NetworkConfig>| {
+        let channel = channel.clone();
+        async move {
+            let result = execute_request(
+                channel,
+                ExecuteRequest {
+                    code,
+                    language: Language::Shell as i32,
+                    network_config: network,
+                    secrets: vec![SecretConfig {
+                        name: "TOKEN".to_string(),
+                        value: REAL.to_string(),
+                        allowed_hosts: vec!["127.0.0.1".to_string()],
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            format!("{}{}", result.stdout.to_lossy(), result.stderr.to_lossy())
+        }
+    };
+    let run = |network| {
+        run_script(
+            format!("tc env TOKEN; tc proxy-get http://127.0.0.1:{port}/x"),
+            network,
+        )
+    };
+
+    let inherit = run(Some(with_children(
+        allowing("127.0.0.1"),
+        Mode::Inherit,
+        None,
+    )))
+    .await;
+    assert!(inherit.contains(" 200 OK"), "{inherit}");
+    // The placeholder, scrubbed from the output; it went out as it is.
+    assert!(inherit.starts_with("[REDACTED]\n"), "{inherit}");
+    let got = seen.lock().unwrap().clone();
+    assert!(
+        got.contains("Bearer ERYX_SECRET_PLACEHOLDER_") && !got.contains(REAL),
+        "{got}"
+    );
+
+    let narrow = |parent: &str, child: &str| {
+        Some(with_children(
+            allowing(parent),
+            Mode::Narrow,
+            Some(allowing(child)),
+        ))
+    };
+    let out = run(narrow("127.0.0.1", "127.0.0.1")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+
+    // Neither mode reaches past the request's own policy.
+    let requests = seen.lock().unwrap().matches("GET ").count();
+    for network in [
+        with_children(allowing("other.test"), Mode::Inherit, None),
+        narrow("other.test", "127.0.0.1").unwrap(),
+        narrow("127.0.0.1", "other.test").unwrap(),
+    ] {
+        let out = run(Some(network)).await;
+        assert!(out.contains(" 403 "), "{out}");
+    }
+    // Without child_network, children have no proxy at all.
+    let out = run(Some(allowing("127.0.0.1"))).await;
+    assert!(!out.contains(" 200 OK") && out.contains("error:"), "{out}");
+    assert_eq!(seen.lock().unwrap().matches("GET ").count(), requests);
+
+    // A command allowed tunnels gets a blind one, and its placeholder goes
+    // out as it is; one without gets an inspecting proxy, which expects TLS.
+    let inherit = || Some(with_children(allowing("127.0.0.1"), Mode::Inherit, None));
+    let out = run_script(format!("tt tunnel-get 127.0.0.1:{port}"), inherit()).await;
+    assert!(
+        out.contains(" 200 Connection established") && out.contains(" 200 OK"),
+        "{out}"
+    );
+    let got = seen.lock().unwrap().clone();
+    assert_eq!(got.matches("GET ").count(), requests + 1, "{got}");
+    assert!(!got.contains(REAL), "{got}");
+    // It handshakes with the (plain) upstream first: give up on that soon.
+    let short = NetworkConfig {
+        connect_timeout_ms: 500,
+        io_timeout_ms: 500,
+        ..allowing("127.0.0.1")
+    };
+    let out = run_script(
+        format!("tc tunnel-get 127.0.0.1:{port}"),
+        Some(with_children(short, Mode::Inherit, None)),
+    )
+    .await;
+    assert!(!out.contains(" 200 OK"), "{out}");
+    assert_eq!(seen.lock().unwrap().matches("GET ").count(), requests + 1);
+
+    // Only the shell has children.
+    let status = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: "pass".to_string(),
+            network_config: inherit(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("only for shell"), "{status:?}");
+}
+
+/// A malformed `child_network` is refused before anything runs.
+#[tokio::test]
+async fn invalid_child_networks_are_rejected() {
+    use eryx_server::proto::eryx::v1::child_network::Mode;
+    use eryx_server::proto::eryx::v1::{ChildNetwork, NetworkConfig};
+
+    let channel = start_server().await;
+    let child = |mode: Mode, narrow: Option<NetworkConfig>| NetworkConfig {
+        child_network: Some(Box::new(ChildNetwork {
+            mode: mode as i32,
+            narrow: narrow.map(Box::new),
+        })),
+        ..Default::default()
+    };
+    for (network, message) in [
+        (child(Mode::Narrow, None), "MODE_NARROW needs narrow"),
+        (
+            child(Mode::Inherit, Some(NetworkConfig::default())),
+            "narrow is only for MODE_NARROW",
+        ),
+        (
+            child(Mode::Narrow, Some(child(Mode::Inherit, None))),
+            "narrow can't set child_network",
+        ),
+    ] {
+        let status = execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                code: "pass".to_string(),
+                network_config: Some(network),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains(message), "{status:?}");
+    }
+}
