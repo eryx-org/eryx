@@ -114,6 +114,10 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     commands: For the shell only: external commands by name, each an
+    ///         `eryx.Command`. They replace the uutils coreutils tools
+    ///         (cat, head, ls, sort, ...) of the same name, which the shell
+    ///         gets by default from the `pyeryx-runtime-shell` package.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -159,7 +163,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -178,6 +182,7 @@ impl Sandbox {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        commands: Option<crate::command::Commands<'_>>,
     ) -> PyResult<Self> {
         let language = parse_language(language)?;
         let runtime = crate::error::make_runtime()?;
@@ -186,7 +191,8 @@ impl Sandbox {
         // (sys.settrace) is always off: the Python ExecuteResult does not
         // expose trace events, and the hook makes instruction-heavy scripts
         // orders of magnitude slower.
-        let mut builder = base_builder(py, language, runtime_path)?.with_trace_collection(false);
+        let (builder, source) = base_builder(py, language, runtime_path)?;
+        let mut builder = builder.with_trace_collection(false);
 
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {
@@ -245,7 +251,7 @@ impl Sandbox {
             });
         }
 
-        let inner = build_for(builder, language)?;
+        let inner = build_for(py, (builder, source), language, commands)?;
 
         Ok(Self {
             inner,
@@ -440,29 +446,68 @@ pub(crate) fn base_builder(
     py: Python<'_>,
     language: eryx::Language,
     runtime_path: Option<PathBuf>,
-) -> PyResult<eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>> {
+) -> PyResult<(
+    eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
+    RuntimeSource,
+)> {
     if language == eryx::Language::Python && runtime_path.is_none() {
-        return Ok(eryx::Sandbox::embedded());
+        return Ok((eryx::Sandbox::embedded(), RuntimeSource::Embedded));
     }
-    let path = find_runtime(py, language, runtime_path)?;
+    let (path, source) = find_runtime(py, language, runtime_path)?;
     // SAFETY: the runtime comes from the caller, its environment, an installed
     // pyeryx-runtime package or the user's private eryx cache, all trusted
     // like the pyeryx wheel itself. Its eryx version and language stamps are
     // checked when the sandbox is built.
     #[allow(unsafe_code)]
-    Ok(unsafe { eryx::Sandbox::builder().with_precompiled_file(path) })
+    let builder = unsafe { eryx::Sandbox::builder().with_precompiled_file(path) };
+    Ok((builder, source))
+}
+
+/// Where a sandbox's runtime came from, which is where its shell finds
+/// coreutils.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeSource {
+    /// Built into the pyeryx wheel (Python).
+    Embedded,
+    /// `runtime_path=` or `ERYX_RUNTIME_CWASM_<LANGUAGE>`.
+    Explicit,
+    /// The `pyeryx-runtime-<language>` companion package.
+    Companion,
+    /// The cache `eryx-precompile setup` writes.
+    SetupCache,
 }
 
 /// Finish `builder` (configured as Python, whose language-neutral options
-/// carry over) as a sandbox for `language`.
+/// carry over) as a sandbox for `language`. A shell gets uutils coreutils
+/// from the `pyeryx-runtime-shell` package if it's installed, then
+/// `commands`, which replace coreutils tools of the same name.
 pub(crate) fn build_for(
-    builder: eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
+    py: Python<'_>,
+    (builder, source): (
+        eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
+        RuntimeSource,
+    ),
     language: eryx::Language,
+    commands: Option<crate::command::Commands<'_>>,
 ) -> PyResult<eryx::Sandbox> {
+    if language != eryx::Language::Shell && commands.as_ref().is_some_and(|c| !c.is_empty()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "commands= is only for language=\"shell\", not {language}"
+        )));
+    }
     match language {
         eryx::Language::Python => builder.build(),
         eryx::Language::JavaScript => builder.javascript().build(),
-        eryx::Language::Shell => builder.shell().build(),
+        eryx::Language::Shell => {
+            let mut builder = builder.shell();
+            if let Some(coreutils) = crate::command::coreutils(py, source)? {
+                builder = builder.with_commands(eryx::embedded::COREUTILS_TOOLS, coreutils);
+            }
+            for (name, command) in commands.into_iter().flatten() {
+                builder = builder.with_command(name, command.inner.clone());
+            }
+            builder.build()
+        }
         other => {
             return Err(InitializationError::new_err(format!(
                 "unsupported language {other}"
@@ -479,16 +524,16 @@ fn find_runtime(
     py: Python<'_>,
     language: eryx::Language,
     explicit: Option<PathBuf>,
-) -> PyResult<PathBuf> {
+) -> PyResult<(PathBuf, RuntimeSource)> {
     if let Some(path) = explicit {
-        return Ok(path);
+        return Ok((path, RuntimeSource::Explicit));
     }
     let var = format!(
         "ERYX_RUNTIME_CWASM_{}",
         language.as_str().to_ascii_uppercase()
     );
     if let Some(path) = std::env::var_os(&var) {
-        return Ok(path.into());
+        return Ok((path.into(), RuntimeSource::Explicit));
     }
     // A companion package without its runtime (a source checkout's
     // skeleton) counts as not installed.
@@ -497,14 +542,14 @@ fn find_runtime(
         .import(module.as_str())
         .and_then(|module| module.call_method0("cwasm_path"))
     {
-        Ok(path) => return path.extract(),
+        Ok(path) => return Ok((path.extract()?, RuntimeSource::Companion)),
         Err(e)
             if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py)
                 || e.is_instance_of::<pyo3::exceptions::PyFileNotFoundError>(py) => {}
         Err(e) => return Err(e),
     }
     if let Some(path) = eryx::cache::setup_runtime(language) {
-        return Ok(path);
+        return Ok((path, RuntimeSource::SetupCache));
     }
     Err(InitializationError::new_err(format!(
         "no {language} runtime found: pyeryx doesn't include it. Install it with \

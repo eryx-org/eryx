@@ -565,6 +565,33 @@ async fn the_embedded_shell_runs_coreutils() {
     assert_eq!(out.stdout_utf8().unwrap(), "HI\nb\n");
 }
 
+/// `without_embedded_commands` leaves the coreutils out, keeping the
+/// registered commands.
+#[tokio::test]
+async fn embedded_commands_can_be_left_out() {
+    let sandbox = shell()
+        .without_embedded_commands()
+        .with_command("upper", test_cmd())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute("echo hi | upper; cat /nope; echo \"cat=$?\"")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "HI\ncat=127\n");
+
+    // A pool's sandboxes leave them out too.
+    let builder = shell()
+        .without_embedded_commands()
+        .with_command("upper", test_cmd());
+    let pool = eryx::SandboxPool::new(builder, eryx::PoolConfig::default().with_max_size(1))
+        .await
+        .unwrap();
+    let sandbox = pool.acquire().await.unwrap();
+    let out = sandbox.execute("cat /nope; echo \"cat=$?\"").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "cat=127\n");
+}
+
 /// The common script tools added in #897 run in the embedded shell.
 #[cfg(feature = "coreutils")]
 #[tokio::test]

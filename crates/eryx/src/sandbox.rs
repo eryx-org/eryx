@@ -1597,6 +1597,11 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     commands: crate::process::Commands,
     /// How the commands' children reach the network (shell only).
     child_network: crate::net::ChildNetwork,
+    /// Whether the network policy is set per request (a pool's sandboxes),
+    /// so a child network needn't have one at build time.
+    network_per_request: bool,
+    /// Whether the embedded shell also gets the embedded coreutils.
+    embedded_commands: bool,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
     stdlib_path: Option<std::path::PathBuf>,
     /// Path to a guest library directory (for Python, site-packages).
@@ -1677,6 +1682,8 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            network_per_request: false,
+            embedded_commands: true,
             stdlib_path: None,
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1716,6 +1723,8 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            network_per_request: false,
+            embedded_commands: true,
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
             #[cfg(feature = "native-extensions")]
@@ -1755,6 +1764,8 @@ impl<L, R> SandboxBuilder<L, R> {
             result_variable: self.result_variable,
             commands: self.commands,
             child_network: self.child_network,
+            network_per_request: self.network_per_request,
+            embedded_commands: self.embedded_commands,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
@@ -2426,10 +2437,22 @@ impl<R> SandboxBuilder<Shell, R> {
     /// protocols. The proxy lives for one execution.
     ///
     /// Needs [`with_network`](Self::with_network): [`build`](Self::build)
-    /// fails without it.
+    /// fails without it. A [`SandboxPool`](crate::SandboxPool)'s sandboxes
+    /// use each lease's network
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network)),
+    /// and children of a lease without one stay offline.
     #[must_use]
     pub fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
         self.child_network = network;
+        self
+    }
+
+    /// Leave out the embedded shell's default commands (uutils coreutils,
+    /// with the `coreutils` feature), so only commands registered with
+    /// [`with_command`](Self::with_command) run.
+    #[must_use]
+    pub fn without_embedded_commands(mut self) -> Self {
+        self.embedded_commands = false;
         self
     }
 }
@@ -2808,6 +2831,8 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
         let commands = self.commands;
+        let embedded_commands = self.embedded_commands;
+        let child_network = self.child_network;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -2817,6 +2842,11 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
             builder.commands = commands.clone();
+            builder.embedded_commands = embedded_commands;
+            // Each lease sets the network (PooledSandbox::with_network);
+            // without one, children stay offline.
+            builder.child_network = child_network.clone();
+            builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
     }
@@ -2998,6 +3028,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let commands = {
             let mut commands = self.commands;
             if L::LANGUAGE == Language::Shell
+                && self.embedded_commands
                 && matches!(self.wasm_source, WasmSource::EmbeddedRuntime)
             {
                 let coreutils = crate::embedded::coreutils()?;
@@ -3014,6 +3045,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         // executor the packages whose directories it mounts.
         if !matches!(self.child_network, crate::net::ChildNetwork::None)
             && self.net_config.is_none()
+            && !self.network_per_request
         {
             return Err(ErrorKind::Initialization(
                 "with_child_network needs with_network: children use the sandbox's network policy"

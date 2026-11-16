@@ -423,3 +423,51 @@ async fn sessions_proxy_each_execution() {
     }
     assert_eq!(seen.lock().unwrap().matches(REAL).count(), 2);
 }
+
+/// A pool's shell sandboxes keep the child network, with each lease's
+/// network policy and secrets; a lease without one leaves children offline.
+#[tokio::test]
+async fn pooled_sandboxes_use_each_leases_network() {
+    let (port, seen) = upstream(None).await;
+    let builder = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd())
+        .with_child_network(ChildNetwork::Inherit);
+    let pool = eryx::SandboxPool::new(builder, eryx::PoolConfig::default().with_max_size(1))
+        .await
+        .unwrap();
+    let secrets = std::collections::HashMap::from([(
+        "TOKEN".to_string(),
+        eryx::SecretConfig::new(REAL, vec!["api.test".to_string()]),
+    )]);
+    let lease = pool
+        .acquire()
+        .await
+        .unwrap()
+        .with_network(network().allow_plaintext_secrets(true), secrets)
+        .unwrap();
+    let out = lease
+        .execute(&format!("tc proxy-get http://api.test:{port}/"))
+        .await
+        .unwrap();
+    assert!(
+        out.stdout_text().contains(" 200 OK"),
+        "{}",
+        out.stdout_text()
+    );
+    assert!(seen.lock().unwrap().contains(REAL));
+    drop(lease);
+
+    let lease = pool.acquire().await.unwrap();
+    let out = match lease
+        .execute("tc env HTTPS_PROXY; tc connect 127.0.0.1:1")
+        .await
+    {
+        Ok(out) => out.stdout_text(),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        !out.contains("http://") && !out.contains("connected"),
+        "{out}"
+    );
+}
