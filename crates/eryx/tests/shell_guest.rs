@@ -524,3 +524,139 @@ async fn snapshots_in_another_state_format_are_refused() {
         "{runtime}"
     );
 }
+
+/// The shell's baseline environment and filesystem (#832): a statable `/`
+/// with the mounts beneath it, a writable `/tmp` and the `/dev` devices.
+/// Builtins only, since children don't see this filesystem without
+/// `unstable-vfs` yet.
+#[tokio::test]
+async fn the_shell_has_a_baseline_unix_environment() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(r#"echo "$HOME|$PATH|$TERM|$LANG|$LC_ALL|$USER|$PWD|$TMPDIR""#)
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "/tmp|/eryx/bin|dumb|C.UTF-8|C.UTF-8|eryx|/|/tmp\n"
+    );
+
+    let out = sandbox
+        .execute(
+            r#"
+[ -d / ] && [ -d /tmp ] && [ -d /dev ] && echo dirs
+[ -e /dev/null ] && [ -e /dev/zero ] && [ -e /dev/urandom ] && echo devices
+echo hi > /tmp/f && read -r line < /tmp/f && echo "tmp:$line"
+echo gone > /dev/null && echo "null:$(< /dev/null):"
+cd / && echo "cwd:$PWD"
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "dirs\ndevices\ntmp:hi\nnull::\ncwd:/\n"
+    );
+}
+
+/// Nothing above the mounts can be created or written, and paths outside
+/// every mount don't exist.
+#[tokio::test]
+async fn the_shell_root_is_read_only() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+if echo x > /new.txt; then echo created; else echo refused; fi
+if echo x > /etc/passwd; then echo created; else echo refused; fi
+[ -e /etc/passwd ] || echo missing
+if read -r line < /etc/passwd; then echo read; else echo unreadable; fi
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "refused\nrefused\nmissing\nunreadable\n"
+    );
+}
+
+/// The shell's `/tmp` counts against the VFS quota, even without a VFS of
+/// the caller's.
+#[tokio::test]
+async fn the_shell_tmp_is_bounded_by_the_vfs_quota() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_resource_limits(eryx::ResourceLimits::default().with_max_vfs_bytes(64 * 1024))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+if printf '%*s' 32768 x > /tmp/small; then echo small; fi
+if printf '%*s' 200000 x > /tmp/big; then echo big; else echo full; fi
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "small\nfull\n");
+}
+
+/// A session's `/tmp` outlives a reset, as the VFS does.
+#[tokio::test]
+async fn the_shell_tmp_survives_a_session_reset() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    session.execute("echo kept > /tmp/k").run().await.unwrap();
+    session.reset(&[]).await.unwrap();
+    let out = session
+        .execute("read -r line < /tmp/k && echo \"$line\"")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "kept\n");
+}
+
+/// A single-file volume at the top level doesn't hide the root: `/` still
+/// lists, `/dev` is still there, and the file is served.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn a_top_level_file_volume_keeps_the_root() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let host = tempfile::tempdir().unwrap();
+    std::fs::write(host.path().join("settings.json"), "{}\n").unwrap();
+    let sandbox = builder
+        .with_volume(eryx::VolumeMount::read_only(
+            host.path().join("settings.json"),
+            "/cfg.json",
+        ))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+[ -d / ] && [ -e /dev/null ] && [ -d /tmp ] && echo root
+read -r cfg < /cfg.json && echo "cfg:$cfg"
+for f in /*; do printf '%s ' "$f"; done; echo
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "root\ncfg:{}\n/cfg.json /data /dev /tmp \n"
+    );
+}

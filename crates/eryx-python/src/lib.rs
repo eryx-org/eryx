@@ -14,6 +14,7 @@
 //! ```
 
 mod callback;
+mod command;
 mod engine;
 mod error;
 mod execution;
@@ -58,6 +59,7 @@ use pyo3::prelude::*;
 fn _eryx(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register classes
     m.add_class::<sandbox::Sandbox>()?;
+    m.add_class::<command::Command>()?;
     m.add_class::<session::Session>()?;
     m.add_class::<preinit::SandboxFactory>()?;
     m.add_class::<result::ExecuteResult>()?;

@@ -43,9 +43,9 @@ use tokio::sync::mpsc;
 use wasmtime::Store;
 use wasmtime::component::{Accessor, ResourceTable};
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
-// flags the VFS enforces now live in eryx-vfs. Only `build_hybrid_vfs_context`
-// uses them, so the import carries that function's feature gate.
-#[cfg(feature = "unstable-vfs")]
+// flags the VFS enforces now live in eryx-vfs. Only the hybrid VFS contexts
+// use them, so the import carries their feature gate.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 use eryx_vfs::{DirPerms, FilePerms};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
@@ -615,7 +615,7 @@ impl VolumeMount {
 }
 
 /// Where the VFS storage is also mounted, as a scratch directory.
-#[cfg(feature = "unstable-vfs")]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 const TMP_MOUNT_PATH: &str = "/tmp";
 
 /// Configuration for the virtual filesystem (VFS) in a session.
@@ -740,8 +740,9 @@ pub struct SessionExecutor {
     /// The guest's direct fd 1/2 writes, appended to each execution's output.
     fd_output: FdOutput,
 
-    /// VFS storage that persists across resets.
-    #[cfg(feature = "unstable-vfs")]
+    /// VFS storage that persists across resets (without `unstable-vfs`, the
+    /// shell's private `/tmp`).
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
 
     /// VFS configuration that persists across resets.
@@ -749,11 +750,11 @@ pub struct SessionExecutor {
     vfs_config: Option<VfsConfig>,
 
     /// Quota used when creating the session's own VFS storage.
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs_max_bytes: Option<u64>,
 
     /// Limit on host files the session may hold open, kept for resets.
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     max_open_host_files: Option<usize>,
 
     /// Host memory child processes may hold, kept for resets.
@@ -828,6 +829,10 @@ fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiC
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount the environment: {e}")))?;
     }
 
+    if executor.language() == Language::Shell {
+        crate::wasm::add_shell_env(&mut wasi_builder);
+    }
+
     Ok(wasi_builder.build())
 }
 
@@ -880,43 +885,7 @@ pub(crate) fn build_hybrid_vfs_context(
         ctx.add_vfs_preopen(TMP_MOUNT_PATH, vfs_config.dir_perms, vfs_config.file_perms);
     }
 
-    // Add real filesystem preopens that mirror the WASI preopens
-    if let Some(stdlib_path) = executor.stdlib_path() {
-        ctx.add_real_preopen_path(
-            "/python-stdlib",
-            stdlib_path,
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .map_err(|e| {
-            ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
-        })?;
-    }
-    for (i, site_packages_path) in executor.library_paths().iter().enumerate() {
-        let mount_path = crate::wasm::site_packages_mount_path(i);
-        ctx.add_real_preopen_path(
-            &mount_path,
-            site_packages_path,
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .map_err(|e| {
-            ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
-        })?;
-    }
-
-    #[cfg(feature = "environment")]
-    if let Some(root) = executor.environment() {
-        ctx.add_real_preopen_path(
-            crate::environment::MOUNT_PATH,
-            root,
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .map_err(|e| {
-            ErrorKind::Initialization(format!("Failed to add the environment to VFS: {e}"))
-        })?;
-    }
+    add_library_preopens(&mut ctx, executor)?;
 
     // Add user-specified volume mounts
     for volume in &vfs_config.volumes {
@@ -958,6 +927,86 @@ pub(crate) fn build_hybrid_vfs_context(
         })?;
     }
 
+    if executor.language() == Language::Shell {
+        ctx.add_root();
+    }
+
+    Ok(ctx)
+}
+
+/// Mount the Python stdlib, site-packages and the environment read-only
+/// from the host, as the plain WASI context does.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+fn add_library_preopens(
+    ctx: &mut eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+    executor: &Executor,
+) -> std::result::Result<(), Error> {
+    // Add real filesystem preopens that mirror the WASI preopens
+    if let Some(stdlib_path) = executor.stdlib_path() {
+        ctx.add_real_preopen_path(
+            "/python-stdlib",
+            stdlib_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
+        })?;
+    }
+    for (i, site_packages_path) in executor.library_paths().iter().enumerate() {
+        let mount_path = crate::wasm::site_packages_mount_path(i);
+        ctx.add_real_preopen_path(
+            &mount_path,
+            site_packages_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
+        })?;
+    }
+    #[cfg(feature = "environment")]
+    if let Some(root) = executor.environment() {
+        ctx.add_real_preopen_path(
+            crate::environment::MOUNT_PATH,
+            root,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add the environment to VFS: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// The storage behind the shell's private `/tmp` when there's no
+/// `unstable-vfs` VFS, under `max_bytes` (default
+/// [`eryx_vfs::DEFAULT_MAX_BYTES`]).
+#[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+pub(crate) fn private_vfs_storage(max_bytes: Option<u64>) -> eryx_vfs::ArcStorage {
+    eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+        eryx_vfs::InMemoryStorage::with_max_bytes(max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES)),
+    ))
+}
+
+/// The hybrid VFS context without `unstable-vfs`, which `shell` links it for:
+/// the Python stdlib and site-packages as in the plain WASI context, and for
+/// the shell a writable `/tmp` in `storage`, `/dev` and the read-only root.
+#[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+pub(crate) fn build_private_vfs_context(
+    executor: &Executor,
+    storage: eryx_vfs::ArcStorage,
+    max_open_host_files: Option<usize>,
+) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(storage).with_max_open_host_files(
+        max_open_host_files.unwrap_or(eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES),
+    );
+    add_library_preopens(&mut ctx, executor)?;
+    if executor.language() == Language::Shell {
+        ctx.add_vfs_preopen(TMP_MOUNT_PATH, DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+    }
     Ok(ctx)
 }
 
@@ -1241,6 +1290,14 @@ impl SessionExecutor {
             MemoryTracker::new(limits.max_memory_bytes),
         )
         .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
+        #[cfg(feature = "shell")]
+        let vfs_storage = private_vfs_storage(limits.max_vfs_bytes);
+        #[cfg(feature = "shell")]
+        let state = state.with_hybrid_vfs(build_private_vfs_context(
+            &executor,
+            vfs_storage.clone(),
+            limits.max_open_host_files,
+        )?);
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1292,6 +1349,12 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
+            #[cfg(feature = "shell")]
+            vfs_storage: Some(vfs_storage),
+            #[cfg(feature = "shell")]
+            vfs_max_bytes: limits.max_vfs_bytes,
+            #[cfg(feature = "shell")]
+            max_open_host_files: limits.max_open_host_files,
             max_child_host_bytes: limits.max_child_host_bytes,
         })
     }
@@ -1748,6 +1811,19 @@ impl SessionExecutor {
             MemoryTracker::new(self.memory_limit),
         )
         .with_commands(self.executor.commands().clone(), self.max_child_host_bytes);
+        // The shell's /tmp persists across resets, as the VFS does.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        let state = {
+            let storage = self
+                .vfs_storage
+                .clone()
+                .unwrap_or_else(|| private_vfs_storage(self.vfs_max_bytes));
+            state.with_hybrid_vfs(build_private_vfs_context(
+                &self.executor,
+                storage,
+                self.max_open_host_files,
+            )?)
+        };
 
         #[cfg(feature = "unstable-vfs")]
         let state = {
@@ -2229,6 +2305,8 @@ impl ExecutorState {
             memory_tracker,
             net_tx: None,    // Set via with_network() when network handler is running
             output_tx: None, // Set via set_output_tx() when output handler is running
+            #[cfg(feature = "shell")]
+            hybrid_vfs_ctx: None,
             suspended: None,
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
@@ -2264,6 +2342,16 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
         }
+    }
+
+    /// Run on `ctx`, the shell's private filesystem without `unstable-vfs`.
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    pub(crate) fn with_hybrid_vfs(
+        mut self,
+        ctx: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+    ) -> Self {
+        self.hybrid_vfs_ctx = Some(ctx);
+        self
     }
 
     /// The external commands the guest can spawn, and the host memory their
