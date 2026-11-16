@@ -17,9 +17,10 @@
 //! the guest awaits its `wait`.
 //!
 //! What a child can reach:
-//! - **Files:** with `unstable-vfs`, a [fork](eryx_vfs::HybridVfsCtx::fork) of
-//!   the parent's hybrid VFS, so the same mounts and permissions and nothing
-//!   else. Without it, no filesystem.
+//! - **Files:** with `unstable-vfs` or `shell`, a
+//!   [fork](eryx_vfs::HybridVfsCtx::fork) of the parent's hybrid VFS, so the
+//!   same mounts and permissions and nothing else. Without either, no
+//!   filesystem.
 //! - **Network:** through the child proxy only, when the sandbox has one
 //!   (#812); otherwise none.
 //! - **Commands:** a child whose command was registered with
@@ -803,7 +804,9 @@ impl Spawner {
         args: Vec<String>,
         mut env: Vec<(String, String)>,
         cwd: String,
-        #[cfg(feature = "unstable-vfs")] vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))] vfs: Option<
+            eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+        >,
     ) -> Result<Prepared, ProcessError> {
         let command = self
             .commands
@@ -883,7 +886,7 @@ impl Spawner {
                 traces: Some(self.traces.clone().unwrap_or_default()),
                 ..self.clone()
             }),
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs,
         };
         Ok(Prepared {
@@ -923,8 +926,8 @@ impl Command {
     /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI 0.2
     /// (a WASI 0.3 command fails to link), so its filesystem is the host
     /// directories it's given, never a sandbox's VFS (which `unstable-vfs`
-    /// puts in place of WASI's filesystem for children, empty for one
-    /// without a parent).
+    /// and `shell` put in place of WASI's filesystem for children, empty for
+    /// one without a parent).
     ///
     /// # Safety
     ///
@@ -950,7 +953,8 @@ impl Command {
     /// lookups), and only `mounts` as its filesystem, within `limits`.
     /// Returns its exit code, stdout and stderr. Load it with
     /// [`from_precompiled_isolated`](Self::from_precompiled_isolated), or
-    /// with `unstable-vfs` it sees an empty filesystem instead of `mounts`.
+    /// with `unstable-vfs` or `shell` it sees an empty filesystem instead of
+    /// `mounts`.
     pub(crate) async fn run_isolated(
         &self,
         argv: &[String],
@@ -995,7 +999,7 @@ impl Command {
                 fuel_used: Arc::default(),
                 // Isolated commands run nothing else.
                 spawner: None,
-                #[cfg(feature = "unstable-vfs")]
+                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs: None,
             },
         );
@@ -1173,7 +1177,7 @@ impl Commands {
 }
 
 /// The linker children are instantiated with: WASI 0.2 and 0.3, plus the
-/// hybrid VFS with `unstable-vfs`. Built once, for the child engine.
+/// hybrid VFS with `unstable-vfs` or `shell`. Built once, for the child engine.
 fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
     if let Some(linker) = LINKER.get() {
@@ -1198,7 +1202,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     .map_err(wasm_err)?;
     count_p3_sockets(&mut linker).map_err(wasm_err)?;
     add_run_to_linker(&mut linker).map_err(wasm_err)?;
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     {
         eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
             .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
@@ -1234,7 +1238,7 @@ pub(crate) struct ChildState {
     fuel_used: Arc<AtomicU64>,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
@@ -1333,7 +1337,7 @@ impl Drop for LiveSlot {
     }
 }
 
-#[cfg(feature = "unstable-vfs")]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 impl eryx_vfs::HybridVfsView for ChildState {
     type Storage = eryx_vfs::ArcStorage;
 
@@ -1387,7 +1391,7 @@ struct ChildRun {
     network: Option<ChildLink>,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
@@ -1422,7 +1426,7 @@ impl ChildRun {
         if let Some((_, pwd)) = env.iter().find(|(k, _)| k == "PWD") {
             wasi.initial_cwd(pwd);
         }
-        #[cfg(feature = "unstable-vfs")]
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         let mut vfs = self.vfs;
         // Without a proxy TCP stays off (wasmtime-wasi's default) and every
         // address is refused, so the child is offline. With one, it may only
@@ -1441,7 +1445,7 @@ impl ChildRun {
                 Box::pin(async move { ok })
             });
             // The CA certificate only, read-only, at CA_DIR.
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             let mounted = match vfs.as_mut() {
                 Some(vfs) => vfs.add_real_preopen_path(
                     CA_DIR,
@@ -1454,7 +1458,7 @@ impl ChildRun {
                     .map(|_| ())
                     .map_err(std::io::Error::other),
             };
-            #[cfg(not(feature = "unstable-vfs"))]
+            #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
             let mounted = wasi
                 .preopened_dir(&link.ca_dir, CA_DIR, wasmtime_wasi::FsPerms::ReadOnly)
                 .map(|_| ())
@@ -1479,7 +1483,7 @@ impl ChildRun {
                 fuel: self.fuel,
                 fuel_used: Arc::clone(&self.fuel_used),
                 spawner: self.spawner,
-                #[cfg(feature = "unstable-vfs")]
+                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs,
             },
         );
@@ -1658,7 +1662,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             args,
             env,
             cwd,
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             state
                 .hybrid_vfs_ctx
                 .as_ref()
@@ -1911,7 +1915,7 @@ async fn run_nested(
         args,
         env,
         cwd,
-        #[cfg(feature = "unstable-vfs")]
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
     )?;
     let mut held = Held {
@@ -2472,7 +2476,7 @@ mod tests {
                 _live: LiveSlot::take(&Arc::default()).unwrap(),
                 network: None,
                 spawner: None,
-                #[cfg(feature = "unstable-vfs")]
+                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs: None,
             };
             let (code, fuel_used) = run.run().await;

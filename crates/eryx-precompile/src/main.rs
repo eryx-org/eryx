@@ -443,7 +443,6 @@ fn run_inspect(args: &InspectArgs) -> Result<()> {
                 let (support, why) = match &i.support {
                     eryx::ImportSupport::Provided => ("provided", None),
                     eryx::ImportSupport::NeedsSpawn => ("needs-spawn", None),
-                    eryx::ImportSupport::NeedsVfs => ("needs-vfs", None),
                     eryx::ImportSupport::Missing(why) => ("missing", Some(why)),
                     _ => ("unknown", None),
                 };

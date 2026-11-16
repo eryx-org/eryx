@@ -21,6 +21,14 @@
 #   version_strings - C strings that must appear in a covered file, as
 #               { path, strings }, so the version recorded here is the one
 #               vendored
+#   rust_toolchain - for code that comes with a Rust toolchain (its standard
+#               library, the libc of its wasm targets): the toolchain, which
+#               must be one rust-toolchain.toml or mise.toml pins, and each
+#               artifact scripts/notices.py's STD lists needs an entry with
+#               its toolchain
+#   sysroot_strings - strings that must appear in files of that toolchain's
+#               sysroot, as { paths, strings }, so the version recorded here
+#               is the one the toolchain ships
 #   crate     - for code that arrives inside a Rust crate: the crate whose
 #               Cargo.lock version `crate_version` must match
 #   npm       - vendored npm package name, matched against the `name@version`
@@ -292,9 +300,9 @@ version = "wasi-sdk-33 (161b3195)"
 license = "Apache-2.0 WITH LLVM-exception AND Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0"
 url = "https://github.com/WebAssembly/wasi-libc/tree/161b3195fc2558d2b1ba3eb9ffae3b2b47407623"
 # wasi-libc itself (its LICENSE lists the parts it derives from), the musl
-# code in it, cloudlibc and musl-fts; dlmalloc is CC0. Every artifact built
-# for WASI links it: the C guests through libs/, the Rust ones through
-# Rust's self-contained wasm targets.
+# code in it, cloudlibc and musl-fts; dlmalloc is CC0. This is the one in
+# libs/ and the WASI SDK, which the Python and JavaScript guests link; the
+# artifacts built with Rust's own wasm targets link the next entry's.
 files = [
     "third_party/licenses/wasi-libc-LICENSE",
     "third_party/licenses/wasi-libc-LICENSE-APACHE-LLVM",
@@ -310,9 +318,6 @@ wasi_sdk = "wasi-sdk-33"
 artifacts = [
     "runtime-python",
     "runtime-javascript",
-    "runtime-shell",
-    "coreutils",
-    "eryx-bundler",
 ]
 covers = [
     { path = "crates/eryx-runtime/libs/libc.so.zst", sha256 = "55eecf0ff724dbaad24d29abd01f709fa294164152448be657fb9854d5865436" },
@@ -321,6 +326,69 @@ covers = [
     { path = "crates/eryx-runtime/libs/libwasi-emulated-process-clocks.so.zst", sha256 = "421ef01ec3b17760417d24aa1106f20c1eca75818270a491bfe58ab7a935ab21" },
     { path = "crates/eryx-runtime/libs/libwasi-emulated-signal.so.zst", sha256 = "d068a4b77a2a71d0a8c473fac1009a189370bafb407415ae1c5884614273a934" },
 ]
+
+[[component]]
+name = "wasi-libc (Rust's wasm targets)"
+version = "wasi-sdk-34 (2e6fb9d8)"
+license = "Apache-2.0 WITH LLVM-exception AND Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0"
+url = "https://github.com/WebAssembly/wasi-libc/tree/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13"
+# The wasi-libc in Rust's self-contained wasm32-wasip2/p3 sysroots, which the
+# artifacts built with the pinned stable toolchain link. Rust 1.100.0 builds
+# those targets with wasi-sdk-34 (src/ci/docker/host-x86_64/dist-various-2/
+# Dockerfile at its tag), whose src/wasi-libc is at the commit above; its
+# libc.a reports clang 23.1.0-wasi-sdk (llvm 895aa2c8). Only musl's COPYRIGHT
+# differs from wasi-sdk-33's. On a toolchain bump, look both up again; the
+# check below fails when the sysroot's libc.a no longer carries that LLVM.
+files = [
+    "third_party/licenses/wasi-libc-LICENSE",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE-LLVM",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE",
+    "third_party/licenses/wasi-libc-LICENSE-MIT",
+    "third_party/licenses/wasi-libc-wasi-sdk-34-musl-COPYRIGHT",
+    "third_party/licenses/wasi-libc-cloudlibc-LICENSE",
+    "third_party/licenses/wasi-libc-musl-fts-COPYING",
+]
+rust_toolchain = "1.100.0"
+sysroot_strings = { paths = [
+    "lib/rustlib/wasm32-wasip2/lib/self-contained/libc.a",
+    "lib/rustlib/wasm32-wasip3/lib/self-contained/libc.a",
+], strings = ["llvm-project 895aa2c896ada719451be2e3673c83da8ddf1141"] }
+artifacts = ["runtime-shell", "eryx-bundler", "coreutils"]
+
+[[component]]
+name = "The Rust standard library"
+version = "1.100.0 (0ef1bc38)"
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+url = "https://github.com/rust-lang/rust/tree/1.100.0"
+# The project's own licence texts for std, core, alloc and the rest of
+# library/, and Unicode-3.0 for core's Unicode tables
+# (library/core/src/unicode/unicode_data.rs, per the project's REUSE.toml);
+# their dependencies (hashbrown, compiler_builtins, ...) are listed per
+# artifact from rust-src (scripts/notices.py, STD).
+files = [
+    "third_party/licenses/rust-COPYRIGHT",
+    "third_party/licenses/rust-LICENSE-MIT",
+    "third_party/licenses/rust-LICENSE-APACHE",
+    "third_party/licenses/rust-Unicode-3.0.txt",
+]
+rust_toolchain = "1.100.0"
+artifacts = ["host", "runtime-shell", "eryx-bundler"]
+
+[[component]]
+name = "The Rust standard library"
+version = "nightly-2026-10-21 (19833af7)"
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+url = "https://github.com/rust-lang/rust/tree/19833af7224424e8b53e288097d56b6af43d5bcf"
+# The guests' std, built from source with -Z build-std. Same licence texts
+# (and REUSE.toml annotations) as 1.100.0's, checked when the pin was set.
+files = [
+    "third_party/licenses/rust-COPYRIGHT",
+    "third_party/licenses/rust-LICENSE-MIT",
+    "third_party/licenses/rust-LICENSE-APACHE",
+    "third_party/licenses/rust-Unicode-3.0.txt",
+]
+rust_toolchain = "nightly-2026-10-21"
+artifacts = ["runtime-python", "runtime-javascript"]
 
 [[component]]
 name = "libc++ and libc++abi"

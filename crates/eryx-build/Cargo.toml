@@ -7,7 +7,7 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Manifest-driven build driver for the CLI components eryx runs as child commands"
-publish = false
+readme = "README.md"
 
 [dependencies]
 anyhow.workspace = true

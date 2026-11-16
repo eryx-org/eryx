@@ -216,9 +216,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   a CLI before registering it with `eryx-precompile commands inspect cli.wasm`
   (`--json` for a script; `Command::inspect` in Rust), which lists its
   imports and whether children get each, and exits 1 if eryx can't run it.
-- **Files:** with `unstable-vfs`, a child sees the shell's filesystem (below):
-  the session's VFS mounts, `/tmp`, `/dev` and the read-only root, and nothing
-  else of the host. Without it, children have no filesystem yet (#812).
+- **Files:** a child sees the shell's filesystem (above): the read-only root,
+  `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
+  nothing else of the host. Files a child writes are the shell's, and last as
+  long as the shell's own.
 - **Network:** none by default. With the sandbox's network, children can
   get some through a proxy on the host, and never more than the sandbox's
   policy allows: in Rust `with_child_network(ChildNetwork::Inherit)` (that

@@ -67,10 +67,6 @@ pub enum ImportSupport {
     /// `eryx:process/run`: linked, but its calls are refused unless the
     /// command is registered with [`allow_spawn`](crate::Command::allow_spawn).
     NeedsSpawn,
-    /// `wasi:filesystem`: linked, but children see files only with eryx's
-    /// `unstable-vfs` feature; without it they have no preopened
-    /// directories, so opening files fails.
-    NeedsVfs,
     /// Children don't get it, and why.
     Missing(String),
 }
@@ -82,11 +78,6 @@ impl std::fmt::Display for CommandImport {
             ImportSupport::NeedsSpawn => write!(
                 f,
                 "{}: provided, but only commands registered with allow_spawn may run commands",
-                self.name
-            ),
-            ImportSupport::NeedsVfs => write!(
-                f,
-                "{}: provided; children see files only with eryx's unstable-vfs feature",
                 self.name
             ),
             ImportSupport::Missing(why) => write!(f, "{}: not provided: {why}", self.name),
@@ -114,11 +105,7 @@ pub(super) fn support(name: &str) -> ImportSupport {
         );
     }
     if (minor("0.2.") && known(WASI_P2)) || (minor("0.3.") && known(WASI_P3)) {
-        return if package == "wasi:filesystem" {
-            ImportSupport::NeedsVfs
-        } else {
-            ImportSupport::Provided
-        };
+        return ImportSupport::Provided;
     }
     ImportSupport::Missing(if package == "wasi:http" {
         "children get no wasi:http; they reach the network over sockets, \
@@ -284,7 +271,7 @@ mod tests {
         assert_eq!(support("eryx:process/run@0.1.0"), ImportSupport::NeedsSpawn);
         assert_eq!(
             support("wasi:filesystem/preopens@0.2.0"),
-            ImportSupport::NeedsVfs
+            ImportSupport::Provided
         );
         for (name, why) in [
             ("wasi:http/outgoing-handler@0.2.0", "no wasi:http"),
