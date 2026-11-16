@@ -442,7 +442,6 @@ impl SandboxPool {
                 .sandbox_mut()
                 .set_callbacks(boxed)
                 .map_err(eryx_error_to_py)?;
-            crate::sandbox::warn_callback_names(py, eryx::Language::Python, pooled.sandbox_mut())?;
         }
 
         if let Some(limits) = resource_limits {

@@ -537,7 +537,7 @@ pub(crate) fn build_for(
             "commands= is only for language=\"shell\", not {language}"
         )));
     }
-    let sandbox = match language {
+    match language {
         eryx::Language::Python => builder.build(),
         eryx::Language::JavaScript => builder.javascript().build(),
         eryx::Language::Shell => {
@@ -556,27 +556,7 @@ pub(crate) fn build_for(
             )));
         }
     }
-    .map_err(eryx_error_to_py)?;
-    warn_callback_names(py, language, &sandbox)?;
-    Ok(sandbox)
-}
-
-/// Show the warnings eryx logs for callbacks whose names the guest already
-/// uses (`eryx::callback_name_warnings`) as Python `UserWarning`s, which
-/// pyeryx users see where Rust's logging doesn't reach them.
-pub(crate) fn warn_callback_names(
-    py: Python<'_>,
-    language: eryx::Language,
-    sandbox: &eryx::Sandbox,
-) -> PyResult<()> {
-    let names = sandbox.callbacks().keys().map(String::as_str);
-    for message in eryx::callback_name_warnings(language, names) {
-        py.import("warnings")?.call_method1(
-            "warn",
-            (message, py.get_type::<pyo3::exceptions::PyUserWarning>()),
-        )?;
-    }
-    Ok(())
+    .map_err(eryx_error_to_py)
 }
 
 /// Find the precompiled runtime for `language`: `explicit`, then
