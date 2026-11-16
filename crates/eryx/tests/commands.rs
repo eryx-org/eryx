@@ -120,7 +120,7 @@ async fn unregistered_commands_exit_127() {
     assert_eq!(out.stdout_utf8().unwrap(), "status=127\n");
 }
 
-/// Without a VFS, a child has no filesystem at all: not even the host's.
+/// A child sees only the shell's filesystem, never the host's.
 #[tokio::test]
 async fn children_cannot_read_host_files() {
     let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
@@ -130,6 +130,58 @@ async fn children_cannot_read_host_files() {
         .await
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "error: NotFound\nstatus=1\n");
+}
+
+/// A child gets the shell's own filesystem, even without `unstable-vfs`
+/// (#968): `/dev`, a read-only root, and the shell's `/tmp`, so what a child
+/// writes there lasts exactly as long as what the shell writes, across a
+/// session's executions but not into another session.
+#[tokio::test]
+async fn children_share_the_shells_filesystem() {
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let mut session = SessionExecutor::new(executor.clone(), &[]).await.unwrap();
+    let run = async |session: &mut SessionExecutor, script: &str| {
+        let out = session.execute(script).run().await.unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let out = run(
+        &mut session,
+        r#"
+tc cat /dev/null; echo "null=$?"
+echo from-shell > /tmp/shell.txt
+tc cat /tmp/shell.txt
+tc write /tmp/child.txt from-child
+read -r c < /tmp/child.txt; echo "child=$c"
+tc write /new.txt x; echo "root=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        out,
+        "null=0\nfrom-shell\nchild=from-child\nerror: PermissionDenied\nroot=1\n"
+    );
+
+    // Both files survive into the session's next execution, for both.
+    let out = run(
+        &mut session,
+        "tc cat /tmp/shell.txt; tc cat /tmp/child.txt; cat /tmp/child.txt; echo",
+    )
+    .await;
+    assert_eq!(out, "from-shell\nfrom-childfrom-child\n");
+
+    // Another session sees neither.
+    let mut other = SessionExecutor::new(executor, &[]).await.unwrap();
+    let out = run(
+        &mut other,
+        "tc cat /tmp/shell.txt; echo \"s=$?\"; tc cat /tmp/child.txt; echo \"c=$?\"",
+    )
+    .await;
+    assert_eq!(out, "error: NotFound\ns=1\nerror: NotFound\nc=1\n");
 }
 
 #[cfg(feature = "unstable-vfs")]
@@ -626,8 +678,8 @@ async fn the_embedded_shell_runs_common_script_tools() {
     .await;
 }
 
-/// The #897 tools that write files, which need the VFS's `/tmp`.
-#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+/// The #897 tools that write files in the shell's `/tmp`.
+#[cfg(feature = "coreutils")]
 #[tokio::test]
 async fn the_embedded_shell_runs_common_script_tools_on_files() {
     assert_script_outputs(&[
@@ -792,13 +844,18 @@ async fn coreutils_walk_nested_directories() {
     }
 }
 
-/// Children see the shell's root and `/dev` too (with `unstable-vfs`; without
-/// it they have no filesystem yet, #968), so tools that walk up to `/` work.
-#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+/// Children see the shell's root and `/dev` too (#968), so tools that walk up
+/// to `/` work.
+#[cfg(feature = "coreutils")]
 #[tokio::test]
 async fn coreutils_see_the_root_and_dev() {
+    let root = if cfg!(feature = "unstable-vfs") {
+        "data dev tmp "
+    } else {
+        "dev tmp "
+    };
     assert_script_outputs(&[
-        ("ls / | tr '\\n' ' '", "data dev tmp "),
+        ("ls / | tr '\\n' ' '", root),
         (
             "mkdir -p /tmp/a/b/c && realpath /tmp/a/../a/b && readlink -f /tmp/a/b/c",
             "/tmp/a/b\n/tmp/a/b/c\n",
@@ -1622,31 +1679,25 @@ async fn allowed_commands_cover_the_grep_builtin() {
 /// A child starts in the shell's directory: after `cd`, the embedded
 /// coreutils (built by eryx-build, which links in the start-in-`$PWD`
 /// constructor) resolve relative paths against it (#978).
-#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[cfg(feature = "coreutils")]
 #[tokio::test]
 async fn children_start_in_the_shells_directory() {
-    use eryx::vfs::{ArcStorage, InMemoryStorage};
-    use std::sync::Arc;
-
-    let executor = shell().build().unwrap().executor();
-    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
-    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage)
+    let out = shell()
+        .build()
+        .unwrap()
+        .execute(
+            "mkdir -p /tmp/d/sub && cd /tmp/d && echo hi > f && cat f && ls && cd sub && cat ../f",
+        )
         .await
         .unwrap();
-    let out = session
-        .execute("mkdir -p /data/d/sub && cd /data/d && echo hi > f && cat f && ls && cd sub && cat ../f")
-        .run()
-        .await
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\nf\nsub\nhi\n");
+    assert_eq!(out.stdout_utf8().unwrap(), "hi\nf\nsub\nhi\n");
 }
 
 /// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash` (and aliases), through
 /// `eryx:process/run`, when registered with `allow_spawn`. Set
 /// ERYX_TEST_GIT_WASM to its component, e.g. from
 /// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
-/// artifact of the CLI components workflow. git needs a filesystem, which
-/// children only get from the VFS.
+/// artifact of the CLI components workflow. It works on the session's VFS.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 #[ignore = "needs ERYX_TEST_GIT_WASM"]
