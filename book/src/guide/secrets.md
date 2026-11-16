@@ -101,6 +101,12 @@ The real value is only sent to the host the connection was opened to:
 - A request whose `Host` header or absolute-form target names a different host
   is refused if it carries a placeholder, as is one with a malformed request
   line or a target containing whitespace, `\` or userinfo (`user@host`).
+- Only the headers of requests the host can frame are substituted. A write
+  that starts with an empty line, or has a malformed request line, is refused,
+  and bytes that aren't a request leave the connection unparsed, with nothing
+  substituted, from then on, as does a `CONNECT` or a request asking for an
+  `Upgrade` once it ends. So a placeholder never reaches the server inside
+  what it reads as another request's body, or a host a tunnel leads to.
 
 ## Responses
 

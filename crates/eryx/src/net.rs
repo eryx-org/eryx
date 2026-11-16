@@ -956,10 +956,16 @@ struct HttpParsingState {
     body: Body,
     /// Whether a request has been framed on this connection yet.
     started: bool,
-    /// Whether this connection's first bytes weren't HTTP, so with HTTP rules
-    /// everything on it is passed through unparsed (see
-    /// [`NetConfig::allow_http`]).
+    /// Whether everything on this connection is passed through unparsed
+    /// from now on: its first bytes weren't a request, or a `CONNECT` or
+    /// `Upgrade` without HTTP rules ended (see [`NetConfig::allow_http`]).
     raw: bool,
+    /// Whether the current request is a `CONNECT` or asks for an `Upgrade`:
+    /// once it ends, what follows may be another protocol, or go to another
+    /// host, so it's never parsed (or substituted) as requests.
+    switches: bool,
+    /// Whether the one empty line allowed between requests was skipped.
+    skipped_crlf: bool,
     /// Whether a write was refused, after which every write is.
     failed: bool,
 }
@@ -976,23 +982,45 @@ enum Body {
     Chunked(Chunked),
 }
 
-/// Position within a `Transfer-Encoding: chunked` body.
+/// Position within a `Transfer-Encoding: chunked` body, which is parsed
+/// strictly: a server more lenient than this could read the next request as
+/// part of the body, and one stricter would refuse it, so anything that
+/// isn't exactly the RFC 9112 grammar is refused.
 #[derive(Debug)]
 enum Chunked {
-    /// On a chunk-size line; `ext` once past the hex digits.
-    Size { size: usize, ext: bool },
+    /// On a chunk-size line, after `digits` hex digits giving `size`.
+    Size {
+        size: usize,
+        digits: usize,
+        part: SizePart,
+    },
     /// Inside chunk data, with this many bytes left.
     Data(usize),
-    /// On the line break after chunk data.
-    DataEnd,
-    /// In the trailer section; `line` is the current line's length so far.
-    Trailer { line: usize },
+    /// On the `\r\n` after chunk data; `cr` once its `\r` is seen.
+    DataEnd { cr: bool },
+    /// In the trailer section; `line` is the current line's length so far,
+    /// and `cr` whether its `\r` is seen.
+    Trailer { line: usize, cr: bool },
+}
+
+/// Where a chunk-size line is, after its hex digits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SizePart {
+    /// Still in the digits.
+    Digits,
+    /// In whitespace after them, before a `;`.
+    Space,
+    /// In the chunk extensions, after a `;`.
+    Ext,
+    /// After the line's `\r`, before its `\n`.
+    Cr,
 }
 
 impl Chunked {
     const START: Self = Self::Size {
         size: 0,
-        ext: false,
+        digits: 0,
+        part: SizePart::Digits,
     };
 
     /// Advance over `data`, returning the length of the prefix that ends the
@@ -1008,34 +1036,49 @@ impl Chunked {
                     *left -= n;
                     i += n;
                     if *left == 0 {
-                        *self = Self::DataEnd;
+                        *self = Self::DataEnd { cr: false };
                     }
                     continue;
                 }
-                Self::Size { size, ext } => match byte {
-                    b'\n' if *size == 0 => *self = Self::Trailer { line: 0 },
-                    b'\n' => *self = Self::Data(*size),
-                    b'\r' => {}
-                    _ if *ext => {}
-                    b';' | b' ' | b'\t' => *ext = true,
-                    _ => {
+                Self::Size { size, digits, part } => match (*part, byte) {
+                    (SizePart::Cr, b'\n') if *size == 0 => {
+                        *self = Self::Trailer { line: 0, cr: false };
+                    }
+                    (SizePart::Cr, b'\n') => *self = Self::Data(*size),
+                    (SizePart::Cr, _) => return Err(malformed()),
+                    // A size needs at least one digit before anything else.
+                    (_, _) if *digits == 0 && !byte.is_ascii_hexdigit() => {
+                        return Err(malformed());
+                    }
+                    (_, b'\r') => *part = SizePart::Cr,
+                    (_, b'\n') => return Err(malformed()),
+                    (SizePart::Ext, _) => {}
+                    (_, b';') => *part = SizePart::Ext,
+                    (_, b' ' | b'\t') => *part = SizePart::Space,
+                    (SizePart::Digits, _) => {
                         let digit = char::from(byte).to_digit(16).ok_or_else(malformed)?;
                         *size = size
                             .checked_mul(16)
                             .and_then(|s| s.checked_add(digit as usize))
                             .ok_or_else(malformed)?;
+                        *digits += 1;
                     }
+                    (SizePart::Space, _) => return Err(malformed()),
                 },
-                Self::DataEnd => {
-                    if byte == b'\n' {
-                        *self = Self::START;
+                Self::DataEnd { cr } => match (*cr, byte) {
+                    (false, b'\r') => *cr = true,
+                    (true, b'\n') => *self = Self::START,
+                    _ => return Err(malformed()),
+                },
+                Self::Trailer { line, cr } => match (*cr, byte) {
+                    (true, b'\n') if *line == 0 => return Ok(Some(i + 1)),
+                    (true, b'\n') => {
+                        *line = 0;
+                        *cr = false;
                     }
-                }
-                Self::Trailer { line } => match byte {
-                    b'\n' if *line == 0 => return Ok(Some(i + 1)),
-                    b'\n' => *line = 0,
-                    b'\r' => {}
-                    _ => *line += 1,
+                    (false, b'\r') => *cr = true,
+                    (false, b'\n') | (true, _) => return Err(malformed()),
+                    (false, _) => *line += 1,
                 },
             }
             i += 1;
@@ -1316,16 +1359,42 @@ impl ConnectionManager {
                     out.extend_from_slice(&input[pos..]);
                     break;
                 }
+                Body::None if state.switches => {
+                    if pos == input.len() {
+                        break;
+                    }
+                    if !self.config.http_rules.is_empty() {
+                        return Err(TcpError::NotPermitted(
+                            "nothing may follow a CONNECT or Upgrade request on this \
+                             connection (HTTP rules are set)"
+                                .into(),
+                        ));
+                    }
+                    state.raw = true;
+                }
                 Body::None => {
                     // Only the new bytes (plus 3 for a split terminator) can
                     // complete the terminator.
-                    let searched = state.buffer.len().saturating_sub(3);
+                    let mut searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    let is_request = if self.config.http_rules.is_empty() {
-                        Some(could_be_http_request(&state.buffer))
-                    } else {
-                        self.classify_ruled(handle, state)?
-                    };
+                    // Servers skip an empty line before a request, and some
+                    // clients send one after a body, so one is passed on
+                    // between requests (never before the first: see
+                    // `classify`). What follows is still framed.
+                    if state.started && !state.skipped_crlf {
+                        if state.buffer == b"\r" {
+                            break;
+                        }
+                        if state.buffer.starts_with(b"\r\n") {
+                            out.extend(state.buffer.drain(..2));
+                            state.skipped_crlf = true;
+                            searched = 0;
+                            if state.buffer.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                    let is_request = self.classify(handle, state)?;
                     match is_request {
                         Some(true) => {}
                         Some(false) => {
@@ -1355,13 +1424,6 @@ impl ConnectionManager {
                     pos = 0;
                     let headers = std::mem::take(&mut state.buffer);
 
-                    // Not HTTP - pass through everything
-                    if self.config.http_rules.is_empty() && !is_http_request(&headers) {
-                        out.extend_from_slice(&headers);
-                        out.extend_from_slice(&input);
-                        break;
-                    }
-
                     // Check for HTTP/2 (not supported with secrets)
                     if is_http2(&headers) {
                         return Err(TcpError::NotPermitted(
@@ -1371,6 +1433,8 @@ impl ConnectionManager {
 
                     state.body = request_body(&headers)?;
                     state.started = true;
+                    state.skipped_crlf = false;
+                    state.switches = switches_protocols(&headers);
                     if !self.config.http_rules.is_empty() {
                         self.check_http_rules(&headers, handle)?;
                     }
@@ -1424,15 +1488,19 @@ impl ConnectionManager {
         !self.config.http_rules.is_empty() || self.substitutes_secrets(handle)
     }
 
-    /// With HTTP rules, whether the buffered bytes start a request (`None`
-    /// until that's known).
+    /// Whether the buffered bytes start a request (`None` until that's
+    /// known).
     ///
-    /// Anything a server could take for a request must be framed and
-    /// checked, so other bytes are only passed through if they're a
-    /// connection's first and its host has no rules; the connection then
-    /// stays unparsed. Otherwise they're refused, as is a leading empty line
-    /// (which servers skip before a request).
-    fn classify_ruled(
+    /// Anything a server could take for a request must be framed (and, with
+    /// HTTP rules, checked): a server may read whatever follows unframed
+    /// bytes as their body, so a later write parsed as a new request could
+    /// have a secret substituted into what reaches the server as a body. So
+    /// other bytes are passed through only by marking the connection raw,
+    /// never parsed or substituted again, and with HTTP rules only if
+    /// they're a connection's first and its host has no rules (otherwise
+    /// they're refused). A leading empty line, which servers skip before a
+    /// request, and a malformed request line are always refused.
+    fn classify(
         &self,
         handle: u32,
         state: &mut HttpParsingState,
@@ -1447,7 +1515,10 @@ impl ConnectionManager {
             ));
         }
         match request_start(&state.buffer) {
-            Some(false) if state.started || self.config.has_http_rules(host) => {
+            Some(false)
+                if !self.config.http_rules.is_empty()
+                    && (state.started || self.config.has_http_rules(host)) =>
+            {
                 Err(TcpError::NotPermitted(format!(
                     "only HTTP/1.1 requests may be sent on this connection to {host} \
                      (HTTP rules are set)"
@@ -2096,19 +2167,6 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
-/// Request-line prefixes recognised as the start of an HTTP request.
-const HTTP_METHODS: [&[u8]; 9] = [
-    b"GET ",
-    b"POST ",
-    b"PUT ",
-    b"DELETE ",
-    b"PATCH ",
-    b"HEAD ",
-    b"OPTIONS ",
-    b"CONNECT ",
-    b"TRACE ",
-];
-
 /// Whether `data` may start an HTTP request, by the shape of its first
 /// line: a method token, then whitespace and a target that starts with `/`
 /// or `*` or contains `://`, or `HTTP/` (ignoring case) anywhere on the
@@ -2118,11 +2176,13 @@ const HTTP_METHODS: [&[u8]; 9] = [
 /// (HTTP/0.9 included) is framed, and `request_line` then refuses the
 /// malformed ones.
 fn request_start(data: &[u8]) -> Option<bool> {
-    let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
-    let method_len = data.iter().take_while(|b| is_tchar(b)).count();
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
+    let method_len = data.iter().take_while(|b| is_tchar(**b)).count();
+    // Only a method token and then whitespace can start a request line, so
+    // anything else (e.g. a binary protocol's header) is known at once.
     match data.get(method_len) {
         None => return None,
-        Some(_) if method_len > 0 => {}
+        Some(b) if method_len > 0 && is_space(b) => {}
         Some(_) => return Some(false),
     }
     let line_end = data.iter().position(|&b| b == b'\n')?;
@@ -2130,7 +2190,6 @@ fn request_start(data: &[u8]) -> Option<bool> {
     if line.windows(5).any(|w| w.eq_ignore_ascii_case(b"HTTP/")) {
         return Some(true);
     }
-    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
     let rest = &line[method_len..];
     if !rest.first().is_some_and(is_space) {
         return Some(false);
@@ -2147,17 +2206,28 @@ fn request_start(data: &[u8]) -> Option<bool> {
     )
 }
 
-/// Check if data starts with an HTTP request method.
-fn is_http_request(data: &[u8]) -> bool {
-    HTTP_METHODS.iter().any(|m| data.starts_with(m))
+/// Whether a request's `headers` make what follows it something other than
+/// requests: a `CONNECT` (a tunnel, maybe to another host) or any `Upgrade`.
+fn switches_protocols(headers: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(headers);
+    let mut lines = text.split("\r\n");
+    // Methods are case-sensitive, but a lenient proxy may take `connect`.
+    let connect = lines.next().is_some_and(|line| {
+        line.split(' ')
+            .next()
+            .is_some_and(|method| method.eq_ignore_ascii_case("CONNECT"))
+    });
+    connect
+        || lines.any(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
+        })
 }
 
-/// Whether `data` is, or may still become, the start of an HTTP request.
-/// Anything else is passed through without waiting for a blank line.
-fn could_be_http_request(data: &[u8]) -> bool {
-    HTTP_METHODS
-        .iter()
-        .any(|m| data.starts_with(m) || m.starts_with(data))
+/// Whether `b` is an HTTP token character (RFC 9110 `tchar`), as in a method
+/// or a header name.
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
 /// The hosts a request names: its absolute-form target's authority (e.g.
@@ -2259,9 +2329,7 @@ fn request_body(headers: &[u8]) -> Result<Body, TcpError> {
         }
         let (name, value) = line
             .split_once(':')
-            .filter(|(name, _)| {
-                !name.is_empty() && !name.contains(|c: char| c.is_ascii_whitespace())
-            })
+            .filter(|(name, _)| !name.is_empty() && name.bytes().all(is_tchar))
             .ok_or_else(|| ambiguous("malformed header line"))?;
         let value = value.trim_matches([' ', '\t']);
         if name.eq_ignore_ascii_case("transfer-encoding") {
@@ -2593,21 +2661,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_http_request() {
-        assert!(is_http_request(b"GET / HTTP/1.1\r\n"));
-        assert!(is_http_request(b"POST /api HTTP/1.1\r\n"));
-        assert!(is_http_request(b"PUT /resource HTTP/1.1\r\n"));
-        assert!(is_http_request(b"DELETE /item HTTP/1.1\r\n"));
-        assert!(is_http_request(b"PATCH /update HTTP/1.1\r\n"));
-        assert!(is_http_request(b"HEAD / HTTP/1.1\r\n"));
-        assert!(is_http_request(b"OPTIONS * HTTP/1.1\r\n"));
-
-        assert!(!is_http_request(b"NOTHTTP"));
-        assert!(!is_http_request(b""));
-        assert!(!is_http_request(b"GET"));
-    }
-
-    #[test]
     fn test_is_http2() {
         assert!(is_http2(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
         assert!(!is_http2(b"GET / HTTP/1.1\r\n"));
@@ -2642,6 +2695,9 @@ mod tests {
             "GET /a HTTP/1.1\nHost: x\n\nGET /b HTTP/1.1\r\n\r\n",
             "GET /a HTTP/1.1\r\nX-A: b\rc\r\n\r\n",
             "GET /a HTTP/1.1\r\nno colon\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding\x0b: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length\x00: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nX(A): b\r\n\r\n",
         ] {
             assert!(body(headers).is_err(), "{headers:?}");
         }
@@ -3629,6 +3685,185 @@ mod tests {
         );
     }
 
+    /// Without HTTP rules too, bytes the framing can't read as a request
+    /// never let a later write be parsed as a new one: the server may read
+    /// that write as the earlier request's body, so a secret substituted
+    /// into its "headers" would reach the server outside any header.
+    #[test]
+    fn unframed_writes_never_lead_to_substitution() {
+        let smuggled: &[u8] = b"GET / HTTP/1.1\r\nHost: api.example.com\r\nX: &text=PH\r\n\r\n";
+        let post = format!(
+            "POST /x HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: {}\r\n\r\n",
+            smuggled.len()
+        );
+
+        // A leading empty line is refused, and so is the connection after it.
+        let mut m = framing_manager();
+        let preceded = format!("\r\n{post}");
+        assert!(m.process_write_data(1, preceded.as_bytes()).is_err());
+        assert!(m.process_write_data(1, smuggled).is_err());
+        let mut m = framing_manager();
+        assert!(m.process_write_data(1, b"\n").is_err());
+
+        // Bytes that aren't a request pass through, and nothing after them is
+        // parsed or substituted.
+        for first in [
+            &b"\x16\x03\x01"[..],
+            b"PING\r\n",
+            b"SET k v\r\n",
+            b"GET key\r\n",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, first).unwrap(), first);
+            assert_eq!(m.process_write_data(1, smuggled).unwrap(), smuggled);
+        }
+
+        // A request with a method outside the usual ones is framed like any
+        // other, so its body is passed through as a body.
+        let mut m = framing_manager();
+        let propfind = post.replacen("POST", "PROPFIND", 1);
+        assert_eq!(
+            frame(&mut m, &[propfind.as_bytes(), smuggled]),
+            format!("{propfind}{}", String::from_utf8_lossy(smuggled))
+        );
+
+        // A malformed request line is refused.
+        for line in [&b"GET /a b HTTP/1.1\r\n\r\n"[..], b"GET / HTTP/2.0\r\n\r\n"] {
+            let mut m = framing_manager();
+            assert!(m.process_write_data(1, line).is_err(), "{line:?}");
+        }
+    }
+
+    /// A complete request with a body in one write, then another request:
+    /// both get their headers substituted, and the body is left alone.
+    #[test]
+    fn framed_requests_with_bodies_keep_substituting() {
+        let mut m = framing_manager();
+        let post = b"POST / HTTP/1.1\r\nAuthorization: PH\r\nContent-Length: 2\r\n\r\nPH";
+        assert_eq!(
+            frame(&mut m, &[post, GET]),
+            format!(
+                "POST / HTTP/1.1\r\nAuthorization: real\r\nContent-Length: 2\r\n\r\nPH{GET_OUT}"
+            )
+        );
+    }
+
+    /// A binary protocol's first bytes go out at once, whatever byte they
+    /// start with, rather than waiting for a newline (and the connection
+    /// stays unparsed).
+    #[test]
+    fn binary_protocols_are_not_held_back() {
+        for first in [
+            &b"AMQP\x00\x00\x09\x01"[..],
+            b"0\x0c\x02\x01\x01",
+            b"\x16\x03\x01\x02\x00",
+            b"GET\x00",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, first).unwrap(), first, "{first:?}");
+            let later = b"GET / HTTP/1.1\r\nAuthorization: PH\r\n\r\n";
+            assert_eq!(m.process_write_data(1, later).unwrap(), later, "{first:?}");
+        }
+        // A method token that may still be followed by a space waits.
+        let mut m = framing_manager();
+        assert_eq!(frame(&mut m, &[b"GET"]), "");
+        assert_eq!(
+            frame(&mut m, &[b" / HTTP/1.1\r\nAuthorization: PH\r\n\r\n"]),
+            GET_OUT
+        );
+    }
+
+    /// A chunked body is framed exactly by RFC 9112: a size line without a
+    /// hex digit, with junk after its digits, or with a bare CR or LF, and
+    /// anything but CRLF after chunk data or ending a trailer line, are
+    /// refused, so a server can't read the next request as part of the body.
+    #[test]
+    fn chunked_bodies_are_framed_strictly() {
+        let head: &[u8] = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        for body in [
+            &b"\r\n"[..],
+            b" 4\r\nabcd\r\n0\r\n\r\n",
+            b";4\r\nabcd\r\n0\r\n\r\n",
+            b"4 4\r\nabcd\r\n0\r\n\r\n",
+            b"4x\r\nabcd\r\n0\r\n\r\n",
+            b"4\nabcd\r\n0\r\n\r\n",
+            b"4\rxabcd\r\n0\r\n\r\n",
+            b"4;a\nb\r\nabcd\r\n0\r\n\r\n",
+            b"4\r\nabcdXY0\r\n\r\n",
+            b"4\r\nabcd\n0\r\n\r\n",
+            b"4\r\nabcd\r\r\n0\r\n\r\n",
+            b"0\r\nX-T: a\nX-U: b\r\n\r\n",
+            b"0\r\n\n",
+        ] {
+            let mut m = framing_manager();
+            assert!(m.process_write_data(1, head).is_ok());
+            assert!(m.process_write_data(1, body).is_err(), "{body:?}");
+        }
+        // Whitespace before an extension is fine, and so is a trailer.
+        let mut m = framing_manager();
+        let body = "4 ;ext=1\r\nabcd\r\n0\r\nX-T: PH\r\n\r\n";
+        assert_eq!(
+            frame(&mut m, &[head, body.as_bytes(), GET]),
+            format!("{}{body}{GET_OUT}", String::from_utf8_lossy(head))
+        );
+    }
+
+    /// After a `CONNECT` or a request asking for an `Upgrade`, what follows
+    /// may be tunnelled to another host or be another protocol, so it's
+    /// never parsed as requests: passed through as it is without rules, and
+    /// refused with them.
+    #[test]
+    fn nothing_after_connect_or_upgrade_is_substituted() {
+        let later: &[u8] = b"GET / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n";
+        for request in [
+            &b"CONNECT evil.example:80 HTTP/1.1\r\nHost: evil.example:80\r\n\r\n"[..],
+            b"connect evil.example:80 HTTP/1.1\r\nHost: evil.example:80\r\n\r\n",
+            b"GET /chat HTTP/1.1\r\nHost: api.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"POST / HTTP/1.1\r\nupgrade: h2c\r\nContent-Length: 2\r\n\r\nhi",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, request).unwrap(), request);
+            assert_eq!(m.process_write_data(1, later).unwrap(), later);
+            // In the same write too.
+            let mut m = framing_manager();
+            let both = [request, later].concat();
+            assert_eq!(m.process_write_data(1, &both).unwrap(), both);
+        }
+
+        let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+        m.connection_hosts.insert(2, "www.github.com".into());
+        let upgrade = b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(m.process_write_data(2, upgrade).is_ok());
+        assert!(m.process_write_data(2, b"\x81\x05hello").is_err());
+    }
+
+    /// One empty line between requests, which servers skip and some clients
+    /// send after a body, is passed on, and the next request is still
+    /// framed; a second one is refused.
+    #[test]
+    fn one_empty_line_between_requests_is_allowed() {
+        let post: &[u8] = b"POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+        let posted = "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+        let mut m = framing_manager();
+        assert_eq!(
+            frame(&mut m, &[&[post, b"\r\n"].concat(), GET]),
+            format!("{posted}\r\n{GET_OUT}")
+        );
+        let mut m = framing_manager();
+        assert_eq!(
+            frame(&mut m, &[post, b"\r", &[b"\n", GET].concat()]),
+            format!("{posted}\r\n{GET_OUT}")
+        );
+        let mut m = framing_manager();
+        assert!(
+            m.process_write_data(1, &[post, b"\r\n\r\n"].concat())
+                .is_err()
+        );
+        // Before the first request it's still refused.
+        let mut m = framing_manager();
+        assert!(m.process_write_data(1, &[b"\r\n", GET].concat()).is_err());
+    }
+
     #[test]
     fn test_malformed_chunk_size_is_rejected() {
         let mut m = framing_manager();
@@ -4079,8 +4314,9 @@ mod tests {
         );
     }
 
-    /// Headers are buffered only up to a cap, and bytes that can't start a
-    /// request go out at once instead of waiting for a blank line.
+    /// Headers are buffered only up to a cap, and bytes go out as they are
+    /// once their first line shows they aren't a request (or a byte no
+    /// request starts with does), instead of waiting for a blank line.
     #[test]
     fn header_buffer_is_capped() {
         let mut m = framing_manager();
@@ -4097,7 +4333,10 @@ mod tests {
 
         let mut m = framing_manager();
         assert_eq!(frame(&mut m, &[b"G", b"E"]), "");
-        assert_eq!(frame(&mut m, &[b"x hello PH"]), "GEx hello PH");
+        assert_eq!(frame(&mut m, &[b"x hello PH"]), "");
+        assert_eq!(frame(&mut m, &[b"\r\n"]), "GEx hello PH\r\n");
+        assert_eq!(frame(&mut m, &[b"\x16\x03\x01"]), "\x16\x03\x01");
+        let mut m = framing_manager();
         assert_eq!(frame(&mut m, &[b"\x16\x03\x01"]), "\x16\x03\x01");
     }
 
