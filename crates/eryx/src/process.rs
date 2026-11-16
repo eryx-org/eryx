@@ -54,6 +54,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::error::{Error, ErrorKind};
 use crate::wasm::ExecutorState;
 
+mod cached;
 mod imports;
 mod pipe;
 mod preview1;
@@ -2052,18 +2053,18 @@ async fn run_nested(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// How many commands have been linked into a pre-instance.
     pub(super) static COMPILED: AtomicUsize = AtomicUsize::new(0);
 
-    fn test_cmd_wasm() -> Vec<u8> {
+    pub(crate) fn test_cmd_wasm() -> Vec<u8> {
         test_cmd_wasm_for("wasm32-wasip2")
     }
 
-    fn test_cmd_wasm_for(target: &str) -> Vec<u8> {
+    pub(crate) fn test_cmd_wasm_for(target: &str) -> Vec<u8> {
         let manifest =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-cmd/Cargo.toml");
         let target_dir = std::env::temp_dir().join("eryx-unit-test-cmd");

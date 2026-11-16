@@ -234,6 +234,18 @@ pub enum ErrorKind {
         missing: Vec<crate::CommandImport>,
     },
 
+    /// A command file's sha256 isn't the pinned one
+    /// ([`Command::from_file_expecting`](crate::Command::from_file_expecting),
+    /// [`Command::load_cached`](crate::Command::load_cached)).
+    #[error("command digest mismatch: expected {expected}, got {actual}")]
+    #[non_exhaustive]
+    CommandDigest {
+        /// The pinned digest, `sha256:<hex>`.
+        expected: String,
+        /// The file's digest, or why `expected` isn't a sha256 digest.
+        actual: String,
+    },
+
     /// Error during execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
     /// — the runtime could not faithfully execute the script. A failure of the
