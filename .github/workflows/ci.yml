@@ -927,6 +927,7 @@ jobs:
       # (crates/eryx/tests/p3_guest.rs) and a command built for both
       # (crates/eryx/tests/commands.rs, child_network.rs).
       - name: Install wasm32-wasip2 and wasm32-wasip3 targets
+        id: targets
         run: rustup target add wasm32-wasip2 wasm32-wasip3
 
       # The opt-in CLI child tests: a Go-built gh (WASI 0.3) reaching
@@ -995,7 +996,11 @@ jobs:
           cargo nextest run --workspace --all-features --profile ci \
             --run-ignored only -E "$filter"
 
+      # Runs whether or not the CLI child tests above failed (the gh one
+      # reaches the real api.github.com), as long as the setup succeeded.
       - name: Run tests
+        id: tests
+        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
         # Use --all-features to test everything. This works because:
         # - runtime-python.wasm and runtime-python.cwasm are provided by artifacts
         # - prebuilt/liberyx_*.so.zst are provided for late-linking feature
@@ -1012,7 +1017,9 @@ jobs:
       # (5.4 min on #941). Pull requests run it only when the `shell` paths
       # change; pushes and tags always do.
       - name: Run the shell suites without unstable-vfs
-        if: github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true'
+        if: >-
+          ${{ !cancelled() && steps.tests.outcome == 'success'
+          && (github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true') }}
         run: |
           df -h .
           cargo nextest run -p eryx --profile ci \
