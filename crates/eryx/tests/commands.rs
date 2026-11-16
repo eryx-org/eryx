@@ -739,21 +739,30 @@ async fn coreutils_see_the_root_and_dev() {
     }
 }
 
-/// A line-at-a-time producer moves data at a useful rate (#890). The bound
-/// is ~10x a debug build's time alone (0.3 s), to catch only a return to
-/// ~100 µs per line (about 6 s); `pipe_throughput` has the real numbers.
+/// A line-at-a-time producer moves data at a useful rate (#890). Timed
+/// against a buffered producer in the same test, so the bound follows the
+/// runner's speed: 100 KB in 2-byte lines takes ~0.55x as long as 20 MB
+/// from `yes` (debug and release alike), and took ~7x with #890's old
+/// pipes (~100 µs per line). `pipe_throughput` has the real numbers.
 #[cfg(feature = "coreutils")]
 #[tokio::test]
 async fn line_at_a_time_pipes_are_not_slow() {
     let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
-    let start = Instant::now();
-    let out = sandbox
-        .execute("tc lines | head -c 100000 | wc -c")
-        .await
-        .unwrap();
-    assert_eq!(out.stdout_utf8().unwrap().trim(), "100000");
-    let took = start.elapsed();
-    assert!(took < Duration::from_secs(4), "took {took:?}");
+    let time = async |script: &str, bytes: &str| {
+        let start = Instant::now();
+        let out = sandbox.execute(script).await.unwrap();
+        assert_eq!(out.stdout_utf8().unwrap().trim(), bytes);
+        start.elapsed()
+    };
+    // Warm up, so neither timed run pays for the first instantiation.
+    time("tc yes | head -c 100000 | wc -c", "100000").await;
+    let buffered = time("tc yes | head -c 20000000 | wc -c", "20000000").await;
+    let lines = time("tc lines | head -c 100000 | wc -c", "100000").await;
+    let ratio = lines.as_secs_f64() / buffered.as_secs_f64();
+    assert!(
+        ratio < 3.0,
+        "lines took {lines:?}, {ratio:.1}x the buffered run's {buffered:?}"
+    );
 }
 
 /// Throughput of child pipes, for #890: line-at-a-time producers (one
