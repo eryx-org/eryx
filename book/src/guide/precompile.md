@@ -211,6 +211,17 @@ eryx-precompile compile runtime-python.wasm -o numpy.cwasm \
 eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --no-verify
 ```
 
+## Checking Shell Commands
+
+`commands inspect` reads a `.wasm` command (it doesn't compile it) and prints its WASI version, each interface it imports with whether shell children get it, its exports, and whether eryx can run it, exiting 1 if not:
+
+```bash
+eryx-precompile commands inspect rg.wasm
+eryx-precompile commands inspect --json rg.wasm
+```
+
+`compile` without `--language` runs the same check on a command (a component exporting `wasi:cli/run`) and refuses one eryx couldn't run. See [External Commands](./sandboxes.md#external-commands) for what children get.
+
 ## Upgrading to a New eryx Version
 
 A precompiled runtime records the eryx version that built it and only loads in that version. Loading it in any other fails with an error naming both versions, so precompiled runtimes have to be rebuilt after every eryx upgrade, patch releases included.

@@ -224,6 +224,16 @@ pub enum ErrorKind {
         expected: String,
     },
 
+    /// A command imports interfaces children aren't given, so it can't be
+    /// registered. [`Command::inspect`](crate::Command::inspect) lists all of
+    /// a command's imports.
+    #[error("{}", crate::process::missing_message(missing))]
+    #[non_exhaustive]
+    CommandImports {
+        /// Each import children don't get, with why.
+        missing: Vec<crate::CommandImport>,
+    },
+
     /// Error during execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
     /// — the runtime could not faithfully execute the script. A failure of the

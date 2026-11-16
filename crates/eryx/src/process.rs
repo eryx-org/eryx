@@ -53,8 +53,12 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::error::{Error, ErrorKind};
 use crate::wasm::ExecutorState;
 
+mod imports;
 mod pipe;
 mod vmctx;
+
+pub(crate) use imports::missing_message;
+pub use imports::{CommandImport, CommandInfo, ImportSupport};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -457,6 +461,20 @@ impl Command {
         let engine = crate::Executor::child_engine()?;
         let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
         Self::from_component(&engine, &component, vmctx::estimate(wasm))
+    }
+
+    /// Inspect a command's `.wasm` bytes before registering it: which WASI
+    /// version it runs as, each interface it imports and whether children get
+    /// it, what it exports, and why it can't run, if it can't
+    /// (`eryx-precompile commands inspect` prints this). It reads the
+    /// component without compiling it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes aren't a component. One that can't run as
+    /// a command is reported in [`CommandInfo::problem`] instead.
+    pub fn inspect(wasm: &[u8]) -> Result<CommandInfo, Error> {
+        imports::inspect(wasm)
     }
 
     /// Stamp `precompiled`, the output of
@@ -1041,16 +1059,16 @@ impl Pre {
             .any(|(name, _)| name.starts_with("wasi:cli/run@0.3."));
         let pre = linker
             .instantiate_pre(component)
-            .map_err(ErrorKind::wasm_component)?;
+            .map_err(|e| imports::explain(engine, component, e))?;
         Ok(if p3 {
             Self::P3(
                 wasmtime_wasi::p3::bindings::CommandPre::new(pre)
-                    .map_err(ErrorKind::wasm_component)?,
+                    .map_err(|e| imports::explain(engine, component, e))?,
             )
         } else {
             Self::P2(
                 wasmtime_wasi::p2::bindings::CommandPre::new(pre)
-                    .map_err(ErrorKind::wasm_component)?,
+                    .map_err(|e| imports::explain(engine, component, e))?,
             )
         })
     }
@@ -2256,6 +2274,59 @@ mod tests {
         let engine = crate::Executor::child_engine().unwrap();
         let empty = Component::new(&engine, "(component)").unwrap();
         assert!(Command::from_component(&engine, &empty, 0).is_err());
+    }
+
+    /// A command importing what children don't get is refused at load with
+    /// each such import named, and one exporting no `wasi:cli/run` is told
+    /// it isn't a command; `inspect` reports every import.
+    #[test]
+    fn unsupported_imports_are_named_at_load() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (import "wasi:http/outgoing-handler@0.2.0" (instance))
+                (import "wasi:cli/environment@0.2.0" (instance))
+                (import "wasi:cli/stdout@0.1.0" (instance))
+            )"#,
+        )
+        .unwrap();
+        let err = Command::from_bytes(&wasm).unwrap_err();
+        let ErrorKind::CommandImports { missing } = err.kind() else {
+            panic!("{err}");
+        };
+        let names: Vec<_> = missing.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["wasi:http/outgoing-handler@0.2.0", "wasi:cli/stdout@0.1.0"]
+        );
+        assert!(
+            err.to_string().contains("children get no wasi:http"),
+            "{err}"
+        );
+
+        let info = Command::inspect(&wasm).unwrap();
+        assert_eq!(info.problem.as_deref(), Some(err.to_string().as_str()));
+        assert_eq!(info.wasi, None);
+        assert_eq!(info.imports.len(), 3);
+        assert_eq!(info.imports[1].support, ImportSupport::Provided);
+
+        let empty = wat::parse_str("(component)").unwrap();
+        let err = Command::from_bytes(&empty).unwrap_err();
+        assert!(err.to_string().contains("not a WASI command"), "{err}");
+        let info = Command::inspect(&empty).unwrap();
+        assert!(info.problem.unwrap().contains("not a WASI command"));
+        let module = wat::parse_str("(module)").unwrap();
+        assert!(Command::inspect(&module).is_err());
+
+        let info = Command::inspect(&test_cmd_wasm()).unwrap();
+        assert!(info.runnable(), "{:?}", info.problem);
+        assert_eq!(info.wasi, Some("0.2"));
+        assert!(
+            info.imports
+                .iter()
+                .all(|i| !matches!(i.support, ImportSupport::Missing(_))),
+            "{:?}",
+            info.imports
+        );
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or

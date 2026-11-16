@@ -203,6 +203,16 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **Running:** each command runs as a child process with `argv[0]` set to the
   name it was called by, which is how a multicall binary picks its tool. It gets
   the shell's environment, with `PWD` set to the shell's directory.
+- **What children get:** WASI 0.2.x and 0.3.x `wasi:cli`, `wasi:clocks`,
+  `wasi:filesystem`, `wasi:random` and `wasi:sockets` (and 0.2's `wasi:io`),
+  plus `eryx:process/run@0.1` for commands registered with `allow_spawn`.
+  Nothing else: no `wasi:http` (children reach the network over sockets,
+  through the proxy below), and no WASI prereleases. A command importing
+  anything else is refused when it's loaded (`Command::from_file` and
+  friends, or `eryx-precompile compile`), with each such import named. Check
+  a CLI before registering it with `eryx-precompile commands inspect cli.wasm`
+  (`--json` for a script; `Command::inspect` in Rust), which lists its
+  imports and whether children get each, and exits 1 if eryx can't run it.
 - **Files:** with `unstable-vfs`, a child sees the shell's filesystem (below):
   the session's VFS mounts, `/tmp`, `/dev` and the read-only root, and nothing
   else of the host. Without it, children have no filesystem yet (#812).
