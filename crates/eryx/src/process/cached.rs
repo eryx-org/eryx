@@ -32,18 +32,26 @@ impl Command {
     /// must have that digest. A command that imports what children don't get
     /// is refused before it's compiled (see [`inspect`](Self::inspect)).
     ///
-    /// Builds without the `embedded`, `preinit` or `packages` feature can't
-    /// load precompiled code, so they compile it on every load.
+    /// The cache only saves compiling: if its directory can't be created, isn't
+    /// private to this user, or can't be written (a read-only filesystem, say),
+    /// the command is compiled in memory and a warning is logged. Builds
+    /// without the `embedded`, `preinit` or `packages` feature can't load
+    /// precompiled code, so they compile it on every load.
     ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::CommandDigest`] on a digest mismatch,
     /// [`ErrorKind::CommandImports`] if it can't run as a command, and an
-    /// error if it can't be read or compiled, or the cache directory can't be
-    /// created or isn't private to this user.
+    /// error if it can't be read or compiled.
     pub fn load_cached(path: impl AsRef<Path>, expected: Option<&str>) -> Result<Self, Error> {
         #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
-        let dir = Some(crate::cache::default_cache_root()?.join("commands"));
+        let dir = match crate::cache::default_cache_root() {
+            Ok(root) => Some(root.join("commands")),
+            Err(e) => {
+                uncached(Path::new("(eryx cache directory)"), &e);
+                None
+            }
+        };
         #[cfg(not(any(feature = "embedded", feature = "preinit", feature = "packages")))]
         let dir: Option<std::path::PathBuf> = None;
         load_cached_in(path.as_ref(), expected, dir.as_deref())
@@ -120,8 +128,13 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     use std::hash::{Hash, Hasher};
     use std::io::Write;
 
-    let dir = crate::cache::ensure_private_dir(dir)
-        .map_err(|e| ErrorKind::Initialization(format!("command cache {}: {e}", dir.display())))?;
+    let dir = match crate::cache::ensure_private_dir(dir) {
+        Ok(dir) => dir,
+        Err(e) => {
+            uncached(dir, &e);
+            return Command::from_bytes(wasm);
+        }
+    };
     let mut engine = std::collections::hash_map::DefaultHasher::new();
     crate::Executor::child_engine()?
         .precompile_compatibility_hash()
@@ -148,11 +161,27 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     Command::stamp_precompiled(&mut precompiled, &component);
     // Through a temporary file and a rename, so a concurrent load of the same
     // command only ever sees a complete file.
-    let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-    file.write_all(&precompiled)?;
-    file.persist(&cwasm).map_err(|e| Error::from(e.error))?;
+    let written = tempfile::NamedTempFile::new_in(&dir).and_then(|mut file| {
+        file.write_all(&precompiled)?;
+        file.persist(&cwasm).map_err(|e| e.error)
+    });
+    if let Err(e) = written {
+        uncached(&dir, &e);
+        // SAFETY: this process compiled these bytes just now.
+        return unsafe { Command::from_precompiled(&precompiled) };
+    }
     // SAFETY: as above; this process just wrote it.
     unsafe { Command::from_precompiled_file(&cwasm) }
+}
+
+/// Warn, once per load, that a command is compiled without the cache.
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+fn uncached(dir: &Path, reason: &dyn std::fmt::Display) {
+    tracing::warn!(
+        dir = %dir.display(),
+        %reason,
+        "can't use the command cache; compiling the command in memory"
+    );
 }
 
 #[cfg(not(any(feature = "embedded", feature = "preinit", feature = "packages")))]
@@ -210,6 +239,38 @@ mod tests {
             "{err}"
         );
         assert!(!cache.exists());
+    }
+
+    /// An unusable cache directory (here a file in its place, or one that
+    /// can't be written) only costs the cache: the command is compiled in
+    /// memory, and a wrong pin is still refused.
+    #[test]
+    fn an_unusable_cache_compiles_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-cmd.wasm");
+        let wasm = test_cmd_wasm();
+        std::fs::write(&path, &wasm).unwrap();
+        let not_a_dir = dir.path().join("cache");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        load_cached_in(&path, Some(&digest(&wasm)), Some(&not_a_dir)).unwrap();
+        let err = load_cached_in(&path, Some(&digest(b"other")), Some(&not_a_dir)).unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::CommandDigest { .. }),
+            "{err}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let read_only = dir.path().join("read-only");
+            std::fs::create_dir(&read_only).unwrap();
+            std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // Root writes anyway, so there's no failure to fall back from.
+            if std::fs::write(read_only.join("probe"), b"").is_err() {
+                load_cached_in(&path, None, Some(&read_only)).unwrap();
+                assert_eq!(std::fs::read_dir(&read_only).unwrap().count(), 0);
+            }
+        }
     }
 
     #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
