@@ -433,9 +433,17 @@ async fn connect(
             TlsError::Tcp(TcpError::TimedOut) => ProxyError::Upstream(format!(
                 "TLS handshake with {host}:{port} timed out after {handshake:?} ({not_tls})"
             )),
-            TlsError::HandshakeFailed(reason) => ProxyError::Upstream(format!(
-                "TLS handshake with {host}:{port} failed: {reason} ({not_tls})"
-            )),
+            // rustls reports bytes that aren't TLS records, such as a plain
+            // HTTP reply, as a corrupt message; other failures (e.g. an
+            // untrusted certificate) are TLS servers, and get no hint.
+            TlsError::HandshakeFailed(reason) if reason.contains("corrupt message") => {
+                ProxyError::Upstream(format!(
+                    "TLS handshake with {host}:{port} failed: {reason} ({not_tls})"
+                ))
+            }
+            TlsError::HandshakeFailed(reason) => {
+                ProxyError::Upstream(format!("TLS handshake with {host}:{port} failed: {reason}"))
+            }
             other => other.into(),
         })?;
     let config = shared
@@ -830,10 +838,23 @@ mod tests {
         let message = refusal(&proxy, port).await;
         assert!(message.starts_with("HTTP/1.1 502 "), "{message}");
         assert!(
-            message.contains(&format!("TLS handshake with api.test:{port} failed:")),
+            message.contains(&format!("TLS handshake with api.test:{port} failed:"))
+                && message.contains("http:// URL to HTTP_PROXY"),
             "{message}"
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+
+        // A TLS server with a certificate the proxy doesn't trust gets no
+        // plain-HTTP hint.
+        let (port, _, _) = upstream(true).await;
+        let proxy = super::tests::proxy(config(&[]), ChildNetwork::Inherit, false);
+        let message = refusal(&proxy, port).await;
+        assert!(
+            message.starts_with("HTTP/1.1 502 ")
+                && message.contains(&format!("TLS handshake with api.test:{port} failed:"))
+                && !message.contains("plain HTTP"),
+            "{message}"
+        );
     }
 
     /// Hosts the policy refuses get a 403, before anything is dialled.
