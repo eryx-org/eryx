@@ -12,7 +12,8 @@ use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
 use crate::file_io::{read_at, reopen_for_append, write_at};
 use crate::hybrid::{
-    HybridDescriptor, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RootEntry, join_guest_path,
+    EntryKind, HybridDescriptor, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RootEntry,
+    join_guest_path,
 };
 use crate::hybrid_bindings::HybridReaddirIterator;
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
@@ -34,7 +35,10 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
             self.ctx.preopens.len()
         );
         let mut result = Vec::new();
-        for preopen in &self.ctx.preopens {
+        for (index, preopen) in self.ctx.preopens.iter().enumerate() {
+            if !self.ctx.exposes_preopen(index) {
+                continue;
+            }
             let (descriptor, path) = HybridVfsCtx::<S>::preopen_descriptor(preopen);
             let resource = self.table.push(descriptor)?;
             tracing::debug!(
@@ -987,6 +991,14 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
             HybridDescriptor::Synthetic { guest_path } => {
+                // Touching a device succeeds and changes nothing, as on an
+                // open device.
+                if let RootEntry::Device(_) = self
+                    .ctx
+                    .resolve_from_root(&join_guest_path(guest_path, &path))
+                {
+                    return Ok(done(()));
+                }
                 let dir = guest_path.clone();
                 self.root_mutation(&dir, &path, false, |s, fd, rest| {
                     s.set_times_at_op(fd, path_flags, rest, atim, mtim)
@@ -1211,7 +1223,9 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     RootEntry::Device(_) if exclusive => {
                         Err(crate::VfsError::AlreadyExists(target).into())
                     }
-                    RootEntry::Device(_) if oflags.contains(types::OpenFlags::DIRECTORY) => {
+                    RootEntry::Device(_)
+                        if oflags.contains(types::OpenFlags::DIRECTORY) || path.ends_with('/') =>
+                    {
                         Err(crate::VfsError::NotDirectory(target).into())
                     }
                     RootEntry::Device(device) => Ok(done(HybridDescriptor::Device(device))),
@@ -1629,12 +1643,12 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     .ctx
                     .synthetic_children(guest_path)
                     .into_iter()
-                    .map(|(name, is_device)| types::DirectoryEntry {
+                    .map(|(name, kind)| types::DirectoryEntry {
                         name,
-                        type_: if is_device {
-                            types::DescriptorType::CharacterDevice
-                        } else {
-                            types::DescriptorType::Directory
+                        type_: match kind {
+                            EntryKind::Directory => types::DescriptorType::Directory,
+                            EntryKind::File => types::DescriptorType::RegularFile,
+                            EntryKind::Device => types::DescriptorType::CharacterDevice,
                         },
                     })
                     .collect();
@@ -1991,6 +2005,111 @@ mod tests {
         assert!(is_err(excl, |e| matches!(
             e,
             crate::VfsError::AlreadyExists(_)
+        )));
+    }
+
+    /// A single-file volume at the top level mounts a restricted view of its
+    /// host directory at `/`; the root still comes up and serves the file.
+    #[tokio::test]
+    async fn the_root_serves_a_top_level_file_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_file = temp.path().join("settings.json");
+        std::fs::write(&host_file, b"{}").unwrap();
+        std::fs::write(temp.path().join("secret"), b"no").unwrap();
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+        ctx.add_real_file_preopen_path(
+            "/cfg.json",
+            &host_file,
+            DirPerms::READ,
+            FilePerms::READ,
+            None,
+        )
+        .unwrap();
+        ctx.add_root();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+
+        // The guest gets one preopen at `/`: the root.
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        let paths: Vec<_> = dirs.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(paths, ["/tmp", "/"]);
+        let root = preopen(&mut state, 1);
+
+        let listing = state.directory_entries(&root).unwrap().await.unwrap();
+        let entries: Vec<_> = listing.iter().map(|e| (e.name.as_str(), e.type_)).collect();
+        assert_eq!(
+            entries,
+            [
+                ("tmp", types::DescriptorType::Directory),
+                ("cfg.json", types::DescriptorType::RegularFile),
+                ("dev", types::DescriptorType::Directory),
+            ]
+        );
+        let cfg = open(
+            &mut state,
+            &root,
+            "cfg.json",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.read(cfg, 10, 0).await.unwrap().0, b"{}");
+        open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        // The rest of the host directory stays hidden.
+        let secret = open(
+            &mut state,
+            &root,
+            "secret",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(secret, |e| matches!(
+            e,
+            crate::VfsError::NotFound(_)
+        )));
+    }
+
+    /// `touch /dev/null` succeeds and changes nothing, as on an open device;
+    /// a device isn't a directory.
+    #[tokio::test]
+    async fn devices_can_be_touched_but_not_entered() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let now = types::NewTimestamp::Now;
+        state
+            .set_times_at(
+                borrow(&root),
+                types::PathFlags::empty(),
+                "dev/null".into(),
+                now,
+                now,
+            )
+            .await
+            .unwrap();
+        let entered = open(
+            &mut state,
+            &root,
+            "dev/null/",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(entered, |e| matches!(
+            e,
+            crate::VfsError::NotDirectory(_)
         )));
     }
 

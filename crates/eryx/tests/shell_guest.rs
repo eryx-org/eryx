@@ -610,3 +610,53 @@ if printf '%*s' 200000 x > /tmp/big; then echo big; else echo full; fi
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "small\nfull\n");
 }
+
+/// A session's `/tmp` outlives a reset, as the VFS does.
+#[tokio::test]
+async fn the_shell_tmp_survives_a_session_reset() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    session.execute("echo kept > /tmp/k").run().await.unwrap();
+    session.reset(&[]).await.unwrap();
+    let out = session
+        .execute("read -r line < /tmp/k && echo \"$line\"")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "kept\n");
+}
+
+/// A single-file volume at the top level doesn't hide the root: `/` still
+/// lists, `/dev` is still there, and the file is served.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn a_top_level_file_volume_keeps_the_root() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let host = tempfile::tempdir().unwrap();
+    std::fs::write(host.path().join("settings.json"), "{}\n").unwrap();
+    let sandbox = builder
+        .with_volume(eryx::VolumeMount::read_only(
+            host.path().join("settings.json"),
+            "/cfg.json",
+        ))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+[ -d / ] && [ -e /dev/null ] && [ -d /tmp ] && echo root
+read -r cfg < /cfg.json && echo "cfg:$cfg"
+for f in /*; do printf '%s ' "$f"; done; echo
+"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "root\ncfg:{}\n/cfg.json /data /dev /tmp \n"
+    );
+}
