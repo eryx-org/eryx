@@ -1,0 +1,25 @@
+# Third-party notices
+
+This artifact includes the following third-party Rust crates, under the
+licences below.
+
+## Licences used
+
+{{#each overview}}
+- {{{name}}}: {{count}} crate(s)
+{{/each}}
+
+{{#each licenses}}
+## {{{name}}}
+
+Used by:
+
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```
+{{{text}}}
+```
+
+{{/each}}
