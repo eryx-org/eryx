@@ -683,7 +683,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    for (component, sha256) in components {
+    for &(component, sha256) in &components {
         setup_component(
             &client,
             &version,
@@ -696,8 +696,19 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .await?;
     }
 
+    // Say what `cargo build` will now find, and with which feature.
+    let set_up: Vec<String> = components.iter().map(|(c, _)| c.to_string()).collect();
+    let feature = if components
+        .iter()
+        .all(|(c, _)| matches!(c, Component::Bundler))
+    {
+        "packages"
+    } else {
+        "embedded"
+    };
     println!(
-        "Setup complete! `cargo build` with `features = [\"embedded\"]` will now find the cached runtime."
+        "Setup complete! `cargo build` with `features = [\"{feature}\"]` will now find the cached {}.",
+        set_up.join(", ")
     );
     println!();
     println!(

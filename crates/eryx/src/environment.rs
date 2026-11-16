@@ -128,9 +128,10 @@ impl BuildOptions {
     /// [`cache_dir`](Self::cache_dir)), never the process's current
     /// directory, so a server whose working directory is read-only still
     /// builds. A lockfile there isn't shared across machines, though, so two
-    /// builds can resolve different versions. For reproducible builds,
-    /// commit the lockfile next to the definition, point `base_dir` at it,
-    /// and build with [`frozen`](Self::frozen).
+    /// builds can resolve different versions, and definitions with the same
+    /// name share it, so two with different packages re-resolve each other's.
+    /// For reproducible builds, commit the lockfile next to the definition,
+    /// point `base_dir` at it, and build with [`frozen`](Self::frozen).
     pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.base_dir = Some(dir.into());
         self
@@ -269,20 +270,23 @@ async fn build_javascript(
             .join("packages"),
     };
     // Not the current directory: a library or server caller may run anywhere.
-    let base_dir = match &options.base_dir {
-        Some(dir) => dir.clone(),
-        None => {
-            let dir = cache_dir.join("lockfiles");
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| EnvironmentError::Build(format!("creating {}: {e}", dir.display())))?;
-            dir
-        }
-    };
+    let base_dir = options
+        .base_dir
+        .clone()
+        .unwrap_or_else(|| cache_dir.join("lockfiles"));
     let lockfile = base_dir.join(
         npm.lockfile
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("{}.lock", definition.name))),
     );
+    // The cache's lockfile directory (and any subdirectory the definition's
+    // `lockfile` names) may not exist yet.
+    if options.base_dir.is_none()
+        && let Some(dir) = lockfile.parent()
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| EnvironmentError::Build(format!("creating {}: {e}", dir.display())))?;
+    }
 
     let mut registry = match &npm.registry {
         Some(url) => Registry::new(url)?,
