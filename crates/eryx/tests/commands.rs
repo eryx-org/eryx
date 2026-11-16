@@ -1067,7 +1067,7 @@ async fn allowed_commands_cover_the_grep_builtin() {
     assert_eq!(String::from_utf8_lossy(&refused.stdout), "grep=127\n");
     assert_eq!(
         String::from_utf8_lossy(&refused.stderr),
-        "grep: command not found\n"
+        "error: command not found: grep\n"
     );
 
     let allowed = session

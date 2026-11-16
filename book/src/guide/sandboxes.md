@@ -186,7 +186,9 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   empty list allows none, unset allows all, and unknown names are ignored. It
   lasts one execution: a session's next call without it gets every command
   back. The shell's `grep` builtin counts as a command here (allow `grep` to
-  keep it); other builtins and callbacks aren't commands and keep working. In a
+  keep it): left out, it fails as not installed when run, though `type grep`
+  and `command -v grep` still report a builtin. Other builtins and callbacks
+  aren't commands and keep working. In a
   session, a command an earlier call allowed still shows in the shell's
   `hash` table, but running it is refused.
 - **Lookup:** the shell looks for functions first, then builtins, then

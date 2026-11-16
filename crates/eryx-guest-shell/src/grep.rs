@@ -73,7 +73,8 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for GrepRefused {
         self,
         context: ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
-        writeln!(context.stderr(), "grep: command not found")?;
+        // As the shell reports a command it can't find.
+        writeln!(context.stderr(), "error: command not found: grep")?;
         Ok(ExecutionResult::new(127))
     }
 }
