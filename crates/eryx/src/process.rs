@@ -785,11 +785,9 @@ impl Drop for NestedTrace {
     }
 }
 
-/// A child ready to run, with what it holds of the execution's budget and
-/// the parent's ends of its pipes.
+/// A child ready to run, with the parent's ends of its pipes.
 struct Prepared {
     run: ChildRun,
-    charged: u64,
     stdin: pipe::Writer,
     stdout: pipe::Reader,
     stderr: pipe::Reader,
@@ -863,8 +861,11 @@ impl Spawner {
             );
             return Err(ProcessError::LimitExceeded);
         };
-        let charged = args_bytes as u64;
-        self.budget.charge(charged)?;
+        let mut args = Held {
+            budget: self.budget.clone(),
+            bytes: 0,
+        };
+        args.charge(args_bytes as u64)?;
 
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
@@ -880,6 +881,7 @@ impl Spawner {
             fuel_used: Arc::default(),
             memory,
             _live: live,
+            _args: args,
             network,
             spawner: command.spawns.then(|| Spawner {
                 depth: self.depth + 1,
@@ -891,7 +893,6 @@ impl Spawner {
         };
         Ok(Prepared {
             run,
-            charged,
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,
@@ -1365,8 +1366,6 @@ impl WasiView for ChildState {
 pub struct ChildProcess {
     /// What `wait` runs, until it does.
     run: Option<ChildRun>,
-    /// What this child holds of the execution's [`ChildBudget`].
-    charged: u64,
 }
 
 /// What `wait` runs a child with, taken out of its handle.
@@ -1387,6 +1386,9 @@ struct ChildRun {
     memory: ChildMemory,
     /// Its live slot, given back when the run ends or is dropped.
     _live: LiveSlot,
+    /// Its argv and env, charged to the execution's budget for as long as
+    /// the run (which holds copies of them) lasts.
+    _args: Held,
     /// Its proxy, if children have network.
     network: Option<ChildLink>,
     /// How it runs commands of its own, if its command may.
@@ -1614,10 +1616,6 @@ impl ExecutorState {
             .table
             .get_mut(child)
             .map_err(|_| ProcessError::IoError)?;
-        // Its argv and env move into the run and are freed with it, even if
-        // the parent's timeout drops it midway.
-        self.child_budget
-            .release(std::mem::take(&mut child.charged));
         let mut run = child.run.take().ok_or(ProcessError::IoError)?;
         run.fuel = fuel.min(CHILD_FUEL);
         Ok(run)
@@ -1632,8 +1630,8 @@ impl Host for ExecutorState {
 
 impl HostChild for ExecutorState {
     async fn drop(&mut self, child: Resource<ChildProcess>) -> wasmtime::Result<()> {
-        let child = self.table.delete(child)?;
-        self.child_budget.release(child.charged);
+        // A run not yet waited on gives back its budget as it's dropped.
+        self.table.delete(child)?;
         Ok(())
     }
 }
@@ -1653,7 +1651,6 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         }
         let Prepared {
             run,
-            charged,
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,
@@ -1668,10 +1665,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 .as_ref()
                 .map(eryx_vfs::HybridVfsCtx::fork),
         )?;
-        let child = ChildProcess {
-            run: Some(run),
-            charged,
-        };
+        let child = ChildProcess { run: Some(run) };
         let spawned = (|| -> wasmtime::Result<Spawned> {
             stdin.pipe(&mut host, PipeConsumer(stdin_tx))?;
             let stdout = StreamReader::new(&mut host, PipeProducer(stdout_rx))?;
@@ -1683,15 +1677,10 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 stderr,
             })
         })();
-        let state = host.get();
-        match spawned {
-            Ok(spawned) => Ok(spawned),
-            Err(e) => {
-                tracing::warn!(error = %e, "connecting a child's stdio failed");
-                state.child_budget.release(charged);
-                Err(ProcessError::SpawnFailed)
-            }
-        }
+        spawned.map_err(|e| {
+            tracing::warn!(error = %e, "connecting a child's stdio failed");
+            ProcessError::SpawnFailed
+        })
     }
 
     /// Run the child, charging the parent the fuel it burns as it runs.
@@ -1906,7 +1895,6 @@ async fn run_nested(
     }
     let Prepared {
         mut run,
-        charged,
         stdin,
         stdout,
         stderr,
@@ -1918,9 +1906,10 @@ async fn run_nested(
         #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
     )?;
+    // Its input and output; the run holds its argv and env.
     let mut held = Held {
         budget: spawner.budget,
-        bytes: charged,
+        bytes: 0,
     };
     held.charge(input.len() as u64)?;
     // Only once it can't be refused, so a refused child reports nothing.
@@ -2474,6 +2463,10 @@ mod tests {
                 fuel_used: Arc::default(),
                 memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
                 _live: LiveSlot::take(&Arc::default()).unwrap(),
+                _args: Held {
+                    budget: ChildBudget::default(),
+                    bytes: 0,
+                },
                 network: None,
                 spawner: None,
                 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
