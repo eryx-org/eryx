@@ -10,11 +10,11 @@ runs:
     - uses: ./.github/actions/setup-binstall
 
     - name: Install mise
-      uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+      uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
       with:
         # Pinned for reproducibility: mise-action installs the latest mise by
         # default, and an auto-upgrade to 2026.8.2 broke CI (its new aube
         # supply-chain trust gate rejected a jco transitive dep). See the
         # trust_policy_excludes note in js/mise.toml. Bump deliberately.
-        version: 2026.11.5
+        version: 2026.11.8
         cache: false # We handle caching ourselves to include ~/.rustup

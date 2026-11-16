@@ -91,7 +91,7 @@ fn random() -> f64 {
 }
 
 /// `performance.now()`: milliseconds since this instance's first execute.
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     TIME_ORIGIN
         .get()
         .map_or(0.0, |origin| origin.elapsed().as_secs_f64() * 1000.0)
