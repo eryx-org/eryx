@@ -738,3 +738,68 @@ async fn coreutils_see_the_root_and_dev() {
         assert!(err.to_string().contains(message), "{script}: {err}");
     }
 }
+
+/// A line-at-a-time producer moves data at a useful rate (#890). The bound
+/// is ~10x a debug build's time alone (0.3 s), to catch only a return to
+/// ~100 µs per line (about 6 s); `pipe_throughput` has the real numbers.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn line_at_a_time_pipes_are_not_slow() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let start = Instant::now();
+    let out = sandbox
+        .execute("tc lines | head -c 100000 | wc -c")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap().trim(), "100000");
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(4), "took {took:?}");
+}
+
+/// Throughput of child pipes, for #890: line-at-a-time producers (one
+/// write and flush per 2-byte line), a buffered one, and the first line's
+/// latency. Prints timings; run it by name with `--run-ignored only`.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+#[ignore = "benchmark"]
+async fn pipe_throughput() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_secs(120)),
+        )
+        .build()
+        .unwrap();
+    for (label, script, bytes) in [
+        (
+            "lines -> head",
+            "tc lines | head -c 100000 | wc -c",
+            100_000,
+        ),
+        (
+            "lines -> cat -> head",
+            "tc lines | cat | head -c 10000 | wc -c",
+            10_000,
+        ),
+        (
+            "yes -> head",
+            "tc yes | head -c 20000000 | wc -c",
+            20_000_000,
+        ),
+        // Latency: the first line should reach `head` long before the pipe fills.
+        (
+            "first lines -> cat -> head",
+            "tc lines | cat | head -c 10 | wc -c",
+            10,
+        ),
+    ] {
+        let start = Instant::now();
+        let out = sandbox.execute(script).await.unwrap();
+        let secs = start.elapsed().as_secs_f64();
+        assert_eq!(out.stdout_utf8().unwrap().trim(), bytes.to_string());
+        eprintln!(
+            "BENCH {label}: {bytes} bytes in {secs:.3}s = {:.0} KB/s",
+            bytes as f64 / secs / 1000.0
+        );
+    }
+}

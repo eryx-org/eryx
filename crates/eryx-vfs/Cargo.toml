@@ -17,7 +17,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 # Vendored DirPerms/FilePerms; see src/perms.rs.
 bitflags = "2"
-bytes = "1"
+bytes.workspace = true
 cap-primitives = "4"
 # /dev/urandom.
 rand.workspace = true

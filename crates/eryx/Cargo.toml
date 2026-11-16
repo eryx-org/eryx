@@ -102,6 +102,7 @@ required-features = ["native-extensions", "embedded"]
 async-trait.workspace = true
 # Secrets in `Authorization: Basic` headers
 base64.workspace = true
+bytes.workspace = true
 blake3 = { workspace = true, optional = true }
 eryx-macros = { workspace = true, optional = true } #unified
 eryx-packages = { workspace = true, optional = true }
