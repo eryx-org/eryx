@@ -1,0 +1,15 @@
+# cargo-about configuration added to about.toml for the Rust standard
+# library's crates only (scripts/notices.py, std_section).
+# The Rust standard library's compiler_builtins (scripts/notices.py, STD)
+# declares "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)",
+# but its LICENSE.txt, which gives the LLVM exception's text, is one
+# directory up, where cargo-about doesn't look. The checksum is that file's
+# in rust-src; a toolchain whose file changes fails the notices until this is
+# updated.
+[compiler_builtins.clarify]
+license = "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)"
+
+[[compiler_builtins.clarify.files]]
+path = "../LICENSE.txt"
+license = "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)"
+checksum = "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b"

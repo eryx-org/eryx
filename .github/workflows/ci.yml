@@ -164,6 +164,8 @@ jobs:
               - 'crates/eryx-guest-js/src/node/**'
               - 'clis/coreutils.toml'
               - 'mise.toml'
+              # The toolchain whose standard library the notices list.
+              - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
 
   # Fast check for dependency drift - runs in parallel with build

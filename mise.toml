@@ -11,7 +11,8 @@ version = "0.9.152"
 
 # Third-party notices for the shipped artifacts (`mise run notices`, #837).
 [tools."cargo:cargo-about"]
-version = "0.7.1"
+# 0.9 knows wasm32-wasip3; 0.7.1 left out every crate only that target uses.
+version = "0.9.3"
 
 [tools."cargo:wasm-tools"]
 version = "1.263.0"
@@ -690,7 +691,13 @@ outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 
 [tasks.notices]
 description = "Write each shipped artifact's third-party notices to target/notices (#837)"
+depends = ["ensure-rust-src"]
 run = "python3 scripts/notices.py generate target/notices"
+
+[tasks.ensure-rust-src]
+description = "Install rust-src for both pinned toolchains, which the notices read the standard library's dependencies from, and the wasm targets whose sysroots they check"
+depends = ["ensure-guest-toolchain"]
+run = "rustup component add rust-src && rustup target add wasm32-wasip2 wasm32-wasip3"
 
 [tasks.update-reserved-names]
 description = "Regenerate the JS SDK's copy of the callback names each guest reserves (#962)"
@@ -698,6 +705,7 @@ run = "ERYX_UPDATE_RESERVED_NAMES=1 cargo test -p eryx --lib reserved::tests::js
 
 [tasks.notices-check]
 description = "Check every shipped crate's licence is accepted and every vendored input has a notices entry"
+depends = ["ensure-rust-src"]
 run = "python3 scripts/notices.py check"
 
 [tasks.setup]
