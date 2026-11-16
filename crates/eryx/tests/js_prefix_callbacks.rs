@@ -9,6 +9,9 @@
 #![cfg(all(feature = "embedded", feature = "javascript"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use eryx::{DynamicCallback, InProcessSession, PrefixCallback, Sandbox, Session};
 use serde_json::json;
 
@@ -129,6 +132,53 @@ async fn unknown_names_outside_a_prefix_still_fail() {
     .await
     .unwrap();
     assert_eq!(out, "function function\n");
+}
+
+/// Printing or serializing a namespace never calls the host: JSON.stringify
+/// asks every object for `toJSON`, and `bind` isn't a call.
+#[tokio::test]
+async fn looking_at_a_namespace_calls_nothing() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let counted = |prefix: &str| {
+        let calls = calls.clone();
+        PrefixCallback::new(prefix, "Counted tools", move |name, _args, _pos| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(json!(name)) })
+        })
+    };
+    let sandbox = Sandbox::embedded()
+        .javascript()
+        .with_callback(counted("mcp.github"))
+        .with_callback(counted("mcp.grafana"))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r"
+            console.log(mcp, mcp.github, mcp.github.search);
+            console.log(JSON.stringify({ svc: mcp.github }), String(mcp.github.search), `${mcp.github}`);
+            const bound = mcp.github.search.bind(null);
+            console.log(typeof bound, typeof mcp.github.call, typeof mcp.github.toJSON);
+            var result = { svc: mcp.grafana };
+            ",
+        )
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        out.stdout_text(),
+        "{} [Namespace mcp.github] [Namespace mcp.github.search]\n\
+         {} [Namespace mcp.github.search] [Namespace mcp.github]\n\
+         function function undefined\n"
+    );
+    assert_eq!(out.result.as_deref(), Some("{}"));
+    // And `invoke` still reaches a tool with one of those names.
+    let out = sandbox
+        .execute("console.log(await invoke('mcp.github.toJSON'))")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_text(), "mcp.github.toJSON\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 /// A namespace is an installed callback, not session state.

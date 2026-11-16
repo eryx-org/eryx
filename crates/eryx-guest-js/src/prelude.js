@@ -6,6 +6,7 @@
     const inspect = (v) => {
         if (typeof v === 'string') return v;
         if (v instanceof Error) return formatError(v);
+        if (prefixNamespaces.has(v)) return `[Namespace ${prefixNamespaces.get(v)}]`;
         if (typeof v === 'function') return `[Function ${v.name || '(anonymous)'}]`;
         if (typeof v === 'bigint') return `${v}n`;
         if (typeof v === 'symbol' || v === undefined) return String(v);
@@ -113,13 +114,22 @@
     // and calling one invokes its full dotted name. `invoke` binds the
     // arguments by name, so an exact callback below the prefix keeps its
     // schema; anything else sends positional arguments as `__eryx_args__`
-    // for the host to bind. Symbols, `then` (so awaiting a namespace doesn't
-    // call it) and Object.prototype's names aren't tool names.
-    const prefixNamespaces = new WeakSet();
-    const prefixNamespace = (name) =>
-        new Proxy(() => {}, {
+    // for the host to bind. Some names aren't tool names, so looking one up
+    // never calls the host: symbols, Object.prototype's (`toString`, ...),
+    // `then` (awaiting a namespace), `toJSON` (JSON.stringify, so
+    // console.log and the result capture), and `call`, `apply` and `bind`.
+    // `invoke("mcp.svc.toJSON")` still reaches them.
+    const NOT_TOOLS = new Set(['then', 'toJSON', 'call', 'apply', 'bind']);
+    // Every namespace, by its dotted name.
+    const prefixNamespaces = new WeakMap();
+    const prefixNamespace = (name) => {
+        // Its own `toString`: Function.prototype's reads `name`, another
+        // namespace, whose string is its `name`'s, ... without end.
+        const target = () => {};
+        Object.defineProperty(target, 'toString', { value: () => `[Namespace ${name}]` });
+        const namespace = new Proxy(target, {
             get(target, key) {
-                if (typeof key === 'symbol' || key === 'then' || key in Object.prototype) {
+                if (typeof key === 'symbol' || NOT_TOOLS.has(key) || key in Object.prototype) {
                     return Reflect.get(target, key);
                 }
                 return prefixNamespace(`${name}.${key}`);
@@ -128,6 +138,9 @@
                 return globalThis.invoke(name, ...args);
             },
         });
+        prefixNamespaces.set(namespace, name);
+        return namespace;
+    };
 
     // Top-level names we installed last time, so a changed callback set can
     // remove them. Anything else already on globalThis is never shadowed.
@@ -165,9 +178,7 @@
                 if (prefixNamespaces.has(target)) break;
             }
             if (prefixNamespaces.has(target)) continue;
-            const namespace = prefixNamespace(parts.join('.'));
-            prefixNamespaces.add(namespace);
-            target[parts.at(-1)] = namespace;
+            target[parts.at(-1)] = prefixNamespace(parts.join('.'));
         }
     };
 

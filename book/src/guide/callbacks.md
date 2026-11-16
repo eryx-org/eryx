@@ -543,9 +543,12 @@ assert_eq!(output.stdout_text().trim(), "admin alerts panels");
 - JavaScript guest code calls them the same way:
   `await mcp.grafana.user_info()`, `await mcp.grafana["search-docs"]("panels")`.
   Any name below the prefix, at any depth, is a function. A single plain
-  object is keyword arguments; anything else goes positionally. `then` and
-  `Object.prototype`'s names (`toString`, ...) aren't tool names there, so
-  call those through `invoke("mcp.grafana.toString")`. `listCallbacks()` lists
+  object is keyword arguments; anything else goes positionally. Looking at a
+  namespace never calls the host, so `then`, `toJSON` (which
+  `JSON.stringify` and `console.log` ask for), `call`, `apply`, `bind` and
+  `Object.prototype`'s names (`toString`, ...) aren't tool names there: call
+  those through `invoke("mcp.grafana.toJSON")`. `console.log` prints a
+  namespace as `[Namespace mcp.grafana]`. `listCallbacks()` lists
   the prefix as is.
 - Any callback whose name ends in `.*` is a prefix callback, and gets the
   invoked name through `Callback::invoke_named`. In the JavaScript package,
