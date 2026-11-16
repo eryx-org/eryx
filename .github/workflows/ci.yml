@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -265,8 +265,9 @@ jobs:
           # Windows cwasm built alongside the Linux one, v5 -> v6 for the macOS one,
           # v6 -> v7 for the eryx version stored in every cwasm (engine config in
           # crates/eryx/src/wasm.rs). The version itself comes from Cargo.toml,
-          # which the key covers.
-          key: wasm-runtime-v7-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # which the key covers. v7 -> v8: the engine enables the component
+          # model's more async builtins (#816).
+          key: wasm-runtime-v8-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -427,8 +428,9 @@ jobs:
             crates/eryx-runtime/runtime-javascript-macos.cwasm
           # As with the Python key, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
-          # cwasms were built without the CPU presets (host features).
-          key: wasm-runtime-javascript-v3-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # cwasms were built without the CPU presets (host features). v3 -> v4:
+          # more async builtins (#816).
+          key: wasm-runtime-javascript-v4-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -523,8 +525,8 @@ jobs:
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v2 -> v3:
           # the shell's embedded coreutils (#809). v3 -> v4: the shell is
-          # built for wasm32-wasip3.
-          key: wasm-runtime-shell-v4-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # built for wasm32-wasip3. v4 -> v5: more async builtins (#816).
+          key: wasm-runtime-shell-v5-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -670,8 +672,9 @@ jobs:
             crates/eryx-runtime/eryx-bundler-windows.cwasm
             crates/eryx-runtime/eryx-bundler-macos.cwasm
           # As for the runtimes, the cwasm's engine and CPU-feature settings
-          # aren't covered: bump the prefix when they change.
-          key: wasm-bundler-v1-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # aren't covered: bump the prefix when they change. v1 -> v2: more
+          # async builtins (#816).
+          key: wasm-bundler-v2-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -892,8 +895,8 @@ jobs:
 
       # Tests build small guests of their own: a wasm32-wasip3 probe
       # (crates/eryx-vfs/tests/p3_filesystem.rs), a wasm32-wasip3 guest
-      # (crates/eryx/tests/p3_guest.rs) and a wasm32-wasip2 command
-      # (crates/eryx/tests/commands.rs).
+      # (crates/eryx/tests/p3_guest.rs) and a command built for both
+      # (crates/eryx/tests/commands.rs, child_network.rs).
       - name: Install wasm32-wasip2 and wasm32-wasip3 targets
         run: rustup target add wasm32-wasip2 wasm32-wasip3
 
