@@ -6,5 +6,9 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# Not part of the eryx workspace: it only builds for wasm32-wasip2.
+# Not part of the eryx workspace: it only builds for WASI.
 [workspace]
+
+[dependencies]
+# `spawn` runs commands through eryx:process/run.
+wit-bindgen = "0.63"

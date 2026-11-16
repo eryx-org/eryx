@@ -929,3 +929,66 @@ async fn abandoned_invokes_are_released() {
     );
     assert_eq!(second.replayed_callbacks, 1);
 }
+
+/// Callback replay matches calls on their arguments' text, which the guest
+/// writes with sorted keys: the same arguments in another key order replay.
+/// And a run that suspends resumes from its journal: completed calls replay,
+/// the rest run live.
+#[tokio::test]
+async fn replay_ignores_key_order_and_resumes_after_suspending() {
+    let Some(builder) = js_sandbox() else { return };
+    let tool = TestCallback::new("tool", Ok);
+    let calls = Arc::clone(&tool.calls);
+    let sandbox = builder.with_callback(tool).build().unwrap();
+    let first = sandbox
+        .execute_with_journal(
+            "await tool({ b: 1, a: { d: [{ z: 0, y: 1 }], c: 2 } })",
+            None,
+        )
+        .await;
+    first.result.unwrap();
+    let second = sandbox
+        .execute_with_journal(
+            "console.log(JSON.stringify(await tool({ a: { c: 2, d: [{ y: 1, z: 0 }] }, b: 1 })))",
+            Some(first.journal),
+        )
+        .await;
+    assert_eq!(second.replayed_callbacks, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        second.result.unwrap().stdout_text(),
+        "{\"a\":{\"c\":2,\"d\":[{\"y\":1,\"z\":0}]},\"b\":1}\n"
+    );
+
+    const SCRIPT: &str = "await before({ n: 1 }); await approve(); await after()";
+    let suspending = js_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("before", Ok))
+        .with_callback(TestCallback::new("approve", |_| {
+            Err(CallbackError::Suspend("needs approval".to_string()))
+        }))
+        .with_callback(TestCallback::new("after", Ok))
+        .build()
+        .unwrap();
+    let halted = suspending.execute_with_journal(SCRIPT, None).await;
+    assert_eq!(halted.suspended.expect("suspends").name, "approve");
+
+    let before = TestCallback::new("before", Ok);
+    let before_calls = Arc::clone(&before.calls);
+    let after = TestCallback::new("after", Ok);
+    let after_calls = Arc::clone(&after.calls);
+    let approving = js_sandbox()
+        .unwrap()
+        .with_callback(before)
+        .with_callback(TestCallback::new("approve", |_| Ok(json!(true))))
+        .with_callback(after)
+        .build()
+        .unwrap();
+    let resumed = approving
+        .execute_with_journal(SCRIPT, Some(halted.journal))
+        .await;
+    resumed.result.unwrap();
+    assert_eq!(resumed.replayed_callbacks, 1);
+    assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
+    assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
+}

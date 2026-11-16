@@ -1601,7 +1601,7 @@ impl SessionExecutor {
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
-            state.child_net = child_net;
+            state.child_net = child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net)));
             // From the full set every time, so one execution's narrowing
             // doesn't carry into the next.
             state.commands = self.executor.commands().only(allowed_commands);

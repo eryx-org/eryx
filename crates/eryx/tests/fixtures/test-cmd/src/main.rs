@@ -20,11 +20,19 @@
 //!   `CONNECT HOST:PORT` to `$HTTPS_PROXY`;
 //! - `hold N`: open up to N connections to `$HTTP_PROXY` and keep them,
 //!   printing `held <count>` and the error that stopped it, if any;
-//! - `listen`: listen on a TCP port and print `listening`.
+//! - `listen`: listen on a TCP port and print `listening`;
+//! - `spawn CMD ARG...`: run `CMD` through `eryx:process/run` with this
+//!   command's stdin, env and `$PWD`, passing on its output and exit status,
+//!   or printing `error: <run-error>` (e.g. `limit-exceeded`) and exiting 1.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
 use std::io::{Read, Write};
+
+wit_bindgen::generate!({
+    path: "../../../../eryx-runtime/wit/deps/process.wit",
+    world: "eryx:process/child",
+});
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -104,6 +112,25 @@ fn main() {
             Ok(format!("held {}{error}\n", held.len()))
         }
         ["listen"] => std::net::TcpListener::bind("127.0.0.1:0").map(|_| "listening\n".to_string()),
+        ["spawn", cmd, args @ ..] => {
+            let mut input = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut input);
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            let env: Vec<(String, String)> = std::env::vars().collect();
+            let cwd = std::env::var("PWD").unwrap_or_else(|_| "/".to_owned());
+            match eryx::process::run::run(cmd, &args, &env, &cwd, &input) {
+                Ok(out) => {
+                    let _ = std::io::stdout().write_all(&out.stdout);
+                    let _ = std::io::stderr().write_all(&out.stderr);
+                    let _ = std::io::stdout().flush();
+                    std::process::exit(out.status);
+                }
+                Err(e) => {
+                    println!("error: {}", e.name());
+                    std::process::exit(1);
+                }
+            }
+        }
         ["spin"] => loop {
             std::hint::spin_loop();
         },

@@ -363,3 +363,67 @@ await fetch(id=1)
     expect((await next).stdout).toBe("next\n");
   });
 });
+
+// The JavaScript and shell guests: replay matches whatever order the
+// arguments' keys were written in, and a suspension halts the guest even
+// where the script catches the call's failure.
+describe.each([
+  {
+    language: "javascript" as const,
+    first: "await lookup({ id: 1, opts: { b: 2, a: 1 } })",
+    reordered: "await lookup({ opts: { a: 1, b: 2 }, id: 1 })",
+    caught: "try { await approve() } catch {} await lookup({ id: 1 })",
+  },
+  {
+    language: "shell" as const,
+    first: "lookup --id 1 --tag x",
+    reordered: "lookup --tag x --id 1",
+    caught: "approve || true; lookup --id 1",
+  },
+])("callback replay in the $language guest", ({ language, first, reordered, caught }) => {
+  let calls: string[];
+  let suspend: boolean;
+  const sandbox = () =>
+    new Sandbox({
+      language,
+      callbacks: {
+        lookup: (args) => {
+          calls.push("lookup");
+          return args;
+        },
+        approve: () => {
+          calls.push("approve");
+          if (suspend) throw new SuspendCallback("later");
+          return true;
+        },
+      },
+    });
+
+  beforeEach(() => {
+    calls = [];
+    suspend = true;
+  });
+
+  it("replays a call whose keys come in another order", async () => {
+    using box = sandbox();
+    const recorded = await box.executeWithJournal(first);
+    expect(recorded.error).toBeUndefined();
+    const replayed = await box.executeWithJournal(reordered, { journal: recorded.journal });
+    expect(replayed.error).toBeUndefined();
+    expect(replayed.replayedCallbacks).toBe(1);
+    expect(calls).toEqual(["lookup"]);
+  });
+
+  it("halts at a suspension the script catches, then resumes", async () => {
+    using box = sandbox();
+    const halted = await box.executeWithJournal(caught);
+    expect(halted.suspended?.reason).toBe("later");
+    expect(calls).toEqual(["approve"]);
+
+    suspend = false;
+    calls = [];
+    const resumed = await box.executeWithJournal(caught, { journal: halted.journal });
+    expect(resumed.error).toBeUndefined();
+    expect(calls).toEqual(["approve", "lookup"]);
+  });
+});

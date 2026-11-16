@@ -789,3 +789,56 @@ for f in /*; do printf '%s ' "$f"; done; echo
         "root\ncfg:{}\n/cfg.json /data /dev /tmp \n"
     );
 }
+
+/// Callback replay matches calls on their arguments' text, which the shell
+/// writes with sorted keys: the same flags in another order replay. And a
+/// run that suspends resumes from its journal.
+#[tokio::test]
+async fn replay_ignores_flag_order_and_resumes_after_suspending() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let tool = TestCallback::new("tool", Ok);
+    let calls = Arc::clone(&tool.calls);
+    let sandbox = builder.with_callback(tool).build().unwrap();
+    let first = sandbox.execute_with_journal("tool --b 1 --a 2", None).await;
+    first.result.unwrap();
+    let second = sandbox
+        .execute_with_journal("tool --a 2 --b 1", Some(first.journal))
+        .await;
+    assert_eq!(second.replayed_callbacks, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    second.result.unwrap();
+
+    const SCRIPT: &str = "before --n 1; approve; after";
+    let suspending = shell_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("before", Ok))
+        .with_callback(TestCallback::new("approve", |_| {
+            Err(CallbackError::Suspend("needs approval".to_string()))
+        }))
+        .with_callback(TestCallback::new("after", Ok))
+        .build()
+        .unwrap();
+    let halted = suspending.execute_with_journal(SCRIPT, None).await;
+    assert_eq!(halted.suspended.expect("suspends").name, "approve");
+
+    let before = TestCallback::new("before", Ok);
+    let before_calls = Arc::clone(&before.calls);
+    let after = TestCallback::new("after", Ok);
+    let after_calls = Arc::clone(&after.calls);
+    let approving = shell_sandbox()
+        .unwrap()
+        .with_callback(before)
+        .with_callback(TestCallback::new("approve", |_| Ok(json!(true))))
+        .with_callback(after)
+        .build()
+        .unwrap();
+    let resumed = approving
+        .execute_with_journal(SCRIPT, Some(halted.journal))
+        .await;
+    resumed.result.unwrap();
+    assert_eq!(resumed.replayed_callbacks, 1);
+    assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
+    assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
+}
