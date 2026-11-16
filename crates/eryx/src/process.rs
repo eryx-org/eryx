@@ -1048,6 +1048,11 @@ pub(crate) struct Commands {
 }
 
 impl Commands {
+    /// The registered commands' names.
+    pub(crate) fn registered_names(&self) -> impl Iterator<Item = &str> {
+        self.registered.keys().map(String::as_str)
+    }
+
     pub(crate) fn insert(&mut self, name: String, command: Command) {
         Arc::make_mut(&mut self.registered).insert(name, command);
     }

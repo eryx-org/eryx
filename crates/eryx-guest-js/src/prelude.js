@@ -84,12 +84,22 @@
     // arguments are equal text however the script ordered them: callback
     // replay journals key on this text (as the CPython guest's sorted
     // json.dumps does).
-    const canonicalJson = (value) =>
-        JSON.stringify(value, (_key, v) =>
-            v !== null && typeof v === 'object' && !Array.isArray(v)
-                ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
-                : v,
-        );
+    // One sorted copy per object, reused wherever it appears: a cycle stays
+    // a cycle, which JSON.stringify reports as a TypeError (rather than the
+    // copies recursing until the stack runs out), and an object shared
+    // without one stays fine.
+    const canonicalJson = (value) => {
+        const copies = new WeakMap();
+        return JSON.stringify(value, (_key, v) => {
+            if (v === null || typeof v !== 'object' || Array.isArray(v)) return v;
+            let copy = copies.get(v);
+            if (copy === undefined) {
+                copy = Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]));
+                copies.set(v, copy);
+            }
+            return copy;
+        });
+    };
 
     // `await invoke("name", {arg: 1})` (or `invoke("name", 1, 2)`) — the JS
     // analog of Python's `await invoke("name", arg=1)`. Resolves to the parsed

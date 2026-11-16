@@ -19,6 +19,8 @@ import {
   TimeoutError,
 } from "@eryx-org/eryx-run/shared";
 import { createCallbackHost } from "./shims/callbacks.js";
+import { COREUTILS_TOOLS } from "./shims/process.js";
+import { RESERVED_CALLBACK_NAMES } from "./shims/reserved-names.js";
 import { createNet, setNetConfig as setDefaultNetConfig } from "./shims/net.js";
 import {
   decodeError,
@@ -281,6 +283,38 @@ function _toResult(output, stateWasReset, stats) {
  */
 
 /**
+ * Refuse callbacks the guest would never install under their name, as the
+ * Rust host does (#962): a JavaScript global or the first part of a dotted
+ * name, a shell builtin, or a shell command the callback would hide. A
+ * Python builtin is only warned about for now. Reports the first by name.
+ * @param {string} language
+ * @param {string[]} names - The callbacks' names
+ * @param {string[]} commands - The shell's command names
+ */
+function checkCallbackNames(language, names, commands) {
+  const reserved = new Set(RESERVED_CALLBACK_NAMES[language] ?? []);
+  const what = { javascript: "the JavaScript global", shell: "the shell builtin or reserved word" }[language] ?? "the Python builtin";
+  for (const name of [...names].sort()) {
+    const root = language === "shell" ? name : name.split(".")[0];
+    let message;
+    if (reserved.has(root)) {
+      message =
+        `callback '${name}' collides with ${what} '${root}': the guest keeps its own, ` +
+        "so the callback could only be reached through invoke(); give it another name";
+    } else if (language === "shell" && commands.includes(root)) {
+      message = `callback '${name}' collides with the command '${root}', which it would hide; give one of them another name`;
+    } else {
+      continue;
+    }
+    if (language === "python") {
+      console.warn(`eryx: ${message}`);
+      continue;
+    }
+    throw new TypeError(message);
+  }
+}
+
+/**
  * A sandbox's external commands, checked: names with the URLs they load from.
  * @param {string} language
  * @param {SandboxOptions} options
@@ -431,6 +465,10 @@ export class Sandbox {
           "e.g. { get_user: async ({ id }) => ... }",
       );
     }
+    checkCallbackNames(language, Object.keys(options.callbacks ?? {}), [
+      ...(this.#commands.coreutils ? COREUTILS_TOOLS : []),
+      ...Object.keys(this.#commands.commands),
+    ]);
     this.#host = createCallbackHost(options);
     if (options.netConfig !== undefined) this.#net.setNetConfig(options.netConfig);
     if (timeoutMs !== undefined) _workerReaper.register(this, this.#slot, this.#slot);

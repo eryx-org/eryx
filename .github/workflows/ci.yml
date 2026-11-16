@@ -93,6 +93,9 @@ jobs:
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
               - 'crates/eryx-packages/**'
+              # A unit test in crates/eryx keeps the JS SDK's copy of the
+              # reserved callback names current (#962).
+              - 'js/eryx/shims/reserved-names.js'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'

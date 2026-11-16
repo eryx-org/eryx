@@ -725,7 +725,9 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
-    /// name; the existing callbacks are left unchanged.
+    /// name, or if one collides with a name the guest uses itself (a
+    /// JavaScript global, a shell builtin or command; Python only warns);
+    /// the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
         let mut duplicate = None;
@@ -733,6 +735,11 @@ impl Sandbox {
             insert_callback(&mut map, &mut duplicate, Arc::from(callback));
         }
         check_duplicate_callback(duplicate)?;
+        crate::reserved::check(
+            self.executor.language(),
+            map.keys().map(String::as_str),
+            self.executor.commands().registered_names(),
+        )?;
         self.callbacks = Arc::new(map);
         Ok(())
     }
@@ -2566,7 +2573,12 @@ impl<L, R> SandboxBuilder<L, R> {
 
     /// Add a single callback.
     ///
-    /// A callback name registered twice makes [`build`](Self::build) fail.
+    /// A callback name registered twice makes [`build`](Self::build) fail,
+    /// as does one the guest already uses itself, which the callback could
+    /// otherwise only be reached through `invoke()` under: a JavaScript
+    /// global (`fetch`, `crypto`, ...), including the first part of a dotted
+    /// name, or a shell builtin or command. A Python builtin is logged as a
+    /// warning for now.
     #[must_use]
     pub fn with_callback(mut self, callback: impl Callback + 'static) -> Self {
         insert_callback(
@@ -3128,6 +3140,11 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         };
         #[cfg(not(all(feature = "embedded", feature = "coreutils")))]
         let commands = self.commands;
+        crate::reserved::check(
+            L::LANGUAGE,
+            self.callbacks.keys().map(String::as_str),
+            commands.registered_names(),
+        )?;
 
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.

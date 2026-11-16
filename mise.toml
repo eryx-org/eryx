@@ -687,6 +687,10 @@ outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 description = "Write each shipped artifact's third-party notices to target/notices (#837)"
 run = "python3 scripts/notices.py generate target/notices"
 
+[tasks.update-reserved-names]
+description = "Regenerate the JS SDK's copy of the callback names each guest reserves (#962)"
+run = "ERYX_UPDATE_RESERVED_NAMES=1 cargo test -p eryx --lib reserved::tests::js_sdk_copy_is_current"
+
 [tasks.notices-check]
 description = "Check every shipped crate's licence is accepted and every vendored input has a notices entry"
 run = "python3 scripts/notices.py check"
