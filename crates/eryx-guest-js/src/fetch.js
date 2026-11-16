@@ -459,6 +459,13 @@
                 timeoutMs: deadline === undefined ? undefined : Math.max(0, deadline - Date.now()),
             });
         } catch (e) {
+            // The host's request timeout is the signal's deadline, but the
+            // two clocks can disagree by a hair: a request that timed out
+            // with a deadline set timed out on it, even if `Date.now()`
+            // hasn't quite reached it yet.
+            if (signal && deadline !== undefined && e?.code === 'timed-out') {
+                abortSignal(signal, new DOMException('The operation timed out.', 'TimeoutError'));
+            }
             if (signal?.aborted) throw signal.reason;
             if (e && typeof e.code === 'string' && !(e instanceof Error)) {
                 if (REQUEST_ERRORS.includes(e.code)) throw new TypeError(e.message);
