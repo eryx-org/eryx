@@ -49,7 +49,48 @@ interface process {
     }
 }
 
+/// Run a command to completion: for child commands, which spawn commands
+/// of their own (git runs `git`) but, written against plain WASI, can't
+/// drive `process`'s streams. A child may only call it if the host lets its
+/// command spawn; nested children share the execution's limits.
+interface run {
+    /// Why a command couldn't run, as for `process.spawn`.
+    enum run-error {
+        /// No component is registered under that command name.
+        command-not-found,
+        /// The command couldn't be run, or this child's command may not run
+        /// others.
+        spawn-failed,
+        /// A limit was reached: nesting too deep, too many children running,
+        /// arguments or output too large.
+        limit-exceeded,
+    }
+
+    /// How a command ended, and what it wrote.
+    record output {
+        status: s32,
+        stdout: list<u8>,
+        stderr: list<u8>,
+    }
+
+    /// Run `cmd` with `stdin` as its input, and wait for it to exit. Its
+    /// output is capped, and a command writing more fails with
+    /// `limit-exceeded`.
+    run: func(
+        cmd: string,
+        args: list<string>,
+        env: list<tuple<string, string>>,
+        cwd: string,
+        stdin: list<u8>,
+    ) -> result<output, run-error>;
+}
+
 /// Host side: links just the process interface next to `eryx:sandbox`.
 world spawner {
     import process;
+}
+
+/// What child commands import.
+world child {
+    import run;
 }
