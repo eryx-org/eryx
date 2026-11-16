@@ -60,12 +60,14 @@ jobs:
           done
           cat ./*.wasm.sha256
 
-      # After build-coreutils, so coreutils' notices list its crates.
+      # After build-coreutils, so coreutils' notices list its crates. `host`
+      # (which takes in every runtime's) goes in the pyeryx wheels (#1015).
       - name: Write the runtimes' notices
         run: |
           mise run ensure-rust-src
           python3 scripts/notices.py generate crates/eryx-runtime \
-            runtime-python runtime-javascript runtime-shell coreutils eryx-bundler
+            runtime-python runtime-javascript runtime-shell coreutils eryx-bundler host
+          test -s crates/eryx-runtime/host.notices.md
 
       # upload-artifact's if-no-files-found only fails when none match.
       - name: Check every runtime asset exists
@@ -98,6 +100,15 @@ jobs:
             crates/eryx-runtime/runtime-shell.notices.md
             crates/eryx-runtime/coreutils.notices.md
             crates/eryx-runtime/eryx-bundler.notices.md
+          if-no-files-found: error
+          retention-days: 5
+
+      # Its own artifact: the pyeryx wheel jobs need only this.
+      - name: Upload the host notices
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: host-notices
+          path: crates/eryx-runtime/host.notices.md
           if-no-files-found: error
           retention-days: 5
 

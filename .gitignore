@@ -73,6 +73,12 @@ crates/eryx-python/python/eryx/__pycache__/
 crates/eryx-python/python/eryx/_eryx*.so
 crates/eryx-python/tests/__pycache__/
 crates/eryx-python/.pytest_cache/
+# The licences and third-party notices CI copies in before building the
+# wheels (#1015).
+crates/eryx-python/LICENSE-*
+crates/eryx-python/notices/
+crates/eryx-python/runtimes/*/LICENSE-*
+crates/eryx-python/runtimes/*/notices/
 .beads/
 
 # mdbook test artifacts

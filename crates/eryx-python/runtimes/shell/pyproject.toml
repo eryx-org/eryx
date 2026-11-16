@@ -11,6 +11,13 @@ description = "The precompiled shell runtime and its coreutils for pyeryx, for o
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
+# eryx's licences and the runtime's third-party notices, which CI copies here
+# before building (python-build.yml's companion-wheels).
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "notices/*.md"]
+
+# Named, so notices/ isn't discovered as a second package.
+[tool.setuptools]
+packages = ["pyeryx_runtime_shell"]
 
 [tool.setuptools.package-data]
 pyeryx_runtime_shell = ["runtime-shell.cwasm", "coreutils.cwasm"]
