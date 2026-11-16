@@ -438,6 +438,9 @@ async fn run_code(
     if let Some(net_tx) = net_tx {
         execute_builder = execute_builder.with_network(net_tx);
     }
+    if let Some(net) = sandbox.child_net() {
+        execute_builder = execute_builder.with_child_network(net);
+    }
     let execution_result = execute_builder.run().await;
 
     // Wait for the handler tasks to complete

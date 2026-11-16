@@ -204,9 +204,10 @@ unstable-vfs = ["dep:eryx-vfs"]
 unstable-internals = []
 # Environments (`eryx::environment`): package sets built ahead of time, which
 # sandboxes mount with `with_environment`. `environment` loads and mounts
-# them; `packages` also builds them, which embeds the JavaScript bundler
-# (eryx-bundler.cwasm, from `mise run precompile-bundler`; ERYX_BUNDLER_CWASM
-# names another) and the npm client.
+# them; `packages` also builds them, which embeds the npm client and the
+# JavaScript bundler (eryx-bundler.cwasm: from `eryx-precompile setup
+# --bundler`, or `mise run precompile-bundler` in the workspace;
+# ERYX_BUNDLER_CWASM names another).
 environment = ["dep:eryx-packages"]
 packages = ["environment", "eryx-packages/npm", "dep:blake3"]
 

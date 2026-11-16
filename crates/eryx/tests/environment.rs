@@ -347,3 +347,64 @@ async fn load_expecting_pins_the_hash() {
     let err = Environment::load_expecting(environment.root(), "sha256-0").unwrap_err();
     assert!(err.to_string().contains("sha256-0"), "{err}");
 }
+
+/// Without a base directory, the lockfile lives in the cache directory, not
+/// the process's current directory; a definition built in code builds as a
+/// parsed one does.
+#[tokio::test]
+async fn the_default_lockfile_is_in_the_cache_dir() {
+    use eryx::environment::NpmSection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, lockfile) = prepare(dir.path());
+    std::fs::create_dir_all(cache.join("lockfiles")).unwrap();
+    std::fs::rename(&lockfile, cache.join("lockfiles/fixtures.lock")).unwrap();
+
+    let definition =
+        EnvironmentDefinition::new("fixtures", eryx::environment::Language::JavaScript)
+            .unwrap()
+            .with_npm(
+                NpmSection::new(["esm-pkg@1", "uses-builtins@1", "@scope/sub@1"])
+                    .entries(["esm-pkg/extra"]),
+            );
+    let options = BuildOptions::new()
+        .out_dir(dir.path().join("out"))
+        .cache_dir(&cache)
+        .offline(true)
+        .frozen(true);
+    let environment = build(&definition, &options).await.unwrap();
+    assert!(environment.exports().contains_key("esm-pkg/extra"));
+    assert!(!Path::new("fixtures.lock").exists());
+}
+
+/// A definition's `lockfile` in a subdirectory gets that directory created in
+/// the cache, so resolving can write it there.
+#[tokio::test]
+async fn a_default_lockfile_in_a_subdirectory_gets_its_directory() {
+    use eryx::environment::NpmSection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, lockfile) = prepare(dir.path());
+    let nested = cache.join("lockfiles/locks");
+    assert!(!nested.exists());
+    let definition =
+        EnvironmentDefinition::new("fixtures", eryx::environment::Language::JavaScript)
+            .unwrap()
+            .with_npm(
+                NpmSection::new(["esm-pkg@1", "uses-builtins@1", "@scope/sub@1"])
+                    .lockfile("locks/fixtures.lock"),
+            );
+    let options = BuildOptions::new()
+        .out_dir(dir.path().join("out"))
+        .cache_dir(&cache)
+        .offline(true)
+        .frozen(true);
+
+    // Without the lockfile there, a frozen build fails, but its directory is made.
+    assert!(build(&definition, &options).await.is_err());
+    assert!(nested.is_dir());
+
+    // With it there, the build reads it.
+    std::fs::rename(&lockfile, nested.join("fixtures.lock")).unwrap();
+    build(&definition, &options).await.unwrap();
+}

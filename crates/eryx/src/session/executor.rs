@@ -355,6 +355,7 @@ pub struct SessionExecuteBuilder<'a> {
     output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
     cancellation_token: Option<CancellationToken>,
+    child_net: Option<crate::process::ChildNet>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -386,7 +387,15 @@ impl<'a> SessionExecuteBuilder<'a> {
             output_tx: None,
             fuel_limit: None,
             cancellation_token: None,
+            child_net: None,
         }
+    }
+
+    /// Give this execution's child processes network, through a proxy that
+    /// lives as long as the execution.
+    pub(crate) fn with_child_network(mut self, net: crate::process::ChildNet) -> Self {
+        self.child_net = Some(net);
+        self
     }
 
     unstable_pub! {
@@ -502,6 +511,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.output_tx,
                 self.fuel_limit,
                 self.cancellation_token,
+                self.child_net,
             )
             .await
     }
@@ -1509,6 +1519,7 @@ impl SessionExecutor {
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
         cancellation_token: Option<CancellationToken>,
+        child_net: Option<crate::process::ChildNet>,
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
@@ -1555,6 +1566,7 @@ impl SessionExecutor {
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
+            state.child_net = child_net;
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.stream_budget = StreamBudget::default();
@@ -1651,6 +1663,8 @@ impl SessionExecutor {
             state.set_callback_tx(None);
             state.set_trace_tx(None);
             state.set_net_tx(None);
+            // The children's proxies don't outlive the execution.
+            state.child_net = None;
             state.set_output_tx(None);
             state.peak_memory_bytes()
         };
@@ -2312,6 +2326,7 @@ impl ExecutorState {
             stream_budget: StreamBudget::default(),
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
         }
     }
 
@@ -2341,6 +2356,7 @@ impl ExecutorState {
             stream_budget: StreamBudget::default(),
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
         }
     }
 

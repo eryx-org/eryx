@@ -413,6 +413,9 @@ impl Sandbox {
         if let Some(tx) = net_tx {
             execute_builder = execute_builder.with_network(tx);
         }
+        if let Some(net) = self.child_net() {
+            execute_builder = execute_builder.with_child_network(net);
+        }
 
         // Add VFS storage — use per-request override if set, otherwise create
         // a scrubbing storage from the sandbox's secrets configuration.
@@ -637,6 +640,16 @@ impl Sandbox {
     #[must_use]
     pub(crate) fn net_config(&self) -> Option<&NetConfig> {
         self.net_config.as_ref()
+    }
+
+    /// The network for one execution's child processes, if they have one:
+    /// this request's policy and secrets.
+    pub(crate) fn child_net(&self) -> Option<crate::process::ChildNet> {
+        crate::process::ChildNet::new(
+            self.net_config.clone()?,
+            self.secrets.clone(),
+            self.executor.child_network().clone(),
+        )
     }
 
     /// Whether stdout should be scrubbed of secret placeholders.
@@ -922,8 +935,9 @@ impl Sandbox {
 /// execution would not show up. JSON string literals are valid Python string
 /// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
 /// The code the guest runs before each execution: [`full_preamble`] for
-/// Python, [`crate::secrets::javascript_preamble`] for JavaScript. Library preambles are
-/// Python, and the shell takes no preamble, so it can't have secrets either.
+/// Python, [`crate::secrets::javascript_preamble`] for JavaScript, and for the
+/// shell an `export` of each secret's placeholder, which its child commands
+/// inherit (the child proxy substitutes them). Library preambles are Python.
 fn language_preamble(
     language: Language,
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
@@ -936,11 +950,35 @@ fn language_preamble(
             "library preambles are only supported for Python, not {language}"
         )),
         Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
-        _ if !secrets.is_empty() => unsupported(format!(
-            "secrets are only supported for Python and JavaScript, not {language}"
-        )),
-        _ => Ok(String::new()),
+        Language::Shell => shell_preamble(secrets),
     }
+}
+
+/// `export NAME='placeholder'` for each secret, in name order, with any `'`
+/// in the placeholder escaped. A name that isn't a shell variable name is
+/// refused.
+fn shell_preamble(
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+) -> Result<String, Error> {
+    let mut names: Vec<&String> = secrets.keys().collect();
+    names.sort();
+    let mut preamble = String::new();
+    for name in names {
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(ErrorKind::Initialization(format!(
+                "secret {name:?} can't be exported to the shell: not a shell variable name"
+            ))
+            .into());
+        }
+        let placeholder = secrets[name].placeholder().replace('\'', "'\\''");
+        preamble.push_str(&format!("export {name}='{placeholder}'\n"));
+    }
+    Ok(preamble)
 }
 
 fn full_preamble(
@@ -1583,6 +1621,11 @@ pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
     result_variable: String,
     /// External commands (shell only).
     commands: crate::process::Commands,
+    /// How the commands' children reach the network (shell only).
+    child_network: crate::net::ChildNetwork,
+    /// Whether the network policy is set per request (a pool's sandboxes),
+    /// so a child network needn't have one at build time.
+    network_per_request: bool,
     /// Whether the embedded shell also gets the embedded coreutils.
     embedded_commands: bool,
     /// Path to the guest's standard library (for Python, the CPython stdlib).
@@ -1677,6 +1720,8 @@ impl SandboxBuilder<Python, state::Needs> {
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            network_per_request: false,
             embedded_commands: true,
             stdlib_path: None,
             library_path: None,
@@ -1718,6 +1763,8 @@ impl SandboxBuilder<Python, state::Needs> {
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            network_per_request: false,
             embedded_commands: true,
             stdlib_path: None, // Will use embedded stdlib
             library_path: None,
@@ -1759,6 +1806,8 @@ impl<L, R> SandboxBuilder<L, R> {
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
             commands: self.commands,
+            child_network: self.child_network,
+            network_per_request: self.network_per_request,
             embedded_commands: self.embedded_commands,
             stdlib_path: self.stdlib_path,
             library_path: self.library_path,
@@ -2379,7 +2428,9 @@ impl<R> SandboxBuilder<Shell, R> {
     /// The shell finds it after its functions, builtins and callbacks, and
     /// runs it as a child process with `argv[0]` set to `name`. The child
     /// sees the sandbox's VFS mounts (with `unstable-vfs`) and nothing else
-    /// of the host, and has no network. Registering a name again replaces it.
+    /// of the host, and has no network unless
+    /// [`with_child_network`](Self::with_child_network) gives it some.
+    /// Registering a name again replaces it.
     ///
     /// ```rust,ignore
     /// let curl = Command::from_file("curl.wasm")?;
@@ -2411,6 +2462,33 @@ impl<R> SandboxBuilder<Shell, R> {
         for name in names {
             self.commands.insert(name.into(), command.clone());
         }
+        self
+    }
+
+    /// Let the commands' child processes reach the network (default
+    /// [`ChildNetwork::None`](crate::ChildNetwork::None): no network).
+    ///
+    /// Children bring their own TLS, so they go through a forward proxy on
+    /// the host that enforces the sandbox's [`NetConfig`](crate::NetConfig)
+    /// (narrowed, with [`ChildNetwork::Narrow`](crate::ChildNetwork::Narrow))
+    /// as `eryx:net` does for the guest: host and address checks, HTTP
+    /// rules, and secret substitution. Each child gets `HTTPS_PROXY` and
+    /// `HTTP_PROXY` (and their lowercase forms) pointing at the proxy, its
+    /// CA certificate at `/etc/ssl/certs/ca-certificates.crt` (read-only),
+    /// with `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and
+    /// `NODE_EXTRA_CA_CERTS` naming it, and an env var with each secret's
+    /// placeholder. It may connect to the proxy and nothing else. Only
+    /// HTTP/1.1 is proxied; see [`Command::allow_tunnels`] for other
+    /// protocols. The proxy lives for one execution.
+    ///
+    /// Needs [`with_network`](Self::with_network): [`build`](Self::build)
+    /// fails without it. A [`SandboxPool`](crate::SandboxPool)'s sandboxes
+    /// use each lease's network
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network)),
+    /// and children of a lease without one stay offline.
+    #[must_use]
+    pub fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.child_network = network;
         self
     }
 
@@ -2822,6 +2900,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let collect_trace = self.collect_trace;
         let commands = self.commands;
         let embedded_commands = self.embedded_commands;
+        let child_network = self.child_network;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -2836,6 +2915,10 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             builder.collect_trace = collect_trace;
             builder.commands = commands.clone();
             builder.embedded_commands = embedded_commands;
+            // Each lease sets the network (PooledSandbox::with_network);
+            // without one, children stay offline.
+            builder.child_network = child_network.clone();
+            builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
     }
@@ -3040,9 +3123,20 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
 
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
+        if !matches!(self.child_network, crate::net::ChildNetwork::None)
+            && self.net_config.is_none()
+            && !self.network_per_request
+        {
+            return Err(ErrorKind::Initialization(
+                "with_child_network needs with_network: children use the sandbox's network policy"
+                    .to_string(),
+            )
+            .into());
+        }
         let executor = executor
             .with_result_variable(self.result_variable)
             .with_commands(commands)
+            .with_child_network(self.child_network)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {
@@ -4332,18 +4426,34 @@ mod tests {
     }
 
     #[test]
-    fn shell_sandboxes_reject_secrets() {
-        let err = Sandbox::builder()
-            .with_wasm_bytes(vec![])
-            .shell()
-            .with_secret("TOKEN", "value", vec!["example.com".to_string()])
-            .build()
-            .unwrap_err();
-        assert!(
-            matches!(err.kind(), ErrorKind::Initialization(msg)
-                if msg.contains("secrets") && msg.contains("shell")),
-            "{err}"
+    fn shell_preamble_exports_placeholders() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
+        let preamble = language_preamble(Language::Shell, &secrets, "").unwrap();
+        assert_eq!(preamble, format!("export TOKEN='{placeholder}'\n"));
+        assert!(!preamble.contains("real-value"));
+        assert_eq!(
+            language_preamble(Language::Shell, &HashMap::new(), "").unwrap(),
+            ""
         );
+
+        // Quotes in a placeholder can't end the quoting.
+        let quoted = crate::secrets::SecretConfig {
+            placeholder: "it's".to_string(),
+            ..secret.clone()
+        };
+        let preamble = language_preamble(
+            Language::Shell,
+            &HashMap::from([("Q".to_string(), quoted)]),
+            "",
+        )
+        .unwrap();
+        assert_eq!(preamble, "export Q='it'\\''s'\n");
+
+        let bad = HashMap::from([("NOT-A-NAME".to_string(), secret)]);
+        assert!(language_preamble(Language::Shell, &bad, "").is_err());
+        assert!(language_preamble(Language::Shell, &HashMap::new(), "import os").is_err());
     }
 
     #[test]

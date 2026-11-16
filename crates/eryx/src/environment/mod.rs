@@ -1,7 +1,8 @@
 //! Environments: package sets built ahead of time and mounted by sandboxes.
 //!
 //! An environment is built once, from an [`EnvironmentDefinition`] (a TOML
-//! file naming the language and its packages), into a directory that
+//! file naming the language and its packages, or one built in code with
+//! [`EnvironmentDefinition::new`]), into a directory that
 //! sandboxes mount read-only. Sandboxes never see package names or a
 //! registry, and building needs the network only to fetch packages, so it
 //! belongs in CI or a deploy step:
@@ -25,6 +26,9 @@
 //!   specifier to its module.
 //! - **Python** and the **shell**: not supported yet
 //!   ([`EnvironmentError::Unsupported`]).
+//!
+//! The bundler is embedded by the `packages` feature. A crates.io build
+//! gets it from `eryx-precompile setup --bundler`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
