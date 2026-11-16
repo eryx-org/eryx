@@ -108,6 +108,11 @@ pub(super) fn support(name: &str) -> ImportSupport {
             ImportSupport::Missing("children get only eryx:process/run@0.1".into())
         };
     }
+    if path == "wasi:cli/run" {
+        return ImportSupport::Missing(
+            "wasi:cli/run is what a command exports, not something children get".into(),
+        );
+    }
     if (minor("0.2.") && known(WASI_P2)) || (minor("0.3.") && known(WASI_P3)) {
         return if package == "wasi:filesystem" {
             ImportSupport::NeedsVfs
@@ -292,6 +297,7 @@ mod tests {
             ("wasi:keyvalue/store@0.2.0", "don't get wasi:keyvalue"),
             ("eryx:process/process@0.1.0", "only eryx:process/run"),
             ("my:app/thing", "only WASI"),
+            ("wasi:cli/run@0.2.0", "what a command exports"),
         ] {
             match support(name) {
                 ImportSupport::Missing(m) => assert!(m.contains(why), "{name}: {m}"),

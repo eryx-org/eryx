@@ -2329,6 +2329,120 @@ mod tests {
         );
     }
 
+    /// The table of what children get agrees with the real child linker:
+    /// a probe component importing each interface of the WIT wasmtime-wasi
+    /// links (with its real types) links exactly when `support` says
+    /// children get it, and so do probes children don't get.
+    #[test]
+    fn import_support_matches_the_child_linker() {
+        use wit_component_wasmtime::{ComponentEncoder, StringEncoding};
+        use wit_parser_wasmtime::{LiftLowerAbi, ManglingAndAbi, Resolve};
+
+        let metadata = std::process::Command::new(env!("CARGO"))
+            .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let wasmtime_wasi = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "wasmtime-wasi")
+            .map(|p| std::path::PathBuf::from(p["manifest_path"].as_str().unwrap()))
+            .unwrap();
+        let src = wasmtime_wasi.parent().unwrap().join("src");
+
+        // A component importing `interface` from the WIT in `dir`, plus
+        // `extra` WIT defining packages of its own.
+        let probe = |dir: &Path, interface: &str, extra: Option<&str>, abi| {
+            let mut resolve = Resolve::default();
+            resolve.push_dir(dir).unwrap();
+            if let Some(extra) = extra {
+                resolve.push_str("extra.wit", extra).unwrap();
+            }
+            let world = format!("package eryx:probe;\nworld probe {{ import {interface}; }}\n");
+            let package = resolve.push_str("probe.wit", &world).unwrap();
+            let world = resolve.select_world(&[package], Some("probe")).unwrap();
+            let mut module = wit_component_wasmtime::dummy_module(&resolve, world, abi);
+            wit_component_wasmtime::embed_component_metadata(
+                &mut module,
+                &resolve,
+                world,
+                StringEncoding::UTF8,
+                false,
+            )
+            .unwrap();
+            ComponentEncoder::default()
+                .module(&module)
+                .unwrap()
+                .encode()
+                .unwrap()
+        };
+
+        let mut probes = Vec::new();
+        for (dir, abi) in [
+            ("p2/wit", ManglingAndAbi::Legacy(LiftLowerAbi::Sync)),
+            (
+                "p3/wit",
+                ManglingAndAbi::Legacy(LiftLowerAbi::AsyncCallback),
+            ),
+        ] {
+            let dir = src.join(dir);
+            let mut resolve = Resolve::default();
+            resolve.push_dir(&dir).unwrap();
+            for (_, package) in &resolve.packages {
+                if package.name.namespace != "wasi" {
+                    continue;
+                }
+                let version = package.name.version.as_ref().unwrap();
+                for name in package.interfaces.keys() {
+                    let interface = format!("wasi:{}/{name}@{version}", package.name.name);
+                    probes.push((interface.clone(), probe(&dir, &interface, None, abi)));
+                }
+            }
+        }
+        assert!(probes.len() > 40, "{}", probes.len());
+        // What children don't get, with real types: another version of an
+        // interface they do get, a prerelease, and a package they don't.
+        let p2 = src.join("p2/wit");
+        let sync = ManglingAndAbi::Legacy(LiftLowerAbi::Sync);
+        for (interface, wit) in [
+            (
+                "wasi:cli/environment@0.1.0",
+                "package wasi:cli@0.1.0;\ninterface environment { get-arguments: func() -> list<string>; }",
+            ),
+            (
+                "wasi:random/random@0.3.0-rc-2025-09-16",
+                "package wasi:random@0.3.0-rc-2025-09-16;\ninterface random { get-random-u64: func() -> u64; }",
+            ),
+            (
+                "wasi:http/outgoing-handler@0.2.0",
+                "package wasi:http@0.2.0;\ninterface outgoing-handler { handle: func(); }",
+            ),
+        ] {
+            probes.push((interface.to_owned(), probe(&p2, interface, Some(wit), sync)));
+        }
+
+        let engine = crate::Executor::child_engine().unwrap();
+        let linker = child_linker(&engine).unwrap();
+        let mut disagree = Vec::new();
+        for (name, wasm) in &probes {
+            let component = Component::new(&engine, wasm).unwrap();
+            let links = linker
+                .instantiate_pre(&component)
+                .map(drop)
+                .map_err(|e| format!("{e:#}"));
+            let provided = !matches!(imports::support(name), ImportSupport::Missing(_));
+            if links.is_ok() != provided {
+                disagree.push(format!(
+                    "{name}: support says {provided}, linking: {links:?}"
+                ));
+            }
+        }
+        assert!(disagree.is_empty(), "{disagree:#?}");
+    }
+
     /// Running reuses the command's `CommandPre`: nothing is compiled or
     /// linked after `Command::from_bytes`, however many children run.
     #[tokio::test]
