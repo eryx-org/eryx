@@ -590,8 +590,10 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
             }
         };
         // Trace events in the CPython and QuickJS guests' shape: the
-        // arguments are callback_start's context.
-        let arguments = arguments.to_string();
+        // arguments are callback_start's context. Keys sorted, so equal
+        // arguments are equal text whatever order the flags came in: callback
+        // replay journals key on this text.
+        let arguments = call::canonical(arguments).to_string();
         report_trace(
             0,
             &serde_json::json!({ "type": "callback_start", "name": name }).to_string(),
