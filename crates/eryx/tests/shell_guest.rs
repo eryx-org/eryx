@@ -519,20 +519,40 @@ async fn suspending_callback_halts_the_guest() {
     ));
 }
 
-/// A callback can't replace a builtin of the same name (functions, then
-/// builtins, then callbacks), but `invoke NAME` still reaches it.
+/// A callback named like a builtin could only be reached through `invoke`,
+/// and one named like a command would hide it, so neither builds (#962).
 #[tokio::test]
-async fn builtins_win_over_callbacks_of_the_same_name() {
+async fn callbacks_named_like_builtins_or_commands_are_refused() {
     let Some(builder) = shell_sandbox() else {
         return;
     };
-    let echo = TestCallback::new("echo", |_| Ok(json!("from the callback")));
-    let calls = Arc::clone(&echo.calls);
-    let sandbox = builder.with_callback(echo).build().unwrap();
-
-    let out = sandbox.execute("echo plain; invoke echo").await.unwrap();
-    assert_eq!(out.stdout_utf8().unwrap(), "plain\nfrom the callback\n");
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let err = builder
+        .with_callback(TestCallback::new("echo", |_| Ok(json!(null))))
+        .build()
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("callback 'echo' collides with the shell builtin 'echo'"),
+        "{err}"
+    );
+    // The embedded coreutils' `cat`.
+    let err = shell_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("cat", |_| Ok(json!(null))))
+        .build()
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("callback 'cat' collides with the command 'cat'"),
+        "{err}"
+    );
+    // Without the embedded commands, `cat` is free.
+    shell_sandbox()
+        .unwrap()
+        .without_embedded_commands()
+        .with_callback(TestCallback::new("cat", |_| Ok(json!(null))))
+        .build()
+        .unwrap();
 }
 
 #[tokio::test]

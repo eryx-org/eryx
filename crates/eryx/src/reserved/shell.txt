@@ -1,0 +1,41 @@
+# Names a shell callback can't take: the shell guest's builtins (brush's
+# BashMode set as the guest builds it, plus its own `invoke` and `grep`).
+# Checked against the guest by its builtins_match_the_host_list test.
+.
+:
+[
+alias
+break
+cd
+command
+continue
+declare
+disown
+echo
+eval
+exec
+exit
+export
+false
+getopts
+grep
+invoke
+let
+local
+logout
+printf
+pwd
+read
+readonly
+return
+set
+shift
+shopt
+source
+test
+trap
+true
+type
+typeset
+unalias
+unset

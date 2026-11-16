@@ -618,3 +618,25 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The host refuses callbacks named like these builtins (#962), from its
+    /// own copy of the list; this keeps it in step with what the guest
+    /// registers.
+    #[test]
+    fn builtins_match_the_host_list() {
+        let mut builtins: Vec<String> =
+            brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
+                .into_keys()
+                .chain(["invoke".to_string(), "grep".to_string()])
+                .collect();
+        builtins.sort();
+        let host: Vec<&str> = include_str!("../../eryx/src/reserved/shell.txt")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(host, builtins, "update crates/eryx/src/reserved/shell.txt");
+    }
+}
