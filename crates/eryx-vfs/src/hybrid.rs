@@ -80,6 +80,14 @@ impl RestrictedDir {
     }
 
     /// The host directory handle, for counting open host descriptors.
+    /// The guest names a file-map-restricted directory exposes, or `None`
+    /// for an ordinary directory mount.
+    pub(crate) fn mapped_names(&self) -> Option<impl Iterator<Item = &str>> {
+        self.file_map
+            .as_ref()
+            .map(|map| map.keys().map(String::as_str))
+    }
+
     pub(crate) fn handle(&self) -> &Arc<std::fs::File> {
         &self.inner
     }
@@ -404,6 +412,49 @@ pub enum HybridDescriptor {
         /// The guest path this descriptor was opened from.
         guest_path: String,
     },
+    /// A read-only directory that only exists because mounts sit beneath it:
+    /// the root (see [`HybridVfsCtx::add_root`]), `/dev`, or a parent of a
+    /// nested mount such as `/mnt` for `/mnt/data`.
+    Synthetic {
+        /// The directory's guest path.
+        guest_path: String,
+    },
+    /// A device file under `/dev`.
+    Device(Device),
+}
+
+/// The device files [`HybridVfsCtx::add_root`] serves under `/dev`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    /// `/dev/null`: reads are empty, writes are discarded.
+    Null,
+    /// `/dev/zero`: reads return zero bytes, writes are discarded.
+    Zero,
+    /// `/dev/urandom`: reads return random bytes, writes are discarded.
+    Urandom,
+}
+
+impl Device {
+    /// Every device, in listing order.
+    pub(crate) const ALL: [Device; 3] = [Device::Null, Device::Zero, Device::Urandom];
+
+    /// The device's name under `/dev`.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Device::Null => "null",
+            Device::Zero => "zero",
+            Device::Urandom => "urandom",
+        }
+    }
+
+    /// The device's guest path.
+    pub(crate) fn path(self) -> &'static str {
+        match self {
+            Device::Null => "/dev/null",
+            Device::Zero => "/dev/zero",
+            Device::Urandom => "/dev/urandom",
+        }
+    }
 }
 
 impl std::fmt::Debug for HybridDescriptor {
@@ -418,6 +469,11 @@ impl std::fmt::Debug for HybridDescriptor {
                 .debug_struct("RealFile")
                 .field("guest_path", guest_path)
                 .finish_non_exhaustive(),
+            HybridDescriptor::Synthetic { guest_path } => f
+                .debug_struct("Synthetic")
+                .field("guest_path", guest_path)
+                .finish(),
+            HybridDescriptor::Device(device) => f.debug_tuple("Device").field(device).finish(),
         }
     }
 }
@@ -430,8 +486,85 @@ impl HybridDescriptor {
             HybridDescriptor::Vfs(d) => &d.path,
             HybridDescriptor::RealDir { guest_path, .. } => guest_path,
             HybridDescriptor::RealFile { guest_path, .. } => guest_path,
+            HybridDescriptor::Synthetic { guest_path } => guest_path,
+            HybridDescriptor::Device(device) => device.path(),
         }
     }
+}
+
+/// What a path seen from the root is; see [`HybridVfsCtx::resolve_from_root`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RootEntry {
+    /// At or inside the preopen at `index`, `rest` below it ("" for the mount
+    /// itself).
+    Mount {
+        /// Index into the context's preopens.
+        index: usize,
+        /// The path below the mount, without a leading `/`.
+        rest: String,
+    },
+    /// A read-only directory above mounts (or `/` or `/dev` itself).
+    Directory,
+    /// A device under `/dev`.
+    Device(Device),
+    /// Nothing is there.
+    NotFound,
+}
+
+/// What an entry of a synthetic directory is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    /// A mount or a directory above mounts.
+    Directory,
+    /// A file a single-file volume mounts.
+    File,
+    /// A device under `/dev`.
+    Device,
+}
+
+/// Where a preopen is mounted; see [`HybridVfsCtx::mount_points`].
+struct MountPoint {
+    /// Index into the context's preopens.
+    index: usize,
+    /// The mounted directory or file's normalized guest path.
+    path: String,
+    /// For a single-file volume, the file's name in the preopen's directory.
+    file: Option<String>,
+}
+
+/// `path` below the directory `dir`, without a leading `/` ("" for `dir`
+/// itself), if `path` is at or under it. Both must be normalized.
+fn strip_dir_prefix<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
+    if dir == "/" {
+        return Some(path.trim_start_matches('/'));
+    }
+    let rest = path.strip_prefix(dir)?;
+    if rest.is_empty() {
+        Some("")
+    } else {
+        rest.strip_prefix('/')
+    }
+}
+
+/// Normalize an absolute guest path: no `.`, `..` or empty components, a
+/// leading `/` and no trailing one. `..` can't climb above `/`.
+pub(crate) fn normalize_guest_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+/// `rel` resolved against the directory `dir`, normalized.
+pub(crate) fn join_guest_path(dir: &str, rel: &str) -> String {
+    normalize_guest_path(&format!("{dir}/{rel}"))
 }
 
 /// Configuration for a preopen directory.
@@ -455,6 +588,8 @@ pub enum HybridPreopen {
         /// The directory handle.
         dir: RealDir,
     },
+    /// The read-only root, `/`: see [`HybridVfsCtx::add_root`].
+    Root,
 }
 
 impl std::fmt::Debug for HybridPreopen {
@@ -477,6 +612,7 @@ impl std::fmt::Debug for HybridPreopen {
                 .field("guest_path", guest_path)
                 .field("dir", dir)
                 .finish(),
+            HybridPreopen::Root => f.write_str("Root"),
         }
     }
 }
@@ -742,6 +878,177 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             file_perms,
             storage,
         });
+    }
+
+    /// Serve `/` as a read-only directory holding the other preopens, with
+    /// `/dev/null`, `/dev/zero` and `/dev/urandom` beneath it.
+    ///
+    /// Tools that walk up to `/` (`mkdir -p`, `realpath`, git's repository
+    /// discovery) need it to be statable. A path under a mount still goes to
+    /// that mount; anything else under `/` doesn't exist, and nothing can be
+    /// created, written, renamed or removed there. A mount at `/dev` replaces
+    /// the devices. Does nothing if a directory is already mounted at `/`.
+    pub fn add_root(&mut self) {
+        // A single-file volume at the top level (`/config.json`) mounts a
+        // restricted view of its host directory at `/`; the root serves that
+        // file instead, so it doesn't count.
+        let has_root = self.preopens.iter().any(|p| match p {
+            HybridPreopen::Root => true,
+            HybridPreopen::Vfs { guest_path, .. } => normalize_guest_path(guest_path) == "/",
+            HybridPreopen::Real { guest_path, dir } => {
+                dir.dir.mapped_names().is_none() && normalize_guest_path(guest_path) == "/"
+            }
+        });
+        if !has_root {
+            self.preopens.push(HybridPreopen::Root);
+        }
+    }
+
+    /// What the absolute guest path `path` (already normalized) is, as seen
+    /// from the root: inside a mount, a directory above mounts, a device, or
+    /// nothing.
+    pub(crate) fn resolve_from_root(&self, path: &str) -> RootEntry {
+        // The longest mount at or above `path` wins, as in the guest's libc.
+        let mount = self
+            .mount_points()
+            .filter_map(|point| {
+                let below = strip_dir_prefix(path, &point.path)?;
+                // A mounted file is served by its preopen, its host directory.
+                let rest = match &point.file {
+                    Some(name) if below.is_empty() => name.clone(),
+                    Some(_) => return None,
+                    None => below.to_owned(),
+                };
+                Some((point.index, point.path.len(), rest))
+            })
+            .max_by_key(|(_, len, _)| *len);
+        if let Some((index, _, rest)) = mount {
+            return RootEntry::Mount { index, rest };
+        }
+        if let Some(device) = Device::ALL.into_iter().find(|d| d.path() == path) {
+            return RootEntry::Device(device);
+        }
+        if path == "/" || path == "/dev" || !self.synthetic_children(path).is_empty() {
+            return RootEntry::Directory;
+        }
+        RootEntry::NotFound
+    }
+
+    /// The entries of the synthetic directory `path`: the next component of
+    /// each mount beneath it, and under `/dev`, the devices.
+    pub(crate) fn synthetic_children(&self, path: &str) -> Vec<(String, EntryKind)> {
+        let mut names: Vec<(String, EntryKind)> = Vec::new();
+        let mut push = |name: &str, kind: EntryKind| {
+            if !names.iter().any(|(n, _)| n == name) {
+                names.push((name.to_owned(), kind));
+            }
+        };
+        for point in self.mount_points() {
+            if let Some(rest) = strip_dir_prefix(&point.path, path) {
+                let mut components = rest.split('/').filter(|c| !c.is_empty());
+                if let Some(name) = components.next() {
+                    let leaf = components.next().is_none();
+                    let kind = if leaf && point.file.is_some() {
+                        EntryKind::File
+                    } else {
+                        EntryKind::Directory
+                    };
+                    push(name, kind);
+                }
+            }
+        }
+        if path == "/" {
+            push("dev", EntryKind::Directory);
+        }
+        if path == "/dev" {
+            for device in Device::ALL {
+                push(device.name(), EntryKind::Device);
+            }
+        }
+        names
+    }
+
+    /// Where each preopen is mounted, as the root sees it: a directory, or
+    /// for a single-file volume each file it exposes.
+    fn mount_points(&self) -> impl Iterator<Item = MountPoint> + '_ {
+        self.preopens
+            .iter()
+            .enumerate()
+            .flat_map(|(index, preopen)| {
+                let (guest_path, names): (_, Option<Vec<String>>) = match preopen {
+                    HybridPreopen::Vfs { guest_path, .. } => (guest_path, None),
+                    HybridPreopen::Real { guest_path, dir } => (
+                        guest_path,
+                        dir.dir
+                            .mapped_names()
+                            .map(|names| names.map(str::to_owned).collect()),
+                    ),
+                    HybridPreopen::Root => return Vec::new(),
+                };
+                let dir = normalize_guest_path(guest_path);
+                match names {
+                    None => vec![MountPoint {
+                        index,
+                        path: dir,
+                        file: None,
+                    }],
+                    Some(names) => names
+                        .into_iter()
+                        .map(|name| MountPoint {
+                            index,
+                            path: join_guest_path(&dir, &name),
+                            file: Some(name),
+                        })
+                        .collect(),
+                }
+            })
+    }
+
+    /// Whether the guest is handed the preopen at `index`. With the root, a
+    /// single-file volume's view of its host directory at `/` isn't: the
+    /// root serves its file, and two preopens at `/` would leave the guest
+    /// choosing between them.
+    pub(crate) fn exposes_preopen(&self, index: usize) -> bool {
+        match &self.preopens[index] {
+            HybridPreopen::Real { guest_path, dir } => {
+                !(dir.dir.mapped_names().is_some()
+                    && normalize_guest_path(guest_path) == "/"
+                    && self
+                        .preopens
+                        .iter()
+                        .any(|p| matches!(p, HybridPreopen::Root)))
+            }
+            _ => true,
+        }
+    }
+
+    /// The descriptor a preopen is opened as.
+    pub(crate) fn preopen_descriptor(preopen: &HybridPreopen) -> (HybridDescriptor, String) {
+        match preopen {
+            HybridPreopen::Vfs {
+                guest_path,
+                dir_perms,
+                file_perms,
+                storage,
+            } => {
+                let mut vfs_desc = VfsDescriptor::dir(guest_path.clone(), *dir_perms, *file_perms);
+                vfs_desc.storage = *storage;
+                (HybridDescriptor::Vfs(vfs_desc), guest_path.clone())
+            }
+            HybridPreopen::Real { guest_path, dir } => (
+                HybridDescriptor::RealDir {
+                    dir: dir.clone(),
+                    guest_path: guest_path.clone(),
+                },
+                guest_path.clone(),
+            ),
+            HybridPreopen::Root => (
+                HybridDescriptor::Synthetic {
+                    guest_path: "/".to_owned(),
+                },
+                "/".to_owned(),
+            ),
+        }
     }
 
     /// Add a real filesystem preopen directory.
