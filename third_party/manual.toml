@@ -399,11 +399,25 @@ files = [
     "third_party/licenses/llvm-libcxx-LICENSE.TXT",
     "third_party/licenses/llvm-libcxxabi-LICENSE.TXT",
 ]
-artifacts = ["runtime-python", "runtime-javascript"]
+# Only CPython links them; the JavaScript guest links libc alone.
+artifacts = ["runtime-python"]
 covers = [
     { path = "crates/eryx-runtime/libs/libc++.so.zst", sha256 = "a334e6a01bb69c1207f240385dc639bfa5603f9048b6d881cc04ac46c4bc4d84" },
     { path = "crates/eryx-runtime/libs/libc++abi.so.zst", sha256 = "4c30c9aa8163e233476d222eb3737ee07905226463cca6d49bd887299fa964a1" },
 ]
+
+[[component]]
+name = "LLVM compiler-rt builtins (WASI SDK)"
+version = "wasi-sdk-33 (llvm-project 4434dabb)"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/llvm/llvm-project/tree/4434dabb69916856b824f68a64b029c67175e532/compiler-rt"
+# clang links libclang_rt.builtins into every library it links: libs/libc.so
+# and libc++.so define its 128-bit integer and long-double helpers (__multi3,
+# __udivti3, __addtf3, __trunctfdf2, ...), and both guests load libc.so. The
+# Rust-built guest libraries get theirs from Rust's compiler_builtins instead.
+files = ["third_party/licenses/llvm-compiler-rt-LICENSE.TXT"]
+wasi_sdk = "wasi-sdk-33"
+artifacts = ["runtime-python", "runtime-javascript"]
 
 [[component]]
 name = "wasi_snapshot_preview1 adapter (Wasmtime)"
@@ -529,6 +543,23 @@ artifacts = ["runtime-python"]
 version_strings = [
     { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", strings = ["invalid HACL* algorithm"] },
 ]
+
+[[component]]
+name = "libgcc_s (GCC runtime library)"
+version = "GCC 12.4.0 (2bada4bc)"
+license = "GPL-3.0-or-later WITH GCC-exception-3.1"
+url = "https://github.com/gcc-mirror/gcc/tree/releases/gcc-12.4.0/libgcc"
+# Only in the musllinux pyeryx wheels: maturin links their extension against
+# the system musl dynamically, so std unwinds through libgcc_s (not LLVM
+# libunwind), and auditwheel bundles that as pyeryx.libs/libgcc_s-*.so.1. Its
+# .comment says GCC 12.4.0 (checked on 0.15.1's x86_64 and aarch64 wheels,
+# #996). musl itself isn't bundled or statically linked: the wheels need the
+# system's libc.so.
+files = [
+    "third_party/licenses/libgcc-COPYING3",
+    "third_party/licenses/libgcc-COPYING.RUNTIME",
+]
+artifacts = ["host"]
 
 [[component]]
 name = "aws-lc-sys (full LICENSE)"
