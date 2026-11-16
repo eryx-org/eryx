@@ -461,12 +461,16 @@ sources = [
 outputs = ["crates/eryx-runtime/runtime-javascript.wasm"]
 
 [tasks.build-runtime-shell]
-description = "Build the brush guest (eryx-guest-shell) into runtime-shell.wasm"
+description = "Build the brush guest (eryx-guest-shell) for WASI 0.3 into runtime-shell.wasm"
+# The shell guest ships as a wasm32-wasip3 component: the release assets, the
+# pyeryx-runtime-shell companion, the server image and the embedded runtime.
+# js/eryx uses the WASI 0.2 build instead (build-runtime-shell-p2), until it
+# has WASI 0.3 shims (#918).
 dir = "crates/eryx-guest-shell"
 run = """
-rustup target add wasm32-wasip2
-CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell.wasm
+rustup target add wasm32-wasip3
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip3 --release
+cp target/wasm32-wasip3/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell.wasm
 """
 sources = [
   "crates/eryx-guest-shell/src/**/*",
@@ -476,6 +480,23 @@ sources = [
   "crates/eryx-runtime/wit/**/*.wit",
 ]
 outputs = ["crates/eryx-runtime/runtime-shell.wasm"]
+
+[tasks.build-runtime-shell-p2]
+description = "Build the brush guest for WASI 0.2 into runtime-shell-p2.wasm, for js/eryx"
+dir = "crates/eryx-guest-shell"
+run = """
+rustup target add wasm32-wasip2
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell-p2.wasm
+"""
+sources = [
+  "crates/eryx-guest-shell/src/**/*",
+  "crates/eryx-guest-shell/wit/**/*",
+  "crates/eryx-guest-shell/Cargo.toml",
+  "crates/eryx-guest-shell/Cargo.lock",
+  "crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["crates/eryx-runtime/runtime-shell-p2.wasm"]
 
 [tasks.precompile-runtime-javascript]
 description = "Pre-initialize and pre-compile runtime-javascript.wasm to runtime-javascript.cwasm"

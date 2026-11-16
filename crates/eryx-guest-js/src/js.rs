@@ -98,6 +98,7 @@ impl Engine {
             let prelude: Function<'_> = ctx.eval(PRELUDE)?;
             let hooks: Object<'_> = prelude.call((native,))?;
             crate::fetch::install(&ctx)?;
+            crate::web::install(&ctx)?;
             crate::modules::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
         });

@@ -88,7 +88,10 @@ when it was loaded, as pools and factories do for every sandbox they make.
   Running the same import again in a session is fine. A session snapshot
   records these imports rather than the modules, and restoring it imports
   them again (so the restoring sandbox needs the same environment); a
-  variable reassigned since its import keeps its new value. Only imports
+  variable reassigned since its import keeps its new value. Values that hold
+  a class instance (a `Buffer`, an `EventEmitter`, a `TextDecoder`) can't be
+  kept with their class, so they're left out and named in the snapshot's
+  `skipped()`, like functions. Only imports
   from executes that succeeded are recorded: if an execute throws after its
   imports ran, run those imports again after a restore.
 - **`await import("…")`** works anywhere.
@@ -103,10 +106,18 @@ when it was loaded, as pools and factories do for every sandbox they make.
 - Only what the environment exports is importable, plus the shared chunks its
   modules import from each other. Anything else fails with "Cannot find
   module", naming what the environment provides.
-- **Node built-ins** (`node:fs`, or a bare `fs` that no package provides)
-  aren't available yet: importing one throws "node:fs isn't available in eryx
-  yet", and a package that imports one statically fails when it's imported.
-  Packages written for browsers or Workers generally avoid them.
+- **Node built-ins:** `node:buffer`, `node:events`, `node:path`,
+  `node:string_decoder` (the npm polyfills, vendored), `node:util` (a subset:
+  `format`, `inspect`, `inherits`, `promisify`, `types`, ...) and
+  `node:crypto` (random values only: `randomBytes`, `randomUUID`,
+  `randomInt`, `getRandomValues`) work, with or without `node:`, and with
+  `require` too. They don't need an environment. The rest (`fs`, `net`,
+  `child_process`, `http`, `url`, ...) throw "node:fs isn't available in eryx
+  yet" on import, so a package that imports one statically fails when it's
+  imported. Packages written for browsers or Workers generally avoid them.
+- **Web globals:** `crypto.getRandomValues()` and `crypto.randomUUID()`
+  (from the host's random source, so uuid and nanoid work), `TextEncoder`
+  and `TextDecoder` (UTF-8 only).
 - **Imports are checked like ES modules:** importing a name a module doesn't
   export (or a default from a module without one) throws a SyntaxError
   naming the export and the module.
@@ -114,7 +125,12 @@ when it was loaded, as pools and factories do for every sandbox they make.
 ## What isn't supported yet
 
 - Python and shell environments (`build` returns `Unsupported`).
-- Node's built-in modules, and web APIs QuickJS lacks (`crypto`,
-  `TextEncoder`, timers). A package that imports a built-in fails when it's
-  imported; one that uses a missing web API fails when it calls it.
+- The other Node built-ins (above), `crypto.subtle` and `node:crypto`'s
+  hashes and ciphers, `URL`, and timers (`setTimeout`, `setInterval`). A
+  package that imports a missing built-in fails when it's imported; one that
+  uses a missing API fails when it calls it.
+- Node's globals: there's no global `Buffer`, `process.nextTick` or
+  `setImmediate`. Code that uses `Buffer` without importing it (common in
+  packages written for Node) throws `ReferenceError: Buffer is not defined`;
+  `import { Buffer } from "node:buffer"` works.
 - Packages with native addons or WebAssembly.

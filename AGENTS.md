@@ -33,9 +33,10 @@ crates/
 ├── eryx-guest-python/     # CPython guest, compiled TO WASM
 │   └── src/lib.rs         # WIT exports, Python FFI
 ├── eryx-guest-js/         # QuickJS guest, built the same way as CPython's
-├── eryx-guest-shell/      # brush (bash) guest: a plain wasip2 component.
-│                          # Its own workspace, excluded from the root one: it
-│                          # only builds for wasm32-wasip2 and pins brush from
+├── eryx-guest-shell/      # brush (bash) guest: a plain wasip3 component
+│                          # (plus a wasip2 build for js/eryx). Its own
+│                          # workspace, excluded from the root one: it only
+│                          # builds for wasm and pins brush from
 │                          # git, which shouldn't enter the root Cargo.lock or
 │                          # host `clippy --workspace` builds. CI lints it in
 │                          # the `shell-guest-lint` job.
@@ -80,7 +81,8 @@ features. Each runtime has its own `build-runtime-<language>` and
 `precompile-runtime-<language>` mise tasks, and changing one guest doesn't
 rebuild the others. The stages below are Python's; JavaScript goes through the
 same wit-dylib linking (`BUILD_ERYX_JS_RUNTIME`) without preinit or late
-linking, and the shell is a plain `cargo build --target wasm32-wasip2`.
+linking, and the shell is a plain `cargo build --target wasm32-wasip3`
+(`build-runtime-shell-p2` builds the WASI 0.2 copy js/eryx uses).
 Understanding this pipeline is essential:
 
 ### Build Stages

@@ -190,6 +190,41 @@
     // Stands in for a variable that can't be kept, so it is named in
     // `skipped`: functions don't serialize.
     const UNKEPT = () => {};
+    // The prototypes a snapshot keeps. JS_WriteObject writes any other
+    // object (a class instance: a Buffer, an EventEmitter) as a plain one,
+    // so a value holding one is skipped rather than restored without its
+    // class.
+    const KEPT_PROTOTYPES = new Set(
+        [
+            Object, Array, Date, RegExp, Map, Set, ArrayBuffer, DataView, Boolean, Number,
+            String, BigInt, Error, EvalError, RangeError, ReferenceError, SyntaxError,
+            TypeError, URIError, Int8Array, Uint8Array, Uint8ClampedArray, Int16Array,
+            Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array,
+            BigUint64Array,
+        ].map((type) => type.prototype),
+    );
+    KEPT_PROTOTYPES.add(null);
+    const losesClass = (root) => {
+        const seen = new Set();
+        const pending = [root];
+        while (pending.length > 0) {
+            const value = pending.pop();
+            if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+            seen.add(value);
+            if (!KEPT_PROTOTYPES.has(Object.getPrototypeOf(value))) return true;
+            if (ArrayBuffer.isView(value)) continue;
+            if (value instanceof Map) {
+                for (const [key, item] of value) pending.push(key, item);
+            } else if (value instanceof Set) {
+                for (const item of value) pending.push(item);
+            }
+            for (const key of Object.getOwnPropertyNames(value)) {
+                const desc = Object.getOwnPropertyDescriptor(value, key);
+                if ('value' in desc) pending.push(desc.value);
+            }
+        }
+        return false;
+    };
     const candidates = new Set();
     // Expressions that look like identifiers but aren't bindings.
     const NOT_BINDINGS = new Set(['this', 'true', 'false', 'null']);
@@ -289,6 +324,9 @@
                 kind = 'const';
             }
             entries.push([name, kind, value]);
+        }
+        for (const entry of entries) {
+            if (entry[2] !== UNKEPT && losesClass(entry[2])) entry[2] = UNKEPT;
         }
         if (imports.length > 0) entries.push(['', 'imports', imports]);
         return entries;

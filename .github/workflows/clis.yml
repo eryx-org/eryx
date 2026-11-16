@@ -198,7 +198,8 @@ jobs:
       # Building the fork from source takes ~10 minutes; key it on the script,
       # which pins the fork's commit.
       - name: Cache wasip3 Go toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go-wasip3-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: scratch/go-wasip3
           key: go-wasip3-${{ hashFiles('scripts/bootstrap-go-wasip3.sh') }}
@@ -212,6 +213,14 @@ jobs:
           export GOROOT_BOOTSTRAP
           GOROOT="$(scripts/bootstrap-go-wasip3.sh scratch/go-wasip3)"
           echo "ERYX_GO_WASIP3_ROOT=$GOROOT" >> "$GITHUB_ENV"
+      # Pushes to main and multi-guest save; PRs and the weekly run only
+      # restore (a PR's caches are scoped to it, and would only evict main's).
+      - name: Save wasip3 Go toolchain
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && github.event_name == 'push' && steps.go-wasip3-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: scratch/go-wasip3
+          key: ${{ steps.go-wasip3-cache.outputs.cache-primary-key }}
       - run: mise run build-cli -- gh
       - run: clis/smoke.sh gh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
