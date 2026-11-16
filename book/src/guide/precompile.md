@@ -222,6 +222,30 @@ eryx-precompile commands inspect --json rg.wasm
 
 `compile` without `--language` runs the same check on a command (a component exporting `wasi:cli/run`) and refuses one eryx couldn't run. See [External Commands](./sandboxes.md#external-commands) for what children get.
 
+### Commands from a Registry
+
+eryx doesn't fetch commands itself: get the `.wasm` with an OCI client, check it against your pinned digest, then check and precompile it. Commands are published as single-layer Wasm OCI artifacts, so [wkg](https://github.com/bytecodealliance/wasm-pkg-tools) writes one straight to a file:
+
+```bash
+wkg oci pull ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2 -o rg.wasm
+```
+
+With [oras](https://oras.land), fetch the layer by its digest. `oras pull` skips it, because the layer carries no file name, but `oras blob fetch` gets it and checks the digest:
+
+```bash
+oras blob fetch ghcr.io/eryx-org/commands/eryx/rg@sha256:<layer digest> --output rg.wasm
+```
+
+The pin is the digest of the `.wasm` itself, which is the manifest's layer digest and what `wkg.lock` records. It isn't the manifest digest that `wkg oci push` prints. Check it, then check and compile the command:
+
+```bash
+echo "<hex>  rg.wasm" | sha256sum -c
+eryx-precompile commands inspect rg.wasm
+eryx-precompile compile rg.wasm --output rg.cwasm --no-verify
+```
+
+`--no-verify` is needed because `compile`'s verification step runs a Python sandbox, which a command isn't. A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
+
 ## Upgrading to a New eryx Version
 
 A precompiled runtime records the eryx version that built it and only loads in that version. Loading it in any other fails with an error naming both versions, so precompiled runtimes have to be rebuilt after every eryx upgrade, patch releases included.
