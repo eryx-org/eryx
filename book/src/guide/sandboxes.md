@@ -71,7 +71,8 @@ result = js.execute("console.log(6 * 7)")
 Python-only options, such as the stdlib, site-packages and packages, are only
 available on a Python builder, as are library preambles. JavaScript has
 [`fetch`](./networking.md#fetch-in-javascript) and reads secrets from
-`process.env`; the shell can't have secrets. A shell script fails with its exit status
+`process.env`; the shell exports their placeholders to its commands (see
+**Network** below). A shell script fails with its exit status
 (`ErrorKind::ScriptFailed { exit_code: Some(n), .. }`; in Python,
 `PythonExceptionError.exit_code`; in eryx-server's `ExecuteResult`, `exit_code`,
 which is also 0 for a shell script that succeeds). Besides bash's builtins,
@@ -172,8 +173,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   coreutils, which pyeryx registers by default.
 - **eryx-server:** `--shell-command NAME[,NAME...]=PATH` (repeatable, or
   `ERYX_SHELL_COMMANDS` separated by `;`) registers a `.wasm` command or one
-  precompiled by `eryx-precompile compile` (`.cwasm`), and
-  `--no-shell-coreutils` leaves the embedded coreutils out.
+  precompiled by `eryx-precompile compile` (`.cwasm`),
+  `--no-shell-coreutils` leaves the embedded coreutils out, and
+  `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
+  (see **Network**).
 
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.
@@ -183,7 +186,21 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **Files:** with `unstable-vfs`, a child sees the shell's filesystem (below):
   the session's VFS mounts, `/tmp`, `/dev` and the read-only root, and nothing
   else of the host. Without it, children have no filesystem yet (#812).
-- **Network:** children have none yet.
+- **Network:** none by default. With the sandbox's network, children can
+  get some through a proxy on the host, and never more than the sandbox's
+  policy allows: in Rust `with_child_network(ChildNetwork::Inherit)` (that
+  policy) or `ChildNetwork::Narrow(config)` (only what both allow); in
+  Python `child_network="inherit"` or a `NetConfig`; in eryx-server
+  `network_config.child_network`. A narrowing config starts from the
+  defaults, which block localhost and private networks, so it must repeat
+  any allowed networks or internal hosts its children need. Children get `HTTPS_PROXY`/`HTTP_PROXY`
+  and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
+  secrets only as their placeholders, which the proxy replaces in requests
+  to each secret's hosts. A command allowed tunnels
+  (`Command::allow_tunnels`, `allow_tunnels=True`, `--shell-command-tunnels`)
+  can open blind `CONNECT` tunnels instead, for protocols the proxy can't
+  inspect: no secret substitution and no HTTP rules in them, and hosts with
+  rules never get one.
 - **Limits:** children count against the execution's `max_fuel` as they
   run (each may burn at most 10 billion instructions of it), and stop at its
   `execution_timeout` and cancellation, even mid-computation. They're
