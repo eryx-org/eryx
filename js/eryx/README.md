@@ -34,7 +34,26 @@ const sh = new Sandbox({ language: "shell", callbacks: { add: ({ a, b }) => a + 
 await sh.execute('echo "sum $(add --a 2 --b 3)"'); // stdout "sum 5\n"
 ```
 
-Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the first time a sandbox uses them, so an app that only runs Python never downloads them; likewise the Python stdlib is only downloaded for the first Python sandbox. Their sandboxes start with an empty filesystem. An uncaught JavaScript exception or a nonzero exit status rejects with a `PythonExceptionError`, as in the Python SDK; for the shell its `exitCode` is the script's exit status. A JavaScript snapshot keeps top-level variables (`var`, `let`, `const`) whose values hold no functions, with shared and circular objects intact; functions, classes and promises are named in `skippedGlobals`. The shell has no external commands (`ls`, `grep`, ...), only builtins and callbacks.
+Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the first time a sandbox uses them, so an app that only runs Python never downloads them; likewise the Python stdlib is only downloaded for the first Python sandbox. Their sandboxes start with an empty filesystem. An uncaught JavaScript exception or a nonzero exit status rejects with a `PythonExceptionError`, as in the Python SDK; for the shell its `exitCode` is the script's exit status. A JavaScript snapshot keeps top-level variables (`var`, `let`, `const`) whose values hold no functions, with shared and circular objects intact; functions, classes and promises are named in `skippedGlobals`. The shell's own builtins include `grep`.
+
+#### Shell commands
+
+A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 6.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js):
+
+```js
+const sh = new Sandbox({
+  language: "shell",
+  commands: { rg: new URL("./rg/rg.js", import.meta.url) },
+});
+await sh.execute("printf 'pear\napple\n' | sort | head -n 1"); // "apple\n"
+```
+
+A command runs in batch: it reads all of its stdin, runs to completion, and only then is its output passed on.
+- An endless producer (`yes | head`) runs until `timeoutMs`.
+- A CPU-bound command blocks the thread it runs on, so use `timeoutMs`, which runs the sandbox in a Worker.
+- Each command may write 16 MiB to stdout and to stderr; past that it's stopped (status 134).
+- Commands share the sandbox's filesystem, and have no network.
+- Data moves through pipes at about 4–10 MiB/s, limited by jco's handling of component-model streams.
 
 ### Returning a structured result
 

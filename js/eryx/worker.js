@@ -6,8 +6,8 @@
  * traces and networking are forwarded to the creating thread, which keeps the
  * handlers, the journal and the network policy.
  *
- * The language comes from `workerData.language` (Node.js) or the Worker's
- * `name` (browsers).
+ * The language and the shell's commands come from `workerData` (Node.js) or
+ * the Worker's `name`, as JSON (browsers).
  *
  * Protocol (all messages are plain objects):
  * - in:  {type: "call", id, method, args, callbacks, options}
@@ -23,7 +23,7 @@ import { sleep } from "./shims/callbacks.js";
 
 const threads = isNode ? await import("node:worker_threads") : null;
 const port = isNode ? threads.parentPort : globalThis;
-const language = isNode ? threads.workerData.language : globalThis.name;
+const { language, commands } = isNode ? threads.workerData : JSON.parse(globalThis.name);
 const post = (message) => port.postMessage(message);
 const onMessage = (fn) =>
   isNode ? port.on("message", fn) : port.addEventListener("message", (e) => fn(e.data));
@@ -98,8 +98,13 @@ onMessage(async (message) => {
 try {
   // Core modules are compiled by the creating thread, so workers don't
   // compile them again.
-  instance = await instantiateSandbox(language, newFileTree(language), cb, net, (name) =>
-    request("module", [name]),
+  instance = await instantiateSandbox(
+    language,
+    newFileTree(language),
+    cb,
+    net,
+    (name) => request("module", [name]),
+    commands,
   );
   post({ type: "ready" });
 } catch (e) {

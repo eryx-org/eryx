@@ -177,6 +177,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `--no-shell-coreutils` leaves the embedded coreutils out, and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**).
+- **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
+  download on first use; `coreutils: false` leaves it out), and `commands`
+  adds others by the URL of their `jco transpile --instantiation async`
+  output. They run in batch, not as a pipeline: each reads all its stdin,
+  runs to completion, then passes on its output (see the package's README).
 
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.

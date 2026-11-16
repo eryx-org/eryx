@@ -44,6 +44,8 @@ jobs:
               - 'crates/eryx-guest-shell/**'
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-runtime/**'
+              - 'clis/coreutils.toml'
+              - 'clis/patches/patch-uucore-wasip2.sh'
               - 'js/**'
               - 'Cargo.lock'
               - 'Cargo.toml'
@@ -109,6 +111,20 @@ jobs:
           # So mise considers the wasm-build-guests task current
           touch crates/eryx-runtime/runtime-javascript.wasm crates/eryx-runtime/runtime-shell-p2.wasm
 
+      # The shell's bundled commands, transpiled into the package (#904).
+      - name: Cache coreutils
+        id: wasm-cache-coreutils
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/eryx-runtime/coreutils.wasm
+          key: wasm-coreutils-wasm-v1-${{ hashFiles('clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'mise.toml', 'rust-toolchain.toml') }}
+
+      - name: Touch cached coreutils
+        if: steps.wasm-cache-coreutils.outputs.cache-hit == 'true'
+        run: |
+          # So mise considers the coreutils-build task current
+          touch crates/eryx-runtime/coreutils.wasm
+
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -151,8 +167,18 @@ jobs:
         if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache-shell.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: crates/eryx-runtime/runtime-shell.wasm
+          # The file the restore step above restores.
+          path: crates/eryx-runtime/runtime-shell-p2.wasm
           key: ${{ steps.wasm-cache-shell.outputs.cache-primary-key }}
+
+      - name: Save coreutils
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache-coreutils.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/eryx-runtime/coreutils.wasm
+          key: ${{ steps.wasm-cache-coreutils.outputs.cache-primary-key }}
 
       # Workers behave differently in browsers (a message sent before the
       # Worker's listener exists is dropped), so run the timeoutMs sandboxes
