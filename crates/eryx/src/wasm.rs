@@ -1588,7 +1588,8 @@ impl ExecutorState {
                 .spend_trace(event_json.len() + context_json.len())
     }
 
-    /// Send an event [`Self::charge_trace`] charged.
+    /// Send an event without charging it: [`Self::charge_trace`] did, or
+    /// it's exempt.
     fn send_charged_trace(&self, lineno: u32, event_json: String, context_json: String) {
         if let Some(tx) = &self.trace_tx {
             // Fire-and-forget - trace events are not critical
@@ -1626,9 +1627,12 @@ impl ExecutorState {
 
     /// Report every child still running as killed: its execution is ending
     /// (or timed out, or was cancelled) with the child's `wait` unfinished.
+    ///
+    /// Uncharged, so a timeout that comes once the budget is spent still
+    /// pairs each start; at most one event per running child.
     pub(crate) fn end_running_children(&mut self) {
         for child in std::mem::take(&mut self.trace_clock.running) {
-            self.send_trace(0, child.end_event(Err("killed")), String::new());
+            self.send_charged_trace(0, child.end_event(Err("killed")), String::new());
         }
     }
 
@@ -4487,6 +4491,32 @@ mod tests {
         state.stream_budget.trace = 0;
         SandboxImports::report_trace(&mut state, 0, event("callback_start", "b"), String::new());
         assert!(state.trace_clock.callbacks.is_empty());
+    }
+
+    /// A child still running when its execution ends is reported killed even
+    /// once the trace budget is spent, so its start isn't left unpaired; one
+    /// whose start the budget dropped reports nothing.
+    #[test]
+    fn running_children_are_reported_killed_past_the_budget() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ExecutorState::placeholder();
+        state.trace_tx = Some(tx);
+        let argv = ["tc".to_owned(), "spin".to_owned()];
+        let _running = state.trace_process_start(&argv).unwrap();
+        let start: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert_eq!(start["type"], "process_start");
+
+        state.stream_budget.trace = 0;
+        assert!(state.trace_process_start(&argv).is_none());
+        state.end_running_children();
+        let end: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert_eq!(
+            (&end["type"], &end["pid"], &end["error"]),
+            (&"process_end".into(), &1.into(), &"killed".into())
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
