@@ -222,6 +222,8 @@ impl Session {
     ///     max_fuel: Overrides `resource_limits.max_fuel`.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     commands: For the shell only: external commands by name, as for
+    ///         `Sandbox`.
     ///
     /// Returns:
     ///     A new Session instance ready to execute Python code.
@@ -249,7 +251,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -267,16 +269,18 @@ impl Session {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        commands: Option<crate::command::Commands<'_>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
         let language = crate::sandbox::parse_language(language)?;
         // The runtime is checked and loaded the way a Sandbox's is.
-        let mut builder = crate::sandbox::base_builder(py, language, runtime_path)?;
+        let (mut builder, source) = crate::sandbox::base_builder(py, language, runtime_path)?;
         if let Some(name) = result_variable {
             builder = builder.with_result_variable(name);
         }
-        let executor = crate::sandbox::build_for(builder, language)?.executor();
+        let executor =
+            crate::sandbox::build_for(py, (builder, source), language, commands)?.executor();
 
         let mut limits = resource_limits.unwrap_or_default();
         if execution_timeout_ms.is_some() {
