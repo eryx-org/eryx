@@ -189,9 +189,15 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("invoke", builtins::Registration::of::<InvokeCommand>());
-    shell
-        .builtins_mut()
-        .register("grep", builtins::Registration::of::<grep::GrepCommand>());
+    // The host lists `grep` when this execution's allowed commands include
+    // it (or there's no allow-list), so it can be narrowed like a command.
+    let commands = eryx::process::process::list_commands();
+    let grep = if commands.iter().any(|name| name == "grep") {
+        builtins::Registration::of::<grep::GrepCommand>()
+    } else {
+        builtins::Registration::of::<grep::GrepRefused>()
+    };
+    shell.builtins_mut().register("grep", grep);
     let mut defs = HashMap::new();
     let mut prefixes = Vec::new();
     for cb in list_callbacks() {
@@ -217,7 +223,7 @@ fn register_builtins(shell: &mut Shell) {
     }
     CALLBACKS.with(|c| *c.borrow_mut() = defs);
     PREFIXES.with(|p| *p.borrow_mut() = prefixes);
-    for name in eryx::process::process::list_commands() {
+    for name in commands {
         let path = std::path::Path::new(COMMAND_DIR).join(&name);
         shell.program_location_cache_mut().set(name, path);
     }
