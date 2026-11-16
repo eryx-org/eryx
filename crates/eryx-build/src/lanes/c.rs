@@ -373,7 +373,9 @@ fn build_autotools(
     };
     let cflags = subst(&manifest.build.cflags)?.join(" ");
     let mut ldflags = subst(&manifest.build.link_flags)?;
-    ldflags.extend(shim_objs.iter().cloned());
+    // As `-Wl,` linker inputs: libtool refuses a bare object in LDFLAGS when
+    // it links a library (jq's libjq.la), and passes these through.
+    ldflags.extend(shim_objs.iter().map(|obj| format!("-Wl,{obj}")));
     let ldflags = ldflags.join(" ");
     let configure_flags = subst(&manifest.build.configure_flags)?;
 
