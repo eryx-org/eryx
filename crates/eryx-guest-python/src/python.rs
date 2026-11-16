@@ -1695,6 +1695,7 @@ def _eryx_install_callbacks(callbacks_json):
     not survive a reinstall, and nothing is compiled per call.
     '''
     global _eryx_installed
+    import asyncio as _asyncio
     import json as _json
     import _eryx
     import _eryx_async
@@ -1762,18 +1763,33 @@ def _eryx_install_callbacks(callbacks_json):
         # Report callback start trace event
         _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_start", "name": _callback_name}), args_json)
 
+        # Exactly one callback_end per start, however the call ends: the
+        # host times calls by pairing them by name, so a missing or extra end
+        # shifts every later duration for that name. A cancelled call
+        # (asyncio.wait_for, a gather whose sibling failed) raises
+        # CancelledError, a BaseException, so `except Exception` misses it.
+        _error = None
         try:
             # Use _eryx_async.await_invoke for proper async handling
             result_json = await _eryx_async.await_invoke(_callback_name, args_json)
-            # Report callback end trace event
-            _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_end", "name": _callback_name}), "")
-            if result_json:
-                return _json.loads(result_json)
-            return None
-        except Exception as e:
-            # Report callback error trace event
-            _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_end", "name": _callback_name, "error": str(e)}), "")
+        except BaseException as e:
+            if isinstance(e, _asyncio.CancelledError):
+                _error = "cancelled"
+            elif isinstance(e, Exception):
+                _error = str(e)
+            else:
+                _error = type(e).__name__
             raise
+        finally:
+            _end = {"type": "callback_end", "name": _callback_name}
+            if _error is not None:
+                _end["error"] = _error
+            _eryx._eryx_report_trace(0, _json.dumps(_end), "")
+        # Outside the try: the call itself succeeded even if its result
+        # doesn't parse, and that mustn't report a second end.
+        if result_json:
+            return _json.loads(result_json)
+        return None
 
     def list_callbacks():
         """List all available callbacks for introspection.
