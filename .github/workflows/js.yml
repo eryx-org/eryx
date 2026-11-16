@@ -27,6 +27,7 @@ jobs:
       pull-requests: read
     outputs:
       js: ${{ steps.filter.outputs.js }}
+      js-dir: ${{ steps.filter.outputs.js-dir }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,6 +48,11 @@ jobs:
               - 'Cargo.lock'
               - 'Cargo.toml'
               - '.github/workflows/js.yml'
+            # PRs into multi-guest run the bindings only for changes to them
+            # (the lean subset, as in ci.yml); the rest run for any of the above.
+            js-dir:
+              - 'js/**'
+              - '.github/workflows/js.yml'
 
   build:
     name: JavaScript bindings
@@ -54,7 +60,8 @@ jobs:
     needs: changes
     if: >-
       github.event_name == 'push'
-      || needs.changes.outputs.js == 'true'
+      || (github.base_ref == 'multi-guest' && needs.changes.outputs.js-dir == 'true')
+      || (github.base_ref != 'multi-guest' && needs.changes.outputs.js == 'true')
     steps:
       - name: Free disk space
         run: |

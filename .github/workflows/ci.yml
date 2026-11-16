@@ -56,6 +56,11 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      # Whether to run the whole suite. PRs into multi-guest run a fast
+      # subset (lint, fmt, Linux tests and what they need, feature checks);
+      # everything else (pushes, PRs into main, tags) runs everything. The
+      # jobs left out check `full` in their `if:`, so they report as skipped.
+      full: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
@@ -920,8 +925,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -952,8 +958,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
@@ -1001,8 +1008,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1050,8 +1058,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1080,8 +1089,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'pull_request'
-      && needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'pull_request'
+      && needs.changes.outputs.core == 'true')
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1186,9 +1196,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.examples == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1253,9 +1264,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1341,9 +1353,10 @@ jobs:
     runs-on: windows-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1445,9 +1458,10 @@ jobs:
     runs-on: macos-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1611,10 +1625,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.book == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1831,13 +1846,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && github.actor != 'dependabot[bot]'
       && github.ref_type != 'tag'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true')
+      || needs.changes.outputs.demo == 'true'))
     permissions:
       contents: read
       deployments: write
@@ -1956,10 +1972,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
     steps:
@@ -2031,10 +2048,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
     steps:
