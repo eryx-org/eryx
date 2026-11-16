@@ -154,8 +154,8 @@ pub use replay::{
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 pub use sandbox::PrecompiledArtifact;
 pub use sandbox::{
-    ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,
-    SandboxBuilder, state,
+    ExecuteOptions, ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits,
+    Sandbox, SandboxBuilder, state,
 };
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, scrub_placeholders, scrub_placeholders_bytes,
