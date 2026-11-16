@@ -566,6 +566,41 @@ async fn p3_gh_reaches_github_through_the_proxy() {
     assert!(out.contains("HTTP 401"), "{out}");
 }
 
+/// Nested children draw on the execution's budget too (#945, #899): their
+/// bytes count in its stats and against `max_bytes`, together with the
+/// shell's children's.
+#[tokio::test]
+async fn nested_children_share_the_executions_budget() {
+    let (port, _) = upstream(None).await;
+    let script = format!("tc spawn tc proxy-get http://api.test:{port}/x");
+    let build = |config: NetConfig| {
+        shell(config)
+            .with_command("tc", test_cmd().allow_spawn())
+            .build()
+            .unwrap()
+    };
+
+    // One nested exchange, unlimited: what it moved shows up in the stats.
+    let result = build(network()).execute(&script).await.unwrap();
+    assert!(result.stdout_utf8().unwrap().contains(" 200 OK"));
+    let moved = result.stats.network_bytes_sent + result.stats.network_bytes_received;
+    assert!(result.stats.network_bytes_sent > 0 && result.stats.network_bytes_received > 0);
+
+    // Exactly that much: the nested exchange spends it, and the shell's own
+    // child is refused after.
+    let sandbox = build(network().with_max_bytes(moved));
+    let out = run(
+        &sandbox,
+        &format!("{script}; tc proxy-get http://api.test:{port}/x"),
+    )
+    .await;
+    assert_eq!(out.matches(" 200 OK").count(), 1, "{out}");
+    assert!(
+        out.contains(" 403 ") && out.contains("network limit reached"),
+        "{out}"
+    );
+}
+
 /// A nested child (see `Command::allow_spawn`) gets the same network as the
 /// shell's children: the proxy only, with the secret substituted, and the
 /// same socket limits.

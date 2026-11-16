@@ -128,6 +128,12 @@ impl NetPolicy {
             .unwrap_or(0)
     }
 
+    /// The most bytes an execution may move, if limited: the smallest limit
+    /// in the chain.
+    pub(crate) fn max_bytes(&self) -> Option<u64> {
+        self.chain().filter_map(|p| p.config.max_bytes()).min()
+    }
+
     /// The connect timeout: the shortest in the chain.
     pub(crate) fn connect_timeout(&self) -> Duration {
         self.chain()
