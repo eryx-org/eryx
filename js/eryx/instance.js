@@ -24,7 +24,7 @@ import { monotonicClock, wallClock } from "#preview2/clocks";
 import { createFilesystem, InMemoryFilesystemAdapter } from "#preview2/filesystem";
 import { error, poll, streams } from "#preview2/io";
 import { insecureSeed, random } from "#preview2/random";
-import * as process from "./shims/process.js";
+import { COREUTILS_TOOLS, createProcessHost } from "./shims/process.js";
 import * as sockets from "./shims/sockets.js";
 
 // Import stdlib loader
@@ -107,27 +107,74 @@ export const isNode =
   typeof globalThis.process !== "undefined" &&
   typeof globalThis.process.versions?.node !== "undefined";
 
-/** Compiled core modules, shared by every instance. */
+/** Compiled core modules by URL, shared by every instance. */
 const _coreModules = new Map();
 
 /**
- * Compile (once) a core wasm module of the component.
- * @param {string} name
+ * Compile (once) the core wasm module at `url`.
+ * @param {URL} url
  * @returns {Promise<WebAssembly.Module>}
  */
-export function getCoreModule(name) {
-  if (!_coreModules.has(name)) {
-    const url = new URL(`./${name}`, import.meta.url);
+function compileAt(url) {
+  const key = url.href;
+  if (!_coreModules.has(key)) {
     const module = isNode
       ? import(/* webpackIgnore: true */ "node:fs/promises").then(async (fs) =>
           WebAssembly.compile(await fs.readFile(url)),
         )
       : WebAssembly.compileStreaming(fetch(url));
     // Don't keep a failure (e.g. a dropped download): the next sandbox retries.
-    module.catch(() => _coreModules.delete(name));
-    _coreModules.set(name, module);
+    module.catch(() => _coreModules.delete(key));
+    _coreModules.set(key, module);
   }
-  return _coreModules.get(name);
+  return _coreModules.get(key);
+}
+
+/**
+ * Compile (once) a core wasm module of this package's components.
+ * @param {string} name
+ * @returns {Promise<WebAssembly.Module>}
+ */
+export function getCoreModule(name) {
+  return compileAt(new URL(`./${name}`, import.meta.url));
+}
+
+/** A command module (jco output) by URL, loaded once. */
+const _commandModules = new Map();
+
+/**
+ * The loaders for a shell sandbox's external commands: the bundled coreutils
+ * (downloaded the first time one runs) unless `coreutils` is false, then
+ * `commands`, which replace coreutils tools of the same name.
+ * @param {{ coreutils?: boolean, commands?: Record<string, string> }} config -
+ *   `commands` maps names to the URL of a jco-transpiled command's `.js`
+ * @param {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} getModule -
+ *   Source of this package's core modules
+ * @returns {Map<string, () => Promise<import("./shims/process.js").CommandModule>>}
+ */
+export function commandLoaders(config, getModule) {
+  const loaders = new Map();
+  if (config.coreutils !== false) {
+    const load = async () => ({
+      instantiate: (await import("./eryx-coreutils.js")).instantiate,
+      getCoreModule: getModule,
+    });
+    for (const tool of COREUTILS_TOOLS) loaders.set(tool, load);
+  }
+  for (const [name, href] of Object.entries(config.commands ?? {})) {
+    loaders.set(name, () => {
+      if (!_commandModules.has(href)) {
+        const loaded = import(/* webpackIgnore: true */ href).then((module) => ({
+          instantiate: module.instantiate,
+          getCoreModule: (file) => compileAt(new URL(file, href)),
+        }));
+        loaded.catch(() => _commandModules.delete(href));
+        _commandModules.set(href, loaded);
+      }
+      return _commandModules.get(href);
+    });
+  }
+  return loaders;
 }
 
 const _sockets = {
@@ -216,8 +263,17 @@ export const languages = Object.keys(components);
  * @param {{tcp: Object, tls: Object}} net - The instance's eryx:net imports
  * @param {(name: string) => WebAssembly.Module | Promise<WebAssembly.Module>} [getModule] -
  *   Core-module source, when not this thread's cache
+ * @param {{ coreutils?: boolean, commands?: Record<string, string> }} [commands] - The
+ *   shell's external commands; see {@link commandLoaders}
  */
-export async function instantiateSandbox(language, fileTree, cb, net, getModule = getCoreModule) {
+export async function instantiateSandbox(
+  language,
+  fileTree,
+  cb,
+  net,
+  getModule = getCoreModule,
+  commands = {},
+) {
   // A tree forked before the stdlib loaded gets its own view of it, attached
   // before the guest's first filesystem access (finalizePreinit, below):
   // instantiation doesn't read the filesystem, so the two overlap.
@@ -240,7 +296,7 @@ export async function instantiateSandbox(language, fileTree, cb, net, getModule 
     "eryx:net/tcp": net.tcp,
     "eryx:net/tls": net.tls,
     // Only the shell imports it; see shims/process.js.
-    "eryx:process/process": process,
+    "eryx:process/process": createProcessHost(fileTree, commandLoaders(commands, getModule)),
     "wasi:cli/environment": environment,
     "wasi:cli/exit": exit,
     "wasi:cli/stderr": fd.stderr,

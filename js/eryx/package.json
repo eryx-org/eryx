@@ -2,7 +2,7 @@
   "name": "@eryx-org/eryx",
   "type": "module",
   "description": "A Python sandbox powered by WebAssembly, for browser and Node.js",
-  "version": "0.12.1",
+  "version": "0.15.1",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -35,6 +35,9 @@
     },
     "./shims/sockets": {
       "default": "./shims/sockets.js"
+    },
+    "./coreutils": {
+      "default": "./eryx-coreutils.js"
     },
     "./low-level": {
       "types": "./eryx-sandbox.d.ts",

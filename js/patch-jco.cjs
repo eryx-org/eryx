@@ -30,11 +30,12 @@ const fsPatched = `	if (context.fileCache.node) {
 		}
 	}`;
 
-// One per guest language.
+// One per guest language, and the shell's bundled coreutils.
 for (const path of [
   'eryx/eryx-sandbox.js',
   'eryx/eryx-sandbox-javascript.js',
   'eryx/eryx-sandbox-shell.js',
+  'eryx/eryx-coreutils.js',
 ]) {
   const code = fs.readFileSync(path, 'utf8');
   if (code.includes(fsOriginal)) {

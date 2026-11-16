@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Loaded by browser.test.ts: one timeoutMs sandbox per language. -->
+<!-- Loaded by browser.test.ts: one timeoutMs sandbox per language, and shell commands. -->
 <meta charset="utf-8" />
 <title>timeoutMs smoke test</title>
 <script type="module">
@@ -17,6 +17,17 @@
       results[language] = (await sandbox.execute(source)).stdout;
     } catch (e) {
       results[language] = `error: ${e}`;
+    } finally {
+      sandbox.close();
+    }
+  }
+  // The shell's coreutils, downloaded on first use, in this thread and in a Worker.
+  for (const [key, timeoutMs] of [["commands", undefined], ["commands-worker", 60000]]) {
+    const sandbox = new Sandbox({ language: "shell", timeoutMs });
+    try {
+      results[key] = (await sandbox.execute("printf 'b\\na\\n' | sort | head -n 1")).stdout;
+    } catch (e) {
+      results[key] = `error: ${e}`;
     } finally {
       sandbox.close();
     }
