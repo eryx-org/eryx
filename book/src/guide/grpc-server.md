@@ -81,7 +81,7 @@ containers:
 - **Fetching:** [Commands from a Registry](./precompile.md#commands-from-a-registry) shows the wkg and oras commands. For a private registry, give the init container credentials the way those tools take them, such as `docker login` or a mounted Docker config. For ghcr.io, that's a token with `read:packages`.
 - **The pin:** `@sha256:<hex>` is the digest of the `.wasm` itself. That's the manifest's layer digest, which eryx-commands' `commands.lock` records. It isn't the manifest digest.
 - **At startup:** a pinned file that doesn't match fails startup, naming the flag. The command is then checked (a command importing what the shell doesn't provide is refused) and compiled once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx`), so a later start with the same file skips compiling.
-- **The cache directory** must be writable and private to the server's user. Mount it as a volume to keep compiled commands across restarts.
+- **The cache directory** should be writable and private to the server's user, so pinned commands compile once; mount it as a volume to keep them across restarts. If it can't be used (a read-only filesystem, say), the server logs a warning and compiles each pinned command in memory at every start instead. A wrong pin or a command the shell can't run still stops startup.
 - **Pins and `.cwasm`:** only a `.wasm` can be pinned. A `.cwasm` is native code and is trusted as a whole, like `--runtime-cwasm`.
 
 ### Request limits
