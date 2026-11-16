@@ -113,6 +113,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -200,6 +201,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -302,6 +304,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -394,6 +397,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-unknown-linux-gnu.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-unknown-linux-gnu.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -500,6 +504,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-aarch64-apple-darwin.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-aarch64-apple-darwin.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -597,6 +602,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-apple-darwin.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-apple-darwin.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         run: |
@@ -696,6 +702,7 @@ jobs:
           for lang in javascript shell; do
             cp "cwasm/runtime-$lang-x86_64-pc-windows-msvc.cwasm" "crates/eryx-runtime/runtime-$lang.cwasm"
           done
+          cp "cwasm/coreutils-x86_64-pc-windows-msvc.cwasm" crates/eryx-runtime/coreutils.cwasm
 
       - name: Test wheel
         shell: bash
@@ -777,12 +784,26 @@ jobs:
             ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- \
               --target "$2" --output "cwasm/runtime-$RUNTIME_LANGUAGE-$2.cwasm"
           }
+          compile_all() {
+            compile x86-64-v2 x86_64-unknown-linux-gnu
+            compile baseline aarch64-unknown-linux-gnu
+            compile x86-64-v2 x86_64-apple-darwin
+            compile baseline aarch64-apple-darwin
+            compile x86-64-v2 x86_64-pc-windows-msvc
+          }
           export ERYX_WASM_PATH="crates/eryx-runtime/runtime-$RUNTIME_LANGUAGE.wasm" ERYX_LANGUAGE="$RUNTIME_LANGUAGE"
-          compile x86-64-v2 x86_64-unknown-linux-gnu
-          compile baseline aarch64-unknown-linux-gnu
-          compile x86-64-v2 x86_64-apple-darwin
-          compile baseline aarch64-apple-darwin
-          compile x86-64-v2 x86_64-pc-windows-msvc
+          compile_all
+          # The shell's default commands, uutils coreutils (from the runtime
+          # assets' coreutils.wasm), precompiled as a command for each platform
+          # and shipped beside the runtime.
+          if [ "$RUNTIME_LANGUAGE" = shell ]; then
+            compile() {
+              ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- \
+                --target "$2" --output "cwasm/coreutils-$2.cwasm"
+            }
+            export ERYX_WASM_PATH=crates/eryx-runtime/coreutils.wasm ERYX_LANGUAGE=command
+            compile_all
+          fi
           ls -la cwasm/
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
@@ -804,6 +825,10 @@ jobs:
           while read -r target tag; do
             cwasm="cwasm/runtime-$RUNTIME_LANGUAGE-$target.cwasm"
             cp "$cwasm" "$dest"
+            coreutils="cwasm/coreutils-$target.cwasm"
+            if [ "$RUNTIME_LANGUAGE" = shell ]; then
+              cp "$coreutils" "$pkg/pyeryx_runtime_shell/coreutils.cwasm"
+            fi
             # setuptools reuses build/, which would keep the previous cwasm.
             rm -rf "$pkg/build" "$pkg"/*.egg-info "$RUNNER_TEMP/wheel"
             uv build --wheel --out-dir "$RUNNER_TEMP/wheel" "$pkg"
@@ -811,6 +836,9 @@ jobs:
             wheel=$(ls "$RUNNER_TEMP"/wheel/*.whl)
             # The wheel must hold this platform's cwasm, byte for byte.
             unzip -p "$wheel" "pyeryx_runtime_$RUNTIME_LANGUAGE/runtime-$RUNTIME_LANGUAGE.cwasm" | cmp - "$cwasm"
+            if [ "$RUNTIME_LANGUAGE" = shell ]; then
+              unzip -p "$wheel" pyeryx_runtime_shell/coreutils.cwasm | cmp - "$coreutils"
+            fi
             mv "$wheel" dist/
           done <<'EOF'
           x86_64-unknown-linux-gnu manylinux_2_17_x86_64.manylinux2014_x86_64
@@ -883,6 +911,8 @@ jobs:
               ("python", "print(6 * 7)"),
               ("javascript", "console.log(6 * 7)"),
               ("shell", "echo $((6 * 7))"),
+              # The companion's coreutils are the shell's default commands.
+              ("shell", "echo 42 | cat"),
           ]
           for language, code in checks:
               stdout = eryx.Sandbox(language=language).execute(code).stdout

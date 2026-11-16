@@ -306,6 +306,51 @@ async fn javascript_session_state_round_trips() {
     assert_eq!(second.result, "42");
 }
 
+/// A shell request runs the embedded coreutils, and its result carries the
+/// script's exit status: 0 on success, N for `exit N`. Python leaves it unset.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_results_carry_the_exit_code() {
+    use eryx_server::proto::eryx::v1::{FailureKind, Language};
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+
+    let ok = execute_in(
+        channel.clone(),
+        Language::Shell,
+        "printf 'pear\\napple\\n' | sort | head -n 1",
+    )
+    .await
+    .unwrap();
+    assert!(ok.success, "{}", ok.error);
+    assert_eq!(ok.stdout, b"apple\n");
+    assert_eq!(ok.exit_code, Some(0));
+
+    let failed = execute_in(channel.clone(), Language::Shell, "echo before; exit 3")
+        .await
+        .unwrap();
+    assert!(!failed.success);
+    assert_eq!(failed.failure_kind, FailureKind::ScriptFailed as i32);
+    assert_eq!(failed.exit_code, Some(3));
+    assert_eq!(failed.stdout, b"before\n");
+
+    let python = execute_in(channel, Language::Python, "raise SystemExit(2)")
+        .await
+        .unwrap();
+    assert_eq!(python.exit_code, None);
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,

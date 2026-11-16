@@ -99,6 +99,14 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 - `EryxService::with_pool(language, pool)` and
   `with_lazy_pool(language, factory)` add a pool; `EryxService::new` and
   `with_signer` take the Python pool as before.
+- `ExecuteResult.exit_code` (new, `optional int32`): a shell script's exit
+  status, 0 on success. Unset for Python and JavaScript and for sandbox
+  failures, so existing clients see no change.
+- The shell runs the embedded uutils coreutils. `--shell-command
+  NAME[,NAME...]=PATH` (repeatable; `ERYX_SHELL_COMMANDS`, `;`-separated)
+  registers more commands, from a `.wasm` or a `.cwasm` precompiled by
+  `eryx-precompile compile`, and `--no-shell-coreutils` drops coreutils. A bad
+  path fails startup.
 
 ## JavaScript (`@eryx-org/eryx`)
 
@@ -141,6 +149,13 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   get it. A runtime from another eryx version or for another language fails
   with `InitializationError` too.
 - `runtime_path=` also works for Python, to run a custom precompiled runtime.
+- Shell sandboxes and sessions take `commands={"name": eryx.Command, ...}`
+  (`Command.from_file`, `from_bytes`, `from_precompiled_file`); `commands=`
+  with another language raises `ValueError`. `pyeryx-runtime-shell` now ships
+  uutils coreutils (`coreutils.cwasm`, about 5 MB more per wheel), registered
+  by default; `commands` replace tools of the same name.
+- A failed shell script's `PythonExceptionError` has `exit_code`; it is
+  `None` for Python and JavaScript.
 
 ## For eryx developers
 
