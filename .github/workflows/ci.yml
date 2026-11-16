@@ -122,6 +122,9 @@ jobs:
             # What the third-party notices are made from (#837).
             notices:
               - '**/Cargo.lock'
+              - '**/Cargo.toml'
+              - 'crates/eryx/python-stdlib.tar.*'
+              - 'crates/eryx-runtime/prebuilt/**'
               - 'about.toml'
               - 'third_party/**'
               - 'scripts/notices.py'

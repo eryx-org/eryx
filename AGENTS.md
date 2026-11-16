@@ -125,7 +125,7 @@ Understanding this pipeline is essential:
 3. **Use `--workspace` flag** for cargo commands to ensure all crates are covered
 4. **Always commit `Cargo.lock`** to version control
 5. **Keep lint config in `Cargo.toml`** - avoid separate clippy.toml files
-6. **Third-party notices** (#837) - a new Rust dependency needs a licence `about.toml` accepts; a new licence there is a decision for review, not a fix to make CI pass. Vendored code that isn't a crate in a lock file (a C library in `crates/eryx-runtime/libs/`, an npm package in the JS guest's `src/node/`, a CLI) needs an entry in `third_party/manual.toml` with its licence files. `mise run notices-check` is what CI runs
+6. **Third-party notices** (#837) - a new Rust dependency needs a licence `about.toml` accepts; a new licence there is a decision for review, not a fix to make CI pass. Vendored code that isn't a crate in a lock file (a C library in `crates/eryx-runtime/libs/` or `prebuilt/`, a package in the bundled Python stdlib, an npm package in the JS guest's `src/node/`, a CLI) needs an entry in `third_party/manual.toml` with its licence files; re-vendoring `libs/` means updating its entries' versions and sha256s. `mise run notices-check` is what CI runs
 
 ## Build Caching & Staleness Issues
 
