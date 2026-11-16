@@ -279,15 +279,18 @@ async fn packages_cant_import_the_apps_files() {
     assert_no_canary(dir.path(), &app.join("service-account.json"));
 }
 
-/// No file under `dir` but `source` holds the canary.
+/// No regular file under `dir` but `source` holds the canary.
 fn assert_no_canary(dir: &Path, source: &Path) {
     let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
-            if path.is_dir() && !path.is_symlink() {
+            // Only files' own contents: the fixtures' links lead back to the
+            // source.
+            let kind = path.symlink_metadata().unwrap().file_type();
+            if kind.is_dir() {
                 pending.push(path);
-            } else if path != source && path.is_file() {
+            } else if path != source && kind.is_file() {
                 let bytes = std::fs::read(&path).unwrap();
                 assert!(
                     !bytes.windows(6).any(|w| w == b"CANARY"),
@@ -498,4 +501,42 @@ async fn a_linked_node_modules_is_checked_and_followed() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("holding the tree"), "{err}");
+}
+
+/// A symlink inside a package keeps its exact target in the bundler's
+/// mirror, so one to the app's files resolves to nothing there: importing
+/// through it fails the pack rather than reading the file.
+#[tokio::test]
+async fn a_package_symlink_to_the_apps_files_doesnt_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let evil = app.join("node_modules/evil");
+    std::fs::create_dir_all(&evil).unwrap();
+    std::fs::write(app.join("service-account.json"), r#"{"key": "CANARY"}"#).unwrap();
+    symlink("../../service-account.json", evil.join("data.json")).unwrap();
+    std::fs::write(
+        evil.join("package.json"),
+        r#"{"name": "evil", "version": "1.0.0", "main": "index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        evil.join("index.js"),
+        "import key from \"./data.json\";\nexport default key;\n",
+    )
+    .unwrap();
+    let out = dir.path().join("env");
+    let err = pack(&app, &out, &options("evil-link").entry("evil"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("data.json"), "{err}");
+    assert!(!out.exists(), "nothing was written");
+    assert_no_canary(dir.path(), &app.join("service-account.json"));
+    // And the mirror went with the failure.
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".eryx-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }

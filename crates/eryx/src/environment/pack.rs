@@ -179,6 +179,8 @@ pub async fn pack(
     // link out of a mount), with Node's real-path resolution for pnpm's
     // store and workspace members. Hard links, so it costs next to nothing
     // on the same filesystem; it's beside the staging dir for that reason.
+    // A TempDir: removed when dropped, so on success, on every error return
+    // below, and on a panic.
     let source = tempfile::Builder::new()
         .prefix(".eryx-pack-")
         .tempdir_in(staging.path().parent().unwrap_or(Path::new(".")))
@@ -463,6 +465,8 @@ fn mirror_entry(from: &Path, to: &Path) -> Result<(), EnvironmentError> {
         if to.symlink_metadata().is_ok() {
             return Ok(());
         }
+        // The exact target, unresolved: a link out of what's mirrored stays
+        // dangling in the mirror, or is refused by the mount if it leaves it.
         let link = std::fs::read_link(from).map_err(io(format!("reading {}", from.display())))?;
         return symlink(&link, to).map_err(io(format!("linking {}", to.display())));
     }
@@ -475,6 +479,9 @@ fn mirror_entry(from: &Path, to: &Path) -> Result<(), EnvironmentError> {
         return Ok(());
     }
     if kind.is_file() && to.symlink_metadata().is_err() {
+        // A hard link shares the user's inode, so the bundler reads the real
+        // file, but only through the read-only mount (`run_bundler` mounts
+        // sources with `writable: false`), so it can't change it.
         std::fs::hard_link(from, to)
             .or_else(|_| std::fs::copy(from, to).map(|_| ()))
             .map_err(io(format!("copying {}", from.display())))?;
