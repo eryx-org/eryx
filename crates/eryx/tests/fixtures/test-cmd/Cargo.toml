@@ -1,4 +1,5 @@
-# A tiny WASI 0.2 command for tests/commands.rs, built by the test itself.
+# A tiny command for tests/commands.rs, built by the test itself, for WASI
+# 0.2 (wasm32-wasip2) and, for the `p3_` tests, WASI 0.3 (wasm32-wasip3).
 [package]
 name = "eryx-test-cmd"
 version = "0.0.0"

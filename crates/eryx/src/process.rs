@@ -1,12 +1,12 @@
 //! External commands for the shell guest: `eryx:process`.
 //!
-//! A [`Command`] is a WASI 0.2 command component (one that exports
+//! A [`Command`] is a WASI 0.2 or 0.3 command component (one that exports
 //! `wasi:cli/run`), compiled once on the shared engine. A shell sandbox
 //! registers commands by name
 //! ([`SandboxBuilder::with_command`](crate::SandboxBuilder::with_command)), and
 //! the shell spawns them as child processes through the `eryx:process`
 //! interface. Each spawn instantiates from the command's cached
-//! [`CommandPre`], so children get the engine's pooling allocator, fuel
+//! pre-instance, so children get the engine's pooling allocator, fuel
 //! metering and epoch interruption without recompiling.
 //!
 //! A child's stdin, stdout and stderr are component-model streams, piped
@@ -18,7 +18,8 @@
 //! - **Files:** with `unstable-vfs`, a [fork](eryx_vfs::HybridVfsCtx::fork) of
 //!   the parent's hybrid VFS, so the same mounts and permissions and nothing
 //!   else. Without it, no filesystem.
-//! - **Network:** none. Children get no sockets; the proxy is #812.
+//! - **Network:** through the child proxy only, when the sandbox has one
+//!   (#812); otherwise none.
 //! - **Limits:** children burn the parent execution's fuel as they run (at
 //!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
 //!   work per running child, and stop at its timeout and cancellation. The
@@ -40,7 +41,7 @@ use wasmtime::component::{
 use wasmtime::{
     AsContext, AsContextMut, Engine, ResourceLimiter, Store, StoreContextMut, UpdateDeadline,
 };
-use wasmtime_wasi::p2::bindings::CommandPre;
+use wasmtime_wasi::p3::bindings::sockets::types as p3_sockets;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::error::{Error, ErrorKind};
@@ -112,8 +113,9 @@ fn max_process_child_sockets() -> usize {
 /// store is dropped).
 #[derive(Default)]
 struct ChildSockets {
-    /// Table indices of the sockets it created; dropped ones are pruned.
-    live: Vec<u32>,
+    /// Table indices of the sockets it created, and whether through WASI 0.3
+    /// (whose sockets are another resource type); dropped ones are pruned.
+    live: Vec<(u32, bool)>,
     /// Sockets its execution's children hold.
     execution: Arc<AtomicUsize>,
 }
@@ -134,10 +136,18 @@ impl ChildSockets {
     /// Forget sockets the child has dropped.
     fn prune(&mut self, table: &ResourceTable) {
         let before = self.live.len();
-        self.live.retain(|&rep| {
-            table
-                .get(&Resource::<wasmtime_wasi::p2::TcpSocket>::new_borrow(rep))
-                .is_ok()
+        self.live.retain(|&(rep, p3)| {
+            if p3 {
+                table
+                    .get(&Resource::<wasmtime_wasi::sockets::TcpSocket>::new_borrow(
+                        rep,
+                    ))
+                    .is_ok()
+            } else {
+                table
+                    .get(&Resource::<wasmtime_wasi::p2::TcpSocket>::new_borrow(rep))
+                    .is_ok()
+            }
         });
         self.release(before - self.live.len());
     }
@@ -222,7 +232,7 @@ impl wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host for CountedSo
             );
         match created {
             Ok(socket) => {
-                self.budget.live.push(socket.rep());
+                self.budget.live.push((socket.rep(), false));
                 Ok(socket)
             }
             Err(e) => {
@@ -231,6 +241,64 @@ impl wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host for CountedSo
             }
         }
     }
+}
+
+/// WASI 0.3's `[static]tcp-socket.create`, counted against [`ChildSockets`]
+/// as [`CountedSockets`] counts WASI 0.2's.
+fn create_p3_tcp_socket(
+    mut store: StoreContextMut<'_, ChildState>,
+    (family,): (p3_sockets::IpAddressFamily,),
+) -> wasmtime::Result<(Result<Resource<wasmtime_wasi::sockets::TcpSocket>, p3_sockets::ErrorCode>,)>
+{
+    let state = store.data_mut();
+    state.sockets.prune(&state.table);
+    if !state.sockets.admit() {
+        // WASI 0.3 has no `new-socket-limit`.
+        return Ok((Err(p3_sockets::ErrorCode::Other(Some(
+            "socket limit reached".into(),
+        ))),));
+    }
+    let mut sockets = wasmtime_wasi::sockets::WasiSocketsCtxView {
+        ctx: state.wasi.sockets(),
+        table: &mut state.table,
+    };
+    match p3_sockets::HostTcpSocket::create(&mut sockets, family) {
+        Ok(socket) => {
+            state.sockets.live.push((socket.rep(), true));
+            Ok((Ok(socket),))
+        }
+        Err(e) => {
+            state.sockets.release(1);
+            Ok((Err(e.downcast()?),))
+        }
+    }
+}
+
+/// The interface holding WASI 0.3's `tcp-socket.create`, as wasmtime-wasi
+/// links it.
+const P3_SOCKETS: &str = "wasi:sockets/types@0.3.0";
+/// That function's name in it.
+const P3_TCP_CREATE: &str = "[static]tcp-socket.create";
+
+/// Replace wasmtime-wasi's WASI 0.3 `tcp-socket.create` in `linker` with
+/// [`create_p3_tcp_socket`].
+///
+/// Fails unless wasmtime-wasi defined it under [`P3_SOCKETS`]: after a
+/// wasmtime-wasi upgrade moves the interface to another version, children
+/// would otherwise create sockets through it uncounted.
+fn count_p3_sockets(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
+    linker.allow_shadowing(false);
+    let defined = linker
+        .instance(P3_SOCKETS)?
+        .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
+        .is_err();
+    linker.allow_shadowing(true);
+    if !defined {
+        wasmtime::bail!("wasmtime-wasi no longer links `{P3_TCP_CREATE}` in `{P3_SOCKETS}`");
+    }
+    linker
+        .instance(P3_SOCKETS)?
+        .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
 }
 
 /// Where a child finds the proxy's CA certificate (see [`ChildNet`]).
@@ -307,8 +375,8 @@ pub(crate) fn add_to_linker(linker: &mut Linker<ExecutorState>) -> wasmtime::Res
     bindings::eryx::process::process::add_to_linker::<_, HasSelf<ExecutorState>>(linker, |s| s)
 }
 
-/// A WASI 0.2 command component that a shell sandbox can run as an external
-/// command.
+/// A WASI 0.2 or 0.3 command component that a shell sandbox can run as an
+/// external command.
 ///
 /// Cloning is cheap: clones share the compiled component, so registering one
 /// multicall binary under several names (see
@@ -316,7 +384,7 @@ pub(crate) fn add_to_linker(linker: &mut Linker<ExecutorState>) -> wasmtime::Res
 /// compiles it once.
 #[derive(Clone)]
 pub struct Command {
-    pre: CommandPre<ChildState>,
+    pre: Pre,
     /// Whether its children's `CONNECT`s are blind tunnels.
     tunnels: bool,
 }
@@ -333,7 +401,8 @@ impl Command {
     /// # Errors
     ///
     /// Returns an error if the file can't be read or compiled, or isn't a
-    /// WASI 0.2 command (it must export `wasi:cli/run` and import only WASI).
+    /// WASI 0.2 or 0.3 command (it must export `wasi:cli/run` and import only
+    /// WASI).
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|e| {
@@ -346,8 +415,8 @@ impl Command {
     ///
     /// # Errors
     ///
-    /// Returns an error if the bytes don't compile, or aren't a WASI 0.2
-    /// command.
+    /// Returns an error if the bytes don't compile, or aren't a WASI 0.2 or
+    /// 0.3 command.
     pub fn from_bytes(wasm: &[u8]) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
         let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
@@ -369,7 +438,7 @@ impl Command {
     /// # Errors
     ///
     /// Returns [`ErrorKind::IncompatiblePrecompiled`] if another eryx version
-    /// precompiled it, and an error if it isn't a WASI 0.2 command.
+    /// precompiled it, and an error if it isn't a WASI 0.2 or 0.3 command.
     #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled: &[u8]) -> Result<Self, Error> {
@@ -407,10 +476,7 @@ impl Command {
     fn from_component(engine: &Engine, component: &Component) -> Result<Self, Error> {
         #[cfg(test)]
         tests::COMPILED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let pre = child_linker(engine)?
-            .instantiate_pre(component)
-            .map_err(ErrorKind::wasm_component)?;
-        let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
+        let pre = Pre::new(child_linker(engine)?, engine, component)?;
         Ok(Self {
             pre,
             tunnels: false,
@@ -550,10 +616,11 @@ pub(crate) struct IsolatedLimits {
 #[cfg(feature = "packages")]
 impl Command {
     /// Load a precompiled command to run with
-    /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI, so
-    /// its filesystem is the host directories it's given, never a sandbox's
-    /// VFS (which `unstable-vfs` puts in place of WASI's filesystem for
-    /// children, empty for one without a parent).
+    /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI 0.2
+    /// (a WASI 0.3 command fails to link), so its filesystem is the host
+    /// directories it's given, never a sandbox's VFS (which `unstable-vfs`
+    /// puts in place of WASI's filesystem for children, empty for one
+    /// without a parent).
     ///
     /// # Safety
     ///
@@ -565,10 +632,7 @@ impl Command {
         // SAFETY: the caller guarantees the bytes are trusted eryx output.
         let component = unsafe { Component::deserialize(&engine, precompiled) }
             .map_err(crate::wasm::deserialize_error)?;
-        let pre = isolated_linker(&engine)?
-            .instantiate_pre(&component)
-            .map_err(ErrorKind::wasm_component)?;
-        let pre = CommandPre::new(pre).map_err(ErrorKind::wasm_component)?;
+        let pre = Pre::new(isolated_linker(&engine)?, &engine, &component)?;
         Ok(Self {
             pre,
             tunnels: false,
@@ -637,18 +701,10 @@ impl Command {
         store.epoch_deadline_callback(|_| Ok(UpdateDeadline::Yield(1)));
 
         let run = async {
-            let command = self
-                .pre
-                .instantiate_async(&mut store)
-                .await
-                .map_err(|e| fail(format!("instantiating {}: {e}", argv[0])))?;
-            match command.wasi_cli_run().call_run(&mut store).await {
-                Ok(Ok(())) => Ok(0),
-                Ok(Err(())) => Ok(1),
-                Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                    Some(exit) => Ok(exit.0),
-                    None => Err(fail(format!("{} failed: {e}", argv[0]))),
-                },
+            match self.pre.run(&mut store).await {
+                Err(e) => Err(fail(format!("instantiating {}: {e}", argv[0]))),
+                Ok(Err(e)) => Err(fail(format!("{} failed: {e}", argv[0]))),
+                Ok(Ok(code)) => Ok(code),
             }
         };
         let code = tokio::time::timeout(limits.timeout, run)
@@ -656,6 +712,77 @@ impl Command {
             .map_err(|_| fail(format!("{} timed out after {:?}", argv[0], limits.timeout)))??;
         drop(store);
         Ok((code, stdout.contents().to_vec(), stderr.contents().to_vec()))
+    }
+}
+
+/// A command pre-instantiated for the WASI version it targets.
+#[derive(Clone)]
+enum Pre {
+    P2(wasmtime_wasi::p2::bindings::CommandPre<ChildState>),
+    P3(wasmtime_wasi::p3::bindings::CommandPre<ChildState>),
+}
+
+impl Pre {
+    /// Pre-instantiate `component` with `linker`: as WASI 0.3 if it exports
+    /// 0.3's `wasi:cli/run`, else as WASI 0.2.
+    fn new(
+        linker: &Linker<ChildState>,
+        engine: &Engine,
+        component: &Component,
+    ) -> Result<Self, Error> {
+        let p3 = component
+            .component_type()
+            .exports(engine)
+            .any(|(name, _)| name.starts_with("wasi:cli/run@0.3."));
+        let pre = linker
+            .instantiate_pre(component)
+            .map_err(ErrorKind::wasm_component)?;
+        Ok(if p3 {
+            Self::P3(
+                wasmtime_wasi::p3::bindings::CommandPre::new(pre)
+                    .map_err(ErrorKind::wasm_component)?,
+            )
+        } else {
+            Self::P2(
+                wasmtime_wasi::p2::bindings::CommandPre::new(pre)
+                    .map_err(ErrorKind::wasm_component)?,
+            )
+        })
+    }
+
+    fn engine(&self) -> &Engine {
+        match self {
+            Self::P2(pre) => pre.engine(),
+            Self::P3(pre) => pre.engine(),
+        }
+    }
+
+    /// Instantiate the command in `store` and run it. The outer error is a
+    /// failed instantiation; the inner one a trap, other than an exit.
+    async fn run(&self, store: &mut Store<ChildState>) -> wasmtime::Result<wasmtime::Result<i32>> {
+        let ran = match self {
+            Self::P2(pre) => {
+                let command = pre.instantiate_async(&mut *store).await?;
+                command.wasi_cli_run().call_run(&mut *store).await
+            }
+            Self::P3(pre) => {
+                let command = pre.instantiate_async(&mut *store).await?;
+                store
+                    .run_concurrent(async move |accessor| {
+                        command.wasi_cli_run().call_run(accessor).await
+                    })
+                    .await
+                    .and_then(|ran| ran)
+            }
+        };
+        Ok(match ran {
+            Ok(Ok(())) => Ok(0),
+            Ok(Err(())) => Ok(1),
+            Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                Some(exit) => Ok(exit.0),
+                None => Err(e),
+            },
+        })
     }
 }
 
@@ -677,8 +804,8 @@ impl Commands {
     }
 }
 
-/// The linker children are instantiated with: WASI 0.2, plus the hybrid VFS
-/// with `unstable-vfs`. Built once for the shared engine.
+/// The linker children are instantiated with: WASI 0.2 and 0.3, plus the
+/// hybrid VFS with `unstable-vfs`. Built once for the shared engine.
 fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
     if let Some(linker) = LINKER.get() {
@@ -687,6 +814,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     let wasm_err = |e: wasmtime::Error| ErrorKind::WasmEngine(e.to_string());
     let mut linker = Linker::<ChildState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(wasm_err)?;
+    wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(wasm_err)?;
     linker.allow_shadowing(true);
     // Count children's sockets (see ChildSockets).
     wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::add_to_linker::<_, CountedSockets>(
@@ -700,9 +828,14 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
         },
     )
     .map_err(wasm_err)?;
+    count_p3_sockets(&mut linker).map_err(wasm_err)?;
     #[cfg(feature = "unstable-vfs")]
-    eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
-        .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+    {
+        eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
+            .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+        eryx_vfs::add_hybrid_vfs_to_linker_p3(&mut linker)
+            .map_err(|e| ErrorKind::WasmEngine(e.to_string()))?;
+    }
     linker.allow_shadowing(false);
     Ok(LINKER.get_or_init(|| linker))
 }
@@ -831,7 +964,7 @@ pub struct ChildProcess {
 
 /// What `wait` runs a child with, taken out of its handle.
 struct ChildRun {
-    pre: CommandPre<ChildState>,
+    pre: Pre,
     argv: Vec<String>,
     env: Vec<(String, String)>,
     /// The child's ends of its stdio pipes.
@@ -960,18 +1093,10 @@ impl ChildRun {
 
         let code = async {
             store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
-            let command = self
-                .pre
-                .instantiate_async(&mut store)
-                .await
-                .map_err(|e| format!("instantiate: {e}"))?;
-            match command.wasi_cli_run().call_run(&mut store).await {
-                Ok(Ok(())) => Ok(0),
-                Ok(Err(())) => Ok(1),
-                Err(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                    Some(exit) => Ok(exit.0),
-                    None => Err(format!("{}: {e}", self.argv[0])),
-                },
+            match self.pre.run(&mut store).await {
+                Err(e) => Err(format!("instantiate: {e}")),
+                Ok(Err(e)) => Err(format!("{}: {e}", self.argv[0])),
+                Ok(Ok(code)) => Ok(code),
             }
         }
         .await;
@@ -1263,22 +1388,51 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// How many commands have been linked into a `CommandPre`.
+    /// How many commands have been linked into a pre-instance.
     pub(super) static COMPILED: AtomicUsize = AtomicUsize::new(0);
 
     fn test_cmd_wasm() -> Vec<u8> {
+        test_cmd_wasm_for("wasm32-wasip2")
+    }
+
+    fn test_cmd_wasm_for(target: &str) -> Vec<u8> {
         let manifest =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test-cmd/Cargo.toml");
         let target_dir = std::env::temp_dir().join("eryx-unit-test-cmd");
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "--quiet", "--release", "--locked"])
-            .args(["--target", "wasm32-wasip2", "--manifest-path"])
+            .args(["--target", target, "--manifest-path"])
             .arg(&manifest)
             .env("CARGO_TARGET_DIR", &target_dir)
             .status()
             .unwrap();
         assert!(status.success(), "building tests/fixtures/test-cmd failed");
-        std::fs::read(target_dir.join("wasm32-wasip2/release/eryx-test-cmd.wasm")).unwrap()
+        std::fs::read(target_dir.join(format!("{target}/release/eryx-test-cmd.wasm"))).unwrap()
+    }
+
+    /// The socket counter only goes in where wasmtime-wasi linked WASI 0.3's
+    /// `tcp-socket.create`, so a version it no longer links fails loudly.
+    #[test]
+    fn p3_sockets_are_counted_only_where_wasmtime_wasi_links_them() {
+        let engine = crate::Executor::shared_engine().unwrap();
+        let mut linker = Linker::<ChildState>::new(&engine);
+        assert!(count_p3_sockets(&mut linker).is_err());
+        wasmtime_wasi::p3::add_to_linker(&mut linker).unwrap();
+        count_p3_sockets(&mut linker).unwrap();
+    }
+
+    /// A command is linked for the WASI version whose `wasi:cli/run` it
+    /// exports; a component exporting neither isn't a command.
+    #[test]
+    fn commands_are_linked_for_their_wasi_version() {
+        let p2 = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        assert!(matches!(p2.pre, Pre::P2(_)));
+        let p3 = Command::from_bytes(&test_cmd_wasm_for("wasm32-wasip3")).unwrap();
+        assert!(matches!(p3.pre, Pre::P3(_)));
+
+        let engine = crate::Executor::shared_engine().unwrap();
+        let empty = Component::new(&engine, "(component)").unwrap();
+        assert!(Command::from_component(&engine, &empty).is_err());
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or

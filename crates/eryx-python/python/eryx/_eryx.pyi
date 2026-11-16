@@ -726,9 +726,10 @@ class NetConfig:
 
 @final
 class Command:
-    """A WASI 0.2 command component a shell sandbox can run as an external command.
+    """A WASI 0.2 or 0.3 command component a shell sandbox can run as an external command.
 
-    For example uutils coreutils, ripgrep or curl built for ``wasm32-wasip2``.
+    For example uutils coreutils, ripgrep or curl built for ``wasm32-wasip2``,
+    or ``gh`` built for ``wasm32-wasip3``.
     Pass commands by name: ``Sandbox(language="shell", commands={"rg": rg})``.
     The same `Command` under several names (a multicall binary, which picks the
     tool from ``argv[0]``) is compiled once. A command sees the sandbox's
@@ -741,7 +742,7 @@ class Command:
 
         Raises:
             InitializationError: If it can't be read or compiled, or isn't a
-                WASI 0.2 command.
+                WASI 0.2 or 0.3 command.
         """
         ...
 

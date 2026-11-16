@@ -42,12 +42,17 @@ permissions:
   contents: read
 
 jobs:
+  # PRs into multi-guest skip the dry run (the lean subset, as in ci.yml);
+  # PRs into main and manual runs do it all. Docker needs `python`, so it's
+  # skipped with it.
   python:
     name: Python
+    if: github.base_ref != 'multi-guest'
     uses: ./.github/workflows/python-build.yml
 
   js:
     name: JavaScript
+    if: github.base_ref != 'multi-guest'
     uses: ./.github/workflows/js-build.yml
 
   docker:

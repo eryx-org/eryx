@@ -888,12 +888,13 @@ impl AllocatorSettings {
 
     /// Upper bound on one core instance's `VMContext` metadata.
     ///
-    /// The largest with numpy linked in needs 242,088 bytes
-    /// (measured), so wasmtime's 1 MiB default leaves headroom for bigger
-    /// extensions. Like the component limit below, this is only checked at
-    /// instantiation: the metadata is heap-allocated at its actual size, never
-    /// reserved per slot.
-    const CORE_INSTANCE_SIZE: usize = 1 << 20;
+    /// The largest with numpy linked in needs 242,088 bytes (measured), but
+    /// child commands are bigger: Go's `gh` (wasip3) needs 1,276,940, almost
+    /// all of it per-function metadata, past wasmtime's 1 MiB default. 4 MiB
+    /// is about 3x that. Like the component limit below, this is only
+    /// checked at instantiation: the metadata is heap-allocated at its actual
+    /// size, never reserved per slot.
+    const CORE_INSTANCE_SIZE: usize = 4 << 20;
 
     /// Upper bound on one runtime instance's metadata: its
     /// `VMComponentContext` plus every core instance's `VMContext`.
@@ -3523,6 +3524,11 @@ impl Executor {
         // TCP/TLS functions are sync `func` in WIT but use fiber-based async
         // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
+        // The synchronous `stream`/`future` read and write builtins and async
+        // `subtask.cancel`, which wasip3 Go programs (`gh`) use as child
+        // commands. Only validation gates them: wasmparser refuses those
+        // canonical builtins unless this is on.
+        config.wasm_component_model_more_async_builtins(true);
 
         // Enable epoch-based interruption for execution timeouts.
         // This allows us to interrupt WASM execution even in tight loops
@@ -4382,15 +4388,31 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
 #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
 pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
-    // wasmtime only reports the stored version as text. If the wording ever
-    // changes, callers just get the raw error again.
+    // wasmtime only reports these as text. If the wording ever changes,
+    // callers just get the raw error again.
     const PREFIX: &str = "Module was compiled with incompatible version '";
+    // The same eryx version with other engine settings (a development build
+    // from before or after a wasm feature was switched on) passes the
+    // version check, then fails this one.
+    const FEATURE: &str = "Module was compiled with support for WebAssembly feature `";
     let message = format!("{err:#}");
     if let Some((_, rest)) = message.split_once(PREFIX)
         && let Some((built_by, _)) = rest.split_once('\'')
     {
         return ErrorKind::IncompatiblePrecompiled {
             built_by: built_by.to_owned(),
+            expected: Executor::module_version(),
+        }
+        .into();
+    }
+    if let Some((_, rest)) = message.split_once(FEATURE)
+        && let Some((feature, _)) = rest.split_once('`')
+    {
+        return ErrorKind::IncompatiblePrecompiled {
+            built_by: format!(
+                "{} with other engine settings (it uses WebAssembly feature `{feature}`)",
+                Executor::module_version()
+            ),
             expected: Executor::module_version(),
         }
         .into();
