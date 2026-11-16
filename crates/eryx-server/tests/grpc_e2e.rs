@@ -371,7 +371,8 @@ async fn shell_requests_narrow_their_commands() {
         EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
     })
     .await;
-    let code = "echo a | cat; echo \"cat=$?\"; echo b | sort >/dev/null; echo \"sort=$?\"";
+    let code = "echo a | cat; echo \"cat=$?\"; echo b | sort >/dev/null; echo \"sort=$?\"; \
+                echo c | grep c >/dev/null 2>&1; echo \"grep=$?\"";
     let run = |allowed: Option<Vec<&str>>| {
         execute_request(
             channel.clone(),
@@ -387,12 +388,15 @@ async fn shell_requests_narrow_their_commands() {
     };
 
     let only_cat = run(Some(vec!["cat"])).await.unwrap();
-    assert_eq!(only_cat.stdout, b"a\ncat=0\nsort=127\n", "{only_cat:?}");
+    assert_eq!(
+        only_cat.stdout, b"a\ncat=0\nsort=127\ngrep=127\n",
+        "{only_cat:?}"
+    );
     let none = run(Some(vec![])).await.unwrap();
-    assert_eq!(none.stdout, b"cat=127\nsort=127\n", "{none:?}");
+    assert_eq!(none.stdout, b"cat=127\nsort=127\ngrep=127\n", "{none:?}");
     // The same pooled sandbox, unnarrowed again.
     let all = run(None).await.unwrap();
-    assert_eq!(all.stdout, b"a\ncat=0\nsort=0\n", "{all:?}");
+    assert_eq!(all.stdout, b"a\ncat=0\nsort=0\ngrep=0\n", "{all:?}");
 
     let status = execute_request(
         channel,
