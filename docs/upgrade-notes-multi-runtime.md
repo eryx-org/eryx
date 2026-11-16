@@ -57,6 +57,12 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   without the `embedded` or `preinit` feature. They used to ignore the
   variable silently and compile for the build machine's CPU, so the output
   could fail to load on a machine with fewer CPU features.
+- A shell sandbox has a baseline Unix environment (#832): a read-only `/`
+  holding the mounts, a writable `/tmp` (under `max_vfs_bytes`, with or
+  without `unstable-vfs`), `/dev/null`, `/dev/zero` and `/dev/urandom`, and
+  `HOME`, `PATH`, `TERM`, `LANG`, `LC_ALL`, `USER`, `PWD` and `TMPDIR`. The
+  `shell` feature now pulls in eryx-vfs for it; the VFS API stays behind
+  `unstable-vfs`. See the Sandboxes guide.
 - A shell script that exits non-zero fails with
   `ErrorKind::ScriptFailed { exit_code: Some(status), .. }`. External commands
   aren't available to the shell yet and exit 127.

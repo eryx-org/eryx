@@ -13,8 +13,13 @@ use eryx::Executor;
 
 /// The guest component, built once per test process.
 fn p3_guest() -> Arc<Executor> {
+    Arc::new(Executor::from_binary(p3_wasm()).unwrap())
+}
+
+/// The guest component's bytes, built once per test process.
+fn p3_wasm() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    let wasm = WASM.get_or_init(|| {
+    WASM.get_or_init(|| {
         let manifest =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p3-guest/Cargo.toml");
         let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("p3-guest");
@@ -30,8 +35,7 @@ fn p3_guest() -> Arc<Executor> {
             "building the p3 guest failed; is the wasm32-wasip3 target installed?"
         );
         std::fs::read(target_dir.join("wasm32-wasip3/release/eryx_p3_guest.wasm")).unwrap()
-    });
-    Arc::new(Executor::from_binary(wasm).unwrap())
+    })
 }
 
 #[tokio::test]
@@ -136,4 +140,51 @@ async fn a_p3_guest_is_held_to_the_mounts_limits() {
     )
     .await;
     assert!(!host.path().join("mounted/new.txt").exists());
+}
+
+/// A p3 guest running as the shell gets the shell's filesystem (#832), as
+/// p2 shells do: a private `/tmp`, `/dev` and the read-only root, and no host
+/// paths. Also built without `unstable-vfs`, where the `shell` feature is
+/// what links the hybrid VFS.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn a_p3_shell_guest_gets_the_shells_filesystem() {
+    let shell = Executor::from_binary(p3_wasm())
+        .unwrap()
+        .with_language(eryx::Language::Shell);
+    let out = shell
+        .execute("write /tmp/x from-guest\nread /tmp/x\nread /dev/null")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from-guest\n\n");
+
+    // A host file next to the sandbox isn't reachable, and nothing can be
+    // written above the mounts.
+    let host = tempfile::tempdir().unwrap();
+    let host_file = host.path().join("host.txt");
+    std::fs::write(&host_file, "host").unwrap();
+    let host_read = format!("read {}", host_file.display());
+    for (code, failed) in [
+        (host_read.as_str(), "No such file"),
+        ("read /etc/passwd", "read /etc/passwd: No such file"),
+        (
+            "write /new.txt nope",
+            "write /new.txt: Operation not permitted",
+        ),
+    ] {
+        let err = shell.execute(code).run().await.unwrap_err();
+        assert!(err.to_string().contains(failed), "{code}: {err}");
+    }
+
+    // A guest that isn't the shell keeps its filesystem: no /tmp of its own.
+    #[cfg(not(feature = "unstable-vfs"))]
+    {
+        let err = p3_guest()
+            .execute("write /tmp/x nope")
+            .run()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("write /tmp/x"), "{err}");
+    }
 }

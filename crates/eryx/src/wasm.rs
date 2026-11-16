@@ -1351,10 +1351,11 @@ pub struct ExecutorState {
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
     /// Channel to stream output (stdout/stderr) to the host in real-time.
     pub(crate) output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
-    /// Hybrid virtual filesystem context (when the `unstable-vfs` feature is enabled).
+    /// Hybrid virtual filesystem context (with `unstable-vfs`, or `shell`
+    /// for the shell's own filesystem).
     /// Routes /data/* to VFS storage, other paths to real filesystem.
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
     /// Set when a callback requested suspension (`CallbackError::Suspend`).
     ///
@@ -1393,7 +1394,7 @@ impl std::fmt::Debug for ExecutorState {
             )
             .field("net_tx", &self.net_tx.is_some())
             .field("output_tx", &self.output_tx.is_some());
-        #[cfg(feature = "unstable-vfs")]
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
         debug.finish()
     }
@@ -1416,7 +1417,7 @@ impl ExecutorState {
             memory_tracker: MemoryTracker::new(None),
             net_tx: None,
             output_tx: None,
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             hybrid_vfs_ctx: None,
             suspended: None,
             reuse_empty_callbacks: true,
@@ -1479,7 +1480,7 @@ impl WasiView for ExecutorState {
     }
 }
 
-#[cfg(feature = "unstable-vfs")]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
@@ -1973,6 +1974,8 @@ pub struct ExecuteBuilder<'a> {
     volumes: Vec<crate::session::VolumeMount>,
     #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    max_vfs_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -2020,6 +2023,8 @@ impl<'a> ExecuteBuilder<'a> {
             volumes: Vec::new(),
             #[cfg(feature = "unstable-vfs")]
             max_open_host_files: None,
+            #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+            max_vfs_bytes: None,
         }
     }
 
@@ -2153,6 +2158,16 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Limit the size of the shell's private `/tmp` (default
+    /// [`eryx_vfs::DEFAULT_MAX_BYTES`]; see
+    /// [`ResourceLimits::max_vfs_bytes`](crate::ResourceLimits::max_vfs_bytes)).
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    #[must_use]
+    pub(crate) fn with_max_vfs_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.max_vfs_bytes = bytes;
+        self
+    }
+
     /// Limit the host memory child processes may hold (default 64 MiB; see
     /// [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes)).
     #[must_use]
@@ -2186,8 +2201,32 @@ impl<'a> ExecuteBuilder<'a> {
                 self.volumes,
                 #[cfg(feature = "unstable-vfs")]
                 self.max_open_host_files,
+                #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+                self.max_vfs_bytes,
             )
             .await
+    }
+}
+
+/// The shell guest's baseline environment (#832): where tools expect to find
+/// a home, temp dir, locale and terminal. `/tmp` is the only directory it can
+/// write to by default, so it is also `HOME`; `/eryx/bin` is where the guest
+/// lists its host commands.
+pub(crate) const SHELL_ENV: [(&str, &str); 8] = [
+    ("HOME", "/tmp"),
+    ("PATH", "/eryx/bin"),
+    ("TERM", "dumb"),
+    ("LANG", "C.UTF-8"),
+    ("LC_ALL", "C.UTF-8"),
+    ("USER", "eryx"),
+    ("PWD", "/"),
+    ("TMPDIR", "/tmp"),
+];
+
+/// Set [`SHELL_ENV`] on a shell guest's WASI context.
+pub(crate) fn add_shell_env(builder: &mut WasiCtxBuilder) {
+    for (key, value) in SHELL_ENV {
+        builder.env(key, value);
     }
 }
 
@@ -3478,7 +3517,8 @@ impl Executor {
         // - /data/* paths to VFS storage (sandboxed in-memory/KV store)
         // - Other paths (like /python-stdlib/*) to real filesystem via WASI
         // This allows Python to access its stdlib while providing sandboxed storage.
-        #[cfg(feature = "unstable-vfs")]
+        // The shell always runs on it, for its private /tmp, /dev and root.
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         {
             // Allow shadowing to override WASI filesystem bindings
             linker.allow_shadowing(true);
@@ -3572,6 +3612,7 @@ impl Executor {
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))] max_vfs_bytes: Option<u64>,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
 
@@ -3636,7 +3677,20 @@ impl Executor {
                 })?;
         }
 
+        if self.language == Language::Shell {
+            add_shell_env(&mut wasi_builder);
+        }
         let wasi = wasi_builder.build();
+
+        // Without `unstable-vfs`, the hybrid VFS is only linked for the
+        // shell's filesystem: a private /tmp under the quota, /dev and the
+        // root, and for Python the same mounts as above.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        let hybrid_vfs_ctx = Some(crate::session::executor::build_private_vfs_context(
+            self,
+            crate::session::executor::private_vfs_storage(max_vfs_bytes),
+            None,
+        )?);
 
         // Build hybrid VFS context when the `unstable-vfs` feature is enabled.
         // The hybrid VFS routes /data/* to VFS storage while passing through
@@ -3666,7 +3720,7 @@ impl Executor {
             memory_tracker: MemoryTracker::new(memory_limit),
             net_tx,
             output_tx,
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             hybrid_vfs_ctx,
             suspended: None,
             reuse_empty_callbacks: true,

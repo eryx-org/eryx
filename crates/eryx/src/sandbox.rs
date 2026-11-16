@@ -467,6 +467,12 @@ impl Sandbox {
             execute_builder =
                 execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
         }
+        // Without `unstable-vfs`, the quota still bounds the shell's /tmp.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        {
+            execute_builder =
+                execute_builder.with_max_vfs_bytes(self.resource_limits.max_vfs_bytes);
+        }
         execute_builder =
             execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
 
@@ -3451,8 +3457,8 @@ pub struct ResourceLimits {
     /// allocate arbitrarily much via `f.seek(2**40); f.write(b'X')`. Scripts see
     /// the limit as `ENOSPC`.
     ///
-    /// Only applies with the `unstable-vfs` feature, and only to the storage eryx creates
-    /// itself; storage you construct and pass in carries its own limit (see
+    /// Applies with the `unstable-vfs` feature, and with `shell` to the shell's
+    /// `/tmp`, and only to the storage eryx creates itself; storage you construct and pass in carries its own limit (see
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
     /// default of 64 MiB.
     pub max_vfs_bytes: Option<u64>,
