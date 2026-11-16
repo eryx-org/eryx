@@ -11,7 +11,8 @@ version = "0.9.152"
 
 # Third-party notices for the shipped artifacts (`mise run notices`, #837).
 [tools."cargo:cargo-about"]
-version = "0.7.1"
+# 0.9 knows wasm32-wasip3; 0.7.1 left out every crate only that target uses.
+version = "0.9.3"
 
 [tools."cargo:wasm-tools"]
 version = "1.263.0"

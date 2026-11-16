@@ -32,6 +32,7 @@ It reads the lock files and vendored files only; nothing is built.
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -49,6 +50,9 @@ TEMPLATE = ROOT / "third_party" / "about.hbs"
 HOST_TARGETS = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    # The musllinux pyeryx wheels.
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
@@ -78,7 +82,20 @@ ARTIFACTS = {
 }
 
 # The toolchains the Rust artifacts are built with.
-STABLE = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+def stable_toolchain():
+    """The pinned stable toolchain. rust-toolchain.toml pins it for cargo,
+    and mise.toml's `[tools] rust` (RUSTUP_TOOLCHAIN in `mise run`) for the
+    mise tasks; they must agree, or the notices could describe a toolchain
+    a build doesn't use."""
+    channel = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    tool = tomllib.loads((ROOT / "mise.toml").read_text())["tools"]["rust"]
+    mise_version = tool["version"] if isinstance(tool, dict) else tool
+    if channel != mise_version:
+        sys.exit(f"rust-toolchain.toml pins {channel} but mise.toml's [tools] rust is {mise_version}; make them agree")
+    return channel
+
+
+STABLE = stable_toolchain()
 GUEST = tomllib.loads((ROOT / "mise.toml").read_text())["vars"]["guest_rust_toolchain"]
 
 # Artifact -> the toolchain and targets of the standard library it links.
@@ -109,18 +126,104 @@ def components():
 
 
 def cargo_about(args, output, cwd=ROOT, env=None):
-    """Render the Rust crates' notices; false if any licence can't be accepted."""
-    return subprocess.run(
-        [
-            "cargo", "about", "generate", "--offline", "--fail",
-            "-c", str(ROOT / "about.toml"),
-            *args,
-            "-o", str(output),
-            str(TEMPLATE),
-        ],
-        cwd=cwd,
-        env=env,
-    ).returncode == 0
+    """Render the Rust crates' notices; false if any licence can't be accepted,
+    or cargo-about's crates differ from cargo's own for those targets."""
+    def run(extra, out):
+        return subprocess.run(
+            ["cargo", "about", "generate", "--offline", "--fail", "-c", str(ROOT / "about.toml"), *args, *extra, "-o", str(out)],
+            cwd=cwd,
+            env=env,
+        ).returncode == 0
+
+    if not run([str(TEMPLATE)], output):
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        listed = Path(tmp) / "crates.json"
+        if not run(["--format", "json"], listed):
+            return False
+        about = {f"{c['package']['name']} {c['package']['version']}" for c in json.loads(listed.read_text())["crates"]}
+    cargo = tree_crates(args, cwd, env)
+    # cargo-about resolves targets and features itself, and can disagree with
+    # cargo: 0.7.1 dropped every crate only wasm32-wasip3 uses, and 0.9.3
+    # still misses some reached through weak (`dep?/feature`) features.
+    # A crate it lists that cargo doesn't build only over-states the notices.
+    for name in sorted(about - cargo):
+        print(f"warning: cargo-about listed {name}, which cargo doesn't build for {args}", file=sys.stderr)
+    missed = sorted(cargo - about)
+    if missed:
+        section = missed_section(missed, args, cwd, env)
+        if section is None:
+            return False
+        with output.open("a") as f:
+            f.write(section)
+    return True
+
+
+LICENCE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|UNLICENSE|NOTICE|COPYRIGHT)", re.I)
+
+
+def accepted_licence(expression):
+    """Whether every licence in an SPDX expression is one about.toml accepts."""
+    accepted = set(tomllib.loads((ROOT / "about.toml").read_text())["accepted"])
+    names = re.sub(r"[()]", " ", expression).split()
+    ids = [n for i, n in enumerate(names) if n not in ("AND", "OR", "WITH") and (i == 0 or names[i - 1] != "WITH")]
+    exceptions = [names[i + 1] for i, n in enumerate(names) if n == "WITH"]
+    return all(i in accepted for i in ids) and all(
+        any(a.endswith(f" WITH {e}") for a in accepted) for e in exceptions
+    )
+
+
+def missed_section(missed, args, cwd, env):
+    """Notices for crates cargo builds but cargo-about left out, from each
+    crate's declared licence and its licence files; None (after reporting
+    why) if one can't be accounted for."""
+    manifest = args[args.index("-m") + 1] if "-m" in args else str(ROOT / "Cargo.toml")
+    metadata = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--offline", "--manifest-path", manifest],
+        cwd=cwd, env=env, capture_output=True, text=True, check=True,
+    ).stdout)
+    packages = {f"{p['name']} {p['version']}": p for p in metadata["packages"]}
+    out = ["", "# Crates cargo-about left out", "",
+           "cargo builds these for this artifact, but cargo-about didn't list them.", ""]
+    ok = True
+    for name in missed:
+        package = packages[name]
+        licence = package.get("license")
+        files = sorted(f for f in Path(package["manifest_path"]).parent.iterdir() if LICENCE_FILE.match(f.name) and f.is_file())
+        if not licence or not accepted_licence(licence) or not files:
+            print(f"error: cargo-about left out {name} (licence {licence!r}, {len(files)} licence files), which cargo builds for {args}", file=sys.stderr)
+            ok = False
+            continue
+        out += [f"## {name}", "", f"Licence: {licence}  ", f"Source: {package.get('repository') or 'crates.io'}", ""]
+        for f in files:
+            out += ["```", f.read_text(errors="replace").rstrip(), "```", ""]
+    return "\n".join(out) if ok else None
+
+
+def tree_crates(args, cwd, env):
+    """The crates cargo itself builds for cargo-about's arguments: `cargo
+    tree -e normal` of the root package (or with --workspace every member)
+    on each target, with the same features. (`cargo metadata` would do too
+    much: its resolve unifies features across the workspace and dev
+    dependencies.)"""
+    manifest = args[args.index("-m") + 1] if "-m" in args else str(ROOT / "Cargo.toml")
+    targets = [args[i + 1] for i, a in enumerate(args) if a == "--target"]
+    flags = ["--workspace"] if "--workspace" in args else []
+    for i, a in enumerate(args):
+        if a in ("--no-default-features", "--all-features"):
+            flags.append(a)
+        elif a == "--features":
+            flags += [a, args[i + 1]]
+    crates = set()
+    for target in targets:
+        lines = subprocess.run(
+            ["cargo", "tree", "--offline", "-e", "normal", "--target", target, "--prefix", "none",
+             "--format", "{p}", *flags, "--manifest-path", manifest],
+            cwd=cwd, env=env, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        # "name vX.Y.Z (path)" or "name vX.Y.Z", "(*)" when already shown.
+        crates |= {f"{line.split()[0]} {line.split()[1].removeprefix('v')}" for line in lines if line.strip()}
+    return crates
 
 
 def std_library(toolchain):
@@ -138,11 +241,13 @@ def std_overlay(library, tmp):
     """A copy of `library` (symlinks to its files) whose own crates all
     declare a licence.
 
-    The Rust project's crates in library/ are all under its MIT OR Apache-2.0
-    (its COPYRIGHT), but a few internal ones (sysroot, test, windows-link and
-    std's windows-sys) don't say so, and cargo-about can't clarify a crate
-    without a licence file. Cargo.toml files and the lock file are real
-    copies, so nothing writes into the toolchain.
+    The Rust project's crates in library/ are under its MIT OR Apache-2.0
+    (its COPYRIGHT and REUSE.toml), but a few internal ones (sysroot, test,
+    windows-link) don't say so, and cargo-about can't clarify a crate without
+    a licence file. Some files in them are under other licences, which the
+    "Rust standard library" entries in manual.toml carry: core's Unicode
+    tables (Unicode-3.0, REUSE.toml). Cargo.toml files and the lock file are
+    real copies, so nothing writes into the toolchain.
     """
     overlay = Path(tmp) / "library"
     shutil.copytree(library, overlay, copy_function=os.symlink, ignore=shutil.ignore_patterns("vendor", "Cargo.lock"))
@@ -165,11 +270,20 @@ def std_section(artifact, path):
     if artifact not in STD:
         return True
     toolchain, targets = STD[artifact]
-    # std's workspace uses unstable cargo features, which RUSTC_BOOTSTRAP lets
-    # its toolchain's cargo read.
-    env = {**os.environ, "RUSTUP_TOOLCHAIN": toolchain, "RUSTC_BOOTSTRAP": "1"}
     with tempfile.TemporaryDirectory() as tmp:
-        std = std_overlay(std_library(toolchain), tmp) / "std"
+        library = std_overlay(std_library(toolchain), tmp)
+        std = library / "std"
+        # std's workspace uses unstable cargo features, which RUSTC_BOOTSTRAP
+        # lets its toolchain's cargo read, and crates.io is replaced by the
+        # sources rust-src vendors (as its own .cargo/config.toml does). This
+        # runs from the repo, so its tools are the pinned ones.
+        env = {
+            **os.environ,
+            "RUSTUP_TOOLCHAIN": toolchain,
+            "RUSTC_BOOTSTRAP": "1",
+            "CARGO_SOURCE_CRATES_IO_REPLACE_WITH": "rust-src-vendor",
+            "CARGO_SOURCE_RUST_SRC_VENDOR_DIRECTORY": str(library / "vendor"),
+        }
         rendered = Path(tmp) / "std.md"
         # The features the toolchain's own std builds use (and more than a
         # -Z build-std one may need), so nothing it can link is left out.
@@ -177,7 +291,7 @@ def std_section(artifact, path):
             "-m", str(std / "Cargo.toml"), "--features", "backtrace panic-unwind",
             *(a for t in targets for a in ("--target", t)),
         ]
-        if not cargo_about(args, rendered, cwd=std, env=env):
+        if not cargo_about(args, rendered, env=env):
             return False
         version = subprocess.run(
             ["rustc", f"+{toolchain}", "--version"], capture_output=True, text=True, check=True
@@ -291,6 +405,16 @@ def check_manual():
                 f"{c['name']}: the pinned toolchains are {STABLE} (rust-toolchain.toml) and {GUEST} "
                 f"(mise.toml), not {c['rust_toolchain']}; update the entry and its licence files"
             )
+        if "sysroot_strings" in c:
+            sysroot = Path(subprocess.run(
+                ["rustc", f"+{c['rust_toolchain']}", "--print", "sysroot"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip())
+            for rel in c["sysroot_strings"]["paths"]:
+                data = (sysroot / rel).read_bytes() if (sysroot / rel).is_file() else b""
+                for string in c["sysroot_strings"]["strings"]:
+                    if string.encode() not in data:
+                        errors.append(f"{c['name']}: {c['rust_toolchain']}'s {rel} doesn't contain {string!r}; update the entry")
         if "wasi_sdk" in c:
             pinned = tomllib.loads(MISE.read_text())["vars"]["wasi_sdk_version"]
             if c["wasi_sdk"] != pinned:
