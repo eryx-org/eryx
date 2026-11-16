@@ -820,6 +820,9 @@ jobs:
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
+    permissions:
+      contents: read # to check out the repository
+      actions: read # to find and download clis.yml's gh-component artifact below
     steps:
       # The full run and the shell-only run below each build a feature set of
       # the workspace, which a cold kache can't fit in the runner's free disk.
@@ -929,6 +932,53 @@ jobs:
         # - liberyx_runtime.so and python-stdlib are provided for eryx-guest-python tests
         # Use --profile ci for longer timeouts on slow WASM component tests
         run: cargo nextest run --workspace --all-features --profile ci
+
+      # The opt-in gh child test (#927): a Go-built gh (WASI 0.3) reaching
+      # api.github.com through the child proxy. clis.yml builds gh only when
+      # its inputs change (and weekly), and the component doesn't depend on
+      # eryx, so take the newest unexpired gh-component artifact rather than
+      # building Go here. Only one this repository's own push or scheduled
+      # run made is trusted: a fork PR's run can report any head_branch
+      # (including "main"), so the branch name proves nothing, while
+      # head_repository_id and the run's event can't be set by a fork.
+      # Push runs only; none found is a notice, not a failure.
+      - name: Find the gh component
+        id: gh-component
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          run_id=""
+          for candidate in $(gh api "repos/$REPO/actions/artifacts?name=gh-component&per_page=30" \
+              --jq ".artifacts[]
+                    | select(.expired | not)
+                    | select(.workflow_run.head_repository_id == $REPO_ID)
+                    | .workflow_run.id"); do
+            event=$(gh api "repos/$REPO/actions/runs/$candidate" --jq '.event')
+            if [ "$event" = push ] || [ "$event" = schedule ]; then
+              run_id=$candidate
+              break
+            fi
+          done
+          if [ -z "$run_id" ]; then
+            echo "::notice::No gh-component artifact from a push or scheduled clis.yml run; skipping the gh child test"
+            exit 0
+          fi
+          gh run download "$run_id" --repo "$REPO" -n gh-component -D scratch/gh-component
+          echo "Using gh-component from run $run_id"
+          echo "path=$PWD/scratch/gh-component/component.wasm" >> "$GITHUB_OUTPUT"
+
+      # The component, not the artifact's .cwasm, which another eryx build
+      # may have precompiled. Same features as the run above: no rebuild.
+      - name: Run the gh child test
+        if: steps.gh-component.outputs.path != ''
+        env:
+          ERYX_TEST_GH_WASM: ${{ steps.gh-component.outputs.path }}
+        run: |
+          cargo nextest run -p eryx --all-features --profile ci --test child_network \
+            --run-ignored only -E 'test(=p3_gh_reaches_github_through_the_proxy)'
 
       # The shell (and JavaScript) without `unstable-vfs`, which --all-features
       # always turns on: bugs gated on its absence (#910's p3 gate, #914's
