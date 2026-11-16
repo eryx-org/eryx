@@ -716,8 +716,56 @@ wc -l < /data/fruit.txt
     assert!(err.to_string().starts_with("exit status 1"), "{err}");
 }
 
+/// `ls -R` descends nested directories on the session's VFS, the shell's
+/// `/tmp` and a host volume, and `cp -r` copies them whole: uutils tells
+/// directories apart by device and inode on WASI, not by type and size, which
+/// made every empty directory look already listed (#972).
+#[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
+#[tokio::test]
+async fn coreutils_walk_nested_directories() {
+    use eryx::session::{VfsConfig, VolumeMount};
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
+
+    let host = tempfile::tempdir().unwrap();
+    let executor = shell().build().unwrap().executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs_config(
+        executor,
+        &[],
+        storage,
+        VfsConfig::default().with_volumes([VolumeMount::new(host.path(), "/vol")]),
+    )
+    .await
+    .unwrap();
+
+    for root in ["/data", "/tmp", "/vol"] {
+        let out = session
+            .execute(format!(
+                "mkdir -p {root}/t/a/b {root}/t/c; touch {root}/t/x {root}/t/a/y {root}/t/a/b/z\n\
+                 cp -r {root}/t {root}/u\n\
+                 ls -R {root}/t; ls -R {root}/u"
+            ))
+            .run()
+            .await
+            .unwrap();
+        let listing =
+            |dir: &str| format!("{dir}:\na\nc\nx\n\n{dir}/a:\nb\ny\n\n{dir}/a/b:\nz\n\n{dir}/c:\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "{}{}",
+                listing(&format!("{root}/t")),
+                listing(&format!("{root}/u"))
+            ),
+            "{root}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// Children see the shell's root and `/dev` too (with `unstable-vfs`; without
-/// it they wait on #812), so tools that walk up to `/` work.
+/// it they have no filesystem yet, #968), so tools that walk up to `/` work.
 #[cfg(all(feature = "coreutils", feature = "unstable-vfs"))]
 #[tokio::test]
 async fn coreutils_see_the_root_and_dev() {
