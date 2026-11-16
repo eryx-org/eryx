@@ -17,11 +17,28 @@ use crate::sandbox::RuntimeSource;
 /// `Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`.
 /// The same `Command` under several names (a multicall binary, which picks
 /// the tool from `argv[0]`) is compiled once. A child sees the sandbox's
-/// volumes and nothing else of the host, and has no network.
+/// volumes and nothing else of the host, and the network only through the
+/// sandbox's `child_network=` proxy.
+///
+/// `allow_tunnels=True` lets the command open blind `CONNECT` tunnels through
+/// that proxy, for protocols it can't inspect (e.g. git over SSH): requests in
+/// a tunnel get no secret substitution (placeholders go out as they are) and
+/// no HTTP rules, and hosts with rules are refused one.
 #[pyclass(module = "eryx", frozen)]
 #[derive(Debug)]
 pub struct Command {
     pub(crate) inner: eryx::Command,
+}
+
+impl Command {
+    fn new(inner: eryx::Command, allow_tunnels: bool) -> Self {
+        let inner = if allow_tunnels {
+            inner.allow_tunnels()
+        } else {
+            inner
+        };
+        Self { inner }
+    }
 }
 
 #[pymethods]
@@ -32,9 +49,10 @@ impl Command {
     ///     InitializationError: If the file can't be read or compiled, or
     ///         isn't a WASI 0.2 command.
     #[staticmethod]
-    fn from_file(path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, allow_tunnels=false))]
+    fn from_file(path: PathBuf, allow_tunnels: bool) -> PyResult<Self> {
         eryx::Command::from_file(path)
-            .map(|inner| Self { inner })
+            .map(|inner| Self::new(inner, allow_tunnels))
             .map_err(eryx_error_to_py)
     }
 
@@ -44,9 +62,10 @@ impl Command {
     ///     InitializationError: If the bytes don't compile, or aren't a WASI
     ///         0.2 command.
     #[staticmethod]
-    fn from_bytes(wasm: Vec<u8>) -> PyResult<Self> {
+    #[pyo3(signature = (wasm, *, allow_tunnels=false))]
+    fn from_bytes(wasm: Vec<u8>, allow_tunnels: bool) -> PyResult<Self> {
         eryx::Command::from_bytes(&wasm)
-            .map(|inner| Self { inner })
+            .map(|inner| Self::new(inner, allow_tunnels))
             .map_err(eryx_error_to_py)
     }
 
@@ -60,11 +79,12 @@ impl Command {
     ///     InitializationError: If another eryx version precompiled it, or it
     ///         isn't a WASI 0.2 command.
     #[staticmethod]
-    fn from_precompiled_file(path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, allow_tunnels=false))]
+    fn from_precompiled_file(path: PathBuf, allow_tunnels: bool) -> PyResult<Self> {
         // SAFETY: documented above; the caller vouches for the file.
         #[allow(unsafe_code)]
         unsafe { eryx::Command::from_precompiled_file(path) }
-            .map(|inner| Self { inner })
+            .map(|inner| Self::new(inner, allow_tunnels))
             .map_err(eryx_error_to_py)
     }
 

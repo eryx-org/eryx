@@ -251,6 +251,38 @@ message NetworkConfig {
   // refused, and only HTTP/1.1 may be sent to a host with rules. See the
   // eryx crate's `NetConfig::allow_http` for the matching rules.
   repeated HttpRule http_rules = 11;
+  // Network for the shell's child processes (external commands). Absent =
+  // none: children stay offline. See ChildNetwork.
+  ChildNetwork child_network = 12;
+}
+
+// How a shell's child processes may reach the network. They connect through a
+// proxy on the host, never directly, and never get more than this
+// NetworkConfig allows.
+//
+// Children see secrets only as their placeholders (the shell exports each
+// secret's placeholder as an environment variable). The proxy substitutes a
+// real value only in requests to that secret's allowed_hosts, after a TLS
+// upgrade (or on plain TCP too with allow_plaintext_secrets), as for the
+// guest's own connections. Commands the server allows to tunnel (see its
+// --shell-command-tunnels flag) can instead open blind CONNECT tunnels to
+// allowed hosts: no secret substitution and no HTTP rules there, and hosts
+// with http_rules never get one.
+message ChildNetwork {
+  enum Mode {
+    // No network for children.
+    MODE_NONE = 0;
+    // Exactly this NetworkConfig's policy.
+    MODE_INHERIT = 1;
+    // Only what both this NetworkConfig and `narrow` allow. The connection
+    // limit and timeouts are the smaller of the two; secrets are this
+    // request's.
+    MODE_NARROW = 2;
+  }
+  Mode mode = 1;
+  // Required for MODE_NARROW, refused otherwise. Its own child_network and
+  // allow_plaintext_secrets must be unset.
+  NetworkConfig narrow = 2;
 }
 
 // HTTP requests allowed to the hosts matching a pattern.

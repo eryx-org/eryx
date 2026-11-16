@@ -732,11 +732,17 @@ class Command:
     Pass commands by name: ``Sandbox(language="shell", commands={"rg": rg})``.
     The same `Command` under several names (a multicall binary, which picks the
     tool from ``argv[0]``) is compiled once. A command sees the sandbox's
-    volumes and nothing else of the host, and has no network.
+    volumes and nothing else of the host, and the network only through the
+    sandbox's ``child_network=`` proxy.
+
+    ``allow_tunnels=True`` lets the command open blind ``CONNECT`` tunnels
+    through that proxy, for protocols it can't inspect (e.g. git over SSH):
+    requests in a tunnel get no secret substitution (placeholders go out as
+    they are) and no HTTP rules, and hosts with rules are refused one.
     """
 
     @staticmethod
-    def from_file(path: PathLike) -> Command:
+    def from_file(path: PathLike, *, allow_tunnels: bool = False) -> Command:
         """Compile a command component from a ``.wasm`` file.
 
         Raises:
@@ -746,12 +752,14 @@ class Command:
         ...
 
     @staticmethod
-    def from_bytes(wasm: bytes) -> Command:
+    def from_bytes(wasm: bytes, *, allow_tunnels: bool = False) -> Command:
         """Compile a command component from its ``.wasm`` bytes."""
         ...
 
     @staticmethod
-    def from_precompiled_file(path: PathLike) -> Command:
+    def from_precompiled_file(
+        path: PathLike, *, allow_tunnels: bool = False
+    ) -> Command:
         """Load a command precompiled by this pyeryx version's eryx.
 
         Only load files you trust: a precompiled file is native code that can't
@@ -820,6 +828,7 @@ class Sandbox:
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
         commands: Optional[dict[str, Command]] = None,
+        child_network: Union[None, Literal["inherit"], NetConfig] = None,
     ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -869,10 +878,17 @@ class Sandbox:
                 sort, ...) of the same name, which the shell gets by default from
                 the ``pyeryx-runtime-shell`` package. A shell script's nonzero exit
                 status raises `PythonExceptionError` with ``exit_code`` set.
+            child_network: For the shell only, with ``network``: how its
+                commands reach the network, through a proxy on the host. None
+                (the default) keeps them offline; ``"inherit"`` gives them
+                ``network``'s policy; a `NetConfig` only what both it and
+                ``network`` allow. Children see secrets only as their
+                placeholders, which the proxy replaces for the secrets' hosts.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
-            ValueError: If ``commands`` is given for another language.
+            ValueError: If ``commands`` or ``child_network`` is given for
+                another language, or ``child_network`` without ``network``.
 
         Example:
             # Default sandbox (stdlib only, no network)
@@ -1480,6 +1496,7 @@ class Session:
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
         commands: Optional[dict[str, Command]] = None,
+        child_network: Union[None, Literal["inherit"], NetConfig] = None,
     ) -> Session:
         """Create a new session with the embedded Python runtime.
 
@@ -1503,6 +1520,11 @@ class Session:
             mcp: Optional MCPManager with connected MCP servers.
             on_stdout: Optional callback for streaming stdout output in real-time.
             on_stderr: Optional callback for streaming stderr output in real-time.
+            child_network: For the shell only, with ``network``: how its
+                commands reach the network, through a proxy on the host. None
+                (the default) keeps them offline; ``"inherit"`` gives them
+                ``network``'s policy; a `NetConfig` only what both it and
+                ``network`` allow.
 
         Raises:
             InitializationError: If the session fails to initialize.
