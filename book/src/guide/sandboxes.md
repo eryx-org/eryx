@@ -178,6 +178,17 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**).
 
+- **Per execution:** an execution can be narrowed to some of the registered
+  commands: `with_allowed_commands(["cat", "sort"])` on a session's (or
+  executor's) execute builder, `allowed_commands=[...]` on pyeryx
+  `Session.execute`, or `ExecuteRequest.allowed_commands` on eryx-server.
+  The guest sees only those, and the others exit 127 as if not installed. An
+  empty list allows none, unset allows all, and unknown names are ignored. It
+  lasts one execution: a session's next call without it gets every command
+  back. It narrows host-registered commands only: shell builtins (including
+  the in-guest `grep`) and callbacks aren't commands and keep working. In a
+  session, a command an earlier call allowed still shows in the shell's
+  `hash` table, but running it is refused.
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.
 - **Running:** each command runs as a child process with `argv[0]` set to the

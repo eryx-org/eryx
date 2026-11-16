@@ -191,3 +191,18 @@ def test_child_network_is_checked():
         eryx.Sandbox(language="shell", network=network, child_network="all")
     with pytest.raises(TypeError):
         eryx.Session(language="shell", network=network, child_network=1)
+
+
+def test_allowed_commands_narrow_one_session_call(monkeypatch):
+    companion(monkeypatch)
+    session = eryx.Session(language="shell")
+    code = 'echo a | cat; echo "cat=$?"; echo b | sort >/dev/null; echo "sort=$?"'
+    narrowed = session.execute(code, allowed_commands=["cat", "missing"])
+    assert narrowed.stdout == b"a\ncat=0\nsort=127\n"
+    assert session.execute(code, allowed_commands=[]).stdout == b"cat=127\nsort=127\n"
+    assert session.execute(code).stdout == b"a\ncat=0\nsort=0\n"
+
+
+def test_allowed_commands_are_only_for_the_shell():
+    with pytest.raises(ValueError, match="only for"):
+        eryx.Session().execute("pass", allowed_commands=[])

@@ -2174,6 +2174,7 @@ pub struct ExecuteBuilder<'a> {
     fuel_limit: Option<u64>,
     max_child_host_bytes: Option<u64>,
     child_net: Option<crate::process::ChildNet>,
+    allowed_commands: Option<Vec<String>>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
@@ -2224,6 +2225,7 @@ impl<'a> ExecuteBuilder<'a> {
             fuel_limit: None,
             max_child_host_bytes: None,
             child_net: None,
+            allowed_commands: None,
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
@@ -2390,6 +2392,22 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Let this execution spawn only the named host-registered commands
+    /// (shell only): the guest lists just those, and any other spawn fails
+    /// with `command-not-found`. An empty list allows none; names that aren't
+    /// registered are ignored. Without this, every registered command is
+    /// allowed. Shell builtins (including `grep`) and callbacks aren't
+    /// commands, so this doesn't affect them.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2410,6 +2428,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.fuel_limit,
                 self.max_child_host_bytes,
                 self.child_net,
+                self.allowed_commands.as_deref(),
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
@@ -3896,6 +3915,7 @@ impl Executor {
         fuel_limit: Option<u64>,
         max_child_host_bytes: Option<u64>,
         child_net: Option<crate::process::ChildNet>,
+        allowed_commands: Option<&[String]>,
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
@@ -4021,7 +4041,7 @@ impl Executor {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
-            commands: self.commands.clone(),
+            commands: self.commands.only(allowed_commands),
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
             child_net,
             trace_clock: TraceClock::default(),
