@@ -8,7 +8,8 @@
 //! `coreutils-v<version>-<arch>-<os>.cwasm`, then `../eryx-runtime/`). With
 //! `packages`, it embeds the JavaScript bundler (`eryx-bundler.cwasm`) the
 //! same way: `ERYX_BUNDLER_CWASM`, the cache (`eryx-precompile setup
-//! --bundler`), then the workspace.
+//! --bundler`), then the workspace, or, if none has it, an empty placeholder
+//! (with a warning): eryx then loads the bundler from that cache at run time.
 //!
 //! Each `runtime-<language>.cwasm` file is located by checking (in order):
 //! 1. An env var with an explicit path, embedded as is: `ERYX_RUNTIME_CWASM`
@@ -175,7 +176,11 @@ mod embedded_runtime {
 
             let arch = std::env::var("CARGO_CFG_TARGET_ARCH").ok()?;
             let os = std::env::var("CARGO_CFG_TARGET_OS").ok()?;
-            let path = cache_dir.join(format!("{}-v{version}-{arch}-{os}.cwasm", self.stem));
+            let path = cache_dir.join(cached_runtime::file_name(
+                self.stem,
+                &version,
+                &format!("{arch}-{os}"),
+            ));
             if std::fs::symlink_metadata(&path).is_err() {
                 return None;
             }
@@ -258,6 +263,20 @@ mod embedded_runtime {
                 // Precompile bootstrap: the precompile example builds without
                 // any runtime, so it embeds an empty placeholder.
                 None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
+                    self.write(out_dir, b"");
+                }
+                // The bundler can come from `setup --bundler`'s cache at run
+                // time instead (eryx::cache::setup_bundler), so a build
+                // without it (e.g. eryx-precompile's releases) still works.
+                None if !self.with_embedded => {
+                    println!(
+                        "cargo::warning=Not embedding the {} ({}): it isn't built. \
+                         Environment builds will load it from `eryx-precompile setup {}`'s \
+                         cache instead.",
+                        self.language,
+                        self.file_name(),
+                        self.setup_args
+                    );
                     self.write(out_dir, b"");
                 }
                 None => {
