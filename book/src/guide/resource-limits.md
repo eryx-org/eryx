@@ -191,10 +191,10 @@ print(result.stdout_text)
 ## Virtual Filesystem Size
 
 `max_vfs_bytes` caps the total bytes the [virtual filesystem](./vfs.md) holds:
-all file contents, plus each file's and directory's path length and a 64-byte
-charge per entry, so empty files and long names aren't free. There are also at
-most 65,536 entries, and names over 255 bytes or paths over 4096 bytes fail
-with `ENAMETOOLONG`. Unlike `max_memory_bytes`, which
+all file contents, plus each file's and directory's path length (twice for a
+directory) and a 64-byte charge per entry, so empty files and long names aren't free. Names over 255
+bytes or paths over 4096 bytes fail with `ENAMETOOLONG`. Unlike
+`max_memory_bytes`, which
 bounds the WebAssembly instance's linear memory, VFS contents live in **host**
 memory - and the script picks its own write offsets, so `f.seek(2**40)` followed
 by a one-byte write would otherwise ask the host to materialize a terabyte of
@@ -235,8 +235,37 @@ session = eryx.Session(vfs=storage)
 ```
 <!-- langtabs-end -->
 
-Because the cap protects host memory rather than the guest, it is not disabled by
-`ResourceLimits::unlimited()`; raise it explicitly if you need more.
+A second limit, `max_vfs_entries`, caps the number of files and directories,
+65,536 by default. Each entry already counts against `max_vfs_bytes`, so this
+mostly bounds operations that visit every entry: listing, removing or renaming
+a directory gets slower as the tree grows. Creating an entry past the limit
+also fails with `ENOSPC`. In Rust:
+
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default()
+    .with_max_vfs_bytes(256 * 1024 * 1024)
+    .with_max_vfs_entries(200_000);
+```
+
+For storage you construct yourself, use
+`InMemoryStorage::with_max_bytes(..).with_max_entries(..)`.
+
+Because both caps protect host memory rather than the guest, neither is
+disabled by `ResourceLimits::unlimited()`; raise them explicitly if you need
+more.
+
+### Large trees belong on a volume
+
+In-memory storage suits scratch files and small working sets. Host memory
+grows faster than the content: about 60 MiB of files added about 97 MiB to the
+host's resident memory in one measurement. For a source checkout, a package
+directory or anything with tens of thousands of files, mount a
+[host-directory volume](./vfs.md#host-volume-mounts) instead. Neither cap
+applies to a volume, which keeps its contents on the host disk; give it a
+`max_file_size` to bound how large a file in it may grow.
 
 ## Open Host Files
 

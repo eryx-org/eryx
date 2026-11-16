@@ -168,7 +168,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         let allowed = if descriptor.is_dir {
             descriptor.dir_perms.contains(DirPerms::MUTATE)
         } else {
-            descriptor.file_perms.contains(FilePerms::WRITE)
+            descriptor.mount_file_perms.contains(FilePerms::WRITE)
         };
         if !allowed {
             return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
@@ -376,9 +376,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             };
 
             if !created {
-                // Check it's not a directory
                 let meta = self.ctx.storage.stat(&full_path).await?;
                 if meta.is_dir {
+                    // As on POSIX, a directory opens without O_DIRECTORY
+                    // unless the open would change it.
+                    if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                        let resource = self.table.push(descriptor.child_dir(full_path))?;
+                        return Ok(resource);
+                    }
                     return Err(crate::VfsError::NotFile(full_path).into());
                 }
                 if truncate {
@@ -392,7 +397,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
                 }
             }
 
-            let new_descriptor = VfsDescriptor::file(full_path, file_perms);
+            let mut new_descriptor = VfsDescriptor::file(full_path, file_perms);
+            new_descriptor.mount_file_perms = descriptor.mount_file_perms;
             let resource = self.table.push(new_descriptor)?;
             Ok(resource)
         }

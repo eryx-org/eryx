@@ -453,7 +453,7 @@ server cancels the restore and snapshot when the client disconnects.
 
 ## Session with VFS
 
-Sessions can be configured with a virtual filesystem for persistent file storage. See [VFS and File Persistence](./vfs.md) for details.
+Sessions can be configured with a virtual filesystem for persistent file storage. See [VFS and File Persistence](./vfs.md) for details. The in-memory storage is capped at 64 MiB and 65,536 files and directories by default (see [resource limits](./resource-limits.md#virtual-filesystem-size)); put large trees on a [host-directory volume](./vfs.md#host-volume-mounts).
 
 ```python
 import eryx

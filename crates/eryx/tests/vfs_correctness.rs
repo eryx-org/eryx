@@ -55,6 +55,37 @@ print(int(os.stat('/data/a').st_mtime), int(os.stat('/data/b').st_mtime))
     assert_eq!(out.trim(), "2000000 2000000");
 }
 
+/// Directories keep the times set on them, by path or through a descriptor
+/// opened without `O_DIRECTORY` (as `touch` does), and an open that would
+/// write, truncate or create one fails with `EISDIR`.
+#[tokio::test]
+async fn directory_times_can_be_set() {
+    let out = run(
+        InMemoryStorage::new(),
+        r#"
+import errno, os
+os.makedirs('/data/d')
+os.utime('/data/d', (1_000_000, 2_000_000))
+print(int(os.stat('/data/d').st_mtime))
+fd = os.open('/data/d', os.O_RDONLY)
+os.utime(fd, (3_000_000, 4_000_000))
+os.close(fd)
+print(int(os.stat('/data/d').st_mtime))
+for flags in [os.O_WRONLY, os.O_RDWR, os.O_RDONLY | os.O_TRUNC, os.O_RDONLY | os.O_CREAT]:
+    try:
+        os.open('/data/d', flags)
+        print('opened')
+    except OSError as e:
+        print(errno.errorcode[e.errno])
+"#,
+    )
+    .await;
+    assert_eq!(
+        out.trim(),
+        "2000000\n4000000\nEISDIR\nEISDIR\nEISDIR\nEISDIR"
+    );
+}
+
 #[tokio::test]
 async fn invalid_directory_renames_fail_with_posix_errors() {
     let out = run(

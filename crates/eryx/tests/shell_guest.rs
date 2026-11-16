@@ -740,6 +740,29 @@ if printf '%*s' 200000 x > /tmp/big; then echo big; else echo full; fi
     assert_eq!(out.stdout_utf8().unwrap(), "small\nfull\n");
 }
 
+/// The shell's `/tmp` is also bounded by the VFS entry limit.
+#[tokio::test]
+async fn the_shell_tmp_is_bounded_by_the_vfs_entry_limit() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_resource_limits(eryx::ResourceLimits::default().with_max_vfs_entries(16))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            r#"
+n=0; for i in {1..32}; do if : > /tmp/f$i; then n=$((n+1)); fi; done 2>/dev/null
+echo $n
+"#,
+        )
+        .await
+        .unwrap();
+    let created: usize = out.stdout_utf8().unwrap().trim().parse().unwrap();
+    assert!((1..16).contains(&created), "{created}");
+}
+
 /// A session's `/tmp` outlives a reset, as the VFS does.
 #[tokio::test]
 async fn the_shell_tmp_survives_a_session_reset() {

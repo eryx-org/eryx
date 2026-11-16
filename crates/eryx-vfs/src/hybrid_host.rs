@@ -99,8 +99,7 @@ fn vfs_metadata_to_stat(meta: &crate::storage::Metadata) -> types::DescriptorSta
         types::DescriptorType::RegularFile
     };
 
-    // Only files store times; directory metadata just carries "now".
-    let time = |t| (!meta.is_dir).then(|| crate::wasi_impl::systemtime_to_datetime(t));
+    let time = |t| Some(crate::wasi_impl::systemtime_to_datetime(t));
 
     types::DescriptorStat {
         type_: dtype,
@@ -494,14 +493,20 @@ fn read_only(path: &str) -> HybridFsError {
     crate::VfsError::PermissionDenied(format!("{path}: read-only")).into()
 }
 
+/// The time synthetic directories and devices report: when the process
+/// first stated one, so it is real and stable rather than the epoch.
+static SYNTHETIC_TIME: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
 /// The stat of a synthetic (read-only) directory.
 fn synthetic_dir_stat() -> types::DescriptorStat {
+    let time = Some(crate::wasi_impl::systemtime_to_datetime(*SYNTHETIC_TIME));
     types::DescriptorStat {
         type_: types::DescriptorType::Directory,
         link_count: 1,
         size: 0,
-        data_access_timestamp: None,
-        data_modification_timestamp: None,
+        data_access_timestamp: time,
+        data_modification_timestamp: time,
         status_change_timestamp: None,
     }
 }
@@ -695,7 +700,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 let allowed = if vfs_desc.is_dir {
                     vfs_desc.dir_perms.contains(DirPerms::MUTATE)
                 } else {
-                    vfs_desc.file_perms.contains(FilePerms::WRITE)
+                    vfs_desc.mount_file_perms.contains(FilePerms::WRITE)
                 };
                 if !allowed {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
@@ -715,7 +720,9 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 Ok(done(()))
             }
             HybridDescriptor::RealFile { file, .. } => {
-                if !file.writable {
+                // Like futimens, this needs the mount to allow writing, not
+                // a descriptor opened for writing.
+                if !file.perms.contains(FilePerms::WRITE) {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 file.file.set_times(file_times(atime, mtime))?;
@@ -1080,6 +1087,13 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                         if !created {
                             let meta = storage.stat(&full_path).await?;
                             if meta.is_dir {
+                                // As on POSIX, a directory opens without
+                                // O_DIRECTORY unless the open would change it.
+                                if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                                    return Ok(HybridDescriptor::Vfs(
+                                        vfs_desc.child_dir(full_path),
+                                    ));
+                                }
                                 return Err(crate::VfsError::NotFile(full_path).into());
                             }
                             if truncate {
@@ -1098,6 +1112,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
 
                         let mut new_vfs_desc = VfsDescriptor::file(full_path, file_perms);
                         new_vfs_desc.storage = vfs_desc.storage;
+                        new_vfs_desc.mount_file_perms = vfs_desc.mount_file_perms;
                         Ok(HybridDescriptor::Vfs(new_vfs_desc))
                     }
                 }))

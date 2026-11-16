@@ -457,10 +457,6 @@ impl Sandbox {
         // a scrubbing storage from the sandbox's secrets configuration.
         #[cfg(feature = "unstable-vfs")]
         {
-            let vfs_max_bytes = self
-                .resource_limits
-                .max_vfs_bytes
-                .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES);
             let vfs_storage = if let Some(ref storage) = self.vfs_storage {
                 eryx_vfs::ArcStorage::new(Arc::clone(storage))
             } else {
@@ -487,7 +483,7 @@ impl Sandbox {
                     }
                 };
                 let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(vfs_max_bytes),
+                    crate::session::executor::VfsLimits::of(&self.resource_limits).storage(),
                     vfs_secrets,
                     vfs_policy,
                 );
@@ -509,8 +505,9 @@ impl Sandbox {
         // Without `unstable-vfs`, the quota still bounds the shell's /tmp.
         #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
         {
-            execute_builder =
-                execute_builder.with_max_vfs_bytes(self.resource_limits.max_vfs_bytes);
+            execute_builder = execute_builder.with_vfs_limits(
+                crate::session::executor::VfsLimits::of(&self.resource_limits),
+            );
         }
         execute_builder =
             execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
@@ -3744,8 +3741,20 @@ pub struct ResourceLimits {
     /// Applies with the `unstable-vfs` feature, and with `shell` to the shell's
     /// `/tmp`, and only to the storage eryx creates itself; storage you construct and pass in carries its own limit (see
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
-    /// default of 64 MiB.
+    /// default of 64 MiB. A tree too large for this or
+    /// [`max_vfs_entries`](Self::max_vfs_entries) belongs on a host-directory
+    /// volume, which neither limit applies to.
     pub max_vfs_bytes: Option<u64>,
+    /// Maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Each entry is also charged against
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) (its path, twice for a directory, plus 64 bytes), so
+    /// this mainly bounds operations that visit every entry, such as listing,
+    /// removing or renaming a directory. Scripts see the limit as `ENOSPC`.
+    /// Applies to the same storage as `max_vfs_bytes`. `None` uses the
+    /// `eryx-vfs` default of 65,536.
+    pub max_vfs_entries: Option<usize>,
     /// Maximum host files and directories a script may hold open at once
     /// beneath host mounts (the stdlib, site-packages and volumes).
     ///
@@ -3776,6 +3785,7 @@ impl Default for ResourceLimits {
             max_callback_invocations: Some(1000),
             max_fuel: None,             // Unlimited by default, but still tracked
             max_vfs_bytes: None,        // eryx-vfs default (64 MiB)
+            max_vfs_entries: None,      // eryx-vfs default (65,536)
             max_open_host_files: None,  // eryx-vfs default (256)
             max_child_host_bytes: None, // 64 MiB
         }
@@ -3788,10 +3798,11 @@ impl ResourceLimits {
     /// Only for code you trust: scripts can then run indefinitely and consume
     /// memory without bound.
     ///
-    /// [`max_vfs_bytes`](Self::max_vfs_bytes) is the exception and stays at its
-    /// default. It bounds *host* memory rather than the guest, so clearing it
-    /// would let a script abort the process rather than merely outstay its
-    /// welcome; raise it explicitly if you need more room.
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) and
+    /// [`max_vfs_entries`](Self::max_vfs_entries) are the exception and stay at
+    /// their defaults. They bound *host* memory rather than the guest, so
+    /// clearing them would let a script abort the process rather than merely
+    /// outstay its welcome; raise them explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
     /// default, since host descriptors are shared with the whole process,
     /// and [`max_child_host_bytes`](Self::max_child_host_bytes) for the same
@@ -3805,6 +3816,7 @@ impl ResourceLimits {
             max_callback_invocations: None,
             max_fuel: None,
             max_vfs_bytes: None,
+            max_vfs_entries: None,
             max_open_host_files: None,
             max_child_host_bytes: None,
         }
@@ -3863,6 +3875,18 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_vfs_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
         self.max_vfs_bytes = bytes.into();
+        self
+    }
+
+    /// Set the maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Pass `None` to use the `eryx-vfs` default of 65,536. Like
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes), there is no way to remove this
+    /// limit; see [`max_vfs_entries`](Self::max_vfs_entries).
+    #[must_use]
+    pub fn with_max_vfs_entries(mut self, entries: impl Into<Option<usize>>) -> Self {
+        self.max_vfs_entries = entries.into();
         self
     }
 

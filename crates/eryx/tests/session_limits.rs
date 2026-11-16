@@ -221,7 +221,9 @@ async fn in_process_session_applies_memory_limit_at_instantiation() {
 #[cfg(feature = "unstable-vfs")]
 fn room_for_four_byte_file() -> u64 {
     let entry = |path: &str| eryx::vfs::ENTRY_OVERHEAD_BYTES + path.len() as u64;
-    entry("/data") + entry("/tmp") + entry("/data/file") + 4
+    // A directory's path is charged twice.
+    let dir = |path: &str| entry(path) + path.len() as u64;
+    dir("/data") + dir("/tmp") + entry("/data/file") + 4
 }
 
 #[cfg(feature = "unstable-vfs")]
