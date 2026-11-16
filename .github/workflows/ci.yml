@@ -550,8 +550,9 @@ jobs:
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v2 -> v3:
           # the shell's embedded coreutils (#809). v3 -> v4: the shell is
-          # built for wasm32-wasip3. v4 -> v5: more async builtins (#816).
-          key: wasm-runtime-shell-v5-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # built for wasm32-wasip3. v4 -> v5: more async builtins (#816). v5 -> v6:
+          # coreutils.cwasm carries its instance-metadata stamp (#942).
+          key: wasm-runtime-shell-v6-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -698,8 +699,8 @@ jobs:
             crates/eryx-runtime/eryx-bundler-macos.cwasm
           # As for the runtimes, the cwasm's engine and CPU-feature settings
           # aren't covered: bump the prefix when they change. v1 -> v2: more
-          # async builtins (#816).
-          key: wasm-bundler-v2-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # async builtins (#816). v2 -> v3: the instance-metadata stamp (#942).
+          key: wasm-bundler-v3-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'

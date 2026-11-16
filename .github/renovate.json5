@@ -78,6 +78,8 @@
         "wasmtime-wasi",
         "wasmtime-wasi-io",
         "wasmtime-wizer",
+        // =-pinned to wasmtime's own version; see Cargo.toml.
+        "wasmtime-environ",
         "cranelift-codegen",
         "wasm-encoder",
         "wasmparser",
