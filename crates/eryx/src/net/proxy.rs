@@ -427,7 +427,18 @@ async fn connect(
         .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
         .await?;
 
-    // From here on the child talks TLS, so failures just close it.
+    // From here on the child talks TLS, so failures just close it. Anything
+    // but a TLS handshake record (0x16) is refused at once, rather than
+    // read as a TLS record header and waited on.
+    let mut first = [0u8; 1];
+    let peeked = tokio::time::timeout(shared.connect_timeout, client.peek(&mut first))
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+    if peeked == 0 || first[0] != 0x16 {
+        return Err(ProxyError::Io(std::io::Error::other(
+            "the CONNECT tunnel didn't start with a TLS handshake",
+        )));
+    }
     let child = tokio::time::timeout(
         shared.connect_timeout,
         TlsAcceptor::from(config).accept(&mut *client),

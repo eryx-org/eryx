@@ -119,6 +119,19 @@ async fn upstream(tls: Option<rustls::ServerConfig>) -> (u16, Received) {
     (port, received)
 }
 
+/// A certificate (DER) for `api.test`, and a server config presenting it.
+fn tls_config() -> (Vec<u8>, rustls::ServerConfig) {
+    let cert = rcgen::generate_simple_self_signed(vec!["api.test".to_string()]).unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        cert.signing_key.serialize_der(),
+    ));
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.cert.der().clone()], key)
+        .unwrap();
+    (cert.cert.der().to_vec(), config)
+}
+
 /// A network allowing `api.test` (resolved to the test upstreams), with a
 /// secret for it.
 fn network() -> NetConfig {
@@ -279,16 +292,9 @@ async fn refused_hosts_get_a_proxy_error() {
 /// the secret reaches only the upstream.
 #[tokio::test]
 async fn https_clients_reach_allowed_hosts_with_only_the_env() {
-    let cert = rcgen::generate_simple_self_signed(vec!["api.test".to_string()]).unwrap();
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-        cert.signing_key.serialize_der(),
-    ));
-    let tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.cert.der().clone()], key)
-        .unwrap();
+    let (cert, tls) = tls_config();
     let (port, seen) = upstream(Some(tls)).await;
-    let sandbox = shell(network().with_root_cert(cert.cert.der().to_vec()))
+    let sandbox = shell(network().with_root_cert(cert))
         .with_command("https-get", https_get())
         .build()
         .unwrap();
@@ -308,4 +314,112 @@ async fn https_clients_reach_allowed_hosts_with_only_the_env() {
     // A host the policy refuses gets the proxy's 403 to its CONNECT.
     let out = run(&sandbox, &format!("https-get https://evil.test:{port}/")).await;
     assert!(out.contains(" 403 "), "{out}");
+}
+
+/// A child can hold only so many sockets at once, and failing to get more
+/// is an ordinary error; they're given back when it exits.
+#[tokio::test]
+async fn sockets_are_limited() {
+    let sandbox = shell(network()).build().unwrap();
+    let out = run(&sandbox, "tc hold 100").await;
+    assert!(out.starts_with("held 32 error:"), "{out}");
+    let out = run(&sandbox, "tc hold 10; tc hold 10").await;
+    assert_eq!(out, "held 10\nheld 10\n");
+}
+
+/// A script can't point a child's proxy or CA variables elsewhere.
+#[tokio::test]
+async fn the_proxy_env_cant_be_overridden() {
+    let (port, seen) = upstream(None).await;
+    let sandbox = shell(network().allow_plaintext_secrets(true))
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!(
+            "HTTPS_PROXY=http://x HTTP_PROXY=http://10.0.0.1:1 SSL_CERT_FILE=/x tc env HTTPS_PROXY; \
+             HTTP_PROXY=http://10.0.0.1:1 tc env SSL_CERT_FILE; \
+             HTTP_PROXY=http://10.0.0.1:1 tc proxy-get http://api.test:{port}/"
+        ),
+    )
+    .await;
+    assert!(out.starts_with("http://127.0.0.1:"), "{out}");
+    assert!(
+        out.contains("/etc/ssl/certs/ca-certificates.crt\n"),
+        "{out}"
+    );
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(seen.lock().unwrap().contains(REAL));
+}
+
+/// A command allowed tunnels gets a blind one to an allowed host (no
+/// substitution), and a command without can't use one: its CONNECTs are
+/// inspected, so plain bytes inside are refused, and it can't reach the
+/// tunnelling proxy either.
+#[tokio::test]
+async fn tunnels_are_per_command() {
+    let (port, seen) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("tt", test_cmd().allow_tunnels())
+        .build()
+        .unwrap();
+    let out = run(&sandbox, &format!("tt tunnel-get api.test:{port}")).await;
+    assert!(
+        out.contains(" 200 Connection established") && out.contains(" 200 OK"),
+        "{out}"
+    );
+    let got = seen.lock().unwrap().clone();
+    assert!(
+        got.contains("Bearer ERYX_SECRET_PLACEHOLDER_") && !got.contains(REAL),
+        "{got}"
+    );
+
+    // The inspecting proxy expects TLS after its 200; plain HTTP is refused.
+    let (cert, tls) = tls_config();
+    let (tls_port, tls_seen) = upstream(Some(tls)).await;
+    let inspected = shell(network().with_root_cert(cert)).build().unwrap();
+    let out = run(&inspected, &format!("tc tunnel-get api.test:{tls_port}")).await;
+    assert!(
+        out.contains(" 200 Connection established") && !out.contains(" 200 OK"),
+        "{out}"
+    );
+    assert_eq!(tls_seen.lock().unwrap().as_str(), "");
+
+    let out = run(&sandbox, "p=$(tt env HTTPS_PROXY); tc connect ${p#http://}").await;
+    assert!(!out.contains("connected"), "{out}");
+}
+
+/// A child can't listen for connections.
+#[tokio::test]
+async fn children_cant_listen() {
+    let sandbox = shell(network()).build().unwrap();
+    let out = run(&sandbox, "tc listen").await;
+    assert!(
+        !out.contains("listening") && out.contains("error:"),
+        "{out}"
+    );
+}
+
+/// A session's children get a proxy in each execution too.
+#[tokio::test]
+async fn sessions_proxy_each_execution() {
+    use eryx::session::{InProcessSession, Session};
+
+    let (port, seen) = upstream(None).await;
+    let sandbox = shell(network().allow_plaintext_secrets(true))
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    for _ in 0..2 {
+        let out = session
+            .execute(&format!("tc proxy-get http://api.test:{port}/"))
+            .await
+            .unwrap();
+        assert!(
+            out.stdout_text().contains(" 200 OK"),
+            "{}",
+            out.stdout_text()
+        );
+    }
+    assert_eq!(seen.lock().unwrap().matches(REAL).count(), 2);
 }
