@@ -37,10 +37,19 @@ RUN mkdir -p crates/eryx-guest-python/tests/python-stdlib && \
 # The x86-64-vN levels are x86-64 only; building this image on an arm64
 # host needs --build-arg ERYX_CPU_FEATURES=baseline, which pins the target
 # without enabling optional features (aarch64 has no psABI presets).
+#
+# The target cache mount outlives builds, and COPY keeps the build context's
+# mtimes, so sources can look older than cached artifacts built from other
+# sources; cargo then reuses those (#876). Touching the copied sources makes
+# cargo re-check every workspace crate, as CI does. Each stage gets its own
+# cache id: they build different packages with different features. The mount
+# is locked so that concurrent builds (e.g. from other worktrees) can't re-link
+# a binary between cargo building it and this RUN using it.
 ARG ERYX_CPU_FEATURES=x86-64-v3
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/build/target \
-  ERYX_PRECOMPILE_BOOTSTRAP=1 \
+  --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
+  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  && ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/runtime-python.wasm \
   --language python \
@@ -53,9 +62,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # The JavaScript and shell runtimes have no preinit. The shell also embeds
 # coreutils (the eryx `coreutils` feature), from crates/eryx-runtime/coreutils.wasm
 # (`mise run build-coreutils`).
+# Same package and features as the step above, so the same (locked) cache,
+# with the sources it touched.
 ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/build/target \
+  --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
   for lang in $(echo "$ERYX_LANGUAGES" | tr , ' '); do \
   [ "$lang" = python ] && continue; \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
@@ -111,10 +122,13 @@ COPY --from=runtime /build/crates/eryx-runtime/*.cwasm crates/eryx-runtime/
 # We copy the final binary out of the cache mount since it disappears after RUN.
 # Only the languages in ERYX_LANGUAGES are compiled in (cargo features
 # `javascript` and `shell`), so a Python-only image embeds no other runtime.
+# The sources are touched first, and the mount locked, as in the precompile
+# stage (#876).
 ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-  --mount=type=cache,target=/build/target \
-  features=$(echo "$ERYX_LANGUAGES" | tr , '\n' | grep -v '^python$' | sed 's|^|eryx-server/|' | paste -sd, -) \
+  --mount=type=cache,id=eryx-server-target,sharing=locked,target=/build/target \
+  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  && features=$(echo "$ERYX_LANGUAGES" | tr , '\n' | grep -v '^python$' | sed 's|^|eryx-server/|' | paste -sd, -) \
   && cargo build --release -p eryx-server --no-default-features \
   --features "eryx/embedded,eryx/preinit${features:+,$features}" \
   && cp target/release/eryx-server /usr/local/bin/eryx-server

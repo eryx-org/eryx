@@ -13,6 +13,7 @@ their packages' full licences in a comment at the top of the module.
 | `node:string_decoder` | [string_decoder] 1.3.0, with [safe-buffer] 5.2.1 | MIT |
 | `node:util` | `util.js`, written for eryx: a subset | (eryx's) |
 | `node:crypto` | `crypto.js`, written for eryx: random values only | (eryx's) |
+| `node:timers`, `node:timers/promises` | `timers.js`, `timers_promises.js`, written for eryx, on the timer globals (`../timers.js`) | (eryx's) |
 
 - `licenses/`: each vendored package's licence file, from its npm tarball.
 - `regen.sh` (with `regen.mjs`) installs the pinned versions above and

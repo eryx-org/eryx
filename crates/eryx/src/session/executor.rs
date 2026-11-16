@@ -1682,15 +1682,16 @@ impl SessionExecutor {
                 .with_output_truncated(output_truncated)
         };
 
-        // A cancelled run was interrupted mid-call, so its instance can't be
-        // reused: leave the store out and the next call resets the session.
+        // A cancelled run was interrupted mid-call, and any other failure of
+        // the call itself (a timeout, running out of fuel, a suspension, a
+        // trap) leaves the instance trapped, so it can't be entered again, or
+        // leaves a guest suspended on a timer or callback, which would wake
+        // into the next call. Either way the instance can't be reused: leave
+        // the store out and the next call resets the session. (A script's
+        // own failure is the inner result, below, and keeps the instance.)
         if was_cancelled.load(Ordering::Relaxed) {
             return Err(with_stats(ErrorKind::Cancelled.into()));
         }
-
-        // Restore store and bindings before handling result
-        self.store = Some(store);
-        self.bindings = Some(bindings);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
@@ -1714,6 +1715,11 @@ impl SessionExecutor {
                 }
             })
             .map_err(|kind| with_stats(kind.into()))?;
+
+        // The call itself completed: the instance is reusable.
+        self.store = Some(store);
+        self.bindings = Some(bindings);
+
         // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
@@ -1765,8 +1771,9 @@ impl SessionExecutor {
         Ok(output)
     }
 
-    /// Start over on a fresh instance if a call whose future was dropped
-    /// mid-run took the instance with it, rather than failing every later call.
+    /// Start over on a fresh instance if a call that was cancelled or timed
+    /// out, or whose future was dropped mid-run, took the instance with it,
+    /// rather than failing every later call.
     ///
     /// Returns whether the instance was reset; the next successful execution
     /// then reports [`ExecutionOutput::state_was_reset`].
@@ -1781,7 +1788,9 @@ impl SessionExecutor {
         if self.store.is_some() {
             return Ok(false);
         }
-        tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
+        tracing::warn!(
+            "previous session call was cancelled or timed out mid-run; resetting, state lost"
+        );
         self.reset(callbacks).await?;
         self.state_was_reset = true;
         Ok(true)
