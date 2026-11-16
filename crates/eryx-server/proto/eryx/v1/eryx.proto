@@ -125,6 +125,20 @@ message ExecuteRequest {
   // A language the server doesn't serve (see its --languages flag) is
   // rejected with INVALID_ARGUMENT.
   Language language = 15;
+
+  // Shell only: the commands this execution may spawn, out of those the
+  // server registered. Unset allows them all; set with no names allows none.
+  // Names the server doesn't have are ignored. Other commands exit 127, as
+  // if not installed. Shell builtins (including grep) and callbacks aren't
+  // registered commands, so this doesn't restrict them. Setting it for
+  // another language is INVALID_ARGUMENT.
+  AllowedCommands allowed_commands = 16;
+}
+
+// The command names in ExecuteRequest.allowed_commands. A message rather
+// than a bare repeated field, so "unset" (all) and "empty" (none) differ.
+message AllowedCommands {
+  repeated string names = 1;
 }
 
 // A guest language.

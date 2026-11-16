@@ -1552,7 +1552,11 @@ class Session:
         ...
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the session.
 
@@ -1570,6 +1574,12 @@ class Session:
             code: Python source code to execute.
             cancel: Optional token; calling ``cancel.cancel()`` from any thread
                 stops the run.
+            allowed_commands: For ``language="shell"`` only: the commands this
+                call may run, out of the session's. ``None`` (the default)
+                allows them all, ``[]`` allows none, and names the session
+                doesn't have are ignored. Others exit 127. Shell builtins
+                (including ``grep``) and callbacks aren't commands, so they're
+                unaffected. ValueError for other languages.
 
         Returns:
             ExecuteResult containing stdout and execution statistics.
@@ -1588,7 +1598,11 @@ class Session:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute code in the session from asyncio.
 
@@ -1599,6 +1613,7 @@ class Session:
         calls made before them. Cancelling the awaiting task stops the run,
         losing session state as with ``cancel``. Raises ``RuntimeError``
         without running anything when called outside a running event loop.
+        ``allowed_commands`` is as for ``execute()``.
 
         Example:
             await session.execute_async('x = 1')
@@ -1607,12 +1622,17 @@ class Session:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code in the session with callback journaling and replay.
 
         Session state persists as with ``execute()``. See
         ``Sandbox.execute_with_journal()`` for the journal semantics.
+        ``allowed_commands`` is as for ``execute()``.
 
         If the run halts (a callback suspends, or it times out or runs out of
         fuel), the session is rolled back to its Python globals from before the

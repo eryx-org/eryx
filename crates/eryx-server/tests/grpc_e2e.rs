@@ -351,6 +351,62 @@ async fn shell_results_carry_the_exit_code() {
     assert_eq!(python.exit_code, None);
 }
 
+/// `allowed_commands` narrows one shell request's commands: set, only those
+/// run and others exit 127; set but empty, none run; unset, all do. Python
+/// requests can't set it.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_requests_narrow_their_commands() {
+    use eryx_server::proto::eryx::v1::{AllowedCommands, Language};
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(1);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+    let code = "echo a | cat; echo \"cat=$?\"; echo b | sort >/dev/null; echo \"sort=$?\"";
+    let run = |allowed: Option<Vec<&str>>| {
+        execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                code: code.to_string(),
+                language: Language::Shell as i32,
+                allowed_commands: allowed.map(|names| AllowedCommands {
+                    names: names.into_iter().map(str::to_owned).collect(),
+                }),
+                ..Default::default()
+            },
+        )
+    };
+
+    let only_cat = run(Some(vec!["cat"])).await.unwrap();
+    assert_eq!(only_cat.stdout, b"a\ncat=0\nsort=127\n", "{only_cat:?}");
+    let none = run(Some(vec![])).await.unwrap();
+    assert_eq!(none.stdout, b"cat=127\nsort=127\n", "{none:?}");
+    // The same pooled sandbox, unnarrowed again.
+    let all = run(None).await.unwrap();
+    assert_eq!(all.stdout, b"a\ncat=0\nsort=0\n", "{all:?}");
+
+    let status = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "pass".to_string(),
+            allowed_commands: Some(AllowedCommands::default()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,

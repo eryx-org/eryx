@@ -63,7 +63,9 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils"]
+# The bundler too: eryx-precompile's default `env` turns on eryx's `packages`
+# across the workspace, and the environment tests need a real one.
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-python]

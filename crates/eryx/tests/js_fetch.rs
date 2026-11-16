@@ -370,3 +370,29 @@ async fn fetch_in_a_session_with_secrets() {
     assert_eq!(out.stdout, b"world\n");
     assert!(server.requests()[1].contains(&format!("x-key: {SECRET}\r\n")));
 }
+
+/// A fetch the signal's deadline stops is a TimeoutError, every time: the
+/// host's request timeout and the guest's clock can disagree by a hair, and
+/// a host timeout on the deadline still counts as the signal's.
+#[tokio::test]
+async fn deadline_timeouts_are_timeout_errors() {
+    let server = Server::start().await;
+    let sandbox = server.sandbox(server.net()).build().unwrap();
+    let out = run(
+        &sandbox,
+        r"
+        const names = new Set();
+        for (let i = 0; i < 20; i++) {
+            const signal = AbortSignal.timeout(20);
+            try {
+                await fetch('https://api.test/stall', { signal });
+            } catch (e) {
+                names.add(`${e.name} ${e === signal.reason}`);
+            }
+        }
+        console.log([...names].join());
+        ",
+    )
+    .await;
+    assert_eq!(out, "TimeoutError true\n");
+}
