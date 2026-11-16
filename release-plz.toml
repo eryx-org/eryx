@@ -18,6 +18,13 @@ git_release_enable = true
 name = "eryx-precompile"
 git_release_enable = false
 
+# eryx-build is a build tool for command components (eryx-commands pins a
+# published version); it versions with the workspace and gets a crates.io
+# release and tag, but no GitHub release of its own.
+[[package]]
+name = "eryx-build"
+git_release_enable = false
+
 [changelog]
 body = """
 
