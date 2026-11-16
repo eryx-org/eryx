@@ -140,6 +140,7 @@ wasmtime-wasi-io.workspace = true
 wasmtime-environ.workspace = true
 wasmparser.workspace = true
 webpki-roots.workspace = true
+wit-component-wasmtime.workspace = true
 # Package support (always enabled)
 zip.workspace = true
 # Embedded runtime/stdlib (optional)

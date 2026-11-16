@@ -9,9 +9,10 @@ use pyo3::prelude::*;
 use crate::error::eryx_error_to_py;
 use crate::sandbox::RuntimeSource;
 
-/// A WASI 0.2 or 0.3 command component that a shell sandbox can run as an
-/// external command, such as uutils coreutils, ripgrep or curl built for
-/// `wasm32-wasip2`, or `gh` built for `wasm32-wasip3`.
+/// A WASI command that a shell sandbox can run as an external command, such
+/// as uutils coreutils, ripgrep or curl built for `wasm32-wasip2`, `gh`
+/// built for `wasm32-wasip3`, or a WASI preview 1 CLI (`wasm32-wasip1`),
+/// which is adapted into a component when loaded.
 ///
 /// Pass commands by name to a shell `Sandbox` or `Session`:
 /// `Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`.
@@ -43,11 +44,13 @@ impl Command {
 
 #[pymethods]
 impl Command {
-    /// Compile a command component from a `.wasm` file.
+    /// Compile a command from a `.wasm` file: a WASI 0.2 or 0.3 command
+    /// component, or a WASI preview 1 command module, adapted into a
+    /// component first.
     ///
     /// Raises:
     ///     InitializationError: If the file can't be read or compiled, or
-    ///         isn't a WASI 0.2 or 0.3 command.
+    ///         isn't a WASI command.
     #[staticmethod]
     #[pyo3(signature = (path, *, allow_tunnels=false))]
     fn from_file(path: PathBuf, allow_tunnels: bool) -> PyResult<Self> {
@@ -56,11 +59,13 @@ impl Command {
             .map_err(eryx_error_to_py)
     }
 
-    /// Compile a command component from its `.wasm` bytes.
+    /// Compile a command from its `.wasm` bytes: a WASI 0.2 or 0.3 command
+    /// component, or a WASI preview 1 command module, adapted into a
+    /// component first.
     ///
     /// Raises:
     ///     InitializationError: If the bytes don't compile, or aren't a WASI
-    ///         0.2 or 0.3 command.
+    ///         command.
     #[staticmethod]
     #[pyo3(signature = (wasm, *, allow_tunnels=false))]
     fn from_bytes(wasm: Vec<u8>, allow_tunnels: bool) -> PyResult<Self> {

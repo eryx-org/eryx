@@ -56,6 +56,7 @@ use crate::wasm::ExecutorState;
 
 mod imports;
 mod pipe;
+mod preview1;
 mod vmctx;
 
 pub(crate) use imports::missing_message;
@@ -452,16 +453,36 @@ impl Command {
         Self::from_bytes(&bytes)
     }
 
-    /// Compile a command component from its `.wasm` bytes.
+    /// Compile a command from its `.wasm` bytes: a WASI 0.2 or 0.3 command
+    /// component, or a WASI preview 1 command module (built for
+    /// `wasm32-wasip1`, say), which is adapted into a 0.2 component first
+    /// (see [`to_component`](Self::to_component)).
     ///
     /// # Errors
     ///
-    /// Returns an error if the bytes don't compile, or aren't a WASI 0.2 or
-    /// 0.3 command.
+    /// Returns an error if the bytes don't compile, or aren't a WASI command.
     pub fn from_bytes(wasm: &[u8]) -> Result<Self, Error> {
+        let wasm = preview1::to_component(wasm)?;
         let engine = crate::Executor::child_engine()?;
-        let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
-        Self::from_component(&engine, &component, vmctx::estimate(wasm))
+        let component =
+            Component::from_binary(&engine, &wasm).map_err(ErrorKind::wasm_component)?;
+        Self::from_component(&engine, &component, vmctx::estimate(&wasm))
+    }
+
+    /// `wasm` as a command component: unchanged if it's a component, and
+    /// adapted into a WASI 0.2 command component if it's a WASI preview 1
+    /// command module, with the `wasi_snapshot_preview1` adapter of the
+    /// wasmtime eryx links (as `wasm-tools component new --adapt` does).
+    /// [`from_bytes`](Self::from_bytes) does this itself; it's for compiling
+    /// a preview 1 command ahead of time, as `eryx-precompile compile` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a core module that isn't a preview 1 command: a
+    /// reactor (no `_start`), or one that doesn't import
+    /// `wasi_snapshot_preview1`.
+    pub fn to_component(wasm: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, Error> {
+        preview1::to_component(wasm)
     }
 
     /// Inspect a command's `.wasm` bytes before registering it: which WASI
@@ -472,10 +493,26 @@ impl Command {
     ///
     /// # Errors
     ///
-    /// Returns an error if the bytes aren't a component. One that can't run as
-    /// a command is reported in [`CommandInfo::problem`] instead.
+    /// Returns an error if the bytes are neither a component nor a WASI
+    /// preview 1 command module. One that can't run as a command is reported
+    /// in [`CommandInfo::problem`] instead.
     pub fn inspect(wasm: &[u8]) -> Result<CommandInfo, Error> {
-        imports::inspect(wasm)
+        let component = match preview1::to_component(wasm) {
+            Ok(component) => component,
+            // A preview 1 module eryx can't adapt (a reactor, say) is one it
+            // can't run, not one it can't inspect.
+            Err(e) if preview1::is_preview1(wasm) => {
+                let why = match e.kind() {
+                    ErrorKind::Initialization(why) => why.clone(),
+                    _ => e.to_string(),
+                };
+                return Ok(CommandInfo::unadaptable(why));
+            }
+            Err(e) => return Err(e),
+        };
+        let mut info = imports::inspect(&component)?;
+        info.preview1 = matches!(component, std::borrow::Cow::Owned(_));
+        Ok(info)
     }
 
     /// Stamp `precompiled`, the output of
@@ -2447,6 +2484,43 @@ mod tests {
             }
         }
         assert!(disagree.is_empty(), "{disagree:#?}");
+    }
+
+    /// A WASI preview 1 module is adapted only if it's a command: a reactor
+    /// (no `_start`) and a module not importing `wasi_snapshot_preview1` are
+    /// refused, and components pass through unchanged.
+    #[test]
+    fn only_preview1_commands_are_adapted() {
+        let reactor = wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_initialize")))"#,
+        )
+        .unwrap();
+        let err = Command::to_component(&reactor).unwrap_err();
+        assert!(err.to_string().contains("reactor"), "{err}");
+        let plain = wat::parse_str("(module (func (export \"_start\")))").unwrap();
+        let err = Command::to_component(&plain).unwrap_err();
+        assert!(err.to_string().contains("wasi_snapshot_preview1"), "{err}");
+        // Inspecting says a preview 1 module can't run, rather than failing.
+        let info = Command::inspect(&reactor).unwrap();
+        assert!(info.preview1 && !info.runnable(), "{info:?}");
+        assert!(info.problem.unwrap().contains("reactor"));
+        assert!(Command::inspect(&plain).is_err());
+
+        let wasm = test_cmd_wasm();
+        assert!(matches!(
+            Command::to_component(&wasm).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let p1 = test_cmd_wasm_for("wasm32-wasip1");
+        let adapted = Command::to_component(&p1).unwrap();
+        assert!(wasmparser::Parser::is_component(&adapted));
+        let info = Command::inspect(&p1).unwrap();
+        assert!(info.preview1 && info.runnable(), "{info:?}");
+        assert_eq!(info.wasi, Some("0.2"));
+        assert!(matches!(Command::from_bytes(&p1).unwrap().pre, Pre::P2(_)));
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or

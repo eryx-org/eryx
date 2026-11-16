@@ -3,8 +3,9 @@
 //!
 //! Most tests use a tiny command built by the test itself
 //! (tests/fixtures/test-cmd, which needs `rustup target add wasm32-wasip2`),
-//! and the `p3_` ones the same command built for WASI 0.3 (`rustup target
-//! add wasm32-wasip3`).
+//! the `p3_` ones the same command built for WASI 0.3 (`rustup target
+//! add wasm32-wasip3`), and the `p1_` ones for WASI preview 1 (`rustup
+//! target add wasm32-wasip1`), a core module eryx adapts into a component.
 //!
 //! ```sh
 //! mise run precompile-runtime-shell
@@ -34,6 +35,13 @@ fn test_cmd_wasm() -> Vec<u8> {
 fn test_cmd_p3() -> Command {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     Command::from_bytes(WASM.get_or_init(|| build_test_cmd("wasm32-wasip3"))).unwrap()
+}
+
+/// The test command built for WASI preview 1: a core module, which
+/// `Command::from_bytes` adapts into a WASI 0.2 command component.
+fn test_cmd_p1() -> Command {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    Command::from_bytes(WASM.get_or_init(|| build_test_cmd("wasm32-wasip1"))).unwrap()
 }
 
 fn build_test_cmd(target: &str) -> Vec<u8> {
@@ -1020,6 +1028,66 @@ async fn p3_children_share_the_sessions_vfs() {
         "from-shell\nfrom-p3\nerror: NotFound\nstatus=1\n"
     );
     assert_eq!(storage.read("/data/b.txt").await.unwrap(), b"from-p3");
+}
+
+/// A WASI preview 1 command module runs as a child once adapted: argv, env,
+/// stdin, stdout, stderr and exit status, pipes to and from components, and
+/// `eryx:process/run` when allowed to spawn. Wasmtime's adapter passes on
+/// only success or failure, so `exit 3` exits 1.
+#[tokio::test]
+async fn p1_commands_run_as_children() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_commands(["tc1", "other1"], test_cmd_p1())
+        .with_command("spawner1", test_cmd_p1().allow_spawn())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "tc1 argv0; other1 argv0; FOO=bar tc1 env FOO; tc1 exit 3; echo \"status=$?\"; \
+             printf 'hi\\n' | tc1 | tc; echo lo | tc | tc1; echo sp | spawner1 spawn tc",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "tc1\nother1\nbar\nstatus=1\nHI\nLO\nSP\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "bye\n");
+}
+
+/// A WASI preview 1 child sees the session's VFS through the adapter, and
+/// no host files.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn p1_children_share_the_sessions_vfs() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .with_command("tc1", test_cmd_p1())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let out = session
+        .execute(
+            "echo from-shell > /data/a.txt; tc1 cat /data/a.txt; \
+             tc1 write /data/b.txt from-p1; tc cat /data/b.txt; echo; \
+             tc1 cat /etc/passwd; echo \"status=$?\"",
+        )
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "from-shell\nfrom-p1\nerror: NotFound\nstatus=1\n"
+    );
+    assert_eq!(storage.read("/data/b.txt").await.unwrap(), b"from-p1");
 }
 
 /// The test command, allowed to run commands itself (`tc spawn CMD ...`).

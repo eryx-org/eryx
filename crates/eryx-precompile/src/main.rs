@@ -113,7 +113,8 @@ enum Command {
 enum CommandsCommand {
     /// Print a command's WASI version, its imports (and whether shell
     /// children get each), its exports, and whether eryx can run it. Exits 1
-    /// if it can't.
+    /// if it can't, and 2 if the file can't be inspected (unreadable,
+    /// precompiled, or not a command component or WASI preview 1 module).
     Inspect(InspectArgs),
 }
 
@@ -425,16 +426,31 @@ async fn main() -> Result<()> {
     }
 }
 
+/// `commands inspect`: exits 1 if eryx can't run the command, and 2 if the
+/// file can't be inspected at all (unreadable, precompiled, or not a
+/// component or WASI preview 1 module), with `{"error": ...}` under --json.
 fn run_inspect(args: &InspectArgs) -> Result<()> {
-    let wasm = std::fs::read(&args.file)
-        .with_context(|| format!("Failed to read {}", args.file.display()))?;
-    if wasm.starts_with(b"\x7fELF") || wasm.starts_with(b"\xcf\xfa\xed\xfe") {
-        anyhow::bail!(
-            "{} is precompiled: inspect the .wasm it was compiled from",
-            args.file.display()
-        );
-    }
-    let info = eryx::Command::inspect(&wasm)?;
+    let inspected = std::fs::read(&args.file)
+        .with_context(|| format!("Failed to read {}", args.file.display()))
+        .and_then(|wasm| {
+            if wasm.starts_with(b"\x7fELF") || wasm.starts_with(b"\xcf\xfa\xed\xfe") {
+                anyhow::bail!(
+                    "{} is precompiled: inspect the .wasm it was compiled from",
+                    args.file.display()
+                );
+            }
+            Ok(eryx::Command::inspect(&wasm)?)
+        });
+    let info = match inspected {
+        Ok(info) => info,
+        Err(e) => {
+            if args.json {
+                println!("{}", serde_json::json!({ "error": format!("{e:#}") }));
+            }
+            eprintln!("Error: {e:#}");
+            std::process::exit(2);
+        }
+    };
     if args.json {
         let imports: Vec<_> = info
             .imports
@@ -450,6 +466,7 @@ fn run_inspect(args: &InspectArgs) -> Result<()> {
             })
             .collect();
         let json = serde_json::json!({
+            "preview1": info.preview1,
             "wasi": info.wasi,
             "runnable": info.runnable(),
             "problem": info.problem,
@@ -458,6 +475,14 @@ fn run_inspect(args: &InspectArgs) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
+        if info.preview1 && info.wasi.is_some() {
+            println!(
+                "{}: a WASI preview 1 module, which eryx adapts into a WASI 0.2 command",
+                args.file.display()
+            );
+        } else if info.preview1 {
+            println!("{}: a WASI preview 1 module", args.file.display());
+        }
         match info.wasi {
             Some(version) => println!("{}: WASI {version} command", args.file.display()),
             None => println!("{}: not a command", args.file.display()),
@@ -1102,8 +1127,20 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
 
     // Read input WASM
-    let wasm_bytes = std::fs::read(&args.input)
+    let mut wasm_bytes = std::fs::read(&args.input)
         .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
+    // A WASI preview 1 command module becomes a 0.2 command component, as
+    // Command::from_bytes would adapt it.
+    if args.language.is_none() {
+        let adapted = match eryx::Command::to_component(&wasm_bytes)? {
+            std::borrow::Cow::Owned(component) => Some(component),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        if let Some(component) = adapted {
+            println!("Adapted the WASI preview 1 module into a command component");
+            wasm_bytes = component;
+        }
+    }
     println!(
         "Input size: {} bytes ({:.1} MB)",
         wasm_bytes.len(),

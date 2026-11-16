@@ -726,10 +726,11 @@ class NetConfig:
 
 @final
 class Command:
-    """A WASI 0.2 or 0.3 command component a shell sandbox can run as an external command.
+    """A WASI command a shell sandbox can run as an external command.
 
     For example uutils coreutils, ripgrep or curl built for ``wasm32-wasip2``,
-    or ``gh`` built for ``wasm32-wasip3``.
+    ``gh`` built for ``wasm32-wasip3``, or a WASI preview 1 CLI
+    (``wasm32-wasip1``), which is adapted into a component when loaded.
     Pass commands by name: ``Sandbox(language="shell", commands={"rg": rg})``.
     The same `Command` under several names (a multicall binary, which picks the
     tool from ``argv[0]``) is compiled once. A command sees the sandbox's
@@ -744,17 +745,21 @@ class Command:
 
     @staticmethod
     def from_file(path: PathLike, *, allow_tunnels: bool = False) -> Command:
-        """Compile a command component from a ``.wasm`` file.
+        """Compile a command from a ``.wasm`` file.
+
+        A WASI 0.2 or 0.3 command component, or a WASI preview 1 command
+        module, adapted into a component first.
 
         Raises:
             InitializationError: If it can't be read or compiled, or isn't a
-                WASI 0.2 or 0.3 command.
+                WASI command (for example if it imports what commands don't
+                get, such as ``wasi:http``).
         """
         ...
 
     @staticmethod
     def from_bytes(wasm: bytes, *, allow_tunnels: bool = False) -> Command:
-        """Compile a command component from its ``.wasm`` bytes."""
+        """Compile a command from its ``.wasm`` bytes, as `from_file` does."""
         ...
 
     @staticmethod

@@ -213,7 +213,7 @@ eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --no-verify
 
 ## Checking Shell Commands
 
-`commands inspect` reads a `.wasm` command (it doesn't compile it) and prints its WASI version, each interface it imports with whether shell children get it, its exports, and whether eryx can run it, exiting 1 if not:
+`commands inspect` reads a `.wasm` command (it doesn't compile it) and prints its WASI version, each interface it imports with whether shell children get it, its exports, and whether eryx can run it. It exits 1 if eryx can't run the command, and 2 if the file can't be inspected at all (unreadable, a `.cwasm`, or neither a component nor a WASI preview 1 module); with `--json`, that prints `{"error": "..."}`:
 
 ```bash
 eryx-precompile commands inspect rg.wasm
