@@ -23,7 +23,7 @@ mod policy;
 mod proxy;
 use ipnet::{Ipv4Net, Ipv6Net};
 use policy::{CheckedTcp, NetPolicy, RequestFramer, ResponseMasker};
-pub use proxy::{ChildNetwork, ChildProxy};
+pub use proxy::{ChildNetPolicy, ChildNetwork, ChildProxy};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -1027,6 +1027,29 @@ impl Chunked {
     }
 }
 
+/// Upstream connections one execution may hold at once, shared by its
+/// guest's [`ConnectionManager`] and its children's proxies: the request's
+/// [`NetConfig::max_connections`], or unlimited for 0.
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectionBudget(Option<Arc<tokio::sync::Semaphore>>);
+
+impl ConnectionBudget {
+    pub(crate) fn new(max: u32) -> Self {
+        Self((max > 0).then(|| Arc::new(tokio::sync::Semaphore::new(max as usize))))
+    }
+
+    /// A share of the budget, to hold while a connection is open (`None` if
+    /// it's unlimited), or an error when it's spent.
+    pub(crate) fn try_acquire(
+        &self,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, tokio::sync::TryAcquireError> {
+        self.0
+            .as_ref()
+            .map(|budget| Arc::clone(budget).try_acquire_owned())
+            .transpose()
+    }
+}
+
 /// Manages TCP and TLS connections for a sandbox instance.
 ///
 /// Each sandbox has its own connection manager, which tracks active connections
@@ -1035,6 +1058,10 @@ impl Chunked {
 pub struct ConnectionManager {
     /// The network policy, shared with each connection's framer and masker.
     policy: Arc<NetPolicy>,
+    /// The execution's connection budget, shared with its children's proxies.
+    budget: ConnectionBudget,
+    /// Each open connection's share of `budget`, by handle.
+    permits: HashMap<u32, tokio::sync::OwnedSemaphorePermit>,
     tcp_connections: HashMap<u32, CheckedTcp>,
     tls_connections: HashMap<u32, TlsStream<TcpStream>>,
     next_handle: u32,
@@ -1110,6 +1137,8 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
         Self {
+            budget: ConnectionBudget::new(config.max_connections),
+            permits: HashMap::new(),
             policy: Arc::new(NetPolicy::new(config, secrets)),
             tcp_connections: HashMap::new(),
             tls_connections: HashMap::new(),
@@ -1121,7 +1150,18 @@ impl ConnectionManager {
         }
     }
 
+    /// The network for this execution's child processes, if `network` gives
+    /// them one: this manager's policy (narrowed, for
+    /// [`ChildNetwork::Narrow`]) and secrets, and its connection budget, so
+    /// that the guest and its children together never hold more than
+    /// [`NetConfig::max_connections`] connections.
+    #[must_use]
+    pub fn child_network(&self, network: ChildNetwork) -> Option<ChildNetPolicy> {
+        ChildNetPolicy::new(Arc::clone(&self.policy), self.budget.clone(), network)
+    }
+
     /// Get the total number of active connections.
+    #[cfg(test)]
     fn connection_count(&self) -> usize {
         self.tcp_connections.len() + self.tls_connections.len()
     }
@@ -1199,11 +1239,10 @@ impl ConnectionManager {
         // policy's own check in `connect` would.
         self.policy.check_host(host)?;
 
-        if self.policy.config.max_connections > 0
-            && self.connection_count() >= self.policy.config.max_connections as usize
-        {
-            return Err(TcpError::NotPermitted("connection limit reached".into()));
-        }
+        let permit = self
+            .budget
+            .try_acquire()
+            .map_err(|_| TcpError::NotPermitted("connection limit reached".into()))?;
 
         let connect_timeout =
             Self::effective_timeout(self.policy.config.connect_timeout, timeout_ms);
@@ -1211,6 +1250,9 @@ impl ConnectionManager {
 
         let handle = self.alloc_handle();
         self.tcp_connections.insert(handle, tcp);
+        if let Some(permit) = permit {
+            self.permits.insert(handle, permit);
+        }
         self.connection_hosts.insert(handle, host.to_string());
 
         tracing::debug!(handle, host, port, "TCP connection established");
@@ -1318,6 +1360,7 @@ impl ConnectionManager {
         if self.tcp_connections.remove(&handle).is_some() {
             tracing::debug!(handle, "TCP connection closed");
         }
+        self.permits.remove(&handle);
         // Clean up HTTP parsing state and host tracking
         self.http_states.remove(&handle);
         self.connection_hosts.remove(&handle);
@@ -1352,6 +1395,7 @@ impl ConnectionManager {
             .remove(&tcp_handle)
             .ok_or(TlsError::InvalidHandle)?;
         let host = self.connection_hosts.remove(&tcp_handle);
+        let permit = self.permits.remove(&tcp_handle);
         self.http_states.remove(&tcp_handle);
         self.read_states.remove(&tcp_handle);
 
@@ -1362,6 +1406,9 @@ impl ConnectionManager {
 
         let handle = self.alloc_handle();
         self.tls_connections.insert(handle, tls);
+        if let Some(permit) = permit {
+            self.permits.insert(handle, permit);
+        }
 
         // Carry over the host mapping from the TCP connection
         if let Some(host) = host {
@@ -1480,6 +1527,7 @@ impl ConnectionManager {
         if self.tls_connections.remove(&handle).is_some() {
             tracing::debug!(handle, "TLS connection closed");
         }
+        self.permits.remove(&handle);
         // Clean up HTTP parsing state and host tracking
         self.http_states.remove(&handle);
         self.connection_hosts.remove(&handle);
@@ -1500,6 +1548,7 @@ impl ConnectionManager {
         let tls_count = self.tls_connections.len();
         self.tcp_connections.clear();
         self.tls_connections.clear();
+        self.permits.clear();
         self.http_states.clear();
         self.connection_hosts.clear();
         self.read_states.clear();

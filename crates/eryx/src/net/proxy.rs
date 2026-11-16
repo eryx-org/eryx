@@ -31,12 +31,13 @@ use rustls::ServerConfig;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::policy::{NetPolicy, RequestFramer, ResponseMasker};
-use super::{MAX_HEADER_LEN, NetConfig, TcpError, TlsError, find_header_end, request_line};
+use super::{
+    ConnectionBudget, MAX_HEADER_LEN, NetConfig, TcpError, TlsError, find_header_end, request_line,
+};
 use crate::secrets::SecretConfig;
 
 /// How a sandbox's child processes may reach the network.
@@ -72,6 +73,51 @@ const BUF_LEN: usize = 16 * 1024;
 /// ClientHello, and the child should hear so well before its execution
 /// times out.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An execution's network for its children: its policy (narrowed, for
+/// [`ChildNetwork::Narrow`]) and secrets, and its connection budget, which
+/// the guest's [`ConnectionManager`](super::ConnectionManager) and every
+/// child proxy started from this draw on together. Make one with
+/// [`ConnectionManager::child_network`](super::ConnectionManager::child_network).
+#[derive(Clone, Debug)]
+pub struct ChildNetPolicy {
+    policy: Arc<NetPolicy>,
+    budget: ConnectionBudget,
+    /// The children's own limit, across all their proxies: the narrowed
+    /// policy's `max_connections` (for `Inherit`, the same as `budget`'s).
+    children: ConnectionBudget,
+}
+
+impl ChildNetPolicy {
+    /// `None` for [`ChildNetwork::None`].
+    pub(crate) fn new(
+        sandbox: Arc<NetPolicy>,
+        budget: ConnectionBudget,
+        network: ChildNetwork,
+    ) -> Option<Self> {
+        let policy = match network {
+            ChildNetwork::None => return None,
+            ChildNetwork::Inherit => sandbox,
+            ChildNetwork::Narrow(config) => Arc::new(sandbox.narrowed(*config)),
+        };
+        let children = ConnectionBudget::new(policy.max_connections());
+        Some(Self {
+            policy,
+            budget,
+            children,
+        })
+    }
+
+    /// Start a proxy for children that may (`allow_tunnels`) or may not
+    /// open blind tunnels. Must be called within a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the CA can't be generated or the listener can't be bound.
+    pub fn start_proxy(&self, allow_tunnels: bool) -> std::io::Result<ChildProxy> {
+        ChildProxy::start_with(self, allow_tunnels)
+    }
+}
 
 /// A forward proxy for one sandbox's child processes, listening on
 /// `127.0.0.1`. It stops when dropped, closing every connection.
@@ -110,12 +156,15 @@ impl ChildProxy {
         network: ChildNetwork,
         allow_tunnels: bool,
     ) -> std::io::Result<Option<Self>> {
+        let budget = ConnectionBudget::new(config.max_connections());
         let sandbox = Arc::new(NetPolicy::new(config, secrets));
-        let policy = match network {
-            ChildNetwork::None => return Ok(None),
-            ChildNetwork::Inherit => sandbox,
-            ChildNetwork::Narrow(config) => Arc::new(sandbox.narrowed(*config)),
-        };
+        ChildNetPolicy::new(sandbox, budget, network)
+            .map(|policy| policy.start_proxy(allow_tunnels))
+            .transpose()
+    }
+
+    fn start_with(net: &ChildNetPolicy, allow_tunnels: bool) -> std::io::Result<Self> {
+        let policy = Arc::clone(&net.policy);
         let ca = Ca::new().map_err(std::io::Error::other)?;
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
@@ -124,24 +173,23 @@ impl ChildProxy {
         let ca_pem = ca.pem.clone();
         #[cfg(test)]
         let ca_der = ca.der.clone();
-        let max = policy.max_connections() as usize;
         let shared = Arc::new(Shared {
             connect_timeout: policy.connect_timeout(),
             io_timeout: policy.io_timeout(),
             policy,
             ca,
             allow_tunnels,
-            // 0 means unlimited, as for eryx:net.
-            connections: (max > 0).then(|| Arc::new(Semaphore::new(max))),
+            budget: net.budget.clone(),
+            children: net.children.clone(),
         });
         let task = tokio::spawn(accept_loop(listener, shared));
-        Ok(Some(Self {
+        Ok(Self {
             addr,
             ca_pem,
             #[cfg(test)]
             ca_der,
             task,
-        }))
+        })
     }
 
     /// The address the proxy listens on (`127.0.0.1:<port>`).
@@ -236,7 +284,10 @@ struct Shared {
     allow_tunnels: bool,
     connect_timeout: Duration,
     io_timeout: Duration,
-    connections: Option<Arc<Semaphore>>,
+    /// The execution's connection budget, shared with its guest.
+    budget: ConnectionBudget,
+    /// Its children's share: `policy`'s limit, across both proxies.
+    children: ConnectionBudget,
 }
 
 async fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
@@ -337,13 +388,14 @@ impl ProxyError {
 /// Serve one connection from a child, replying with the error if it's
 /// refused before any response has started.
 async fn serve(shared: &Shared, mut client: TcpStream) -> Result<(), ProxyError> {
-    let permit = shared
-        .connections
-        .as_ref()
-        .map(|limit| Arc::clone(limit).try_acquire_owned());
-    let result = match permit {
-        Some(Err(_)) => Err(ProxyError::Busy),
-        _ => route(shared, &mut client).await,
+    // Both held for as long as the connection is open.
+    let permits = shared
+        .children
+        .try_acquire()
+        .and_then(|child| Ok((child, shared.budget.try_acquire()?)));
+    let result = match permits {
+        Err(_) => Err(ProxyError::Busy),
+        Ok(_permits) => route(shared, &mut client).await,
     };
     if let Err(e) = &result
         && let Some(response) = e.response(&shared.policy)
@@ -1069,6 +1121,55 @@ mod tests {
         let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
         assert!(status.contains(" 503 "), "{status}");
         drop(held);
+    }
+
+    /// The guest and its children share the execution's `max_connections`:
+    /// what the guest holds, children can't, through either proxy.
+    #[tokio::test]
+    async fn guest_and_children_share_one_connection_budget() {
+        let (port, cert, _) = upstream(true).await;
+        let target = format!("api.test:{port}");
+        let mut guest =
+            crate::net::ConnectionManager::new(config(&cert).with_max_connections(2), secrets());
+        let children = guest.child_network(ChildNetwork::Inherit).unwrap();
+        let inspecting = children.start_proxy(false).unwrap();
+        let tunnelling = children.start_proxy(true).unwrap();
+
+        let held = guest.tcp_connect("api.test", port, 0).await.unwrap();
+        let (_child, status) = connect_to(&tunnelling, &target).await;
+        assert!(status.contains(" 200 "), "{status}");
+        // Two of two: neither the other proxy nor the guest gets a third.
+        let (_, status) = connect_to(&inspecting, &target).await;
+        assert!(status.contains(" 503 "), "{status}");
+        let err = guest.tcp_connect("api.test", port, 0).await.unwrap_err();
+        assert!(err.to_string().contains("connection limit"), "{err}");
+
+        // The guest closing one hands it back.
+        guest.tcp_close(held);
+        let (_child, status) = connect_to(&inspecting, &target).await;
+        assert!(status.contains(" 200 "), "{status}");
+    }
+
+    /// A narrowed limit holds across both of the children's proxies, below
+    /// the guest's.
+    #[tokio::test]
+    async fn narrow_limits_all_the_childrens_proxies_together() {
+        let (port, cert, _) = upstream(true).await;
+        let target = format!("api.test:{port}");
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let narrow = NetConfig::permissive()
+            .allow_internal_host("*.test")
+            .with_max_connections(1);
+        let children = guest
+            .child_network(ChildNetwork::Narrow(Box::new(narrow)))
+            .unwrap();
+        let inspecting = children.start_proxy(false).unwrap();
+        let tunnelling = children.start_proxy(true).unwrap();
+
+        let (_child, status) = connect_to(&inspecting, &target).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let (_, status) = connect_to(&tunnelling, &target).await;
+        assert!(status.contains(" 503 "), "{status}");
     }
 
     /// An idle tunnel is closed after the I/O timeout.
