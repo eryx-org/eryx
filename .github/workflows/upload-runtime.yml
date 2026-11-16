@@ -1,8 +1,10 @@
 # Upload runtime-{python,javascript,shell}.wasm, the shell's coreutils.wasm and
 # the JavaScript bundler eryx-bundler.wasm, for `eryx-precompile setup`, and the
-# command components from clis/ (runtime-build.yml), each with its .sha256 and
+# command components from clis/ (cli-build.yml), each with its .sha256 and
 # third-party .notices.md, to the main eryx GitHub release.
 # Runs separately from the release workflows to avoid conflicts over the release.
+# The runtimes and the commands are built and uploaded independently, so a
+# failed command build doesn't hold up the runtimes.
 
 name: Upload Runtime Artifacts
 
@@ -25,8 +27,16 @@ jobs:
       !startsWith(github.event.release.tag_name, 'eryx-vfs-v')
     uses: ./.github/workflows/runtime-build.yml
 
+  build-clis:
+    name: Build CLIs
+    # The same releases as the runtimes.
+    if: >-
+      startsWith(github.event.release.tag_name, 'eryx-v') &&
+      !startsWith(github.event.release.tag_name, 'eryx-vfs-v')
+    uses: ./.github/workflows/cli-build.yml
+
   upload-runtime:
-    name: Upload to release
+    name: Upload runtimes to release
     runs-on: ubuntu-26.04
     needs: build
     permissions:
@@ -38,20 +48,47 @@ jobs:
           name: runtime-assets
           path: runtime-assets
 
+      # `eryx-precompile setup` verifies each download against its .sha256.
+      # Listed by name, so nothing else in the artifact is published.
+      - name: Upload the runtimes to the release
+        working-directory: runtime-assets
+        run: |
+          files=()
+          for name in runtime-python runtime-javascript runtime-shell coreutils eryx-bundler; do
+            sha256sum --check "$name.wasm.sha256"
+            files+=("$name.wasm" "$name.wasm.sha256" "$name.notices.md")
+          done
+          gh release upload "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+
+  upload-clis:
+    name: Upload CLIs to release
+    runs-on: ubuntu-26.04
+    needs: build-clis
+    permissions:
+      contents: write
+    steps:
+      # Into their own directory, so no command's files can stand in for a
+      # runtime's.
       - name: Download CLI assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: cli-assets-*
           merge-multiple: true
-          path: runtime-assets
+          path: cli-assets
 
-      # `eryx-precompile setup` verifies each download against its .sha256.
-      - name: Upload the runtimes to the release
-        working-directory: runtime-assets
+      # The names cli-build.yml builds, each listed.
+      - name: Upload the CLIs to the release
+        working-directory: cli-assets
         run: |
-          sha256sum --check ./*.wasm.sha256
-          gh release upload "$TAG_NAME" ./*.wasm ./*.wasm.sha256 ./*.notices.md \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          files=()
+          for name in rg sd jaq jq curl; do
+            sha256sum --check "$name.wasm.sha256"
+            files+=("$name.wasm" "$name.wasm.sha256" "$name.notices.md")
+          done
+          gh release upload "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.event.release.tag_name }}

@@ -126,13 +126,21 @@ jobs:
       - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
         with:
           version: 2026.11.8
-          install_args: rust aqua:bytecodealliance/wasmtime
+          # cargo-about for the notices of the ones published (cli-build.yml).
+          install_args: rust aqua:bytecodealliance/wasmtime cargo:cargo-about
           cache: false
       - run: rustup target add wasm32-wasip2
       - run: mise run build-cli -- "$CLI"
         env:
           CLI: ${{ matrix.cli }}
       - run: clis/smoke.sh "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      # A release can't publish a command whose crates' licences aren't
+      # accepted (#837); find out here instead.
+      - name: Check the notices
+        if: contains(fromJSON('["coreutils", "rg", "sd", "jaq"]'), matrix.cli)
+        run: python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
         env:
           CLI: ${{ matrix.cli }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -177,6 +185,12 @@ jobs:
         env:
           MANIFEST: ${{ matrix.manifest || matrix.cli }}
       - run: clis/smoke.sh "$CLI"
+        env:
+          CLI: ${{ matrix.cli }}
+      # Published ones (cli-build.yml) need their manual.toml entries (#837).
+      - name: Check the notices
+        if: contains(fromJSON('["jq", "curl"]'), matrix.cli)
+        run: python3 scripts/notices.py generate "$RUNNER_TEMP/notices" "$CLI"
         env:
           CLI: ${{ matrix.cli }}
       # A GPL component ships with its licence and our notice (#837).

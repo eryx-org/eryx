@@ -1,0 +1,79 @@
+# Build the command components from clis/ that ship as eryx release assets,
+# for the eryx-server image and anyone registering them as commands.
+#
+# Called by upload-runtime.yml and the release dry run; it publishes nothing.
+# Kept apart from runtime-build.yml so a CLI build can't hold up the pyeryx
+# wheels or the runtime assets. One artifact per command,
+# `cli-assets-<name>`: <name>.wasm, its .sha256 and its third-party
+# .notices.md (#837). gh waits for its Go-module notices (#986).
+#
+# Each is built and smoke-tested as clis.yml does, without its caches:
+# everything here ships.
+
+name: Build CLI Assets
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-clis:
+    name: Build ${{ matrix.cli }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cli: rg, lane: rust }
+          - { cli: sd, lane: rust }
+          - { cli: jaq, lane: rust }
+          - { cli: jq, lane: c }
+          - { cli: curl, lane: c }
+    env:
+      CLI: ${{ matrix.cli }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - run: rustup target add wasm32-wasip2
+
+      # The C lane's CMake builds use Ninja, which the runner doesn't ship.
+      - name: Install the C lane's tools
+        if: matrix.lane == 'c'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build
+          mise run ensure-wasi-sdk
+
+      - name: Build and smoke-test
+        run: |
+          mise trust
+          mise run build-cli -- "$CLI"
+          clis/smoke.sh "$CLI"
+
+      # Named and listed one by one, so nothing else in the output directory
+      # is published.
+      - name: Hash and write notices
+        run: |
+          mkdir -p cli-assets
+          cp "scratch/$CLI-component/component.wasm" "cli-assets/$CLI.wasm"
+          (cd cli-assets && sha256sum "$CLI.wasm" > "$CLI.wasm.sha256" && cat "$CLI.wasm.sha256")
+          python3 scripts/notices.py generate cli-assets "$CLI"
+
+      - name: Upload CLI assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-assets-${{ matrix.cli }}
+          path: |
+            cli-assets/${{ matrix.cli }}.wasm
+            cli-assets/${{ matrix.cli }}.wasm.sha256
+            cli-assets/${{ matrix.cli }}.notices.md
+          if-no-files-found: error
+          retention-days: 5

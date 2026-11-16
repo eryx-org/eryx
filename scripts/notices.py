@@ -145,17 +145,31 @@ def cli_about_args(artifact, required):
 
 def bin_package(checkout, bin_name):
     """The Cargo.toml of the package in `checkout` that builds `bin_name`:
-    the root package, or a workspace member's."""
+    the root package, or a workspace member's.
+
+    A package builds it if it declares a [[bin]] of that name or, with no
+    [[bin]]s, is named for it and has a src/main.rs (cargo's default binary).
+    Explicit [[bin]]s win, so a library sharing the binary's name (sd's `sd`,
+    whose binary is in `sd-cli`) isn't taken for it.
+    """
     root = checkout / "Cargo.toml"
     data = tomllib.loads(root.read_text())
     candidates = [root] if "package" in data else []
-    candidates += [checkout / m / "Cargo.toml" for m in data.get("workspace", {}).get("members", [])]
-    for path in candidates:
-        package = tomllib.loads(path.read_text())
-        bins = [b["name"] for b in package.get("bin", [])] or [package["package"]["name"]]
-        if bin_name in bins:
+    for member in data.get("workspace", {}).get("members", []):
+        dirs = checkout.glob(member) if any(c in member for c in "*?[") else [checkout / member]
+        candidates += sorted(d / "Cargo.toml" for d in dirs if (d / "Cargo.toml").is_file())
+    packages = [(path, tomllib.loads(path.read_text())) for path in candidates]
+    for path, package in packages:
+        if bin_name in [b["name"] for b in package.get("bin", [])]:
             return path
-    sys.exit(f"no package in {checkout} builds {bin_name}")
+    for path, package in packages:
+        if (
+            not package.get("bin")
+            and package.get("package", {}).get("name") == bin_name
+            and (path.parent / "src" / "main.rs").is_file()
+        ):
+            return path
+    sys.exit(f"no package in {checkout} builds the binary {bin_name}")
 
 
 def manual_section(artifact):
@@ -172,9 +186,8 @@ def manual_section(artifact):
 
 def fetch(about_args):
     """Download the crates cargo-about reads (it runs offline)."""
-    manifests = {"Cargo.toml"} | {
-        args[args.index("-m") + 1] for args in about_args.values() if args and "-m" in args
-    }
+    # The root workspace's for the artifacts without a -m of their own.
+    manifests = {args[args.index("-m") + 1] if "-m" in args else "Cargo.toml" for args in about_args.values() if args}
     for manifest in sorted(manifests):
         subprocess.run(
             ["cargo", "fetch", "--locked", "--manifest-path", manifest], cwd=ROOT, check=True
@@ -279,8 +292,12 @@ def check_manual():
                     errors.append(f"{c['name']}: {v['path']} doesn't contain {string!r}; update its version")
 
     for cli, manifest in CLIS.items():
-        if not any(cli in c["artifacts"] and c.get("cli") == manifest for c in comps):
+        if not any(cli in c["artifacts"] and c.get("cli") == manifest and "cli_dep" not in c for c in comps):
             errors.append(f"{cli}: no third_party/manual.toml entry for the tool ({manifest})")
+        # Each library built into it from its manifest's [[deps]].
+        for dep in tomllib.loads((ROOT / manifest).read_text()).get("deps", []):
+            if not any(cli in c["artifacts"] and c.get("cli") == manifest and c.get("cli_dep") == dep["name"] for c in comps):
+                errors.append(f"{cli}: no third_party/manual.toml entry for its dependency {dep['name']} ({manifest})")
 
     covers = {cv["path"]: (c["name"], cv.get("sha256")) for c in comps for cv in c.get("covers", [])}
     for d in VENDORED_DIRS:

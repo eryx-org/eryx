@@ -3,9 +3,11 @@
 #
 # Runs the same build workflows the releases call:
 # - runtime-build.yml: runtime-{python,javascript,shell}.wasm, coreutils.wasm,
-#   the JavaScript bundler eryx-bundler.wasm, the published clis/ commands and
-#   their .sha256 and .notices.md, the GitHub release assets (kept here as the
-#   `runtime-assets` and `cli-assets-*` artifacts);
+#   the JavaScript bundler eryx-bundler.wasm and their .sha256 and
+#   .notices.md, GitHub release assets (kept here as the `runtime-assets`
+#   artifact);
+# - cli-build.yml: the published clis/ commands, also release assets (the
+#   `cli-assets-*` artifacts);
 # - python-build.yml: every pyeryx wheel, the sdist and the companion wheels,
 #   smoke-tested on Linux, macOS and Windows;
 # - js-build.yml: the npm package;
@@ -31,6 +33,7 @@ on:
       - .github/workflows/js-build.yml
       - .github/workflows/js-release.yml
       - .github/workflows/upload-runtime.yml
+      - .github/workflows/cli-build.yml
       - crates/eryx-server/Dockerfile
       - crates/eryx-python/runtimes/**
       - scripts/sync-runtime-versions.sh
@@ -40,6 +43,8 @@ on:
       - scripts/notices.py
       - third_party/**
       - about.toml
+      # Pins the WASI SDK, cargo-about and the build-cli task.
+      - mise.toml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -61,6 +66,11 @@ jobs:
     name: JavaScript
     if: github.base_ref != 'multi-guest'
     uses: ./.github/workflows/js-build.yml
+
+  clis:
+    name: CLIs
+    if: github.base_ref != 'multi-guest'
+    uses: ./.github/workflows/cli-build.yml
 
   docker:
     name: Docker (${{ matrix.variant }})
