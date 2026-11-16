@@ -53,12 +53,26 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-thread_local! {
-    static RUNTIME: tokio::runtime::Runtime = tokio::runtime::Builder::new_current_thread()
+// State that lasts across calls into the guest is a plain static, not a
+// `thread_local!`: on wasm32-wasip3 each call into an export runs as a task of
+// its own, with thread-local storage of its own, so a thread-local set by one
+// call (`set-result-variable`, or the shell an `execute` left behind) is gone
+// by the next. Thread-locals below only live within one `execute`.
+static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_current_thread()
         .build()
-        .expect("failed to create tokio runtime");
-    static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) };
-    static RESULT_VAR: RefCell<String> = RefCell::new("result".into());
+        .expect("failed to create tokio runtime")
+});
+static SHELL: std::sync::Mutex<Option<Shell>> = std::sync::Mutex::new(None);
+/// The result variable's name; empty for the default, `result`.
+static RESULT_VAR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The guest is single-threaded, so a lock is never contended or poisoned.
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+thread_local! {
     /// The host's callbacks by name, refreshed every execution.
     static CALLBACKS: RefCell<HashMap<String, call::CallbackDef>> = RefCell::new(HashMap::new());
     /// Prefix callbacks (`ns.*`), as `ns.`.
@@ -114,7 +128,7 @@ pub(crate) async fn wait_for_input() {
 }
 
 fn block_on<F: Future>(f: F) -> F::Output {
-    RUNTIME.with(|rt| rt.block_on(f))
+    RUNTIME.block_on(f)
 }
 
 /// Run `f`, and the tasks it spawns, under the component's executor.
@@ -124,7 +138,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
 /// under tokio's `block_on`. A stage waiting on a pipe yields back to the
 /// host, which runs the children meanwhile.
 async fn run_local<F: Future>(f: F) -> F::Output {
-    let handle = RUNTIME.with(|rt| rt.handle().clone());
+    let handle = RUNTIME.handle().clone();
     let _enter = handle.enter();
     tokio::task::LocalSet::new().run_until(f).await
 }
@@ -216,13 +230,16 @@ fn new_shell() -> Shell {
 }
 
 fn with_shell<R>(f: impl FnOnce(&mut Shell) -> R) -> R {
-    SHELL.with(|s| f(s.borrow_mut().get_or_insert_with(new_shell)))
+    f(lock(&SHELL).get_or_insert_with(new_shell))
 }
 
 /// Read and unset the result variable. A value that parses as JSON is passed
 /// through; anything else becomes a JSON string.
 fn take_result(shell: &mut Shell) -> String {
-    let name = RESULT_VAR.with(|r| r.borrow().clone());
+    let name = match lock(&RESULT_VAR).clone() {
+        name if name.is_empty() => "result".to_owned(),
+        name => name,
+    };
     let Some(value) = shell
         .env()
         .get(&name)
@@ -272,9 +289,7 @@ impl Guest for Sandbox {
         // The host's preamble exports the secrets' placeholders, for child
         // commands; it runs first, and its status doesn't count.
         let (preamble, code) = split_preamble(&code);
-        let mut shell = SHELL
-            .with(|s| s.borrow_mut().take())
-            .unwrap_or_else(new_shell);
+        let mut shell = lock(&SHELL).take().unwrap_or_else(new_shell);
         // Callbacks can differ per execution; re-register the current set.
         register_builtins(&mut shell);
         if !preamble.is_empty() {
@@ -293,7 +308,7 @@ impl Guest for Sandbox {
         .await
         .map(|r| u8::from(r.exit_code));
         let result_json = take_result(&mut shell);
-        SHELL.with(|s| *s.borrow_mut() = Some(shell));
+        *lock(&SHELL) = Some(shell);
         // std's stdout is line-buffered; flush so the host sees the tail.
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
@@ -348,18 +363,18 @@ impl Guest for Sandbox {
         }
         let mut shell: Shell = serde_json::from_slice(json).map_err(|e| e.to_string())?;
         register_builtins(&mut shell);
-        SHELL.with(|s| *s.borrow_mut() = Some(shell));
+        *lock(&SHELL) = Some(shell);
         Ok(())
     }
 
     async fn clear_state() {
-        SHELL.with(|s| *s.borrow_mut() = None);
+        *lock(&SHELL) = None;
     }
 
     fn finalize_preinit() {}
 
     async fn set_result_variable(name: String) {
-        RESULT_VAR.with(|r| *r.borrow_mut() = name);
+        *lock(&RESULT_VAR) = name;
     }
 }
 
