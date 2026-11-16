@@ -52,6 +52,7 @@ use crate::error::{Error, ErrorKind};
 use crate::wasm::ExecutorState;
 
 mod pipe;
+mod vmctx;
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -417,6 +418,9 @@ pub struct Command {
     tunnels: bool,
     /// Whether its children may run commands themselves.
     spawns: bool,
+    /// Host memory its instances' metadata takes, charged to the children's
+    /// memory pool while one runs (see `vmctx`).
+    vmctx: usize,
 }
 
 impl std::fmt::Debug for Command {
@@ -450,7 +454,21 @@ impl Command {
     pub fn from_bytes(wasm: &[u8]) -> Result<Self, Error> {
         let engine = crate::Executor::shared_engine()?;
         let component = Component::from_binary(&engine, wasm).map_err(ErrorKind::wasm_component)?;
-        Self::from_component(&engine, &component)
+        Self::from_component(&engine, &component, vmctx::estimate(wasm))
+    }
+
+    /// Stamp `precompiled`, the output of
+    /// [`Executor::precompile`](crate::Executor::precompile) (or its
+    /// variants) for `wasm`, with what its instances need of the host's
+    /// memory, so a sandbox can charge each running child for it.
+    /// `eryx-precompile compile` does this for commands.
+    ///
+    /// A precompiled command without the stamp is charged 4 MiB per child,
+    /// the most one core instance's metadata may take under the pooling
+    /// allocator: always enough, but it fits fewer children in their memory
+    /// pool.
+    pub fn stamp_precompiled(precompiled: &mut Vec<u8>, wasm: &[u8]) {
+        vmctx::stamp(precompiled, vmctx::estimate(wasm));
     }
 
     /// Load a command precompiled by
@@ -476,7 +494,7 @@ impl Command {
         // SAFETY: the caller guarantees the bytes are trusted eryx output.
         let component = unsafe { Component::deserialize(&engine, precompiled) }
             .map_err(crate::wasm::deserialize_error)?;
-        Self::from_component(&engine, &component)
+        Self::from_component(&engine, &component, precompiled_vmctx(precompiled))
     }
 
     /// Load a precompiled command from a file; see
@@ -496,14 +514,16 @@ impl Command {
     #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let path = path.as_ref();
         let engine = crate::Executor::shared_engine()?;
         // SAFETY: the caller guarantees the file is trusted and unchanging.
         let component = unsafe { Component::deserialize_file(&engine, path) }
             .map_err(crate::wasm::deserialize_error)?;
-        Self::from_component(&engine, &component)
+        let vmctx = precompiled_vmctx(&file_tail(path).unwrap_or_default());
+        Self::from_component(&engine, &component, vmctx)
     }
 
-    fn from_component(engine: &Engine, component: &Component) -> Result<Self, Error> {
+    fn from_component(engine: &Engine, component: &Component, vmctx: u64) -> Result<Self, Error> {
         #[cfg(test)]
         tests::COMPILED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let pre = Pre::new(child_linker(engine)?, engine, component)?;
@@ -511,6 +531,7 @@ impl Command {
             pre,
             tunnels: false,
             spawns: false,
+            vmctx: usize::try_from(vmctx).unwrap_or(usize::MAX),
         })
     }
 
@@ -547,6 +568,26 @@ impl Command {
         self.spawns = true;
         self
     }
+}
+
+/// What a precompiled command's instances need of the host's memory, as
+/// [`Command::stamp_precompiled`] recorded it.
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+fn precompiled_vmctx(precompiled: &[u8]) -> u64 {
+    vmctx::stamped(precompiled).unwrap_or(vmctx::UNSTAMPED)
+}
+
+/// The last bytes of `path`, where a stamp would be.
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+fn file_tail(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(vmctx::STAMP_LEN as u64);
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)?;
+    Ok(tail)
 }
 
 /// An execution's network for its children: the sandbox's policy and secrets,
@@ -666,10 +707,12 @@ enum NestedEvent {
     Start {
         id: u64,
         argv: Vec<String>,
+        at: std::time::Instant,
     },
     End {
         id: u64,
         outcome: Result<i32, String>,
+        at: std::time::Instant,
     },
 }
 
@@ -701,7 +744,8 @@ impl NestedTrace {
             queue.next += 1;
             queue.next
         };
-        NestedTraces::push(&traces, NestedEvent::Start { id, argv });
+        let at = std::time::Instant::now();
+        NestedTraces::push(&traces, NestedEvent::Start { id, argv, at });
         Self {
             traces,
             id,
@@ -716,6 +760,7 @@ impl NestedTrace {
             NestedEvent::End {
                 id: self.id,
                 outcome,
+                at: std::time::Instant::now(),
             },
         );
     }
@@ -729,6 +774,7 @@ impl Drop for NestedTrace {
                 NestedEvent::End {
                     id: self.id,
                     outcome: Err("killed".to_owned()),
+                    at: std::time::Instant::now(),
                 },
             );
         }
@@ -799,6 +845,18 @@ impl Spawner {
             );
             return Err(ProcessError::LimitExceeded);
         };
+        let Some(memory) = ChildMemory::reserve(
+            Arc::clone(&self.budget.memory),
+            CHILD_MEMORY_LIMIT,
+            command.vmctx,
+        ) else {
+            tracing::warn!(
+                needs = command.vmctx,
+                used = self.budget.memory.load(Ordering::Relaxed),
+                "no room in the child memory pool for a child's instance metadata"
+            );
+            return Err(ProcessError::LimitExceeded);
+        };
         let charged = args_bytes as u64;
         self.budget.charge(charged)?;
 
@@ -814,7 +872,7 @@ impl Spawner {
             stderr: stderr_tx,
             fuel: 0,
             fuel_used: Arc::default(),
-            memory: Arc::clone(&self.budget.memory),
+            memory,
             _live: live,
             network,
             spawner: command.spawns.then(|| Spawner {
@@ -880,6 +938,7 @@ impl Command {
             pre,
             tunnels: false,
             spawns: false,
+            vmctx: usize::try_from(precompiled_vmctx(precompiled)).unwrap_or(usize::MAX),
         })
     }
 
@@ -925,11 +984,8 @@ impl Command {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
                 // A pool of its own: an isolated run shares no execution's.
-                limits: ChildMemory {
-                    pool: Arc::new(AtomicUsize::new(0)),
-                    held: 0,
-                    limit: limits.memory,
-                },
+                limits: ChildMemory::reserve(Arc::default(), limits.memory, self.vmctx)
+                    .ok_or_else(|| fail(format!("{} needs more memory than its limit", argv[0])))?,
                 // No network: TCP is off.
                 sockets: ChildSockets::default(),
                 fuel: limits.fuel,
@@ -1182,6 +1238,22 @@ struct ChildMemory {
     limit: usize,
 }
 
+impl ChildMemory {
+    /// A share of `pool` holding `bytes` already (for the child's instance
+    /// metadata), or `None` if that doesn't fit `limit`.
+    fn reserve(pool: Arc<AtomicUsize>, limit: usize, bytes: usize) -> Option<Self> {
+        pool.try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            used.checked_add(bytes).filter(|&u| u <= limit)
+        })
+        .ok()?;
+        Some(Self {
+            pool,
+            held: bytes,
+            limit,
+        })
+    }
+}
+
 impl ResourceLimiter for ChildMemory {
     fn memory_growing(
         &mut self,
@@ -1286,8 +1358,9 @@ struct ChildRun {
     fuel: u64,
     /// Fuel it has burned so far, as of its last epoch tick.
     fuel_used: Arc<AtomicU64>,
-    /// The execution's pool of child memory.
-    memory: Arc<AtomicUsize>,
+    /// Its share of the execution's pool of child memory, holding its
+    /// instances' metadata from spawn.
+    memory: ChildMemory,
     /// Its live slot, given back when the run ends or is dropped.
     _live: LiveSlot,
     /// Its proxy, if children have network.
@@ -1370,11 +1443,7 @@ impl ChildRun {
             ChildState {
                 wasi,
                 table: ResourceTable::new(),
-                limits: ChildMemory {
-                    pool: self.memory,
-                    held: 0,
-                    limit: CHILD_MEMORY_LIMIT,
-                },
+                limits: self.memory,
                 sockets: ChildSockets::new(
                     self.network
                         .as_ref()
@@ -1521,7 +1590,6 @@ impl ExecutorState {
             .release(std::mem::take(&mut child.charged));
         let mut run = child.run.take().ok_or(ProcessError::IoError)?;
         run.fuel = fuel.min(CHILD_FUEL);
-        run.memory = Arc::clone(&self.child_budget.memory);
         Ok(run)
     }
 }
@@ -1633,14 +1701,15 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 let state = access.get();
                 for event in events {
                     match event {
-                        NestedEvent::Start { id, argv } => {
-                            if let Some(trace) = state.trace_process_start(&argv) {
+                        NestedEvent::Start { id, argv, at } => {
+                            if let Some(trace) = state.trace_process_start_at(&argv, at) {
                                 reported.insert(id, trace);
                             }
                         }
-                        NestedEvent::End { id, outcome } => {
+                        NestedEvent::End { id, outcome, at } => {
                             if let Some(trace) = reported.remove(&id) {
-                                trace.end(state, outcome.as_ref().copied().map_err(String::as_str));
+                                let outcome = outcome.as_ref().copied().map_err(String::as_str);
+                                trace.end_at(state, outcome, at);
                             }
                         }
                     }
@@ -1819,15 +1888,16 @@ async fn run_nested(
         #[cfg(feature = "unstable-vfs")]
         state.vfs.as_ref().map(eryx_vfs::HybridVfsCtx::fork),
     )?;
-    let trace = spawner
-        .traces
-        .clone()
-        .map(|traces| NestedTrace::start(traces, run.argv.clone()));
     let mut held = Held {
         budget: spawner.budget,
         bytes: charged,
     };
     held.charge(input.len() as u64)?;
+    // Only once it can't be refused, so a refused child reports nothing.
+    let trace = spawner
+        .traces
+        .clone()
+        .map(|traces| NestedTrace::start(traces, run.argv.clone()));
     run.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
     let fuel_used = Arc::clone(&run.fuel_used);
     let mut running = std::pin::pin!(run.run());
@@ -1979,6 +2049,91 @@ mod tests {
         assert_eq!(budget.used.load(Ordering::Relaxed), 0);
     }
 
+    /// The largest core instance `wasm` creates, as wasmtime sizes it: the
+    /// pooling allocator refuses an instance over its limit, saying how many
+    /// bytes it needed, so raise the limit to that until every one fits.
+    async fn largest_instance(wasm: &[u8]) -> u64 {
+        let mut limit = 1;
+        loop {
+            let mut pooling = wasmtime::PoolingAllocationConfig::new();
+            pooling.max_core_instance_size(limit);
+            let mut config = wasmtime::Config::new();
+            config.wasm_component_model_async(true);
+            config.wasm_component_model_more_async_builtins(true);
+            config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+            let engine = Engine::new(&config).unwrap();
+            // wasmtime checks when compiling, and again when instantiating.
+            let tried = async {
+                let component = Component::new(&engine, wasm)?;
+                let mut linker = Linker::<()>::new(&engine);
+                linker.define_unknown_imports_as_traps(&component)?;
+                let mut store = Store::new(&engine, ());
+                linker.instantiate_async(&mut store, &component).await
+            };
+            let Err(e) = tried.await else {
+                return limit as u64;
+            };
+            let message = format!("{e:#}");
+            let needed = message
+                .split_once("requires ")
+                .and_then(|(_, rest)| rest.split_once(' '))
+                .and_then(|(n, _)| n.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("unexpected error: {message}"));
+            assert!(needed > limit, "{message}");
+            limit = needed;
+        }
+    }
+
+    /// The estimate a command is charged for its instances' metadata covers
+    /// what wasmtime allocates for its largest instance, closely.
+    #[tokio::test]
+    async fn instance_metadata_estimates_match_wasmtime() {
+        for target in ["wasm32-wasip2", "wasm32-wasip3"] {
+            let wasm = test_cmd_wasm_for(target);
+            let actual = largest_instance(&wasm).await;
+            let estimated = vmctx::largest(&wasm);
+            assert!(
+                estimated >= actual && estimated <= actual + actual / 20,
+                "{target}: estimated {estimated}, wasmtime {actual}"
+            );
+        }
+    }
+
+    /// A precompiled command carries its estimate in its stamp; one without
+    /// is charged the pooling limit.
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[test]
+    #[allow(unsafe_code)]
+    fn precompiled_commands_carry_their_estimate() {
+        let wasm = test_cmd_wasm();
+        let mut precompiled = crate::Executor::precompile(&wasm).unwrap();
+        // SAFETY: built just above.
+        let plain = unsafe { Command::from_precompiled(&precompiled) }.unwrap();
+        assert_eq!(plain.vmctx as u64, vmctx::UNSTAMPED);
+        Command::stamp_precompiled(&mut precompiled, &wasm);
+        // SAFETY: as above, with a trailer wasmtime ignores.
+        let stamped = unsafe { Command::from_precompiled(&precompiled) }.unwrap();
+        assert_eq!(stamped.vmctx as u64, vmctx::estimate(&wasm));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tc.cwasm");
+        std::fs::write(&path, &precompiled).unwrap();
+        // SAFETY: as above.
+        let from_file = unsafe { Command::from_precompiled_file(&path) }.unwrap();
+        assert_eq!(from_file.vmctx, stamped.vmctx);
+    }
+
+    /// A child whose instances' metadata doesn't fit the memory pool isn't
+    /// started; its share is given back once it ends.
+    #[test]
+    fn instance_metadata_is_charged_to_the_pool() {
+        let pool = Arc::new(AtomicUsize::new(0));
+        let held = ChildMemory::reserve(Arc::clone(&pool), 100, 60).unwrap();
+        assert_eq!(pool.load(Ordering::Relaxed), 60);
+        assert!(ChildMemory::reserve(Arc::clone(&pool), 100, 60).is_none());
+        drop(held);
+        assert_eq!(pool.load(Ordering::Relaxed), 0);
+    }
+
     /// A command is linked for the WASI version whose `wasi:cli/run` it
     /// exports; a component exporting neither isn't a command.
     #[test]
@@ -1990,7 +2145,7 @@ mod tests {
 
         let engine = crate::Executor::shared_engine().unwrap();
         let empty = Component::new(&engine, "(component)").unwrap();
-        assert!(Command::from_component(&engine, &empty).is_err());
+        assert!(Command::from_component(&engine, &empty, 0).is_err());
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or
@@ -2016,7 +2171,7 @@ mod tests {
                 stderr,
                 fuel: CHILD_FUEL,
                 fuel_used: Arc::default(),
-                memory: Arc::default(),
+                memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
                 _live: LiveSlot::take(&Arc::default()).unwrap(),
                 network: None,
                 spawner: None,

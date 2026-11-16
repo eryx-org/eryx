@@ -822,9 +822,11 @@ async fn setup_component(
     let mut precompiled =
         eryx::Executor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
             .with_context(|| format!("Failed to pre-compile {asset} to native code"))?;
-    // Commands aren't runtimes, so coreutils carries no language stamp.
-    if let Component::Runtime(language) = component {
-        eryx::Executor::stamp_language(&mut precompiled, language);
+    // Commands aren't runtimes, so coreutils carries no language stamp, but
+    // the size of its instances' metadata instead.
+    match component {
+        Component::Runtime(language) => eryx::Executor::stamp_language(&mut precompiled, language),
+        _ => eryx::Command::stamp_precompiled(&mut precompiled, &wasm_bytes),
     }
 
     let elapsed = start.elapsed();
@@ -1074,8 +1076,10 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
             cpu_features,
         )
         .context("Failed to AOT compile")?;
-        if let Some(language) = args.language {
-            eryx::Executor::stamp_language(&mut precompiled, language);
+        match args.language {
+            Some(language) => eryx::Executor::stamp_language(&mut precompiled, language),
+            // Without a language it's a command.
+            None => eryx::Command::stamp_precompiled(&mut precompiled, &component_bytes),
         }
 
         let elapsed = start.elapsed();
