@@ -2350,7 +2350,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
-            callback_clock: crate::wasm::CallbackClock::default(),
+            trace_clock: crate::wasm::TraceClock::default(),
         }
     }
 
@@ -2381,7 +2381,7 @@ impl ExecutorState {
             commands: crate::process::Commands::default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
-            callback_clock: crate::wasm::CallbackClock::default(),
+            trace_clock: crate::wasm::TraceClock::default(),
         }
     }
 
@@ -2414,8 +2414,11 @@ impl ExecutorState {
 
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
+        // A child whose `wait` the execution left parked (it timed out) is
+        // reported killed on the old channel before it goes.
+        self.end_running_children();
         self.trace_tx = tx;
-        self.callback_clock = crate::wasm::CallbackClock::default();
+        self.trace_clock = crate::wasm::TraceClock::default();
     }
 
     /// Update the network channel for a new execution.

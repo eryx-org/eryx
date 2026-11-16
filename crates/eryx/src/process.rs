@@ -1333,6 +1333,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
             tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
         }
+        let trace = accessor.with(|mut access| access.get().trace_process_start(&run.argv));
         let fuel_used = Arc::clone(&run.fuel_used);
         let mut charged = 0;
         // Move what the child has burned since the last charge to the parent;
@@ -1356,17 +1357,28 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             Poll::Pending => Poll::Ready(None),
         })
         .await;
-        let Some((code, used)) = finished else {
-            tracing::warn!("parent ran out of fuel; killed its child");
-            return Err(ProcessError::SpawnFailed);
+        const OUT_OF_FUEL: &str = "the parent ran out of fuel";
+        let outcome = match finished {
+            Some((code, used)) if charge(used) => code,
+            _ => {
+                tracing::warn!("parent ran out of fuel; killed its child");
+                Err(OUT_OF_FUEL.to_owned())
+            }
         };
-        if !charge(used) {
-            return Err(ProcessError::SpawnFailed);
-        }
-        code.map_err(|e| {
+        if let Err(e) = &outcome
+            && e != OUT_OF_FUEL
+        {
             tracing::warn!(error = %e, "child command failed");
-            ProcessError::SpawnFailed
-        })
+        }
+        if let Some(trace) = trace {
+            accessor.with(|mut access| {
+                trace.end(
+                    access.get(),
+                    outcome.as_ref().copied().map_err(String::as_str),
+                )
+            });
+        }
+        outcome.map_err(|_| ProcessError::SpawnFailed)
     }
 }
 
