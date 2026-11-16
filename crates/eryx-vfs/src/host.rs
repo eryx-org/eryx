@@ -168,7 +168,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         let allowed = if descriptor.is_dir {
             descriptor.dir_perms.contains(DirPerms::MUTATE)
         } else {
-            descriptor.file_perms.contains(FilePerms::WRITE)
+            descriptor.mount_file_perms.contains(FilePerms::WRITE)
         };
         if !allowed {
             return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
@@ -397,7 +397,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
                 }
             }
 
-            let new_descriptor = VfsDescriptor::file(full_path, file_perms);
+            let mut new_descriptor = VfsDescriptor::file(full_path, file_perms);
+            new_descriptor.mount_file_perms = descriptor.mount_file_perms;
             let resource = self.table.push(new_descriptor)?;
             Ok(resource)
         }

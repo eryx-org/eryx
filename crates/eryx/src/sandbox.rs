@@ -3641,7 +3641,7 @@ pub struct ResourceLimits {
     /// filesystem may hold.
     ///
     /// Each entry is also charged against
-    /// [`max_vfs_bytes`](Self::max_vfs_bytes) (its path plus 64 bytes), so
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) (its path, twice for a directory, plus 64 bytes), so
     /// this mainly bounds operations that visit every entry, such as listing,
     /// removing or renaming a directory. Scripts see the limit as `ENOSPC`.
     /// Applies to the same storage as `max_vfs_bytes`. `None` uses the

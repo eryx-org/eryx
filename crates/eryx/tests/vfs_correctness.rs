@@ -56,8 +56,8 @@ print(int(os.stat('/data/a').st_mtime), int(os.stat('/data/b').st_mtime))
 }
 
 /// Directories keep the times set on them, by path or through a descriptor
-/// opened without `O_DIRECTORY` (as `touch` does), and opening one for
-/// writing fails with `EISDIR`.
+/// opened without `O_DIRECTORY` (as `touch` does), and an open that would
+/// write, truncate or create one fails with `EISDIR`.
 #[tokio::test]
 async fn directory_times_can_be_set() {
     let out = run(
@@ -71,14 +71,19 @@ fd = os.open('/data/d', os.O_RDONLY)
 os.utime(fd, (3_000_000, 4_000_000))
 os.close(fd)
 print(int(os.stat('/data/d').st_mtime))
-try:
-    os.open('/data/d', os.O_WRONLY)
-except OSError as e:
-    print(errno.errorcode[e.errno])
+for flags in [os.O_WRONLY, os.O_RDWR, os.O_RDONLY | os.O_TRUNC, os.O_RDONLY | os.O_CREAT]:
+    try:
+        os.open('/data/d', flags)
+        print('opened')
+    except OSError as e:
+        print(errno.errorcode[e.errno])
 "#,
     )
     .await;
-    assert_eq!(out.trim(), "2000000\n4000000\nEISDIR");
+    assert_eq!(
+        out.trim(),
+        "2000000\n4000000\nEISDIR\nEISDIR\nEISDIR\nEISDIR"
+    );
 }
 
 #[tokio::test]

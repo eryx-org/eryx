@@ -647,6 +647,11 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
             "mkdir /tmp/e && touch -d @100000 /tmp/e && date -r /tmp/e +%s",
             "100000\n",
         ),
+        // touch sets an existing file's times through a read-only descriptor.
+        (
+            "echo x > /tmp/f && touch -d @100000 /tmp/f && date -r /tmp/f +%s",
+            "100000\n",
+        ),
     ])
     .await;
 }

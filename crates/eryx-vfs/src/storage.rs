@@ -318,7 +318,7 @@ impl StorageState {
         self.directories
             .iter()
             .filter(|path| path.as_str() != "/")
-            .map(|path| entry_cost(path))
+            .map(|path| dir_cost(path))
             .fold(files, u64::saturating_add)
     }
 
@@ -328,7 +328,7 @@ impl StorageState {
 
     /// Add directory `path` (which must not exist), charging for it.
     fn insert_dir(&mut self, path: String, now: SystemTime) {
-        self.used = self.used.saturating_add(entry_cost(&path));
+        self.used = self.used.saturating_add(dir_cost(&path));
         self.touch_parent(&path, now);
         self.dir_times.insert(path.clone(), DirTimes::at(now));
         self.directories.insert(path);
@@ -394,9 +394,15 @@ const MAX_NAME_LEN: usize = 255;
 /// Longest absolute path accepted, in bytes (POSIX `PATH_MAX`).
 const MAX_PATH_LEN: usize = 4096;
 
-/// Bytes charged for a directory, or for a file apart from its content.
+/// Bytes charged for a file apart from its content.
 fn entry_cost(path: &str) -> u64 {
     (path.len() as u64).saturating_add(ENTRY_OVERHEAD_BYTES)
+}
+
+/// Bytes charged for a directory: its path is stored twice, as a directory
+/// and as the key of its times.
+fn dir_cost(path: &str) -> u64 {
+    entry_cost(path).saturating_add(path.len() as u64)
 }
 
 /// Bytes charged for a file holding `len` bytes.
@@ -425,7 +431,8 @@ const MKDIR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// offsets it writes at and the sizes it truncates to. Without a limit, a
 /// one-byte write at a large offset turns into an arbitrarily large host
 /// allocation. Paths count too: each file and directory is charged its path
-/// length plus [`ENTRY_OVERHEAD_BYTES`]. Override with
+/// length (twice for a directory, which stores it twice) plus
+/// [`ENTRY_OVERHEAD_BYTES`]. Override with
 /// [`InMemoryStorage::with_max_bytes`].
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1096,7 +1103,7 @@ impl VfsStorage for InMemoryStorage {
         }
 
         self.check_new_entry(&state, &path)?;
-        self.check_growth(&state, &path, 0, entry_cost(&path))?;
+        self.check_growth(&state, &path, 0, dir_cost(&path))?;
         state.insert_dir(path, SystemTime::now());
         Ok(())
     }
@@ -1136,7 +1143,7 @@ impl VfsStorage for InMemoryStorage {
 
         state.directories.remove(&path);
         state.dir_times.remove(&path);
-        state.used = state.used.saturating_sub(entry_cost(&path));
+        state.used = state.used.saturating_sub(dir_cost(&path));
         state.touch_parent(&path, SystemTime::now());
         Ok(())
     }
@@ -1240,9 +1247,10 @@ impl VfsStorage for InMemoryStorage {
                     "moving {from} to {to} makes paths longer than {MAX_PATH_LEN} bytes"
                 )));
             }
-            let moved = (files_to_rename.len() + dirs_to_rename.len()) as u64;
+            // A directory's path is charged twice (see `dir_cost`).
+            let moved = (files_to_rename.len() + 2 * dirs_to_rename.len()) as u64;
             let replaced = if state.directories.contains(&to) {
-                entry_cost(&to)
+                dir_cost(&to)
             } else {
                 0
             };
@@ -1330,7 +1338,7 @@ impl VfsStorage for InMemoryStorage {
                 }
                 if !state.directories.contains(&current) {
                     self.check_new_entry(state, &current)?;
-                    self.check_growth(state, &current, 0, entry_cost(&current))?;
+                    self.check_growth(state, &current, 0, dir_cost(&current))?;
                     state.insert_dir(current.clone(), now);
                 }
             }
@@ -1617,7 +1625,8 @@ mod tests {
     /// they can't grow host memory past the limit for free.
     #[tokio::test]
     async fn entries_and_names_count_towards_the_limit() {
-        let storage = InMemoryStorage::with_max_bytes(10 * (ENTRY_OVERHEAD_BYTES + 3));
+        // Room for ten directories, each charged its three-byte path twice.
+        let storage = InMemoryStorage::with_max_bytes(10 * (ENTRY_OVERHEAD_BYTES + 2 * 3));
         for i in 0..10 {
             storage.mkdir(&format!("/d{i}")).await.unwrap();
         }
@@ -1786,7 +1795,7 @@ mod tests {
             storage.state.read().await.used,
             ["/x", "/x/y", "/x/y/z", "/x/y/z/w"]
                 .iter()
-                .map(|p| entry_cost(p))
+                .map(|p| dir_cost(p))
                 .sum::<u64>()
         );
     }

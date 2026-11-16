@@ -191,8 +191,8 @@ print(result.stdout_text)
 ## Virtual Filesystem Size
 
 `max_vfs_bytes` caps the total bytes the [virtual filesystem](./vfs.md) holds:
-all file contents, plus each file's and directory's path length and a 64-byte
-charge per entry, so empty files and long names aren't free. Names over 255
+all file contents, plus each file's and directory's path length (twice for a
+directory) and a 64-byte charge per entry, so empty files and long names aren't free. Names over 255
 bytes or paths over 4096 bytes fail with `ENAMETOOLONG`. Unlike
 `max_memory_bytes`, which
 bounds the WebAssembly instance's linear memory, VFS contents live in **host**

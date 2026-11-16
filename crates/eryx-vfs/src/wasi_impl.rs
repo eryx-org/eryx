@@ -73,8 +73,12 @@ pub struct VfsDescriptor {
     pub(crate) is_dir: bool,
     /// Directory permissions (for directory descriptors).
     pub(crate) dir_perms: DirPerms,
-    /// File permissions.
+    /// File permissions: for a file, what it was opened for.
     pub(crate) file_perms: FilePerms,
+    /// The file permissions of the preopen this descriptor is beneath. Setting
+    /// a file's times needs the preopen to allow writing, not a descriptor
+    /// opened for writing (as with `futimens`).
+    pub(crate) mount_file_perms: FilePerms,
     /// Which storage it's in, for contexts with more than one (see
     /// `HybridVfsCtx::add_storage_preopen`); 0 is the default storage.
     pub(crate) storage: usize,
@@ -90,6 +94,7 @@ impl VfsDescriptor {
             is_dir: true,
             dir_perms,
             file_perms,
+            mount_file_perms: file_perms,
             storage: 0,
         }
     }
@@ -103,6 +108,7 @@ impl VfsDescriptor {
             is_dir: false,
             dir_perms: DirPerms::empty(),
             file_perms,
+            mount_file_perms: file_perms,
             storage: 0,
         }
     }
