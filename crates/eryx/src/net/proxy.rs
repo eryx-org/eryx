@@ -318,6 +318,14 @@ impl Shared {
         true
     }
 
+    /// Give back `n` bytes charged by [`take_sent`](Self::take_sent) that
+    /// never reached the upstream.
+    fn refund_sent(&self, n: usize) {
+        let n = n as u64;
+        self.children.bytes().refund_sent(n);
+        self.budget.bytes().refund_sent(n);
+    }
+
     /// Charge up to `n` bytes a child received, returning how many fit.
     fn take_received(&self, n: usize) -> usize {
         let granted = self.children.bytes().take_received(n as u64);
@@ -462,6 +470,11 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         .map_err(|_| ProxyError::BadRequest("request is not UTF-8".into()))?;
     let (method, target) = request_line(text)
         .ok_or_else(|| ProxyError::BadRequest("malformed request line".into()))?;
+    // A spent byte limit gets its 403 now, before anything is dialled,
+    // rather than a `200` to a CONNECT tunnel that closes at once.
+    if shared.read_cap() == 0 {
+        return Err(shared.over_limit());
+    }
 
     if method == "CONNECT" {
         let (host, port) = split_authority(target)
@@ -605,8 +618,14 @@ where
         if !shared.take_sent(first.len()) {
             return Err(shared.over_limit());
         }
-        let out = framer.frame(&first).map_err(ProxyError::from)?;
-        up_w.write_all(&out).await?;
+        let sent = match framer.frame(&first) {
+            Ok(out) => up_w.write_all(&out).await.map_err(ProxyError::from),
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = sent {
+            shared.refund_sent(first.len());
+            return Err(e);
+        }
     }
 
     let mut buf = vec![0u8; BUF_LEN];
@@ -631,8 +650,14 @@ where
                     return Ok(());
                 }
                 match framer.frame(&buf[..n]) {
-                    Ok(out) => up_w.write_all(&out).await?,
+                    Ok(out) => {
+                        if let Err(e) = up_w.write_all(&out).await {
+                            shared.refund_sent(n);
+                            return Err(e.into());
+                        }
+                    }
                     Err(e) => {
+                        shared.refund_sent(n);
                         if let Some(response) = ProxyError::from(e).response(&shared.policy) {
                             let _ = child_w.write_all(&response).await;
                         }
@@ -679,7 +704,11 @@ where
             tokio::select! {
                 n = a_r.read(&mut a_buf[..cap]) => match n {
                     Ok(n) if n > 0 && shared.take_sent(n) => {
-                        b_w.write_all(&a_buf[..n]).await.is_ok()
+                        let sent = b_w.write_all(&a_buf[..n]).await.is_ok();
+                        if !sent {
+                            shared.refund_sent(n);
+                        }
+                        sent
                     }
                     _ => false,
                 },
@@ -1313,6 +1342,71 @@ mod tests {
         guest.tcp_write(handle, &[b'x'; 20], 0).await.unwrap();
         let response = get(&proxy).await;
         assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    }
+
+    /// Once the byte limit is spent, a request gets its 403 before anything
+    /// is dialled, a tunnelled or inspected `CONNECT` included.
+    #[tokio::test]
+    async fn a_spent_byte_limit_refuses_before_dialling() {
+        let (port, cert, _) = upstream(false).await;
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let dialled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&dialled);
+        tokio::spawn(async move {
+            while target.accept().await.is_ok() {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        for tunnels in [false, true] {
+            let mut guest =
+                crate::net::ConnectionManager::new(config(&cert).with_max_bytes(10), secrets());
+            let proxy = guest
+                .child_network(ChildNetwork::Inherit)
+                .unwrap()
+                .start_proxy(tunnels)
+                .unwrap();
+            let handle = guest.tcp_connect("api.test", port, 0).await.unwrap();
+            guest.tcp_write(handle, &[b'x'; 10], 0).await.unwrap();
+
+            let (_, status) = connect_to(&proxy, &format!("api.test:{target_port}")).await;
+            assert!(status.contains(" 403 "), "tunnels={tunnels}: {status}");
+            let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+            let response = exchange(
+                &mut stream,
+                format!("GET http://api.test:{target_port}/ HTTP/1.1\r\nHost: api.test\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await;
+            assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(dialled.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A request the proxy refuses after charging it is refunded: it never
+    /// reached the upstream.
+    #[tokio::test]
+    async fn refused_requests_are_refunded() {
+        let (port, cert, seen) = upstream(true).await;
+        let guest =
+            crate::net::ConnectionManager::new(config(&cert).with_max_bytes(1 << 20), secrets());
+        let proxy = guest
+            .child_network(ChildNetwork::Inherit)
+            .unwrap()
+            .start_proxy(false)
+            .unwrap();
+        let (stream, _) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        let response = exchange(
+            &mut tls,
+            b"GET / HTTP/1.1\r\nHost: other.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        assert_eq!(received(&seen), "");
+        assert_eq!(guest.traffic().sent, 0);
     }
 
     /// A narrowed `max_bytes` limits the children, below the guest's.

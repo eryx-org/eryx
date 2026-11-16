@@ -418,6 +418,11 @@ impl<'a> SessionExecuteBuilder<'a> {
     /// [`ConnectionManager::child_network`](crate::ConnectionManager::child_network)
     /// on the manager given to [`with_network`](Self::with_network), so the
     /// guest and its children share one connection and byte budget.
+    ///
+    /// Make a fresh `ChildNetPolicy` from that manager for every execution.
+    /// The policy carries its manager's budget, so one kept from an earlier
+    /// execution would charge the children to that execution's spent budget
+    /// rather than this one's.
     #[must_use]
     fn with_child_network(mut self, net: crate::net::ChildNetPolicy) -> Self {
         self.child_net = Some(crate::process::ChildNet::new(net));

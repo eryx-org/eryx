@@ -576,8 +576,10 @@ included. Reads stop at the cap, and past it reads and writes raise `OSError`
 (`network limit reached`); a child's request gets a `403` from its proxy, or
 its connection closes if a response had started. Either way, the result's
 `stats.network_bytes_sent` and `stats.network_bytes_received` say how much it
-moved, children included, as the code wrote and read it (TLS overhead isn't
-counted):
+moved, children included, as the code wrote and read it. TLS overhead isn't
+counted, except through a child's blind `CONNECT` tunnel (a command allowed
+tunnels), where the proxy only sees the encrypted bytes: there the handshake
+and record overhead count too:
 
 ```rust,ignore
 let sandbox = Sandbox::embedded()

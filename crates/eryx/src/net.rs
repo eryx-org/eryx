@@ -342,7 +342,10 @@ impl NetConfig {
     /// every connection, its child processes' included (see
     /// [`ConnectionManager::child_network`]). Past it, reads and writes fail
     /// with [`TcpError::NotPermitted`]; a child's request gets a `403`, or its
-    /// connection is closed if a response had started.
+    /// connection is closed if a response had started. Bytes are counted as
+    /// the code wrote and read them, without TLS overhead, except through a
+    /// child's blind tunnel (see [`ChildProxy::start`]), which only sees the
+    /// encrypted bytes and so also counts the handshake and record overhead.
     #[must_use]
     pub fn with_max_bytes(mut self, max: u64) -> Self {
         self.max_bytes = Some(max);
