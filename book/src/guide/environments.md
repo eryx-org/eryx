@@ -117,7 +117,9 @@ when it was loaded, as pools and factories do for every sandbox they make.
   imported. Packages written for browsers or Workers generally avoid them.
 - **Web globals:** `crypto.getRandomValues()` and `crypto.randomUUID()`
   (from the host's random source, so uuid and nanoid work), `TextEncoder`
-  and `TextDecoder` (UTF-8 only).
+  and `TextDecoder` (UTF-8 only), and timers (`setTimeout` and friends, with
+  `node:timers` and `node:timers/promises`; see
+  [Timers in JavaScript](./sandboxes.md#timers-in-javascript)).
 - **Imports are checked like ES modules:** importing a name a module doesn't
   export (or a default from a module without one) throws a SyntaxError
   naming the export and the module.
@@ -126,11 +128,11 @@ when it was loaded, as pools and factories do for every sandbox they make.
 
 - Python and shell environments (`build` returns `Unsupported`).
 - The other Node built-ins (above), `crypto.subtle` and `node:crypto`'s
-  hashes and ciphers, `URL`, and timers (`setTimeout`, `setInterval`). A
-  package that imports a missing built-in fails when it's imported; one that
-  uses a missing API fails when it calls it.
-- Node's globals: there's no global `Buffer`, `process.nextTick` or
-  `setImmediate`. Code that uses `Buffer` without importing it (common in
-  packages written for Node) throws `ReferenceError: Buffer is not defined`;
-  `import { Buffer } from "node:buffer"` works.
+  hashes and ciphers, and `URL` (#925). A package that imports a missing
+  built-in fails when it's imported; one that uses a missing API fails when
+  it calls it.
+- Node's globals: there's no global `Buffer` or `process.nextTick`. Code
+  that uses `Buffer` without importing it (common in packages written for
+  Node) throws `ReferenceError: Buffer is not defined`; `import { Buffer }
+  from "node:buffer"` works.
 - Packages with native addons or WebAssembly.

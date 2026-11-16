@@ -65,6 +65,9 @@ struct Task {
     /// What the script's `import` declarations bind, kept for snapshots
     /// once it succeeds.
     imports: Vec<crate::modules::ImportRecord>,
+    /// The host `sleep` waiting for the next timer, if one is armed, and
+    /// when (on `fresh::now`'s clock) it ends.
+    sleep: Option<(wit::PendingSleep, f64)>,
 }
 
 struct PendingInvoke {
@@ -99,6 +102,7 @@ impl Engine {
             let hooks: Object<'_> = prelude.call((native,))?;
             crate::fetch::install(&ctx)?;
             crate::web::install(&ctx)?;
+            hooks.set("timers", crate::timers::install(&ctx)?)?;
             crate::modules::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
         });
@@ -219,13 +223,54 @@ impl Task {
             stdout: Vec::new(),
             stderr: Vec::new(),
             imports: Vec::new(),
+            sleep: None,
         }
     }
 
-    fn register(&mut self, pending: PendingInvoke) {
-        let set = *self
+    fn waitable_set(&mut self) -> u32 {
+        *self
             .waitable_set
-            .get_or_insert_with(|| unsafe { wit::waitable_set_new() });
+            .get_or_insert_with(|| unsafe { wit::waitable_set_new() })
+    }
+
+    /// Stop the armed `sleep`, if any.
+    fn disarm(&mut self) {
+        if let Some((sleep, _)) = self.sleep.take() {
+            let handle = sleep.subtask;
+            unsafe { wit::waitable_join(handle, 0) };
+            // SAFETY: a live subtask handle of this task, out of any waitable set.
+            if unsafe { wit::subtask_cancel(handle) } == SUBTASK_RETURNED {
+                wit::sleep_finish(sleep);
+            }
+            unsafe { wit::subtask_drop(handle) };
+        }
+    }
+
+    /// Have the host wake the task in `delay_ms`, unless an armed `sleep`
+    /// already ends by then. False if the host finished it at once, so the
+    /// timer is due now.
+    fn arm(&mut self, delay_ms: f64) -> bool {
+        let deadline = crate::fresh::now() + delay_ms;
+        if self
+            .sleep
+            .as_ref()
+            .is_some_and(|(_, armed)| *armed <= deadline)
+        {
+            return true;
+        }
+        self.disarm();
+        // Whole nanoseconds; a fraction of one isn't worth a wake-up.
+        let Some(sleep) = wit::sleep_start((delay_ms * 1e6) as u64) else {
+            return false;
+        };
+        let set = self.waitable_set();
+        unsafe { wit::waitable_join(sleep.subtask, set) };
+        self.sleep = Some((sleep, deadline));
+        true
+    }
+
+    fn register(&mut self, pending: PendingInvoke) {
+        let set = self.waitable_set();
         let handle = pending.call.subtask;
         unsafe { wit::waitable_join(handle, set) };
         self.pending.insert(handle, pending);
@@ -385,7 +430,27 @@ pub(crate) fn resume(event: u32, handle: u32, status: u32) -> u32 {
     with_ctx(|ctx, hooks| {
         match AsyncEvent::of(event, status) {
             AsyncEvent::Returned => {
-                let pending = with_task(|task| task.take(handle)).flatten();
+                let slept = with_task(|task| {
+                    if task
+                        .sleep
+                        .as_ref()
+                        .is_some_and(|(s, _)| s.subtask == handle)
+                    {
+                        let (sleep, _) = task.sleep.take().expect("checked");
+                        unsafe { wit::waitable_join(handle, 0) };
+                        wit::sleep_finish(sleep);
+                        unsafe { wit::subtask_drop(handle) };
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+                let pending = if slept {
+                    None
+                } else {
+                    with_task(|task| task.take(handle)).flatten()
+                };
                 if let Some(pending) = pending {
                     let result = wit::invoke_finish(pending.call);
                     unsafe { wit::subtask_drop(handle) };
@@ -452,32 +517,77 @@ fn cancel_subtask(call: PendingInvokeCall) {
 
 /// Drain the job queue, then either finish the task or suspend it.
 fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
-    while ctx.execute_pending_job() {}
-
-    let (completion, has_pending) = with_task(|task| {
-        let completion = task.completion.clone().expect("completion promise set");
-        (completion, !task.pending.is_empty())
-    })
-    .expect("poll without an active task");
-    let promise = completion.restore(ctx).expect("completion promise restore");
-
-    match promise.state() {
-        PromiseState::Resolved => finish(hooks, Ok(())),
-        PromiseState::Rejected => {
-            // `result` rethrows the rejection reason so `catch` can pick it up.
-            let _ = promise.result::<Value<'_>>();
-            let msg = format_value(ctx, hooks, ctx.catch());
-            finish(hooks, Err(msg))
+    loop {
+        // Microtasks, then each due timer with the microtasks it queues.
+        loop {
+            while ctx.execute_pending_job() {}
+            match timers_call::<bool>(hooks, "runDue", ()).catch(ctx) {
+                Ok(true) => {}
+                Ok(false) => break,
+                // An exception in a timer callback fails the execute, as an
+                // uncaught one ends a Node process.
+                Err(e) => {
+                    let msg = format_caught(ctx, hooks, e);
+                    return finish(hooks, Err(msg));
+                }
+            }
         }
-        PromiseState::Pending if has_pending => suspend(),
-        PromiseState::Pending => finish(
-            hooks,
-            Err(
-                "execution never completed: the script awaited a promise that nothing will resolve"
-                    .to_string(),
-            ),
-        ),
+
+        let (completion, has_pending) = with_task(|task| {
+            let completion = task.completion.clone().expect("completion promise set");
+            (completion, !task.pending.is_empty())
+        })
+        .expect("poll without an active task");
+        let promise = completion.restore(ctx).expect("completion promise restore");
+        // [ms until the next timer (-1 if none), whether one is referenced].
+        let (next_timer, referenced) = timers_call::<Array<'_>>(hooks, "state", ())
+            .and_then(|state| Ok((state.get::<f64>(0)?, state.get::<bool>(1)?)))
+            .unwrap_or((-1.0, false));
+
+        let wait_for_timer = match promise.state() {
+            // As in Node, the execute waits for referenced timers.
+            PromiseState::Resolved if !referenced => return finish(hooks, Ok(())),
+            PromiseState::Resolved => true,
+            PromiseState::Rejected => {
+                // `result` rethrows the rejection reason so `catch` can pick it up.
+                let _ = promise.result::<Value<'_>>();
+                let msg = format_value(ctx, hooks, ctx.catch());
+                return finish(hooks, Err(msg));
+            }
+            // Any timer may still settle the script.
+            PromiseState::Pending if next_timer >= 0.0 => true,
+            PromiseState::Pending if has_pending => false,
+            PromiseState::Pending => {
+                return finish(
+                    hooks,
+                    Err(
+                        "execution never completed: the script awaited a promise that nothing \
+                         will resolve"
+                            .to_string(),
+                    ),
+                );
+            }
+        };
+        if !wait_for_timer {
+            return suspend();
+        }
+        if with_task(|task| task.arm(next_timer)).unwrap_or(false) {
+            return suspend();
+        }
+        // The host's sleep was already over: the timer is due now.
     }
+}
+
+/// Call the event loop's side of `src/timers.js`.
+fn timers_call<'js, R: rquickjs::FromJs<'js>>(
+    hooks: &Object<'js>,
+    name: &str,
+    args: impl rquickjs::function::IntoArgs<'js>,
+) -> rquickjs::Result<R> {
+    hooks
+        .get::<_, Object<'js>>("timers")?
+        .get::<_, Function<'js>>(name)?
+        .call(args)
 }
 
 fn suspend() -> u32 {
@@ -505,6 +615,7 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         stdout,
         stderr,
         imports,
+        sleep,
         ..
     } = task;
     let result_variable = RESULT_VARIABLE.with(|name| name.borrow().clone());
@@ -554,6 +665,18 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
     for (handle, pending) in pending {
         unsafe { wit::waitable_join(handle, 0) };
         cancel_subtask(pending.call);
+    }
+    // No timer outlives its execute.
+    if let Some((sleep, _)) = sleep {
+        let handle = sleep.subtask;
+        unsafe { wit::waitable_join(handle, 0) };
+        if unsafe { wit::subtask_cancel(handle) } == SUBTASK_RETURNED {
+            wit::sleep_finish(sleep);
+        }
+        unsafe { wit::subtask_drop(handle) };
+    }
+    if let Err(e) = timers_call::<()>(hooks, "clear", ()) {
+        eprintln!("eryx-js: failed to clear the timers: {e}");
     }
     if let Some(set) = waitable_set {
         unsafe { wit::waitable_set_drop(set) };

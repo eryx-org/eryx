@@ -147,6 +147,40 @@ pub(crate) fn invoke_finish(mut call: PendingInvokeCall) -> Result<String, Strin
     pop_invoke_result(&mut call.cx)
 }
 
+/// A `sleep` the host hasn't finished yet.
+pub(crate) struct PendingSleep {
+    pub(crate) subtask: u32,
+    buffer: *mut u8,
+    /// Owns `buffer`, as for an invoke.
+    cx: Box<EryxCall>,
+}
+
+/// Start `sleep: async func(duration-ns: u64)`. `None` if the host finished
+/// it at once.
+pub(crate) fn sleep_start(duration_ns: u64) -> Option<PendingSleep> {
+    let import = wit()
+        .get_import(None, "sleep")
+        .expect("the sandbox world imports sleep");
+    let mut cx = Box::new(EryxCall::new());
+    cx.stack.push(Value::U64(duration_ns));
+    // SAFETY: called from inside an async export, with a fresh call context.
+    let pending = unsafe { import.call_import_async(&mut *cx) }?;
+    Some(PendingSleep {
+        subtask: pending.subtask,
+        buffer: pending.buffer,
+        cx,
+    })
+}
+
+/// Free a `sleep` whose subtask has returned.
+pub(crate) fn sleep_finish(mut call: PendingSleep) {
+    let import = wit()
+        .get_import(None, "sleep")
+        .expect("sleep import exists if a call is pending");
+    // SAFETY: the subtask returned, so the host has finished with `buffer`.
+    unsafe { import.lift_import_async_result(&mut *call.cx, call.buffer) };
+}
+
 fn pop_invoke_result(cx: &mut EryxCall) -> Result<String, String> {
     match (cx.stack.pop(), cx.stack.pop()) {
         (Some(Value::ResultDiscriminant(true)), Some(Value::String(json))) => Ok(json),

@@ -6,8 +6,9 @@
 // imports, which are synchronous: `fetch()` blocks the guest until the whole
 // response has been read, and returns an already settled promise. Bodies are
 // buffered (`body` is always null; use text(), json(), arrayBuffer() or
-// bytes()). QuickJS has no timers, so an `AbortSignal.timeout()` signal turns
-// aborted when it is next looked at, and fetch passes its deadline to the host.
+// bytes()). An `AbortSignal.timeout()` signal turns aborted when it is next
+// looked at, or when an unref'd timer at its deadline looks (firing `abort`
+// listeners), and fetch passes its deadline to the host.
 (native) => {
     const define = (name, value) =>
         Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
@@ -376,6 +377,8 @@
         static timeout(ms) {
             const signal = new AbortSignal(ILLEGAL);
             signal.#deadline = Date.now() + Math.max(0, Number(ms));
+            // Not keeping the execute running, as in Node.
+            setTimeout(() => signal.aborted, Math.max(0, Number(ms))).unref();
             return signal;
         }
 
