@@ -3313,7 +3313,14 @@ impl Executor {
             });
         }
 
-        // Cache miss - load from embedded resources
+        // Cache miss - load from embedded resources. A stale runtime embedded
+        // through ERYX_RUNTIME_CWASM* fails here rather than misbehaving.
+        if let Some(stamp) = std::fs::File::open(runtime_path).ok().and_then(|mut file| {
+            let len = file.metadata().ok()?.len();
+            file_language_stamp(&mut file, len)
+        }) {
+            stamp.check_guest()?;
+        }
         // SAFETY: The embedded runtime was pre-compiled at build time from our own
         // trusted runtime-<language>.wasm, so we know it's safe to deserialize.
         #[allow(unsafe_code)]
@@ -3485,9 +3492,21 @@ impl Executor {
     /// guest language it runs, so that building a sandbox for another
     /// language from it fails with a clear error instead of misbehaving.
     /// Unstamped runtimes are not checked.
+    ///
+    /// An eryx built from a checkout also stamps the hash of the guest's
+    /// sources it was built with. Loading the runtime in an eryx built from
+    /// other guest sources then fails with
+    /// [`ErrorKind::IncompatiblePrecompiled`], as for another eryx version.
     pub fn stamp_language(precompiled: &mut Vec<u8>, language: Language) {
+        let magic = match guest_sources_hash(language) {
+            Some(hash) => {
+                precompiled.extend_from_slice(&hash.to_le_bytes());
+                GUEST_STAMP_MAGIC
+            }
+            None => LANGUAGE_STAMP_MAGIC,
+        };
         precompiled.push(language.snapshot_tag());
-        precompiled.extend_from_slice(LANGUAGE_STAMP_MAGIC);
+        precompiled.extend_from_slice(magic);
     }
 
     /// Create a configured wasmtime engine.
@@ -4517,19 +4536,104 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
 /// stamped file still loads anywhere a plain one does.
 pub(crate) const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
 
-/// How many bytes [`Executor::stamp_language`] appends.
-#[cfg(any(feature = "embedded", feature = "preinit"))]
-pub(crate) const LANGUAGE_STAMP_LEN: usize = 1 + LANGUAGE_STAMP_MAGIC.len();
+/// Ends a precompiled runtime stamped with its guest language and the hash
+/// of its guest sources: `[hash u64 LE][language tag][magic]`.
+const GUEST_STAMP_MAGIC: &[u8; 8] = b"ERYXLNG2";
 
-/// The language a precompiled runtime ending in `tail` was stamped with by
+/// The most bytes [`Executor::stamp_language`] appends.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) const LANGUAGE_STAMP_LEN: usize = 8 + 1 + GUEST_STAMP_MAGIC.len();
+
+/// The hash of `language`'s guest sources this eryx was built with (see
+/// `build/guest_sources.rs`), or `None` outside an eryx checkout.
+///
+/// It catches a stale runtime, not a tampered one: a 64-bit FNV-1a is
+/// trivial to forge, and the stamp sits outside anything wasmtime checks.
+/// Only load precompiled files you trust.
+fn guest_sources_hash(language: Language) -> Option<u64> {
+    let hex = match language {
+        Language::Python => option_env!("ERYX_GUEST_HASH_PYTHON"),
+        Language::JavaScript => option_env!("ERYX_GUEST_HASH_JAVASCRIPT"),
+        Language::Shell => option_env!("ERYX_GUEST_HASH_SHELL"),
+    }?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+/// What [`Executor::stamp_language`] stamped a precompiled runtime with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LanguageStamp {
+    /// The guest language it runs.
+    pub(crate) language: Language,
+    /// The hash of the guest sources it was built from, if the eryx that
+    /// stamped it was built from a checkout.
+    guest_hash: Option<u64>,
+}
+
+impl LanguageStamp {
+    /// Fail if the runtime was built from other guest sources than this eryx.
+    /// Only checked when both have a hash.
+    pub(crate) fn check_guest(self) -> std::result::Result<(), Error> {
+        match (self.guest_hash, guest_sources_hash(self.language)) {
+            (Some(found), Some(expected)) if found != expected => {
+                let describe = |hash: u64| {
+                    format!(
+                        "{}, {} guest {hash:016x}",
+                        Executor::module_version(),
+                        self.language
+                    )
+                };
+                Err(ErrorKind::IncompatiblePrecompiled {
+                    built_by: describe(found),
+                    expected: describe(expected),
+                    guest: Some(self.language),
+                }
+                .into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The stamp of the precompiled runtime in the first `len` bytes of `file`,
+/// if any.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) fn file_language_stamp(file: &mut std::fs::File, len: u64) -> Option<LanguageStamp> {
+    use std::io::{Read as _, Seek as _};
+
+    // In a bundle the stamp ends the component, before the bundle's own
+    // sections and footer.
+    #[cfg(feature = "preinit")]
+    let end = match crate::bundle::read_layout(file) {
+        Ok(crate::bundle::Layout::Mapped { component_len, .. }) => component_len.min(len),
+        _ => len,
+    };
+    #[cfg(not(feature = "preinit"))]
+    let end = len;
+    let mut tail = [0; LANGUAGE_STAMP_LEN];
+    let start = end.checked_sub(tail.len() as u64)?;
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
+    file.read_exact(&mut tail).ok()?;
+    language_stamp(&tail)
+}
+
+/// The stamp a precompiled runtime ending in `tail` got from
 /// [`Executor::stamp_language`], or `None` if it wasn't stamped.
 #[cfg(any(test, feature = "embedded", feature = "preinit"))]
-pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
+pub(crate) fn language_stamp(tail: &[u8]) -> Option<LanguageStamp> {
     let (rest, magic) = tail.split_last_chunk::<8>()?;
-    if magic != LANGUAGE_STAMP_MAGIC {
+    let (&tag, rest) = rest.split_last()?;
+    let language = Language::from_snapshot_tag(tag)?;
+    let guest_hash = if magic == LANGUAGE_STAMP_MAGIC {
+        None
+    } else if magic == GUEST_STAMP_MAGIC {
+        Some(u64::from_le_bytes(*rest.split_last_chunk::<8>()?.1))
+    } else {
         return None;
-    }
-    Language::from_snapshot_tag(*rest.last()?)
+    };
+    Some(LanguageStamp {
+        language,
+        guest_hash,
+    })
 }
 
 /// Map an error from loading a precompiled component, reporting a file built
@@ -4550,6 +4654,7 @@ pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
         return ErrorKind::IncompatiblePrecompiled {
             built_by: built_by.to_owned(),
             expected: Executor::module_version(),
+            guest: None,
         }
         .into();
     }
@@ -4562,6 +4667,7 @@ pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
                 Executor::module_version()
             ),
             expected: Executor::module_version(),
+            guest: None,
         }
         .into();
     }
@@ -4639,12 +4745,48 @@ mod tests {
         for language in [Language::Python, Language::JavaScript, Language::Shell] {
             let mut bytes = b"component".to_vec();
             Executor::stamp_language(&mut bytes, language);
-            assert_eq!(language_stamp(&bytes), Some(language));
+            let stamp = language_stamp(&bytes).unwrap();
+            assert_eq!(stamp.language, language);
+            // Built from this checkout, so it carries this eryx's hash.
+            assert_eq!(stamp.guest_hash, guest_sources_hash(language));
+            assert!(stamp.guest_hash.is_some());
+            stamp.check_guest().unwrap();
         }
         assert_eq!(language_stamp(b"component"), None);
         assert_eq!(language_stamp(b""), None);
         // An unknown tag isn't a language.
         assert_eq!(language_stamp(b"\x09ERYXLANG"), None);
+        // A stamp from before guest hashes: the language, not checked.
+        let old = language_stamp(b"component\x01ERYXLANG").unwrap();
+        assert_eq!((old.language, old.guest_hash), (Language::JavaScript, None));
+        old.check_guest().unwrap();
+    }
+
+    /// A runtime built from other guest sources is `IncompatiblePrecompiled`,
+    /// naming the language and how to rebuild it.
+    #[test]
+    fn other_guest_sources_are_incompatible() {
+        let mut bytes = b"component".to_vec();
+        bytes.extend_from_slice(&0x1234_u64.to_le_bytes());
+        bytes.push(Language::Shell.snapshot_tag());
+        bytes.extend_from_slice(GUEST_STAMP_MAGIC);
+        let err = language_stamp(&bytes).unwrap().check_guest().unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            ErrorKind::IncompatiblePrecompiled {
+                guest: Some(Language::Shell),
+                ..
+            }
+        ));
+        let message = err.to_string();
+        assert!(
+            message.contains("shell guest 0000000000001234"),
+            "{message}"
+        );
+        assert!(
+            message.contains("mise run precompile-runtime-shell"),
+            "{message}"
+        );
     }
 
     use super::*;

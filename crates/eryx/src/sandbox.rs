@@ -1477,31 +1477,14 @@ impl PrecompiledArtifact {
         })
     }
 
-    /// The language the component was stamped with by
-    /// [`Executor::stamp_language`], if any.
-    fn language_stamp(&self) -> Option<Language> {
-        use std::io::{Read as _, Seek as _};
-
+    /// What [`Executor::stamp_language`] stamped the component with, if
+    /// anything.
+    fn language_stamp(&self) -> Option<crate::wasm::LanguageStamp> {
         match &self.component {
             ArtifactComponent::Bytes(bytes) => crate::wasm::language_stamp(bytes),
             ArtifactComponent::Mapped(mapped) => {
                 let mut file = mapped.file.lock().ok()?;
-                // In a bundle the stamp ends the component, before the bundle's
-                // own sections and footer.
-                #[cfg(feature = "preinit")]
-                let end = match crate::bundle::read_layout(&mut *file) {
-                    Ok(crate::bundle::Layout::Mapped { component_len, .. }) => {
-                        component_len.min(mapped.len)
-                    }
-                    _ => mapped.len,
-                };
-                #[cfg(not(feature = "preinit"))]
-                let end = mapped.len;
-                let mut tail = [0; crate::wasm::LANGUAGE_STAMP_LEN];
-                let start = end.checked_sub(tail.len() as u64)?;
-                file.seek(std::io::SeekFrom::Start(start)).ok()?;
-                file.read_exact(&mut tail).ok()?;
-                crate::wasm::language_stamp(&tail)
+                crate::wasm::file_language_stamp(&mut file, mapped.len)
             }
         }
     }
@@ -1568,6 +1551,9 @@ impl PrecompiledArtifact {
     /// trusted components.
     #[allow(unsafe_code)]
     pub unsafe fn to_executor(&self) -> std::result::Result<Executor, Error> {
+        if let Some(stamp) = self.language_stamp() {
+            stamp.check_guest()?;
+        }
         let bytes = match &self.component {
             ArtifactComponent::Bytes(bytes) => bytes,
             ArtifactComponent::Mapped(mapped) => {
@@ -1682,8 +1668,8 @@ impl PrecompiledFileSource {
         unsafe { artifact.to_executor() }
     }
 
-    /// The language the file was stamped with, once it has been mapped.
-    fn language_stamp(&self) -> Option<Language> {
+    /// What the file was stamped with, once it has been mapped.
+    fn language_stamp(&self) -> Option<crate::wasm::LanguageStamp> {
         self.artifact.get()?.language_stamp()
     }
 }
@@ -3410,7 +3396,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             }
         };
 
-        let stamp: Option<Language> = match &self.wasm_source {
+        let stamp: Option<crate::wasm::LanguageStamp> = match &self.wasm_source {
             #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledBytes(bytes) => crate::wasm::language_stamp(bytes),
             #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -3419,14 +3405,16 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             WasmSource::PrecompiledFile(source) => source.language_stamp(),
             _ => None,
         };
-        if let Some(found) = stamp
-            && found != L::LANGUAGE
-        {
-            return Err(ErrorKind::Initialization(format!(
-                "this precompiled runtime runs {found}, but the sandbox is for {}",
-                L::LANGUAGE
-            ))
-            .into());
+        if let Some(stamp) = stamp {
+            if stamp.language != L::LANGUAGE {
+                return Err(ErrorKind::Initialization(format!(
+                    "this precompiled runtime runs {}, but the sandbox is for {}",
+                    stamp.language,
+                    L::LANGUAGE
+                ))
+                .into());
+            }
+            stamp.check_guest()?;
         }
 
         Ok(executor)

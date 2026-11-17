@@ -75,6 +75,51 @@ fn a_runtime_only_builds_for_its_language() {
     }
 }
 
+/// A runtime stamped with other JavaScript guest sources than this eryx was
+/// built from fails to load, naming the language and how to rebuild it.
+#[test]
+fn a_runtime_from_other_guest_sources_is_incompatible() {
+    let js = eryx::embedded::runtime_path(Language::JavaScript)
+        .unwrap()
+        .unwrap();
+    let mut bytes = std::fs::read(js).unwrap();
+    // Replace its stamp, `[guest hash u64][tag]ERYXLNG2` (or, from before
+    // guest hashes, `[tag]ERYXLANG`), with one carrying another hash.
+    let stamp = if bytes.ends_with(b"ERYXLNG2") { 17 } else { 9 };
+    bytes.truncate(bytes.len() - stamp);
+    bytes.extend_from_slice(&0x1234_u64.to_le_bytes());
+    bytes.push(1); // JavaScript's tag
+    bytes.extend_from_slice(b"ERYXLNG2");
+    let dir = tempfile::tempdir().unwrap();
+    let stale = dir.path().join("stale.cwasm");
+    std::fs::write(&stale, bytes).unwrap();
+
+    // SAFETY: the embedded runtime with only its stamp changed.
+    #[allow(unsafe_code)]
+    let err = unsafe {
+        Sandbox::builder()
+            .javascript()
+            .with_precompiled_file(&stale)
+    }
+    .build()
+    .unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::IncompatiblePrecompiled {
+                guest: Some(Language::JavaScript),
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("mise run precompile-runtime-javascript"),
+        "{err}"
+    );
+}
+
 /// A test callback backed by a closure, optionally delayed and counted.
 struct TestCallback {
     name: &'static str,
