@@ -35,7 +35,7 @@ impl Command {
     /// The cache only saves compiling: if its directory can't be created, isn't
     /// private to this user, or can't be written (a read-only filesystem, say),
     /// the command is compiled in memory and a warning is logged. Builds
-    /// without the `embedded`, `preinit` or `packages` feature can't load
+    /// without the `embedded`, `preinit` or `env-pack` feature can't load
     /// precompiled code, so they compile it on every load.
     ///
     /// # Errors
@@ -44,7 +44,7 @@ impl Command {
     /// [`ErrorKind::CommandImports`] if it can't run as a command, and an
     /// error if it can't be read or compiled.
     pub fn load_cached(path: impl AsRef<Path>, expected: Option<&str>) -> Result<Self, Error> {
-        #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+        #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
         let dir = match crate::cache::default_cache_root() {
             Ok(root) => Some(root.join("commands")),
             Err(e) => {
@@ -52,7 +52,7 @@ impl Command {
                 None
             }
         };
-        #[cfg(not(any(feature = "embedded", feature = "preinit", feature = "packages")))]
+        #[cfg(not(any(feature = "embedded", feature = "preinit", feature = "env-pack")))]
         let dir: Option<std::path::PathBuf> = None;
         load_cached_in(path.as_ref(), expected, dir.as_deref())
     }
@@ -122,7 +122,7 @@ fn load_cached_in(
 
 /// Load `wasm` from its compiled copy in `dir`, compiling and caching it
 /// first if there's none (or it doesn't load).
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 #[allow(unsafe_code)]
 fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     use std::hash::{Hash, Hasher};
@@ -175,7 +175,7 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
 }
 
 /// Warn, once per load, that a command is compiled without the cache.
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 fn uncached(dir: &Path, reason: &dyn std::fmt::Display) {
     tracing::warn!(
         dir = %dir.display(),
@@ -184,7 +184,7 @@ fn uncached(dir: &Path, reason: &dyn std::fmt::Display) {
     );
 }
 
-#[cfg(not(any(feature = "embedded", feature = "preinit", feature = "packages")))]
+#[cfg(not(any(feature = "embedded", feature = "preinit", feature = "env-pack")))]
 fn compiled(wasm: &[u8], _dir: &Path) -> Result<Command, Error> {
     Command::from_bytes(wasm)
 }
@@ -273,7 +273,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     fn cwasms(cache: &Path) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(cache)
             .unwrap()
@@ -287,7 +287,7 @@ mod tests {
     /// The compiled command is cached in the cache directory, keyed by the
     /// file's content, never beside the file: a different file at the same
     /// path gets its own, and a second load reuses it.
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     #[test]
     fn compiled_commands_are_cached_by_content() {
         let dir = tempfile::tempdir().unwrap();
@@ -332,7 +332,7 @@ mod tests {
 
     /// A WASI preview 1 command module is compiled as its adapted component,
     /// so its cached `.cwasm` loads as a command, the second time too.
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     #[test]
     fn preview1_modules_are_compiled_as_components() {
         let dir = tempfile::tempdir().unwrap();

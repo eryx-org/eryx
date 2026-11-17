@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 # Regenerate the bundled npm packages tests/js_environment.rs imports: install
-# the pinned versions with eryx-packages, bundle them minified with the
-# eryx-bundler wasm (mise run build-bundler), and copy each package's licence.
+# the pinned versions with `npm install --ignore-scripts`, bundle them
+# minified with the eryx-bundler wasm (mise run build-bundler), and copy each
+# package's licence.
 #
 # Usage: crates/eryx/tests/fixtures/js-environment/regen.sh
-# Needs network (the npm registry) and wasmtime. Run from anywhere.
+# Needs network (the npm registry), npm and wasmtime. Run from anywhere.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../../../.." && pwd)"
 packages=(zod@4.6.7 date-fns@4.4.0 lodash@4.18.1 uuid@14.0.3 nanoid@6.0.2)
 entries=(zod date-fns lodash uuid nanoid)
 
-cache="$(mktemp -d)"
-trap 'rm -rf "$cache"' EXIT
+tree="$(mktemp -d)"
+trap 'rm -rf "$tree"' EXIT
 cd "$root"
 mise run build-bundler >/dev/null
-tree="$(cargo run -q -p eryx-packages --example npm_install -- "$cache" "${packages[@]}" 2>&1 \
-    | sed -n 's/.* at \(.*\)\/node_modules$/\1/p')"
+echo '{"private": true}' > "$tree/package.json"
+npm install --prefix "$tree" --ignore-scripts --omit=dev --no-audit --no-fund --save-exact \
+    "${packages[@]}" >/dev/null
 [ -d "$tree/node_modules" ] || { echo "install failed" >&2; exit 1; }
 
 rm -rf "$here/modules" "$here/licenses"

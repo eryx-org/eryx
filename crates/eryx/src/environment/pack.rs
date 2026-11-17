@@ -1,4 +1,4 @@
-//! Packing environments from an installed `node_modules` tree (the `packages`
+//! Packing environments from an installed `node_modules` tree (the `env-pack`
 //! feature), without resolving or fetching anything.
 
 use std::collections::BTreeSet;
@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::build::{MODULES_DIR, install_environment, io, run_bundler, staging_dir};
+use super::bundler::{MODULES_DIR, install_environment, io, run_bundler, staging_dir};
 use super::{Builder, Environment, EnvironmentError, Inputs, Language, Manifest};
 
 /// How to [`pack`] an environment.
@@ -273,7 +273,7 @@ pub async fn pack(
         .extend(report.warnings.iter().map(|w| format!("bundler: {w}")));
     manifest.write(staging.path())?;
 
-    install_environment(staging, out, false, &manifest.content.hash)?;
+    install_environment(staging, out)?;
     Environment::load_expecting(out, &manifest.content.hash)
 }
 

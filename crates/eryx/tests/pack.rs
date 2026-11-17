@@ -8,7 +8,7 @@
 //! mise run precompile-bundler
 //! cargo nextest run -p eryx --features packages --test pack
 //! ```
-#![cfg(all(feature = "packages", unix))]
+#![cfg(all(feature = "env-pack", unix))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::os::unix::fs::symlink;

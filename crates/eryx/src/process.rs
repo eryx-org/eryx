@@ -597,7 +597,7 @@ impl Command {
     ///
     /// Returns [`ErrorKind::IncompatiblePrecompiled`] if another eryx version
     /// precompiled it, and an error if it isn't a WASI 0.2 or 0.3 command.
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled(precompiled: &[u8]) -> Result<Self, Error> {
         let engine = crate::Executor::child_engine()?;
@@ -621,7 +621,7 @@ impl Command {
     /// # Errors
     ///
     /// As for [`from_precompiled`](Self::from_precompiled).
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     #[allow(unsafe_code)]
     pub unsafe fn from_precompiled_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
@@ -683,13 +683,13 @@ impl Command {
 
 /// What a precompiled command's instances need of the host's memory, as
 /// [`Command::stamp_precompiled`] recorded it.
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 fn precompiled_vmctx(precompiled: &[u8]) -> u64 {
     vmctx::stamped(precompiled).unwrap_or(vmctx::UNSTAMPED)
 }
 
 /// The last bytes of `path`, where a stamp would be.
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 fn file_tail(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;
@@ -1011,7 +1011,7 @@ impl Spawner {
 }
 
 /// A host directory an isolated command sees, at `guest`.
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
 pub(crate) struct Mount<'a> {
     pub(crate) host: &'a Path,
     pub(crate) guest: &'a str,
@@ -1019,7 +1019,7 @@ pub(crate) struct Mount<'a> {
 }
 
 /// What an isolated command may use.
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
 pub(crate) struct IsolatedLimits {
     /// Bytes of linear memory.
     pub(crate) memory: usize,
@@ -1031,7 +1031,7 @@ pub(crate) struct IsolatedLimits {
     pub(crate) output: usize,
 }
 
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
 impl Command {
     /// Load a precompiled command to run with
     /// [`run_isolated`](Self::run_isolated): it's linked with plain WASI 0.2
@@ -1372,7 +1372,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
 }
 
 /// The linker isolated commands are instantiated with: WASI 0.2 only.
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
 fn isolated_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     static LINKER: OnceLock<Linker<ChildState>> = OnceLock::new();
     if let Some(linker) = LINKER.get() {
@@ -2309,7 +2309,7 @@ pub(crate) mod tests {
     /// is charged [`vmctx::UNSTAMPED`]. Commands precompiled on the shared
     /// engine's configuration ([`Executor::precompile`](crate::Executor::precompile))
     /// load on the child engine.
-    #[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
     #[test]
     #[allow(unsafe_code)]
     fn precompiled_commands_carry_their_estimate() {

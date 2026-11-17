@@ -1,77 +1,27 @@
 # Environments
 
-An environment is a set of packages built ahead of time, in CI or a deploy
-step, into a directory that sandboxes mount read-only. Sandboxes never see
-package names or a registry: they import what the environment provides.
-JavaScript is supported today (npm packages); Python and the shell will use
-the same definitions and the same `with_environment`.
+An environment is a set of packages installed and packed ahead of time, in CI
+or a deploy step, into a directory that sandboxes mount read-only. Sandboxes
+never see package names or a registry: they import what the environment
+provides. JavaScript is supported today (npm packages); Python and the shell
+will use the same format and the same `with_environment`.
 
-## Defining an environment
+## Getting the packages
 
-An environment is described by a TOML file:
+eryx doesn't resolve or fetch packages. Install them with your package
+manager, or let a service do it:
 
-```toml
-# data-tools.toml
-name = "data-tools"
-language = "javascript"
+- **npm or pnpm:** `npm ci --ignore-scripts --omit=dev` (or `pnpm install
+  --prod --ignore-scripts`) from a committed lockfile, then pack the tree as
+  below.
+- **eryx-run:** the hosted service resolves and fetches packages from a
+  definition (package specs, a registry, a minimum release age, a lockfile)
+  and packs them with eryx, so its environments are the same format.
 
-[npm]
-packages = ["zod@^4", "date-fns", "lodash"]
-entries = ["date-fns/format"]    # importable beyond each package's root
-# registry = "https://mirror.example/npm/"
-# min-release-age = "3d"          # skip versions published more recently (default 3d)
-# lockfile = "data-tools.lock"    # default: <name>.lock next to the definition
-                                 # (with `env build`; see "Building it")
+## Packing them
 
-[limits]                         # optional
-max-packages = 500
-max-package-bytes = "32MiB"
-max-total-bytes = "1GiB"
-```
-
-## Building it
-
-```bash
-eryx-precompile env build data-tools.toml --out envs/data-tools
-```
-
-This resolves the packages, writing `data-tools.lock` (or installing exactly
-what an existing one pins), downloads and verifies them, and bundles them into
-ES modules with rolldown, which runs as a sandboxed WebAssembly command. Pass
-`--frozen` in CI to fail instead of re-resolving when the lockfile is out of
-date, and `--offline` to use only the lockfile and the download cache.
-Nothing from a package runs during the build: there are no install scripts.
-
-In Rust, the same is `eryx::environment::build` with the `packages` feature.
-A definition can also be built in code, without TOML:
-`EnvironmentDefinition::new("data-tools", Language::JavaScript)?.with_npm(NpmSection::new(["zod@^4"]))`.
-The `packages` feature embeds the bundler if it's there at build time
-(`ERYX_BUNDLER_CWASM`, the setup cache, or the workspace). Otherwise, as in a
-crates.io build or a released `eryx-precompile`, it's loaded at run time from
-the cache `eryx-precompile setup --bundler` writes, checked against its
-checksum; without one, the build fails saying to run that.
-
-Where the lockfile goes: `env build` keeps it next to the definition (its
-`base_dir`). Through the library, `BuildOptions` without a `base_dir` keeps it
-in the eryx cache (`<cache>/packages/lockfiles/`) rather than the current
-directory. A lockfile there isn't shared across machines, so two machines can
-resolve different versions, and definitions with the same name share it. For
-reproducible builds, commit the lockfile next to the definition, point
-`base_dir` at that directory, and build with `frozen`.
-
-> With a released `eryx-precompile`, run `eryx-precompile setup --bundler`
-> once before the first `env build`.
-
-The result is a directory with a manifest (`eryx-environment.json`: language,
-inputs, what it exports, and a hash of everything sandboxes rely on), the
-lockfile and the modules. Rebuilding from the same lockfile gives the same
-hash.
-
-## Packing installed packages
-
-When the packages are already installed (by `npm ci`, pnpm, or a service
-that resolves and fetches them), `env pack` turns them into an environment
-without resolving or fetching anything:
+`env pack` turns the installed packages into an environment, without
+resolving or fetching anything:
 
 ```bash
 npm ci --ignore-scripts --omit=dev
@@ -121,8 +71,21 @@ eryx-precompile env pack . --name data-tools --entry date-fns/format \
   installed tree again gives the same environment.
 
 In Rust, the same is `eryx::environment::pack(tree, out, &PackOptions::new(name, Language::JavaScript))`,
-with the `packages` feature. The directory format is described in
+with the `env-pack` feature. The directory format is described in
 [Environment Format](../api/environment-format.md).
+
+The `env-pack` feature embeds the bundler if it's there at build time
+(`ERYX_BUNDLER_CWASM`, the setup cache, or the workspace). Otherwise, as in a
+crates.io build or a released `eryx-precompile`, it's loaded at run time from
+the cache `eryx-precompile setup --bundler` writes, checked against its
+checksum; without one, packing fails saying to run that.
+
+> With a released `eryx-precompile`, run `eryx-precompile setup --bundler`
+> once before the first `env pack`.
+
+The result is a directory with a manifest (`eryx-environment.json`: language,
+inputs, what it exports, and a hash of everything sandboxes rely on), the
+lockfile if given, and the modules.
 
 ## Using it
 
@@ -145,9 +108,9 @@ sandbox.execute(r#"
 "#).await?;
 ```
 
-Loading and mounting only need eryx's `environment` feature, which includes
-neither the bundler nor an HTTP client. `build()` refuses an environment for
-another language, and checks the environment still hashes to what it did
+Loading and mounting only need eryx's `environment` feature, which doesn't
+include the bundler. The sandbox builder's `build()` refuses an environment
+for another language, and checks the environment still hashes to what it did
 when it was loaded, as pools and factories do for every sandbox they make.
 
 ## Importing in JavaScript
@@ -208,7 +171,7 @@ when it was loaded, as pools and factories do for every sandbox they make.
 
 ## What isn't supported yet
 
-- Python and shell environments (`build` returns `Unsupported`).
+- Python and shell environments (`pack` returns `Unsupported`).
 - The other Node built-ins (above), `crypto.subtle` and `node:crypto`'s
   hashes and ciphers. A package that imports a missing
   built-in fails when it's imported; one that uses a missing API fails when

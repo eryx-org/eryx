@@ -18,6 +18,6 @@ them from a sandbox.
 - `bundle.json`: the bundler's report, mapping each package to its module.
 - `licenses/`: each package's licence file, copied from its npm tarball.
 
-Regenerate everything with `./regen.sh` (needs the npm registry and
-wasmtime). These are test data, not vendored dependencies: eryx doesn't ship
+Regenerate everything with `./regen.sh` (needs the npm registry, npm
+and wasmtime). These are test data, not vendored dependencies: eryx doesn't ship
 them.

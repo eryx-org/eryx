@@ -92,7 +92,6 @@ jobs:
               - 'crates/eryx-runtime/**'
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
-              - 'crates/eryx-packages/**'
               # A unit test in crates/eryx keeps the JS SDK's copy of the
               # reserved callback names current (#962).
               - 'js/eryx/shims/reserved-names.js'
@@ -136,7 +135,6 @@ jobs:
             shell:
               - 'crates/eryx-guest-shell/**'
               - 'crates/eryx-vfs/**'
-              - 'crates/eryx-packages/**'
               - 'crates/eryx/Cargo.toml'
               - 'crates/eryx/build.rs'
               - 'crates/eryx/src/process.rs'
@@ -147,7 +145,7 @@ jobs:
               - 'crates/eryx/tests/shell_guest.rs'
               - 'crates/eryx/tests/commands.rs'
               - 'crates/eryx/tests/p3_guest.rs'
-              - 'crates/eryx/tests/environment.rs'
+              - 'crates/eryx/tests/pack.rs'
               - 'crates/eryx/tests/js_environment.rs'
               - 'crates/eryx/tests/fixtures/**'
               - '.github/workflows/ci.yml'
@@ -667,7 +665,7 @@ jobs:
         run: cargo test --locked --lib
 
   # The JavaScript bundler (rolldown as a WASI command), its own workspace,
-  # embedded by eryx's `packages` feature: builds with --all-features need
+  # embedded by eryx's `env-pack` feature: builds with --all-features need
   # its cwasm, so this runs whenever the runtimes do.
   build-bundler:
     name: Build bundler
@@ -1013,7 +1011,7 @@ jobs:
 
       # The shell (and JavaScript) without `unstable-vfs`, which --all-features
       # always turns on: bugs gated on its absence (#910's p3 gate, #914's
-      # environment mount) only show up here. (`packages` implies
+      # environment mount) only show up here. (`env-pack` implies
       # `environment`.) Only the suites that exercise
       # that path, reusing this job's artifacts and compiled dependencies, so
       # it costs about the eryx crate's own rebuild plus a minute of tests
@@ -1026,8 +1024,8 @@ jobs:
         run: |
           df -h .
           cargo nextest run -p eryx --profile ci \
-            --features embedded,shell,javascript,packages \
-            --test shell_guest --test commands --test p3_guest --test environment \
+            --features embedded,shell,javascript,env-pack \
+            --test shell_guest --test commands --test p3_guest --test pack \
             --test js_environment
           df -h .
 
@@ -1242,7 +1240,7 @@ jobs:
           # The shell's embedded coreutils (the `coreutils` feature, #809).
           : > "$RUNNER_TEMP/coreutils.cwasm"
           echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
-          # The bundler environment builds run (the `packages` feature, #827).
+          # The bundler `env pack` runs (the `env-pack` feature, #827).
           : > "$RUNNER_TEMP/eryx-bundler.cwasm"
           echo "ERYX_BUNDLER_CWASM=$RUNNER_TEMP/eryx-bundler.cwasm" >> "$GITHUB_ENV"
 
@@ -1303,9 +1301,6 @@ jobs:
           cargo check -p eryx --features embedded,preinit
           cargo check -p eryx --features native-extensions
           cargo check -p eryx --features embedded,native-extensions
-
-          echo "=== Checking eryx-packages without npm (skipped by cargo-all-features) ==="
-          cargo check -p eryx-packages --no-default-features
 
   # Run examples to ensure they don't bitrot
   examples:

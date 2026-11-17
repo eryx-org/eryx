@@ -28,10 +28,10 @@ walkdir.workspace = true
 
 [features]
 default = ["env"]
-# `env build`: build environments (eryx's `packages` feature). The JavaScript
-# bundler is embedded if it's built; otherwise, as in releases, it's loaded
-# from `eryx-precompile setup --bundler`'s cache.
-env = ["eryx/packages"]
+# `env pack`: pack installed packages into environments (eryx's `env-pack`
+# feature). The JavaScript bundler is embedded if it's built; otherwise, as
+# in releases, it's loaded from `eryx-precompile setup --bundler`'s cache.
+env = ["eryx/env-pack"]
 
 [package.metadata.cargo-all-features]
 # CI checks eryx's feature powerset with `cargo check-all-features -- -p eryx`,

@@ -1,17 +1,12 @@
-//! Building environments (the `packages` feature).
+//! Running the bundler, and installing what it produced (the `env-pack`
+//! feature).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use eryx_packages::environment::{MANIFEST_FILE, parse_duration};
-use eryx_packages::npm::{Install, Limits, Registry};
-
-use super::{
-    Builder, Environment, EnvironmentDefinition, EnvironmentError, Inputs, Language, Manifest,
-    NpmSection, Size,
-};
+use super::{EnvironmentError, MANIFEST_FILE};
 use crate::process::{IsolatedLimits, Mount};
 
 pub(super) fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> EnvironmentError {
@@ -21,245 +16,6 @@ pub(super) fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> E
 
 /// The directory a JavaScript environment's modules are in.
 pub(super) const MODULES_DIR: &str = "modules";
-
-/// The lockfile's name inside a JavaScript environment.
-const NPM_LOCKFILE: &str = "eryx-npm.lock";
-
-/// How to build an environment.
-#[derive(Debug, Clone, Default)]
-#[must_use]
-pub struct BuildOptions {
-    out_dir: Option<PathBuf>,
-    base_dir: Option<PathBuf>,
-    cache_dir: Option<PathBuf>,
-    offline: bool,
-    frozen: bool,
-}
-
-impl BuildOptions {
-    /// Defaults: built into the eryx cache directory, the lockfile kept there
-    /// too (see [`base_dir`](Self::base_dir)), online, not frozen.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Build into `dir`, replacing an environment already there (moved
-    /// aside, then deleted, so `dir` never holds a half-replaced one) or
-    /// filling an empty directory in place. Anything else at `dir` is
-    /// refused. `dir` mustn't be a mount point that already holds an
-    /// environment, which can't be renamed: mount its parent, or an empty
-    /// directory. Without one, environments go to the eryx cache directory,
-    /// named by a hash of what they're built from.
-    pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.out_dir = Some(dir.into());
-        self
-    }
-
-    /// Resolve the definition's relative paths (its lockfile) against `dir`,
-    /// usually the definition file's directory.
-    ///
-    /// Without one, the lockfile goes in the cache directory
-    /// (`<cache>/packages/lockfiles/`, or `lockfiles/` under
-    /// [`cache_dir`](Self::cache_dir)), never the process's current
-    /// directory, so a server whose working directory is read-only still
-    /// builds. A lockfile there isn't shared across machines, though, so two
-    /// builds can resolve different versions, and definitions with the same
-    /// name share it, so two with different packages re-resolve each other's.
-    /// For reproducible builds, commit the lockfile next to the definition,
-    /// point `base_dir` at it, and build with [`frozen`](Self::frozen).
-    pub fn base_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.base_dir = Some(dir.into());
-        self
-    }
-
-    /// Cache downloads and installs in `dir` instead of the eryx cache
-    /// directory.
-    pub fn cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.cache_dir = Some(dir.into());
-        self
-    }
-
-    /// Use only the lockfile and the cache; never touch the network.
-    pub fn offline(mut self, offline: bool) -> Self {
-        self.offline = offline;
-        self
-    }
-
-    /// Fail instead of resolving when the lockfile is missing or out of date.
-    pub fn frozen(mut self, frozen: bool) -> Self {
-        self.frozen = frozen;
-        self
-    }
-}
-
-/// Build the environment `definition` describes.
-///
-/// ```no_run
-/// # async fn run() -> Result<(), eryx::environment::EnvironmentError> {
-/// use eryx::environment::{BuildOptions, EnvironmentDefinition, build};
-///
-/// let definition = EnvironmentDefinition::read("data-tools.toml".as_ref())?;
-/// let options = BuildOptions::new().out_dir("envs/data-tools").base_dir(".");
-/// let environment = build(&definition, &options).await?;
-/// println!("{}", environment.manifest().content.hash);
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Errors
-///
-/// [`EnvironmentError::Unsupported`] for languages without a backend yet,
-/// otherwise whatever the build step reports.
-pub async fn build(
-    definition: &EnvironmentDefinition,
-    options: &BuildOptions,
-) -> Result<Environment, EnvironmentError> {
-    // A definition built in code hasn't been through `from_toml`'s checks.
-    definition.check()?;
-    match (definition.language, &definition.npm) {
-        (Language::JavaScript, Some(npm)) => build_javascript(definition, npm, options).await,
-        (other, _) => Err(EnvironmentError::Unsupported(other)),
-    }
-}
-
-async fn build_javascript(
-    definition: &EnvironmentDefinition,
-    npm: &NpmSection,
-    options: &BuildOptions,
-) -> Result<Environment, EnvironmentError> {
-    let cache_dir = match &options.cache_dir {
-        Some(dir) => dir.clone(),
-        None => crate::cache::default_cache_root()
-            .map_err(|e| EnvironmentError::Build(e.to_string()))?
-            .join("packages"),
-    };
-    // Not the current directory: a library or server caller may run anywhere.
-    let base_dir = options
-        .base_dir
-        .clone()
-        .unwrap_or_else(|| cache_dir.join("lockfiles"));
-    let lockfile = base_dir.join(
-        npm.lockfile
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("{}.lock", definition.name))),
-    );
-    // The cache's lockfile directory (and any subdirectory the definition's
-    // `lockfile` names) may not exist yet.
-    if options.base_dir.is_none()
-        && let Some(dir) = lockfile.parent()
-    {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| EnvironmentError::Build(format!("creating {}: {e}", dir.display())))?;
-    }
-
-    let mut registry = match &npm.registry {
-        Some(url) => Registry::new(url)?,
-        None => Registry::npmjs(),
-    };
-    for host in &npm.tarball_hosts {
-        registry = registry.allow_tarball_host(host);
-    }
-    let mut limits = Limits::default();
-    if let Some(max) = definition.limits.max_packages {
-        limits.max_packages = max;
-    }
-    if let Some(Size(max)) = definition.limits.max_package_bytes {
-        limits.max_tarball_bytes = max;
-    }
-    if let Some(Size(max)) = definition.limits.max_total_bytes {
-        limits.max_total_bytes = max;
-    }
-    let mut install = Install::new(&npm.packages, &cache_dir)
-        .registry(registry.clone())
-        .lockfile(&lockfile)
-        .offline(options.offline)
-        .frozen(options.frozen)
-        .limits(limits);
-    if let Some(age) = &npm.min_release_age {
-        install =
-            install.min_release_age(parse_duration(age).map_err(eryx_packages::Error::Definition)?);
-    }
-    let installed = install.run().await?;
-
-    // What's importable: each package's root, plus the extra entries.
-    let mut entries: Vec<String> = npm
-        .packages
-        .iter()
-        .map(|spec| eryx_packages::npm::Spec::parse(spec).map(|s| s.name))
-        .collect::<Result<_, _>>()?;
-    entries.extend(npm.entries.iter().cloned());
-    entries.sort();
-    entries.dedup();
-
-    let out_dir = match &options.out_dir {
-        Some(dir) => dir.clone(),
-        None => {
-            let key = blake3::hash(
-                format!(
-                    "{}\0{}\0{}\0{}",
-                    definition.name,
-                    installed.lockfile.content_hash(),
-                    // Which bundler builds it: an environment cached by
-                    // another (e.g. after an upgrade) is rebuilt.
-                    bundler()?.1,
-                    entries.join("\0")
-                )
-                .as_bytes(),
-            );
-            let dir = cache_dir.join("environments").join(&key.to_hex()[..32]);
-            if let Ok(existing) = Environment::load(&dir) {
-                return Ok(existing);
-            }
-            dir
-        }
-    };
-
-    let cached = options.out_dir.is_none();
-    let staging = staging_dir(&out_dir)?;
-    let modules = staging.path().join(MODULES_DIR);
-    std::fs::create_dir(&modules).map_err(io("creating the modules directory"))?;
-
-    let tree_root = installed
-        .node_modules
-        .parent()
-        .ok_or_else(|| EnvironmentError::Build("installed tree has no root".to_string()))?;
-    // `modules` is new and empty: the bundler doesn't clear its output dir,
-    // so a fresh staging dir is what keeps stale chunks out of the hash.
-    let sources = [(tree_root.to_path_buf(), "/src".to_string())];
-    let mut report = run_bundler(&sources, "/src", &modules, &entries).await?;
-    std::fs::remove_file(modules.join("bundle.json")).map_err(io("removing bundle.json"))?;
-
-    let exports = std::mem::take(&mut report.entries)
-        .into_iter()
-        .map(|(specifier, chunk)| (specifier, format!("{MODULES_DIR}/{chunk}")))
-        .collect();
-    installed
-        .lockfile
-        .write(&staging.path().join(NPM_LOCKFILE))?;
-    let mut inputs = Inputs::new(installed.lockfile.requested.clone());
-    inputs.registry = Some(registry.url().to_string());
-    inputs.lockfile = Some(NPM_LOCKFILE.to_string());
-    inputs.lockfile_hash = Some(installed.lockfile.content_hash());
-    let mut builder = Builder::new(env!("CARGO_PKG_VERSION"));
-    builder.tools.insert("bundler".to_string(), report.bundler);
-    let mut manifest = Manifest::new(
-        &definition.name,
-        definition.language,
-        inputs,
-        builder,
-        staging.path(),
-        MODULES_DIR,
-        exports,
-    )?;
-    manifest.warnings = installed.warnings.clone();
-    manifest
-        .warnings
-        .extend(report.warnings.iter().map(|w| format!("bundler: {w}")));
-    manifest.write(staging.path())?;
-
-    install_environment(staging, &out_dir, cached, &manifest.content.hash)?;
-    Environment::load_expecting(&out_dir, &manifest.content.hash)
-}
 
 /// Whether `dir` is an existing, empty directory.
 fn is_empty_dir(dir: &Path) -> bool {
@@ -299,18 +55,15 @@ pub(super) fn staging_dir(out: &Path) -> Result<tempfile::TempDir, EnvironmentEr
 /// - `out` was empty (`staging` is inside it): move the contents up, the
 ///   manifest last, so it never describes files that aren't there yet.
 /// - `out` doesn't exist: rename `staging` to it.
-/// - `out` holds an environment: if `cached` and it's the one just built
-///   (`hash`), another build got there first, so keep it. Otherwise move it
-///   aside, rename `staging` in, and delete it, so there's never a
-///   half-deleted environment at `out` (only, briefly, none).
+/// - `out` holds an environment: move it aside, rename `staging` in, and
+///   delete it, so there's never a half-deleted environment at `out` (only,
+///   briefly, none).
 ///
 /// `out` must not be a mount point holding an environment, since that can't
 /// be renamed: mount its parent instead, or an empty directory.
 pub(super) fn install_environment(
     staging: tempfile::TempDir,
     out: &Path,
-    cached: bool,
-    hash: &str,
 ) -> Result<(), EnvironmentError> {
     if staging.path().parent() == Some(out) {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(staging.path())
@@ -342,10 +95,6 @@ pub(super) fn install_environment(
                 continue;
             }
             Err(_) => {}
-        }
-        if cached && Environment::load_expecting(out, hash).is_ok() {
-            discard(&staged);
-            return Ok(());
         }
         if !out.join(MANIFEST_FILE).is_file() {
             discard(&staged);
@@ -448,7 +197,6 @@ pub(super) async fn run_bundler(
         output: 1024 * 1024,
     };
     let (code, _stdout, stderr) = bundler()?
-        .0
         .run_isolated(&argv, &mounts, &limits)
         .await
         .map_err(|e| EnvironmentError::Build(format!("bundling: {e}")))?;
@@ -465,12 +213,11 @@ pub(super) async fn run_bundler(
 
 /// The bundler, loaded on first use: the embedded one, or, if this eryx was
 /// built without it (a placeholder is embedded), the one `eryx-precompile
-/// setup --bundler` cached. Returns it and a hash identifying it, for
-/// environments' cache keys. Only a loaded bundler is kept: after a failure,
-/// the next build looks again, so running `setup` fixes a running process.
-pub(super) fn bundler() -> Result<(crate::Command, &'static str), EnvironmentError> {
-    static BUNDLER: OnceLock<(crate::Command, String)> = OnceLock::new();
-    let (command, hash) = match BUNDLER.get() {
+/// setup --bundler` cached. Only a loaded bundler is kept: after a failure,
+/// the next pack looks again, so running `setup` fixes a running process.
+fn bundler() -> Result<crate::Command, EnvironmentError> {
+    static BUNDLER: OnceLock<crate::Command> = OnceLock::new();
+    let command = match BUNDLER.get() {
         Some(loaded) => loaded,
         None => {
             let loaded = load_bundler(
@@ -482,16 +229,14 @@ pub(super) fn bundler() -> Result<(crate::Command, &'static str), EnvironmentErr
             BUNDLER.get_or_init(|| loaded)
         }
     };
-    Ok((command.clone(), hash.as_str()))
+    Ok(command.clone())
 }
 
 /// Load `embedded`, or what `cached` finds if it's empty.
-/// Also returns the bundler's hash: the build script's for `embedded`, or
-/// the cached bytes' own.
 fn load_bundler(
     embedded: &[u8],
     cached: impl FnOnce() -> Option<(std::path::PathBuf, Result<Vec<u8>, String>)>,
-) -> Result<(crate::Command, String), String> {
+) -> Result<crate::Command, String> {
     let setup = "run `eryx-precompile setup --bundler` (or, in the eryx workspace, \
                  `mise run precompile-bundler`)";
     if !embedded.is_empty() {
@@ -499,7 +244,6 @@ fn load_bundler(
         // produced, as it does the runtimes.
         #[allow(unsafe_code)]
         return unsafe { crate::Command::from_precompiled_isolated(embedded) }
-            .map(|command| (command, env!("ERYX_EMBEDDED_BUNDLER_HASH").to_owned()))
             .map_err(|e| format!("the embedded bundler: {e}"));
     }
     let (path, bytes) = match cached() {
@@ -523,7 +267,6 @@ fn load_bundler(
     // eryx precompiled fails to load.
     #[allow(unsafe_code)]
     unsafe { crate::Command::from_precompiled_isolated(&bytes) }
-        .map(|command| (command, blake3::hash(&bytes).to_hex()[..16].to_owned()))
         // `setup` would keep an entry that matches its checksum, so it has
         // to go first.
         .map_err(|e| {
@@ -547,11 +290,8 @@ mod tests {
         let embedded: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/eryx-bundler.cwasm"));
         if !embedded.is_empty() {
             assert!(load_bundler(embedded, || panic!("the cache was consulted")).is_ok());
-            // A cached bundler keys environments by its own bytes, not the
-            // build script's hash of the empty placeholder.
-            let (_, hash) =
-                load_bundler(b"", || Some(("b.cwasm".into(), Ok(embedded.to_vec())))).unwrap();
-            assert_eq!(hash, blake3::hash(embedded).to_hex()[..16]);
+            // Without an embedded one, the cached bytes load.
+            assert!(load_bundler(b"", || Some(("b.cwasm".into(), Ok(embedded.to_vec())))).is_ok());
         }
 
         let err = load_bundler(b"", || None).unwrap_err();
@@ -580,21 +320,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn other_languages_are_unsupported() {
-        for language in ["python", "shell"] {
-            let definition = EnvironmentDefinition::from_toml(&format!(
-                "name = \"x\"\nlanguage = \"{language}\""
-            ))
-            .unwrap();
-            let err = build(&definition, &BuildOptions::new()).await.unwrap_err();
-            assert!(
-                matches!(err, EnvironmentError::Unsupported(_)),
-                "{language}: {err}"
-            );
-        }
-    }
-
     #[test]
     fn refuses_to_replace_a_non_environment() {
         let dir = tempfile::tempdir().unwrap();
@@ -615,7 +340,7 @@ mod tests {
         assert_eq!(staging.path().parent(), Some(out.as_path()));
         std::fs::write(staging.path().join(MANIFEST_FILE), "{}").unwrap();
         std::fs::create_dir(staging.path().join("modules")).unwrap();
-        install_environment(staging, &out, false, "unused").unwrap();
+        install_environment(staging, &out).unwrap();
         let mut names: Vec<_> = std::fs::read_dir(&out)
             .unwrap()
             .map(|e| e.unwrap().file_name())

@@ -6,7 +6,7 @@
 //! `coreutils` feature, the shell's default commands (`coreutils.cwasm`,
 //! located the same way through `ERYX_COREUTILS_CWASM`, the cache as
 //! `coreutils-v<version>-<arch>-<os>.cwasm`, then `../eryx-runtime/`). With
-//! `packages`, it embeds the JavaScript bundler (`eryx-bundler.cwasm`) the
+//! `env-pack`, it embeds the JavaScript bundler (`eryx-bundler.cwasm`) the
 //! same way: `ERYX_BUNDLER_CWASM`, the cache (`eryx-precompile setup
 //! --bundler`), then the workspace, or, if none has it, an empty placeholder
 //! (with a warning): eryx then loads the bundler from that cache at run time.
@@ -22,21 +22,21 @@
 // Build scripts should panic on errors, so expect/unwrap are appropriate here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[cfg(any(feature = "embedded", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "env-pack"))]
 #[path = "build/cached_runtime.rs"]
 mod cached_runtime;
 
 fn main() {
     #[cfg(feature = "embedded-stdlib")]
     embedded_stdlib::prepare();
-    #[cfg(any(feature = "embedded", feature = "packages"))]
+    #[cfg(any(feature = "embedded", feature = "env-pack"))]
     embedded_runtime::prepare();
 }
 
 /// First 16 hex characters of SHA-256, used to name the extracted copies of
 /// embedded files. Hashing here instead of at startup saves every process a
 /// hash of the file, which for the runtime takes ~1s in unoptimized builds.
-#[cfg(any(feature = "embedded-stdlib", feature = "packages"))]
+#[cfg(any(feature = "embedded-stdlib", feature = "env-pack"))]
 fn short_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -56,7 +56,7 @@ mod embedded_stdlib {
     }
 }
 
-#[cfg(any(feature = "embedded", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "env-pack"))]
 mod embedded_runtime {
     use std::path::PathBuf;
 
@@ -77,7 +77,7 @@ mod embedded_runtime {
         /// The env var naming an explicit `.cwasm` to embed.
         path_var: &'static str,
         /// Only embedded with the `embedded` feature too; the bundler is
-        /// embedded by `packages` alone.
+        /// embedded by `env-pack` alone.
         with_embedded: bool,
         /// The rustc env var the build script sets to its short hash.
         hash_var: &'static str,
@@ -133,7 +133,7 @@ mod embedded_runtime {
             stem: "eryx-bundler",
             setup_args: "--bundler",
             mise_task: "precompile-bundler",
-            feature: "PACKAGES",
+            feature: "ENV_PACK",
             path_var: "ERYX_BUNDLER_CWASM",
             with_embedded: false,
             hash_var: "ERYX_EMBEDDED_BUNDLER_HASH",
@@ -302,7 +302,7 @@ mod embedded_runtime {
                         $ mise run {mise_task}\n\
                         ",
                         language = self.language,
-                        feature = self.feature.to_lowercase(),
+                        feature = self.feature.to_lowercase().replace('_', "-"),
                         mise_task = self.mise_task,
                         file = self.file_name(),
                         var = self.path_var,
