@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.15.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.1...eryx-precompile-v0.15.2) - 2026-11-17
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.15.2](https://github.com/eryx-org/eryx/compare/eryx-v0.15.1...eryx-v0.15.2) - 2026-11-17
+
+### Fixed
+- *(net)* byte limit accounting on timed-out writes ([#1020](https://github.com/eryx-org/eryx/pull/1020))
+
+### Other
+- Merge commit from fork
+- Merge commit from fork
+- Merge commit from fork
+- Merge commit from fork
+
 ## `eryx-precompile` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.0...eryx-precompile-v0.15.1) - 2026-11-15
 
 ### Other
