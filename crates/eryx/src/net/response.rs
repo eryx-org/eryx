@@ -51,6 +51,8 @@ pub(super) enum RequestKind {
     Head,
     /// `CONNECT`: a `2xx` response turns the connection into a tunnel.
     Connect,
+    /// With an `Upgrade` header: a `101` response switches protocols.
+    Upgrade,
     /// Anything else.
     Other,
 }
@@ -63,6 +65,8 @@ impl RequestKind {
             Self::Head
         } else if method.eq_ignore_ascii_case(b"CONNECT") {
             Self::Connect
+        } else if super::switches_protocols(headers) {
+            Self::Upgrade
         } else {
             Self::Other
         }
@@ -116,9 +120,9 @@ pub(super) struct ResponseMasker {
     carry: Vec<u8>,
     /// Bytes ready for the guest.
     pub(super) out: Vec<u8>,
-    /// Whether a compressed or otherwise encoded response fails the
-    /// connection (see [`Self::refusing_encodings`]).
-    refuse_encoded: bool,
+    /// Whether the connection carries a credential, so an encoded response
+    /// or an unasked-for `101` fails it (see [`Self::carrying_credential`]).
+    credential: bool,
 }
 
 impl ResponseMasker {
@@ -135,17 +139,19 @@ impl ResponseMasker {
             pending: Vec::new(),
             carry: Vec::new(),
             out: Vec::new(),
-            refuse_encoded: false,
+            credential: false,
         })
     }
 
-    /// Fail the connection on a response with a `Content-Encoding` other
-    /// than `identity` or a transfer coding other than `chunked`, rather than
-    /// pass through a body that may hold a value in a form it can't see. For
-    /// connections carrying a child proxy credential, which the guest must
-    /// never get back.
-    pub(super) fn refusing_encodings(mut self, refuse: bool) -> Self {
-        self.refuse_encoded = refuse;
+    /// For connections carrying a child proxy credential, which the guest
+    /// must never get back: fail the connection on a response with a
+    /// `Content-Encoding` other than `identity` or a transfer coding other
+    /// than `chunked`, rather than pass through a body that may hold a value
+    /// in a form it can't see, and on a `101` to a request without `Upgrade`
+    /// (which got the credential), rather than pass what follows through
+    /// unframed.
+    pub(super) fn carrying_credential(mut self, credential: bool) -> Self {
+        self.credential = credential;
         self
     }
 
@@ -343,8 +349,12 @@ impl ResponseMasker {
         };
         // ponytail: fail closed on encoded bodies; decode, mask and send them
         // on uncompressed instead if servers that ignore `identity` matter.
-        if self.refuse_encoded && is_encoded(head) {
+        if self.credential && is_encoded(head) {
             return self.fail("an encoded response on a connection carrying a credential");
+        }
+        if self.credential && status == 101 && request != RequestKind::Upgrade {
+            return self
+                .fail("a 101 to a request without Upgrade on a connection carrying a credential");
         }
         let masked = self.mask(head);
         self.out.extend(masked);
@@ -805,7 +815,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\ncontent-encoding: identity, br\r\nContent-Length: 11\r\n\r\nSECRETVALUE",
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
         ] {
-            let mut m = masker().refusing_encodings(true);
+            let mut m = masker().carrying_credential(true);
             let mut requests = VecDeque::from([RequestKind::Other]);
             m.feed(wire, &mut requests);
             m.finish();
@@ -816,7 +826,7 @@ mod tests {
             &b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: 11\r\n\r\nSECRETVALUE"[..],
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
         ] {
-            let mut m = masker().refusing_encodings(true);
+            let mut m = masker().carrying_credential(true);
             let mut requests = VecDeque::from([RequestKind::Other]);
             let got = run(&mut m, &mut requests, &[wire]);
             assert!(m.failure().is_none(), "{:?}", String::from_utf8_lossy(wire));
@@ -831,6 +841,35 @@ mod tests {
             &[b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nhi"],
         );
         assert!(m.failure().is_none());
+    }
+
+    /// On a connection carrying a credential, a `101` is only taken for a
+    /// request that asked for an upgrade: one to any other request fails the
+    /// connection instead of switching it to pass-through.
+    #[test]
+    fn unasked_for_upgrades_fail_closed_when_carrying_a_credential() {
+        let wire = &b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\nSECRETVALUE"[..];
+        let mut m = masker().carrying_credential(true);
+        let mut requests = VecDeque::from([RequestKind::Other]);
+        m.feed(wire, &mut requests);
+        m.finish();
+        assert!(m.failure().is_some());
+        assert!(!m.out.windows(5).any(|w| w == b"SECRE"));
+        for (credential, request) in [(true, RequestKind::Upgrade), (false, RequestKind::Other)] {
+            let mut m = masker().carrying_credential(credential);
+            let mut requests = VecDeque::from([request]);
+            m.feed(wire, &mut requests);
+            assert!(m.failure().is_none(), "{credential} {request:?}");
+            assert!(m.may_release_on_quiet(), "{credential} {request:?}");
+        }
+        assert_eq!(
+            RequestKind::of(b"GET / HTTP/1.1\r\nupgrade: websocket\r\n\r\n"),
+            RequestKind::Upgrade
+        );
+        assert_eq!(
+            RequestKind::of(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+            RequestKind::Other
+        );
     }
 
     /// Bare-LF line endings in a response head are accepted, as clients do.

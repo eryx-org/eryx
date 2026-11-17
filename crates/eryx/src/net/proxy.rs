@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
@@ -88,6 +88,45 @@ pub struct ChildNetPolicy {
     /// all the proxies started from it), those of the policies it narrows,
     /// and last the execution's, shared with the guest.
     budgets: Vec<NetBudget>,
+    /// What the passwords of the proxies started from it (and from the
+    /// policies narrowed from it) are derived from.
+    key: ProxyKey,
+}
+
+/// A random key, one per execution's child network, from which each proxy
+/// holding credentials derives its password (see
+/// [`ChildNetPolicy::proxy_userinfo`]): so the output can be scrubbed of a
+/// password before its proxy starts, and one proxy's password tells nothing
+/// about another's.
+#[derive(Clone)]
+struct ProxyKey(Arc<[u8; 32]>);
+
+impl std::fmt::Debug for ProxyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyKey([REDACTED])")
+    }
+}
+
+/// HMAC-SHA256 (RFC 2104) of `message` under `key`, of at most a block.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    debug_assert!(key.len() <= 64);
+    let pad = |byte: u8| {
+        let mut block = [byte; 64];
+        for (b, k) in block.iter_mut().zip(key) {
+            *b ^= k;
+        }
+        block
+    };
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .into()
 }
 
 impl ChildNetPolicy {
@@ -106,6 +145,7 @@ impl ChildNetPolicy {
         Some(Self {
             policy,
             budgets: vec![children, budget],
+            key: ProxyKey(Arc::new(rand::random())),
         })
     }
 
@@ -120,7 +160,33 @@ impl ChildNetPolicy {
             budgets: std::iter::once(own)
                 .chain(self.budgets.iter().cloned())
                 .collect(),
+            key: self.key.clone(),
         }
+    }
+
+    /// The `user:password` the proxy holding credentials for the command
+    /// `name` requires from its clients, derived from this execution's key.
+    pub(crate) fn proxy_userinfo(&self, name: &str) -> String {
+        use base64::Engine as _;
+        let password = hmac_sha256(&*self.key.0, name.as_bytes());
+        format!(
+            "eryx:{}",
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(password)
+        )
+    }
+
+    /// What output and traces are scrubbed of for the proxy holding
+    /// credentials for the command `name`: its `user:password` (so its URL
+    /// in `HTTPS_PROXY` reads `http://[REDACTED]@127.0.0.1:<port>`), that as
+    /// `Proxy-Authorization: Basic` encodes it, and the password alone.
+    pub(crate) fn proxy_sensitive_values(&self, name: &str) -> [String; 3] {
+        use base64::Engine as _;
+        let userinfo = self.proxy_userinfo(name);
+        let encoded = base64::prelude::BASE64_STANDARD.encode(&userinfo);
+        let password = userinfo
+            .split_once(':')
+            .map_or_else(String::new, |(_, password)| password.to_owned());
+        [userinfo, encoded, password]
     }
 
     /// Start a proxy for children that may (`allow_tunnels`) or may not
@@ -130,18 +196,20 @@ impl ChildNetPolicy {
     ///
     /// Fails if the CA can't be generated or the listener can't be bound.
     pub fn start_proxy(&self, allow_tunnels: bool) -> std::io::Result<ChildProxy> {
-        ChildProxy::start_with(self, allow_tunnels, &[])
+        ChildProxy::start_with(self, allow_tunnels, &[], "")
     }
 
     /// [`start_proxy`](Self::start_proxy), adding `credentials` to the
-    /// children's requests. A proxy with credentials requires the password
-    /// in [`ChildProxy::userinfo`] from its clients.
+    /// requests of the command `name`'s children. A proxy with credentials
+    /// requires the password in [`ChildProxy::userinfo`] (see
+    /// [`Self::proxy_userinfo`]) from its clients.
     pub(crate) fn start_proxy_with(
         &self,
         allow_tunnels: bool,
         credentials: &[Arc<Credential>],
+        name: &str,
     ) -> std::io::Result<ChildProxy> {
-        ChildProxy::start_with(self, allow_tunnels, credentials)
+        ChildProxy::start_with(self, allow_tunnels, credentials, name)
     }
 }
 
@@ -166,12 +234,14 @@ pub(super) fn is_child_proxy(addr: SocketAddr) -> bool {
     (ip.is_loopback() || ip.is_unspecified())
         && PROXY_PORTS
             .lock()
-            .is_ok_and(|ports| ports.contains(&addr.port()))
+            // A poisoned lock still refuses: the list is only pushed to and
+            // removed from, so it's never left half-updated.
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&addr.port())
 }
 
 /// A forward proxy for one sandbox's child processes, listening on
 /// `127.0.0.1`. It stops when dropped, closing every connection.
-#[derive(Debug)]
 pub struct ChildProxy {
     addr: SocketAddr,
     ca_pem: String,
@@ -180,6 +250,16 @@ pub struct ChildProxy {
     #[cfg(test)]
     ca_der: rustls::pki_types::CertificateDer<'static>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for ChildProxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the password.
+        f.debug_struct("ChildProxy")
+            .field("addr", &self.addr)
+            .field("userinfo", &self.userinfo.as_ref().map(|_| "[REDACTED]"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChildProxy {
@@ -219,6 +299,7 @@ impl ChildProxy {
         net: &ChildNetPolicy,
         allow_tunnels: bool,
         credentials: &[Arc<Credential>],
+        name: &str,
     ) -> std::io::Result<Self> {
         let policy = Arc::clone(&net.policy);
         let ca = Ca::new().map_err(std::io::Error::other)?;
@@ -226,19 +307,14 @@ impl ChildProxy {
         listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(listener)?;
         let addr = listener.local_addr()?;
-        if let Ok(mut ports) = PROXY_PORTS.lock() {
-            ports.push(addr.port());
-        }
+        // Registered even if the lock is poisoned, so it's still refused.
+        PROXY_PORTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(addr.port());
         // Children reach only their own proxy, but other processes on the
         // host may reach any: a proxy with credentials wants a password.
-        let userinfo = (!credentials.is_empty()).then(|| {
-            use base64::Engine as _;
-            let password: [u8; 24] = rand::random();
-            format!(
-                "eryx:{}",
-                base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(password)
-            )
-        });
+        let userinfo = (!credentials.is_empty()).then(|| net.proxy_userinfo(name));
         let proxy_auth = userinfo.as_ref().map(|userinfo| {
             use base64::Engine as _;
             format!(
@@ -294,9 +370,8 @@ impl Drop for ChildProxy {
     fn drop(&mut self) {
         // The accept loop owns every connection's task, so they stop too.
         self.task.abort();
-        if let Ok(mut ports) = PROXY_PORTS.lock()
-            && let Some(i) = ports.iter().position(|&p| p == self.addr.port())
-        {
+        let mut ports = PROXY_PORTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = ports.iter().position(|&p| p == self.addr.port()) {
             ports.swap_remove(i);
         }
     }
@@ -878,7 +953,6 @@ async fn read_head(stream: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>), ProxyEr
     }
 }
 
-/// `host` and `port` of a `host:port` or `[v6]:port` authority.
 /// Whether the request head `text` carries `expected` as its only
 /// `Proxy-Authorization`.
 fn proxy_authorized(text: &str, expected: &str) -> bool {
@@ -899,6 +973,7 @@ fn proxy_authorized(text: &str, expected: &str) -> bool {
     }) && values.next().is_none()
 }
 
+/// `host` and `port` of a `host:port` or `[v6]:port` authority.
 fn split_authority(authority: &str) -> Option<(&str, u16)> {
     let (host, port) = authority.rsplit_once(':')?;
     let host = host
@@ -1325,7 +1400,7 @@ mod tests {
         let credentials: Vec<_> = credentials.iter().cloned().map(Arc::new).collect();
         ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit)
             .unwrap()
-            .start_proxy_with(tunnels, &credentials)
+            .start_proxy_with(tunnels, &credentials, "cmd")
             .unwrap()
     }
 
@@ -1384,6 +1459,50 @@ mod tests {
         assert!(response.contains(" 200 OK"), "{response}");
         assert!(!response.contains(TOKEN), "{response}");
         assert!(response.contains("Authorization: [REDACTED]"), "{response}");
+    }
+
+    /// A proxy with credentials has a password derived from its child
+    /// network's key and its command, known before it starts (so output can
+    /// be scrubbed of it), different for each command and each execution,
+    /// and never in its `Debug`.
+    #[tokio::test]
+    async fn proxy_passwords_are_derived_and_never_debugged() {
+        // RFC 4231 test case 2.
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+
+        let config = NetConfig::default().allow_host("api.test");
+        let budget = NetBudget::new(config.max_connections(), config.max_bytes());
+        let sandbox = Arc::new(NetPolicy::new(config, secrets()));
+        let net = ChildNetPolicy::new(Arc::clone(&sandbox), budget.clone(), ChildNetwork::Inherit)
+            .unwrap();
+        let credentials = [Arc::new(Credential::bearer(TOKEN).for_hosts(["api.test"]))];
+        let proxy = net.start_proxy_with(false, &credentials, "gh").unwrap();
+        let userinfo = proxy.userinfo().unwrap();
+        let [scrubbed, encoded, password] = net.proxy_sensitive_values("gh");
+        assert_eq!(userinfo, scrubbed);
+        assert_eq!(format!("eryx:{password}"), userinfo);
+        assert!(password.len() >= 32);
+        {
+            use base64::Engine as _;
+            assert_eq!(encoded, base64::prelude::BASE64_STANDARD.encode(userinfo));
+        }
+        assert_eq!(
+            net.narrowed(NetConfig::default()).proxy_userinfo("gh"),
+            userinfo
+        );
+        assert_ne!(net.proxy_userinfo("git"), userinfo);
+        let other = ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit).unwrap();
+        assert_ne!(other.proxy_userinfo("gh"), userinfo);
+        assert!(net.start_proxy(false).unwrap().userinfo().is_none());
+
+        let debug = format!("{proxy:?} {net:?}");
+        assert!(!debug.contains(&password), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
     }
 
     /// A credential goes only to its hosts and paths, over TLS (unless it

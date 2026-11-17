@@ -251,6 +251,36 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
 
 Alternatively, turn file scrubbing off for that sandbox (`scrub_files=False`, `.scrub_files(false)`), accepting that placeholders then persist in its files.
 
+## Credentials for Child Processes
+
+A shell's commands can instead be given a
+[credential](./sandboxes.md#external-commands): a header the child proxy adds
+to their requests itself, so the sandbox never holds the secret at all. A few
+rules and limits worth knowing:
+
+- **Precedence:** a credential given to one execution
+  (`ExecuteOptions::with_credential`) wins over the sandbox's
+  (`SandboxBuilder::with_credential`) where both apply to a request and set
+  the same header, so a per-request token overrides a sandbox-wide default.
+  Among one level's own, the first given wins.
+- **Hosts:** `for_hosts` takes exact names (`api.github.com`) or `*.` and a
+  name (`*.github.com`, its subdomains only). Any other `*` (`*`, `*.*`,
+  `github.com*`, `*github.com`) is refused, since it could match a host the
+  script controls. Hosts aren't scoped by port: any port the network allows
+  on a credential's host gets it.
+- **Masking only hides whole, verbatim echoes.** A host that echoes request
+  headers can hand the credential back in a form masking doesn't see: re-escaped
+  (JSON's `\/` for `/`), re-encoded, or in pieces (`Range` and `If-Range` are
+  dropped from requests carrying a credential, but other ways to slice a
+  response remain). Don't give credentials for hosts that echo requests.
+- **Output scrubbing is defence in depth, not a boundary.** The credential's
+  value and the password of the proxy holding it (which a command finds in its
+  `HTTPS_PROXY`) are scrubbed from stdout, stderr, traces, failure messages
+  and (with `scrub_result`) results, but only verbatim: a script that gets a
+  value can transform it, write it to a file, or split it across streamed
+  writes. Masking the responses, and keeping the secret out of the sandbox,
+  is the control.
+
 ## Best Practices
 
 1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret falls back to the network config's allowed hosts, which could be broader than intended.

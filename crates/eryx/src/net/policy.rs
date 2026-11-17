@@ -752,7 +752,7 @@ impl RequestFramer {
         };
         masks.extend(self.credentials.iter().flat_map(|c| c.masks()));
         let masker = response::ResponseMasker::new(masks)
-            .map(|m| m.refusing_encodings(!self.credentials.is_empty()));
+            .map(|m| m.carrying_credential(!self.credentials.is_empty()));
         ResponseMasker {
             masker,
             error: None,
@@ -973,9 +973,12 @@ fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
 
 /// The request head `headers` with `credentials` applied: each one for the
 /// request's path replaces every header of its name the child sent (the
-/// first for a name wins), and `Accept-Encoding` asks for `identity`, since
-/// a credential can't be masked out of a compressed response. A `CONNECT`
-/// or `Upgrade` request gets none: what follows it isn't framed or masked.
+/// first for a name wins, so callers put an execution's before the
+/// sandbox's), and `Accept-Encoding` asks for `identity`, since a credential
+/// can't be masked out of a compressed response. A request that gets one
+/// loses its `Range` and `If-Range`, so an echo of the credential can't be
+/// fetched in pieces shorter than the masks. A `CONNECT` or `Upgrade`
+/// request gets none: what follows it isn't framed or masked.
 fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8> {
     // `request_body` has checked that the headers are UTF-8, and the
     // request line parses (`classify`).
@@ -1001,7 +1004,9 @@ fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8
     }
     for line in lines.filter(|line| !line.is_empty()) {
         let name = line.split(':').next().unwrap_or_default().trim();
+        let ranged = name.eq_ignore_ascii_case("range") || name.eq_ignore_ascii_case("if-range");
         if name.eq_ignore_ascii_case("accept-encoding")
+            || (ranged && !applied.is_empty())
             || applied
                 .iter()
                 .any(|c| c.header_name().eq_ignore_ascii_case(name))
@@ -1238,6 +1243,43 @@ mod tests {
         assert_eq!(
             frame(b"GET /x HTTP/1.1\r\nHost: api.test\r\n\r\n"),
             "GET /x HTTP/1.1\r\nHost: api.test\r\n\r\n"
+        );
+    }
+
+    /// Of two credentials setting one header, the first wins (an
+    /// execution's, which callers put first); a request that gets one loses
+    /// `Range` and `If-Range`, and one that gets none keeps them.
+    #[test]
+    fn injection_takes_the_first_credential_and_drops_ranges() {
+        let credentials = [
+            Arc::new(Credential::bearer("execution").for_hosts(["api.test"])),
+            Arc::new(Credential::bearer("sandbox").for_hosts(["api.test"])),
+            Arc::new(
+                Credential::header("X-Key", "{secret}", "key")
+                    .for_hosts(["api.test"])
+                    .for_paths(["/keyed/"]),
+            ),
+        ];
+        let inject = |head: &str, credentials: &[Arc<Credential>]| {
+            String::from_utf8(inject_credentials(head.as_bytes(), credentials)).unwrap()
+        };
+        let out = inject(
+            "GET /keyed/x HTTP/1.1\r\nHost: api.test\r\nRange: bytes=0-3\r\nif-range: \"e\"\r\n\r\n",
+            &credentials,
+        );
+        assert!(out.contains("Authorization: Bearer execution\r\n"), "{out}");
+        assert!(!out.contains("sandbox"), "{out}");
+        assert!(out.contains("X-Key: key\r\n"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("range"), "{out}");
+        // No credential for the path: the ranges stay.
+        let path_only = [Arc::clone(&credentials[2])];
+        let out = inject(
+            "GET /other HTTP/1.1\r\nHost: api.test\r\nRange: bytes=0-3\r\n\r\n",
+            &path_only,
+        );
+        assert!(
+            out.contains("Range: bytes=0-3\r\n") && !out.contains("X-Key"),
+            "{out}"
         );
     }
 }

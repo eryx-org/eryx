@@ -1037,11 +1037,13 @@ async fn credentials_go_to_their_commands_only() {
     .await;
     assert!(out.contains(" 200 OK"), "{out}");
     assert!(!seen.lock().unwrap().contains(INJECTED));
-    // tc's proxy wants a password, tc3's (another proxy) doesn't.
+    // tc's proxy wants a password, which is scrubbed from the output; tc3's
+    // (another proxy) wants none.
     assert!(
-        out.contains("http://eryx:") && out.contains("\nhttp://127.0.0.1:"),
+        out.contains("http://[REDACTED]@127.0.0.1:") && out.contains("\nhttp://127.0.0.1:"),
         "{out}"
     );
+    assert!(!out.contains("eryx:"), "{out}");
     assert!(!out.contains(INJECTED), "{out}");
 
     // Taken away for one execution, and given for one.
@@ -1072,6 +1074,63 @@ async fn credentials_go_to_their_commands_only() {
     );
     let out = run(&plain, &leak).await;
     assert!(out.contains(INJECTED), "{out}");
+}
+
+/// An execution's credential wins over the sandbox's for a header both set,
+/// so a per-request token overrides a sandbox-wide default.
+#[tokio::test]
+async fn an_executions_credential_wins_over_the_sandboxs() {
+    const SANDBOX: &str = "sandbox-credential-0123456789";
+    let (port, seen) = upstream(None).await;
+    let credential = |secret: &str| {
+        eryx::Credential::bearer(secret)
+            .for_hosts(["api.test"])
+            .allow_plaintext()
+    };
+    let sandbox = shell(network())
+        .with_credential(credential(SANDBOX))
+        .build()
+        .unwrap();
+    let get = format!("tc proxy-get http://api.test:{port}/x");
+    let given = eryx::ExecuteOptions::new().with_credential(credential(INJECTED));
+    let out = run_with(&sandbox, &get, &given).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    let got = seen.lock().unwrap().clone();
+    assert!(
+        got.contains(&format!("Authorization: Bearer {INJECTED}")) && !got.contains(SANDBOX),
+        "{got}"
+    );
+    // Without one of its own, an execution gets the sandbox's.
+    seen.lock().unwrap().clear();
+    let out = run(&sandbox, &get).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .contains(&format!("Authorization: Bearer {SANDBOX}"))
+    );
+}
+
+/// The password of a proxy holding credentials is scrubbed from the output
+/// wherever a command prints it: its `HTTPS_PROXY`, the `user:password` in
+/// it, and that as `Proxy-Authorization: Basic` sends it.
+#[tokio::test]
+async fn proxy_passwords_are_scrubbed_from_the_output() {
+    let credential = eryx::Credential::bearer(INJECTED)
+        .for_hosts(["api.test"])
+        .for_commands(["tc"]);
+    let sandbox = shell(network()).build().unwrap();
+    let given = eryx::ExecuteOptions::new().with_credential(credential);
+    let script = "p=$(tc env HTTPS_PROXY); echo \"proxy=$p\"; \
+                  u=${p#http://}; u=${u%@*}; echo \"userinfo=$u\"; echo \"password=${u#*:}\" >&2";
+    let out = run_with(&sandbox, script, &given).await;
+    assert!(
+        out.contains("proxy=http://[REDACTED]@127.0.0.1:")
+            && out.contains("userinfo=[REDACTED]")
+            && out.contains("password=[REDACTED]"),
+        "{out}"
+    );
+    assert!(!out.contains("eryx:"), "{out}");
 }
 
 /// Over TLS (the proxy's own), a credential replaces the child's header and

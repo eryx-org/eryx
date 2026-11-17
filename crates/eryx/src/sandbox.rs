@@ -383,8 +383,22 @@ impl Sandbox {
             .await
         });
 
+        // Spawn network handler if networking is enabled (first, so the
+        // output can be scrubbed of the child proxies' passwords)
+        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
+            // Children draw on the guest's budget.
+            let child_net = manager.child_network(self.executor.child_network().clone());
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler), child_net)
+        } else {
+            (None, None, None)
+        };
+
+        let scrub_secrets = self.scrub_secrets(&options.credentials, child_net.as_ref());
+        let child_net = child_net.map(crate::process::ChildNet::new);
         // Create the trace channel and collector only when tracing is enabled.
-        let scrub_secrets = self.scrub_secrets(&options.credentials);
         let tracing_enabled = self.tracing_enabled();
         let (trace_tx, trace_collector) = if tracing_enabled {
             let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
@@ -397,20 +411,6 @@ impl Sandbox {
             (Some(trace_tx), Some(trace_collector))
         } else {
             (None, None)
-        };
-
-        // Spawn network handler if networking is enabled
-        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
-            let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
-            // Children draw on the guest's budget.
-            let child_net = manager
-                .child_network(self.executor.child_network().clone())
-                .map(crate::process::ChildNet::new);
-            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler), child_net)
-        } else {
-            (None, None, None)
         };
 
         // Spawn output collector for real-time streaming if handler is configured
@@ -699,21 +699,47 @@ impl Sandbox {
     }
 
     /// What an execution's output and traces are scrubbed of: the secrets'
-    /// placeholders, and the values of the credentials its children get (the
+    /// placeholders, the values of the credentials its children get (the
     /// sandbox's and `extra`, the execution's own), in case one gets there
-    /// some way the proxy's response masking misses.
+    /// some way the proxy's response masking misses, and the passwords of
+    /// the proxies holding them (from `child_net`, the execution's).
     pub(crate) fn scrub_secrets(
         &self,
         extra: &[crate::net::Credential],
+        child_net: Option<&crate::net::ChildNetPolicy>,
     ) -> HashMap<String, crate::secrets::SecretConfig> {
         let mut secrets = self.secrets.clone();
-        let credentials = self
+        let credentials: Vec<&crate::net::Credential> = self
             .executor
             .credentials()
             .iter()
             .map(|c| &**c)
-            .chain(extra);
-        for (i, value) in credentials.flat_map(|c| c.sensitive_values()).enumerate() {
+            .chain(extra)
+            .collect();
+        // The commands that may get a proxy of their own with a password.
+        let registered = self.executor.commands().registered_names();
+        let names: std::collections::BTreeSet<&str> = if credentials.is_empty() {
+            std::collections::BTreeSet::new()
+        } else if credentials.iter().any(|c| c.commands().is_none()) {
+            registered.collect()
+        } else {
+            let named: std::collections::BTreeSet<&str> = credentials
+                .iter()
+                .flat_map(|c| c.commands().unwrap_or_default())
+                .map(String::as_str)
+                .collect();
+            registered.filter(|name| named.contains(name)).collect()
+        };
+        let passwords = child_net.into_iter().flat_map(|net| {
+            names
+                .iter()
+                .flat_map(move |name| net.proxy_sensitive_values(name))
+        });
+        let values = credentials
+            .iter()
+            .flat_map(|c| c.sensitive_values())
+            .chain(passwords);
+        for (i, value) in values.enumerate() {
             // Not a name a secret can have (names are env var names).
             secrets.insert(
                 format!("eryx credential {i}"),
@@ -1222,6 +1248,10 @@ impl ExecuteOptions {
     /// opens blind tunnels, or if the sandbox gives children no network.
     /// Sessions take the same option on
     /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    ///
+    /// Where it and one of the sandbox's both apply to a request and set the
+    /// same header, this one wins: the request carries its value, not the
+    /// sandbox's. Between an execution's own, the one given first wins.
     #[must_use]
     pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
         self.credentials.push(credential);
@@ -2703,6 +2733,11 @@ impl<R> SandboxBuilder<Shell, R> {
     /// [`ExecuteOptions::with_credential`]. Needs a child network; an
     /// execution fails to start if the credential is invalid or names a
     /// command that isn't registered, has no network or opens blind tunnels.
+    ///
+    /// Where it and an execution's own both apply to a request and set the
+    /// same header, the execution's wins, so a per-request token overrides
+    /// a sandbox-wide default. Between the sandbox's own, the one given
+    /// first wins.
     #[must_use]
     pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
         self.credentials.push(Arc::new(credential));

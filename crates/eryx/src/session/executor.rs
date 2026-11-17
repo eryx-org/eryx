@@ -1630,8 +1630,10 @@ impl SessionExecutor {
         crate::error::validate_user_code(code)?;
         // From the full set every time, so one execution's narrowing
         // doesn't carry into the next. Checked before the store is taken.
-        let credentials: Vec<_> = (self.executor.credentials().iter())
-            .chain(credentials)
+        // The execution's first, so they win over the sandbox's for a
+        // header both set (see `PythonExecutor::execute`).
+        let credentials: Vec<_> = (credentials.iter())
+            .chain(self.executor.credentials())
             .cloned()
             .collect();
         let commands = self.executor.commands().for_execution(

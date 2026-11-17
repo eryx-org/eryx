@@ -4073,10 +4073,11 @@ impl Executor {
         vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
-        let credentials: Vec<_> = self
-            .credentials
+        // The execution's first: for a header both set on a request, the
+        // first match wins (`inject_credentials`), so the execution's does.
+        let credentials: Vec<_> = credentials
             .iter()
-            .chain(credentials)
+            .chain(&self.credentials)
             .cloned()
             .collect();
         let commands = self.commands.for_execution(

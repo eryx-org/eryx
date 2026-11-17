@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 
-use super::{host_matches_pattern, is_host_pattern, is_normalized_path, normalize_host};
+use super::{host_matches_pattern, is_normalized_path, normalize_host};
 
 /// What a masked credential reads as in a response.
 const MASKED: &[u8] = b"[REDACTED]";
@@ -50,7 +50,19 @@ const RESERVED_HEADERS: [&str; 9] = [
 /// `Upgrade` request. Any header of the same name the child sent is
 /// replaced, so a client that needs a token to send requests at all (like
 /// `gh`) can be given a dummy one. Responses on such a connection are asked
-/// for and must come uncompressed, and have the credential masked out.
+/// for and must come uncompressed, and have the credential masked out; a
+/// request that gets it loses its `Range` and `If-Range` headers.
+///
+/// Where an execution's credential and the sandbox's both apply to a request
+/// and set the same header, the execution's wins.
+///
+/// Masking only hides whole, verbatim echoes of the value (and of a `Basic`
+/// payload, and the secret): not pieces of it, nor forms a host re-escapes
+/// or re-encodes it into (JSON's `\/` for `/`, say). So don't give
+/// credentials for hosts that echo requests. The value and the proxy's
+/// password are also scrubbed from the output and traces, but that's defence
+/// in depth, not a boundary: a script that gets hold of either can transform
+/// it first. [`for_hosts`](Self::for_hosts) doesn't scope by port.
 ///
 /// A command given a credential can do anything with it that its hosts and
 /// paths allow, on the guest's behalf: scope it as narrowly as you can.
@@ -128,10 +140,13 @@ impl Credential {
         }
     }
 
-    /// The hosts it's sent to (patterns as for
-    /// [`NetConfig::allow_host`](crate::NetConfig::allow_host)). Required,
-    /// and `*` isn't allowed: a credential for every host would go wherever
-    /// the guest points its commands.
+    /// The hosts it's sent to: each an exact name (`api.github.com`), or
+    /// `*.` and a name for its subdomains (`*.github.com`, which doesn't
+    /// match `github.com` itself). Required, and narrower than
+    /// [`NetConfig::allow_host`](crate::NetConfig::allow_host)'s patterns: a
+    /// `*` anywhere else (`*`, `*.*`, `github.com*`, `*github.com`) is
+    /// refused, since it would match hosts the guest can register. Any port
+    /// the network allows on a host gets it: hosts aren't scoped by port.
     #[must_use]
     pub fn for_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.hosts = hosts.into_iter().map(Into::into).collect();
@@ -220,9 +235,10 @@ impl Credential {
             ));
         }
         for host in &self.hosts {
-            if !is_host_pattern(&normalize_host(host)) {
+            if !is_credential_host_pattern(host) {
                 return Err(format!(
-                    "credential host pattern {host:?} names no host, or every host"
+                    "credential host pattern {host:?} must be a host name, or `*.` and one \
+                     (no other `*`, no empty labels)"
                 ));
             }
         }
@@ -289,6 +305,14 @@ impl Credential {
     }
 }
 
+/// Whether `pattern` is an exact host name, or a single leading `*.` label
+/// and a name with no `*` (and no empty labels) in it.
+fn is_credential_host_pattern(pattern: &str) -> bool {
+    let host = normalize_host(pattern);
+    let name = host.strip_prefix("*.").unwrap_or(&host);
+    !name.contains('*') && name.split('.').all(|label| !label.is_empty())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -330,8 +354,8 @@ mod tests {
         assert!(ok().validate().is_ok());
         for (bad, why) in [
             (Credential::bearer("s"), "no hosts"),
-            (Credential::bearer("s").for_hosts(["*"]), "every host"),
-            (Credential::bearer("s").for_hosts(["."]), "names no host"),
+            (Credential::bearer("s").for_hosts(["*"]), "host pattern"),
+            (Credential::bearer("s").for_hosts(["."]), "host pattern"),
             (Credential::bearer(""), "empty secret"),
             (Credential::bearer("a\r\nX-Evil: 1"), "control character"),
             (Credential::header("Host", "{secret}", "s"), "can't set"),
@@ -361,6 +385,47 @@ mod tests {
             };
             let err = bad.validate().unwrap_err();
             assert!(err.contains(why), "{why}: {err}");
+        }
+    }
+
+    /// Only an exact name or `*.` and a name: no other glob, which could
+    /// match a host the guest controls.
+    #[test]
+    fn host_patterns_are_names_or_one_leading_wildcard_label() {
+        for ok in [
+            "api.github.com",
+            "GitHub.com.",
+            "*.github.com",
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+        ] {
+            assert!(is_credential_host_pattern(ok), "{ok}");
+            assert!(Credential::bearer("s").for_hosts([ok]).validate().is_ok());
+        }
+        for bad in [
+            "",
+            ".",
+            "*",
+            "*.",
+            "**",
+            "*.*",
+            "*m",
+            "github.com*",
+            "*github.com",
+            "gi*hub.com",
+            "*.*.github.com",
+            "api.*.com",
+            ".github.com",
+            "github..com",
+            "*..github.com",
+        ] {
+            assert!(!is_credential_host_pattern(bad), "{bad}");
+            let err = Credential::bearer("s")
+                .for_hosts(["api.github.com", bad])
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("host pattern"), "{bad}: {err}");
         }
     }
 

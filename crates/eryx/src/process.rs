@@ -805,7 +805,7 @@ impl ChildNet {
         let link = match self.proxies.entry((key, command.tunnels)) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let proxy = policy.start_proxy_with(command.tunnels, &command.credentials)?;
+                let proxy = policy.start_proxy_with(command.tunnels, &command.credentials, name)?;
                 let ca_dir = tempfile::tempdir()?;
                 std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
                 entry.insert(ProxyLink { proxy, ca_dir })

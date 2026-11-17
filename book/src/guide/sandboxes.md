@@ -288,11 +288,13 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   ```
 
   `bearer`, `token` (`Authorization: token …`), `basic(user, …)` and
-  `header(name, template, …)` build the value. `for_hosts` is required (not
-  `*`); `for_paths` and `for_commands` narrow it (with no `for_commands`,
-  every child gets it). Give one execution its own with
-  `ExecuteOptions::with_credential` (a hosted service's per-user token), and
-  take them from one command with `CommandOptions::without_credentials()`.
+  `header(name, template, …)` build the value. `for_hosts` is required, and
+  takes exact names or `*.` and a name (`*.github.com`), no other `*`;
+  it doesn't scope by port. `for_paths` and `for_commands` narrow it (with
+  no `for_commands`, every child gets it). Give one execution its own with
+  `ExecuteOptions::with_credential` (a hosted service's per-user token): where
+  it and a sandbox's both set a header on a request, the execution's wins.
+  Take them from one command with `CommandOptions::without_credentials()`.
   - **Where:** only on requests the proxy inspects: over the TLS it
     terminates, or plain HTTP with `allow_plaintext()`; never an `Upgrade`
     request. Any header of the same name the child sent is replaced, so `gh`
@@ -300,18 +302,23 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     carry one: naming it fails the execution, and a tunnelling proxy refuses
     a credential's hosts.
   - **Confined to its commands:** a command with credentials gets a proxy of
-    its own, which wants a password from its `HTTPS_PROXY` URL, and no
+    its own, which wants a password from its `HTTPS_PROXY` URL (scrubbed
+    from the output like the credential), and no
     connection, the sandbox's or a child's, may reach a child proxy, even
     with `allow_localhost`. Other commands and the script's own requests
     never get the header.
   - **Responses:** on a connection with a credential, requests ask for
     `Accept-Encoding: identity` and a compressed or transfer-coded response
     ends the connection, since the credential can't be found in an encoded
-    body. The value (and for `Basic` its base64 payload, and the secret) is
+    body, as does a `101` to a request that didn't ask to upgrade. `Range`
+    and `If-Range` are dropped from requests that get one. The value (and for `Basic` its base64 payload, and the secret) is
     masked out as `[REDACTED]`, as secrets' real values are, and scrubbed
-    from stdout, stderr and traces too in case any reaches them. A host that
-    echoes it in another form (its base64 alone, hex) isn't masked, so don't
-    give credentials for hosts that echo request headers.
+    from stdout, stderr and traces too in case any reaches them. Masking
+    only hides whole, verbatim echoes: one in another form (its base64
+    alone, hex, JSON's `\/` for `/`) or in pieces isn't masked, so don't give
+    credentials for hosts that echo request headers. Output scrubbing is
+    defence in depth, not a boundary (see
+    [Credentials](./secrets.md#credentials-for-child-processes)).
   - **Limits:** a command with a credential can do anything with it its hosts
     and paths allow, whatever the script asks: scope it as narrowly as you
     can. Credentials are Rust-only for now.
