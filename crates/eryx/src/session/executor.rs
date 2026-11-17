@@ -1830,7 +1830,12 @@ impl SessionExecutor {
             .and_then(|output| {
                 output.map_err(|failure| {
                     let mut message = failure.message;
-                    crate::wasm::append_fd_stderr(&mut message, &fd_stderr, language);
+                    crate::wasm::append_fd_stderr(
+                        &mut message,
+                        &fd_stderr,
+                        language,
+                        failure.exit_code,
+                    );
                     let mut stdout = failure.stdout;
                     let mut stderr = failure.stderr;
                     stdout.extend(&fd_stdout);

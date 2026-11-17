@@ -4190,12 +4190,12 @@ impl Executor {
             Err(e) => {
                 if let ErrorKind::ScriptFailed {
                     message,
+                    exit_code,
                     stdout,
                     stderr,
-                    ..
                 } = e.kind_mut()
                 {
-                    append_fd_stderr(message, &fd_stderr, self.language);
+                    append_fd_stderr(message, &fd_stderr, self.language, *exit_code);
                     stdout.extend(fd_stdout);
                     stderr.extend(fd_stderr);
                 }
@@ -4420,6 +4420,23 @@ impl Executor {
 /// The most of a shell script's last stderr line its failure message quotes.
 const SHELL_MESSAGE_LINE_MAX: usize = 1024;
 
+/// Where to cut `line` at most at `end` without splitting a run of ASCII
+/// letters, digits and underscores: secret placeholders are such runs
+/// (`SecretConfig::with_placeholder`), and the message is scrubbed after
+/// it's composed, so half of one would be left unredacted. The cut backs off
+/// to the run's start, so the run is either whole (and scrubbed) or gone.
+fn placeholder_safe_cut(line: &str, end: usize) -> usize {
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = line.as_bytes();
+    if !bytes.get(end).copied().is_some_and(word) {
+        return end;
+    }
+    bytes[..end]
+        .iter()
+        .rposition(|&b| !word(b))
+        .map_or(0, |i| i + 1)
+}
+
 /// Add the guest's direct fd 2 writes to a script failure's message, the way
 /// a successful run appends them to stderr.
 ///
@@ -4428,10 +4445,19 @@ const SHELL_MESSAGE_LINE_MAX: usize = 1024;
 /// appended on a line of its own. A shell failure's message is its exit
 /// status, and fd 2 is the script's own stderr, already all in the failure's
 /// `stderr`: the message quotes just its last line, as `exit status 127:
-/// error: command not found: x`.
-pub(crate) fn append_fd_stderr(message: &mut String, fd_stderr: &[u8], language: Language) {
+/// error: command not found: x`. A shell failure without an exit status (the
+/// shell itself erred) keeps its message as it is: the stderr is unrelated.
+pub(crate) fn append_fd_stderr(
+    message: &mut String,
+    fd_stderr: &[u8],
+    language: Language,
+    exit_code: Option<i32>,
+) {
     let text = String::from_utf8_lossy(fd_stderr);
     if language == Language::Shell {
+        if exit_code.is_none() {
+            return;
+        }
         if let Some(line) = text
             .lines()
             .map(str::trim_end)
@@ -4440,7 +4466,7 @@ pub(crate) fn append_fd_stderr(message: &mut String, fd_stderr: &[u8], language:
             message.push_str(": ");
             match line.char_indices().nth(SHELL_MESSAGE_LINE_MAX) {
                 Some((end, _)) => {
-                    message.push_str(&line[..end]);
+                    message.push_str(&line[..placeholder_safe_cut(line, end)]);
                     message.push('…');
                 }
                 None => message.push_str(line),
@@ -4781,18 +4807,18 @@ mod tests {
     #[test]
     fn fd_stderr_joins_the_message_on_its_own_line_or_the_shells_last_line() {
         let mut python = "Traceback (most recent call last):\n  ...\nValueError: x".to_string();
-        append_fd_stderr(&mut python, b"warning from C\n", Language::Python);
+        append_fd_stderr(&mut python, b"warning from C\n", Language::Python, None);
         assert_eq!(
             python,
             "Traceback (most recent call last):\n  ...\nValueError: x\nwarning from C\n"
         );
 
         let mut ended = "Error: x\n".to_string();
-        append_fd_stderr(&mut ended, b"more", Language::JavaScript);
+        append_fd_stderr(&mut ended, b"more", Language::JavaScript, None);
         assert_eq!(ended, "Error: x\nmore");
 
         let mut nothing = "Error: x".to_string();
-        append_fd_stderr(&mut nothing, b"", Language::JavaScript);
+        append_fd_stderr(&mut nothing, b"", Language::JavaScript, None);
         assert_eq!(nothing, "Error: x");
 
         // The shell's message quotes the last non-empty line, capped.
@@ -4801,21 +4827,65 @@ mod tests {
             &mut shell,
             b"first\nerror: command not found: mcp.calc.add\n\n",
             Language::Shell,
+            Some(127),
         );
         assert_eq!(
             shell,
             "exit status 127: error: command not found: mcp.calc.add"
         );
         let mut quiet = "exit status 3".to_string();
-        append_fd_stderr(&mut quiet, b"", Language::Shell);
+        append_fd_stderr(&mut quiet, b"", Language::Shell, Some(3));
         assert_eq!(quiet, "exit status 3");
         let mut long = "exit status 1".to_string();
-        append_fd_stderr(&mut long, "é".repeat(5000).as_bytes(), Language::Shell);
+        append_fd_stderr(
+            &mut long,
+            "é".repeat(5000).as_bytes(),
+            Language::Shell,
+            Some(1),
+        );
         assert_eq!(
             long.chars().count(),
             "exit status 1: ".len() + SHELL_MESSAGE_LINE_MAX + 1
         );
         assert!(long.ends_with('…'));
+
+        // The shell itself erred (no exit status): its message stands alone.
+        let mut erred = "brush: something broke".to_string();
+        append_fd_stderr(&mut erred, b"unrelated\n", Language::Shell, None);
+        assert_eq!(erred, "brush: something broke");
+    }
+
+    /// The cap never splits a secret placeholder (a run of ASCII letters,
+    /// digits and underscores), which scrubbing after it couldn't then
+    /// match: a run straddling the cut is dropped whole, generated or custom.
+    #[test]
+    fn the_shell_message_cap_keeps_placeholders_whole() {
+        for placeholder in [
+            "ERYX_SECRET_PLACEHOLDER_0123456789abcdef0123456789abcdef",
+            "my_own_placeholder_with_32_chars_or_more",
+        ] {
+            // A run of 1000 non-word characters, then the placeholder across
+            // character 1024.
+            let line = format!("{} {placeholder} tail", "-".repeat(1000));
+            let mut message = "exit status 1".to_string();
+            append_fd_stderr(&mut message, line.as_bytes(), Language::Shell, Some(1));
+            assert_eq!(message, format!("exit status 1: {} …", "-".repeat(1000)));
+
+            // Entirely before the cut it's kept whole, for scrubbing.
+            let line = format!("{placeholder} {}", "-".repeat(2000));
+            let mut message = "exit status 1".to_string();
+            append_fd_stderr(&mut message, line.as_bytes(), Language::Shell, Some(1));
+            assert!(message.contains(placeholder), "{message}");
+        }
+        // One run longer than the cap: nothing of it is quoted.
+        let mut message = "exit status 1".to_string();
+        append_fd_stderr(
+            &mut message,
+            "A".repeat(5000).as_bytes(),
+            Language::Shell,
+            Some(1),
+        );
+        assert_eq!(message, "exit status 1: …");
     }
 
     #[test]

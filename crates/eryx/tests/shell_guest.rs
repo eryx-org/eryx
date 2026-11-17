@@ -186,6 +186,27 @@ async fn a_failure_message_quoting_stderr_is_scrubbed() {
     assert_eq!(stderr, "token=[REDACTED]\n");
     assert!(!err.to_string().contains("real-value"), "{err}");
     assert!(!err.to_string().contains("ERYX_SECRET"), "{err}");
+
+    // A placeholder across the message's 1024-character cap isn't split
+    // into an unscrubbable fragment: it's dropped whole from the message
+    // (and scrubbed in stderr, which has it all).
+    let pad = "-".repeat(1000);
+    let err = sandbox
+        .execute(&format!("echo \"{pad} $TOKEN tail\" >&2; exit 1"))
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message, stderr, ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    assert_eq!(*message, format!("exit status 1: {pad} …"));
+    assert_eq!(
+        String::from_utf8_lossy(stderr),
+        format!("{pad} [REDACTED] tail\n")
+    );
+    assert!(!err.to_string().contains("ERYX_SECRET"), "{err}");
 }
 
 #[tokio::test]
