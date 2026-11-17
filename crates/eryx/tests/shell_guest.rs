@@ -158,6 +158,36 @@ async fn nonzero_exit_is_a_script_failure_with_output() {
     assert!(stderr.starts_with("first\n"), "{stderr:?}");
 }
 
+/// The message quotes stderr's last line, so it's scrubbed like stderr: a
+/// secret the script prints (as its placeholder; the real value never
+/// reaches the guest) is `[REDACTED]` in both.
+#[tokio::test]
+async fn a_failure_message_quoting_stderr_is_scrubbed() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_secret("TOKEN", "real-value", vec![])
+        .build()
+        .unwrap();
+
+    let err = sandbox
+        .execute("echo \"token=$TOKEN\" >&2; exit 1")
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message, stderr, ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    let stderr = String::from_utf8_lossy(stderr);
+    assert_eq!(message, "exit status 1: token=[REDACTED]", "{stderr:?}");
+    assert_eq!(stderr, "token=[REDACTED]\n");
+    assert!(!err.to_string().contains("real-value"), "{err}");
+    assert!(!err.to_string().contains("ERYX_SECRET"), "{err}");
+}
+
 #[tokio::test]
 async fn callbacks_are_commands() {
     let Some(builder) = shell_sandbox() else {
