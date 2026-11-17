@@ -53,6 +53,8 @@ mod generated {
             "wasi:filesystem/types.[method]descriptor.write-via-stream": store | trappable,
             "wasi:filesystem/types.[method]descriptor.append-via-stream": store | trappable,
             "wasi:filesystem/types.[method]descriptor.read-directory": store | trappable,
+            // Closing the last descriptor on an unlinked file deletes it.
+            "wasi:filesystem/types.[drop]descriptor": async | store | trappable,
             // WIT `async func`s always get `&Accessor`.
             default: trappable,
         },
@@ -226,16 +228,22 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
     }
 }
 
-impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
-    fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
-        p2t::HostDescriptor::drop(self, fd)
-    }
-}
+impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'_, S> {}
 
 // The async functions only get the store inside `Accessor::with`, which can't
 // be held across an await: each one runs the p2 checks there and awaits the
 // returned storage op outside it.
 impl<U, S: VfsStorage + Clone + 'static> types::HostDescriptorWithStore<U> for HybridFilesystem<S> {
+    async fn drop(
+        store: &Accessor<U, Self>,
+        fd: Resource<HybridDescriptor>,
+    ) -> wasmtime::Result<()> {
+        if let Some(delete) = store.with(|mut s| s.get().close_op(fd))? {
+            let _ = delete.await;
+        }
+        Ok(())
+    }
+
     async fn advise(
         _store: &Accessor<U, Self>,
         _fd: Resource<HybridDescriptor>,
@@ -368,7 +376,7 @@ impl<U, S: VfsStorage + Clone + 'static> types::HostDescriptorWithStore<U> for H
             )
         })?;
         let opened = op.await?;
-        Ok(store.with(|mut s| s.get().table.push(opened))?)
+        store.with(|mut s| s.get().push_opened(opened))
     }
 
     async fn readlink_at(

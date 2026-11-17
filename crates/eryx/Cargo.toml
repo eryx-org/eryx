@@ -110,6 +110,8 @@ eryx-vfs = { workspace = true, optional = true } #unified
 flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
+# Request targets checked against HTTP rules
+http.workspace = true
 # CIDR matching for the network policy
 ipnet.workspace = true
 # Secrets support
@@ -226,7 +228,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
 crossterm.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # `all-arch` pulls in Cranelift's non-host backends so the CPU-feature tests
 # can check aarch64 configuration from an x86 runner (eryx has no ARM test job).
 wasmtime = { workspace = true, features = ["all-arch"] }

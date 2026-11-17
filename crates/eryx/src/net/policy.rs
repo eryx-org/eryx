@@ -13,14 +13,15 @@
 //!   host.
 //! - A [`RequestFramer`] per connection frames the HTTP requests written to
 //!   it, checks them against the HTTP rules and substitutes secrets.
-//! - A [`ResponseMasker`] per connection replaces real secret values read
-//!   back with their placeholders.
+//! - A [`ResponseMasker`] per connection, paired with its framer, frames the
+//!   responses to those requests and replaces real secret values read back
+//!   with their placeholders (see [`super::response`]).
 //!
 //! [`ConnectionManager`]: super::ConnectionManager
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -32,11 +33,11 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use super::response::{self, CARRY_GRACE, RequestKind, UNSOLICITED};
 use super::{
-    Body, IpNet, MAX_HEADER_LEN, NetConfig, TcpError, TlsError, could_be_http_request,
-    embedded_ipv4, find_header_end, host_matches_pattern, is_absolute_form, is_http_request,
-    is_http2, read_buf_len, request_authorities, request_body, request_line, request_start,
-    same_host, strip_port,
+    Body, IpNet, MAX_HEADER_LEN, NetConfig, TcpError, TlsError, embedded_ipv4, find_header_end,
+    host_matches_pattern, is_absolute_form, is_http2, read_buf_len, request_authorities,
+    request_body, request_line, request_start, same_host, strip_port, switches_protocols,
 };
 use crate::secrets::SecretConfig;
 
@@ -46,8 +47,6 @@ use crate::secrets::SecretConfig;
 pub(crate) struct NetPolicy {
     pub(super) config: NetConfig,
     pub(super) secrets: HashMap<String, SecretConfig>,
-    /// `(real value, placeholder)` of each secret, for masking reads.
-    read_masks: Vec<(Vec<u8>, Vec<u8>)>,
     tls_config: Arc<ClientConfig>,
     /// The policy this one narrows (see [`NetPolicy::narrowed`]): every check
     /// must pass it too.
@@ -74,16 +73,6 @@ impl NetPolicy {
 
         Self {
             config,
-            read_masks: secrets
-                .values()
-                .filter(|s| !s.real_value.is_empty())
-                .map(|s| {
-                    (
-                        s.real_value.clone().into_bytes(),
-                        s.placeholder.clone().into_bytes(),
-                    )
-                })
-                .collect(),
             secrets,
             tls_config: Arc::new(tls_config),
             parent: None,
@@ -102,7 +91,6 @@ impl NetPolicy {
         Self {
             config,
             secrets: self.secrets.clone(),
-            read_masks: self.read_masks.clone(),
             tls_config: Arc::clone(&self.tls_config),
             parent: Some(Arc::clone(self)),
         }
@@ -223,7 +211,11 @@ impl NetPolicy {
     /// Only [`NetPolicy::connect`] calls this, and it dials only the returned
     /// addresses, never re-resolving: the check is only as good as the
     /// address actually used.
-    async fn resolve_allowed(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, TcpError> {
+    pub(super) async fn resolve_allowed(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, TcpError> {
         // The sandbox's resolver: a narrowed policy can't re-point a host.
         let addrs: Vec<SocketAddr> = match &self.root().config.resolver {
             Some(resolver) => resolver.resolve(host, port).await,
@@ -340,27 +332,47 @@ impl NetPolicy {
             substitute: self.substitutes_secrets(over_tls),
             http_only: false,
             authority: String::new(),
-            state: HttpParsingState::default(),
+            state: Arc::default(),
         }
     }
 
-    /// A masker for the responses read from one connection.
-    pub(crate) fn response_masker(self: &Arc<Self>) -> ResponseMasker {
-        ResponseMasker {
-            policy: Arc::clone(self),
-            state: ReadState::default(),
-        }
+    /// `(real value, placeholder)` of each secret that may be sent to `host`
+    /// (the sandbox's, the root policy's, secret hosts), the only secrets
+    /// its responses can legitimately contain.
+    pub(super) fn read_masks(&self, host: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.secrets
+            .values()
+            .filter(|s| !s.real_value.is_empty())
+            .filter(|s| {
+                self.root()
+                    .config
+                    .secret_hosts(s)
+                    .iter()
+                    .any(|p| host_matches_pattern(host, p))
+            })
+            .map(|s| {
+                (
+                    s.real_value.clone().into_bytes(),
+                    s.placeholder.clone().into_bytes(),
+                )
+            })
+            .collect()
     }
 
-    /// With HTTP rules, whether the buffered bytes start a request (`None`
-    /// until that's known).
+    /// Whether the buffered bytes start a request (`None` until that's
+    /// known).
     ///
-    /// Anything a server could take for a request must be framed and
-    /// checked, so other bytes are only passed through if they're a
-    /// connection's first and its host has no rules; the connection then
-    /// stays unparsed. Otherwise they're refused, as is a leading empty line
-    /// (which servers skip before a request).
-    fn classify_ruled(
+    /// Anything a server could take for a request must be framed (and, with
+    /// HTTP rules, checked): a server may read whatever follows unframed
+    /// bytes as their body, so a later write parsed as a new request could
+    /// have a secret substituted into what reaches the server as a body. So
+    /// other bytes are passed through only by marking the connection raw,
+    /// never parsed or substituted again, and with HTTP rules only if
+    /// they're a connection's first and its host has no rules (otherwise
+    /// they're refused); with `http_only`, never. A leading empty line,
+    /// which servers skip before a request, and a malformed request line are
+    /// always refused.
+    fn classify(
         &self,
         host: &str,
         state: &mut HttpParsingState,
@@ -375,7 +387,9 @@ impl NetPolicy {
             Some(false) if http_only => Err(TcpError::NotPermitted(format!(
                 "only HTTP/1.1 requests may be sent to {host}"
             ))),
-            Some(false) if state.started || self.has_http_rules(host) => {
+            Some(false)
+                if self.any_http_rules() && (state.started || self.has_http_rules(host)) =>
+            {
                 Err(TcpError::NotPermitted(format!(
                     "only HTTP/1.1 requests may be sent on this connection to {host} \
                      (HTTP rules are set)"
@@ -423,6 +437,15 @@ impl NetPolicy {
             return Err(TcpError::NotPermitted(format!(
                 "HTTP request names a host other than {host}"
             )));
+        }
+        // A host with rules only gets requests naming itself: a server may
+        // route by, or decode into the path, an authority the rules weren't
+        // checked against (`http://..%2fsecret/public`, `Host: other`).
+        if self.has_http_rules(host) && !named.iter().all(|a| same_host(strip_port(a), host)) {
+            return Err(TcpError::NotPermitted(
+                "HTTP request names a host other than the connection's, which has HTTP rules"
+                    .into(),
+            ));
         }
         for host in std::iter::once(host).chain(named.into_iter().map(strip_port)) {
             for policy in self.chain() {
@@ -599,19 +622,36 @@ impl CheckedTcp {
 
 /// HTTP request framing state for a single connection.
 #[derive(Debug, Default)]
-struct HttpParsingState {
+pub(super) struct HttpParsingState {
     /// Request bytes buffered until the headers are complete.
-    buffer: Vec<u8>,
+    pub(super) buffer: Vec<u8>,
     /// How much of the current request's body is still to come.
-    body: Body,
+    pub(super) body: Body,
     /// Whether a request has been framed on this connection yet.
-    started: bool,
-    /// Whether this connection's first bytes weren't HTTP, so with HTTP rules
-    /// everything on it is passed through unparsed (see
-    /// [`NetConfig::allow_http`]).
-    raw: bool,
+    pub(super) started: bool,
+    /// Whether everything on this connection is passed through unparsed
+    /// from now on: its first bytes weren't a request, or a `CONNECT` or
+    /// `Upgrade` without HTTP rules ended (see [`NetConfig::allow_http`]).
+    pub(super) raw: bool,
+    /// Whether the current request is a `CONNECT` or asks for an `Upgrade`:
+    /// once it ends, what follows may be another protocol, or go to another
+    /// host, so it's never parsed (or substituted) as requests.
+    pub(super) switches: bool,
+    /// Whether the one empty line allowed between requests was skipped.
+    pub(super) skipped_crlf: bool,
     /// Whether a write was refused, after which every write is.
-    failed: bool,
+    pub(super) failed: bool,
+    /// The kinds of the requests sent and still awaiting a response, which
+    /// the connection's [`ResponseMasker`] frames those responses by.
+    pub(super) requests: VecDeque<RequestKind>,
+}
+
+/// Lock a connection's framing state, which its framer (writes) and masker
+/// (reads) share. Neither holds it across an `await`, and a panic while
+/// holding it can't leave it worse than the bytes it describes, so a
+/// poisoned lock is used as is.
+fn lock(state: &Mutex<HttpParsingState>) -> MutexGuard<'_, HttpParsingState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Frames the HTTP requests written to one connection, checking each against
@@ -631,7 +671,9 @@ pub(crate) struct RequestFramer {
     /// For the child proxy, the `host[:port]` the connection was made to,
     /// for requests forwarded with no `Host` header.
     authority: String,
-    state: HttpParsingState,
+    /// Shared with the connection's [`ResponseMasker`], which frames the
+    /// responses by the requests framed here.
+    state: Arc<Mutex<HttpParsingState>>,
 }
 
 impl RequestFramer {
@@ -654,50 +696,111 @@ impl RequestFramer {
     /// Refuses a request the policy doesn't allow; nothing from that call is
     /// to be sent, and every later call fails too.
     pub(crate) fn frame(&mut self, data: &[u8]) -> Result<Vec<u8>, TcpError> {
-        if self.state.failed {
+        let shared = Arc::clone(&self.state);
+        let mut state = lock(&shared);
+        if state.failed {
             return Err(TcpError::NotPermitted(
                 "an earlier write on this connection was refused".into(),
             ));
         }
-        let result = self.frame_requests(data);
+        let result = self.frame_requests(&mut state, data);
         // After an error the buffered bytes are dropped, and the connection
         // refuses further writes: its framing can't be trusted any more.
+        // The requests already sent still get their responses framed.
         if result.is_err() {
-            self.state = HttpParsingState {
+            *state = HttpParsingState {
                 failed: true,
+                started: state.started,
+                requests: std::mem::take(&mut state.requests),
                 ..HttpParsingState::default()
             };
         }
         result
     }
 
+    /// The masker for the responses read from this framer's connection.
+    /// Only a connection whose requests get real values substituted has its
+    /// responses framed and masked, with the secrets that may be sent to its
+    /// host: anywhere else none was ever sent.
+    pub(crate) fn response_masker(&self) -> ResponseMasker {
+        let masks = if self.substitute {
+            self.policy.read_masks(&self.host)
+        } else {
+            Vec::new()
+        };
+        ResponseMasker {
+            masker: response::ResponseMasker::new(masks),
+            error: None,
+            http: Arc::clone(&self.state),
+        }
+    }
+
     /// Advance the state over `data`, one request at a time, so every request
     /// on a keep-alive connection gets its headers processed.
-    fn frame_requests(&mut self, data: &[u8]) -> Result<Vec<u8>, TcpError> {
+    fn frame_requests(
+        &self,
+        state: &mut HttpParsingState,
+        data: &[u8],
+    ) -> Result<Vec<u8>, TcpError> {
         let policy = &*self.policy;
         let host = self.host.as_str();
         let http_only = self.http_only;
         let checked = http_only || policy.any_http_rules();
-        let state = &mut self.state;
         let mut out = Vec::new();
         let mut input = data.to_vec();
         let mut pos = 0;
         loop {
             match &mut state.body {
                 Body::None if state.raw => {
+                    // The read side marks a connection raw when the server
+                    // speaks first; a host with HTTP rules, or the child
+                    // proxy's, still gets nothing it can't check (as in
+                    // `classify`).
+                    if pos < input.len() && (http_only || policy.has_http_rules(host)) {
+                        return Err(TcpError::NotPermitted(format!(
+                            "only HTTP/1.1 requests may be sent on this connection to {host}, \
+                             which spoke first"
+                        )));
+                    }
                     out.extend_from_slice(&input[pos..]);
                     break;
+                }
+                Body::None if state.switches => {
+                    if pos == input.len() {
+                        break;
+                    }
+                    if checked {
+                        return Err(TcpError::NotPermitted(
+                            "nothing may follow a CONNECT or Upgrade request on this \
+                             connection (HTTP rules are set, or it's proxied)"
+                                .into(),
+                        ));
+                    }
+                    state.raw = true;
                 }
                 Body::None => {
                     // Only the new bytes (plus 3 for a split terminator) can
                     // complete the terminator.
-                    let searched = state.buffer.len().saturating_sub(3);
+                    let mut searched = state.buffer.len().saturating_sub(3);
                     state.buffer.extend_from_slice(&input[pos..]);
-                    let is_request = if checked {
-                        policy.classify_ruled(host, state, http_only)?
-                    } else {
-                        Some(could_be_http_request(&state.buffer))
-                    };
+                    // Servers skip an empty line before a request, and some
+                    // clients send one after a body, so one is passed on
+                    // between requests (never before the first: see
+                    // `classify`). What follows is still framed.
+                    if state.started && !state.skipped_crlf {
+                        if state.buffer == b"\r" {
+                            break;
+                        }
+                        if state.buffer.starts_with(b"\r\n") {
+                            out.extend(state.buffer.drain(..2));
+                            state.skipped_crlf = true;
+                            searched = 0;
+                            if state.buffer.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                    let is_request = policy.classify(host, state, http_only)?;
                     match is_request {
                         Some(true) => {}
                         Some(false) => {
@@ -727,13 +830,6 @@ impl RequestFramer {
                     pos = 0;
                     let headers = std::mem::take(&mut state.buffer);
 
-                    // Not HTTP - pass through everything
-                    if !checked && !is_http_request(&headers) {
-                        out.extend_from_slice(&headers);
-                        out.extend_from_slice(&input);
-                        break;
-                    }
-
                     // Check for HTTP/2 (not supported with secrets)
                     if is_http2(&headers) {
                         return Err(TcpError::NotPermitted(
@@ -743,6 +839,9 @@ impl RequestFramer {
 
                     state.body = request_body(&headers)?;
                     state.started = true;
+                    state.skipped_crlf = false;
+                    state.switches = switches_protocols(&headers);
+                    state.requests.push_back(RequestKind::of(&headers));
                     if checked {
                         policy.check_http_rules(&headers, host, http_only)?;
                     }
@@ -840,88 +939,151 @@ fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Read data held back by one connection's [`ResponseMasker`].
-#[derive(Debug, Default)]
-struct ReadState {
-    /// Masked bytes not returned yet.
-    ready: Vec<u8>,
-    /// Trailing bytes that may be the start of a secret split across reads.
-    carry: Vec<u8>,
-}
-
-/// How long a read waits for more data before releasing bytes held back as
-/// the possible start of a secret.
-const CARRY_GRACE: Duration = Duration::from_millis(100);
-
-/// Replaces real secret values read from one connection with their
-/// placeholders, including values split across reads.
+/// Frames and masks the responses read from one connection, by the requests
+/// its [`RequestFramer`] framed: real secret values are replaced with their
+/// placeholders wherever the guest's HTTP client will see them whole (see
+/// [`super::response`]).
 ///
-/// Each connection gets its own, from [`NetPolicy::response_masker`].
+/// Each comes from its connection's framer, [`RequestFramer::response_masker`].
 #[derive(Debug)]
 pub(crate) struct ResponseMasker {
-    policy: Arc<NetPolicy>,
-    state: ReadState,
+    /// `None` on a connection whose requests get nothing substituted, whose
+    /// responses are passed through as read.
+    pub(super) masker: Option<response::ResponseMasker>,
+    /// A read error that came with held-back bytes still to deliver: those
+    /// go out first, and this on the next read.
+    error: Option<std::io::Error>,
+    /// The connection's request framing, shared with its framer.
+    http: Arc<Mutex<HttpParsingState>>,
 }
 
 impl ResponseMasker {
-    /// Read up to `len` bytes from `stream`, masked. Bytes that may start a
-    /// secret are held back for up to [`CARRY_GRACE`] waiting for the rest.
+    /// Read up to `len` bytes from `stream`, masked.
+    ///
+    /// What's returned, and when, depends only on the responses' framing
+    /// and on when bytes arrive, not on whether they look like a secret. The
+    /// read gives up after `io_timeout` in all, except that held-back bytes
+    /// the grace period applies to always wait all of it: `io_timeout` may
+    /// come from the guest, which must not be able to shorten it.
+    ///
+    /// Cancel-safe: everything read is fed to the masker before the next
+    /// `await`, so a read dropped part way (by the child proxy's `select!`)
+    /// loses nothing.
     pub(crate) async fn read<S: tokio::io::AsyncRead + Unpin>(
         &mut self,
         stream: &mut S,
         len: u32,
         io_timeout: Duration,
     ) -> std::io::Result<Vec<u8>> {
-        let masks = &self.policy.read_masks;
-        let state = &mut self.state;
         let want = read_buf_len(len);
         if want == 0 {
             return Ok(Vec::new());
         }
-        while state.ready.is_empty() {
-            let timeout = if state.carry.is_empty() {
-                io_timeout
-            } else {
-                CARRY_GRACE.min(io_timeout)
-            };
+        let Self {
+            masker,
+            error,
+            http,
+        } = self;
+        let Some(masker) = masker else {
             let mut buf = vec![0u8; want];
-            let n = match tokio::time::timeout(timeout, stream.read(&mut buf)).await {
-                Ok(n) => n?,
-                // Nothing followed: the held-back bytes weren't a secret after all.
-                Err(_) if !state.carry.is_empty() => 0,
-                Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
-            };
-            let mut data = std::mem::take(&mut state.carry);
-            data.extend_from_slice(&buf[..n]);
-            if n > 0 {
-                for (real, placeholder) in masks {
-                    data = crate::secrets::replace_bytes(&data, real, placeholder);
-                }
-                let keep = partial_secret_len(&data, masks);
-                state.carry = data.split_off(data.len() - keep);
+            let n = tokio::time::timeout(io_timeout, stream.read(&mut buf))
+                .await
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+            buf.truncate(n);
+            return Ok(buf);
+        };
+        let deadline = tokio::time::Instant::now() + io_timeout;
+        while masker.out.is_empty() {
+            if let Some(e) = error.take() {
+                return Err(e);
             }
-            state.ready = data;
-            if n == 0 {
-                break;
+            // Responses it can't frame end the connection for the guest; an
+            // unsolicited one (a 408 before an idle close) ends it cleanly.
+            match masker.failure() {
+                Some(UNSOLICITED) => return Ok(Vec::new()),
+                Some(why) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, why));
+                }
+                None => {}
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let quiet = masker.may_release_on_quiet();
+            let wait = if quiet { CARRY_GRACE } else { left };
+            let mut buf = vec![0u8; want];
+            match tokio::time::timeout(wait, stream.read(&mut buf)).await {
+                Ok(Ok(0)) => {
+                    masker.finish();
+                    if masker.out.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                }
+                Ok(Ok(n)) => {
+                    let mut http = lock(http);
+                    // Decided by the connection's first bytes: if its first
+                    // write wasn't a request, or the server spoke before
+                    // anything was written, it's another protocol, which
+                    // nothing is ever substituted on (and never will be: the
+                    // write side stays raw).
+                    if masker.at_start()
+                        && !http.started
+                        && http.buffer.is_empty()
+                        && http.requests.is_empty()
+                    {
+                        http.raw = true;
+                    }
+                    if masker.at_start() && http.raw && !http.started {
+                        masker.raw_from_start();
+                    }
+                    masker.feed(&buf[..n], &mut http.requests);
+                }
+                // The held-back bytes were received: deliver them before the
+                // error rather than lose them.
+                Ok(Err(e)) => {
+                    masker.finish();
+                    if masker.out.is_empty() {
+                        return Err(e);
+                    }
+                    *error = Some(e);
+                }
+                Err(_) if quiet => masker.release_on_quiet(),
+                Err(_) => return Err(std::io::ErrorKind::TimedOut.into()),
             }
         }
-        let rest = state.ready.split_off(want.min(state.ready.len()));
-        Ok(std::mem::replace(&mut state.ready, rest))
+        let rest = masker.out.split_off(want.min(masker.out.len()));
+        Ok(std::mem::replace(&mut masker.out, rest))
     }
 }
 
-/// Length of the longest suffix of `data` that is a proper prefix of a
-/// secret value in `masks`.
-fn partial_secret_len(data: &[u8], masks: &[(Vec<u8>, Vec<u8>)]) -> usize {
-    let longest = masks.iter().map(|(real, _)| real.len()).max().unwrap_or(0);
-    (1..longest.min(data.len() + 1))
-        .rev()
-        .find(|&k| {
-            masks
-                .iter()
-                .any(|(real, _)| real.len() > k && data.ends_with(&real[..k]))
-        })
-        .unwrap_or(0)
+/// The read side as main's tests of it see it: a masker with its own
+/// request framing state, which [`read_masked`] swaps in for each read.
+#[cfg(test)]
+pub(super) type ReadState = ResponseMasker;
+
+#[cfg(test)]
+impl ResponseMasker {
+    /// A masker for `masks`, framing responses by its own requests.
+    pub(super) fn new(masks: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self {
+            masker: response::ResponseMasker::new(masks),
+            error: None,
+            http: Arc::default(),
+        }
+    }
+}
+
+/// [`ResponseMasker::read`] with `http` as the connection's request framing.
+#[cfg(test)]
+pub(super) async fn read_masked<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    state: &mut ResponseMasker,
+    http: &mut HttpParsingState,
+    len: u32,
+    io_timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    *lock(&state.http) = std::mem::take(http);
+    let result = state.read(stream, len, io_timeout).await;
+    *http = std::mem::take(&mut *lock(&state.http));
+    result
 }
 
 #[cfg(test)]

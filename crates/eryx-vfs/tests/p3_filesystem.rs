@@ -226,6 +226,19 @@ async fn p3_guest_writes_stop_at_the_storage_quota() {
     assert!(size <= 256 * 1024, "{size}");
 }
 
+#[tokio::test]
+async fn p3_guest_reads_a_file_after_unlinking_it() {
+    let storage = storage(None);
+    storage.mkdir("/data").await.unwrap();
+    storage.write("/data/t", b"spooled").await.unwrap();
+    assert_eq!(
+        run(ctx(&storage), &["unlinkread", "/data/t"]).await,
+        (0, "spooled".into())
+    );
+    // Closing the descriptor deleted it.
+    assert!(!storage.exists("/data/t").await.unwrap());
+}
+
 /// Concurrent writers to one storage can't overshoot its quota together: the
 /// quota is charged inside storage, under its lock, at the moment of each
 /// write, not checked ahead of it.

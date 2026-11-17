@@ -6,6 +6,8 @@
 //! - `mkdir PATH`, `rm PATH`, `rename FROM TO`: print `ok`.
 //! - `fill PATH BYTES`: write BYTES bytes in 64 KiB chunks, then print `ok`.
 //! - `excl PATH`: create PATH with `O_CREAT|O_EXCL`, then print `ok`.
+//! - `unlinkread PATH`: open PATH, unlink it, then print what the open
+//!   file reads.
 //! - `appendn PATH TAG N`: append N lines `TAG-<i>`, one write each, then
 //!   print `ok`.
 //!
@@ -49,6 +51,12 @@ fn main() {
                 }
                 Ok("ok".to_string())
             }),
+        ["unlinkread", path] => std::fs::File::open(path).and_then(|mut f| {
+            std::fs::remove_file(path)?;
+            let mut out = String::new();
+            std::io::Read::read_to_string(&mut f, &mut out)?;
+            Ok(out)
+        }),
         ["fill", path, bytes] => fill(path, bytes.parse().unwrap_or(0)),
         _ => {
             eprintln!("usage: see src/main.rs");

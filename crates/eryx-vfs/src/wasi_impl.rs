@@ -3,6 +3,7 @@
 //! This module provides the core types used by the WASI filesystem host
 //! implementation: descriptors, directory iterators, and error conversion.
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::bindings::{DirPerms, FilePerms, types};
@@ -15,6 +16,8 @@ pub struct VfsCtx<S: VfsStorage + Clone> {
     pub(crate) storage: S,
     /// Preopened directories (path, dir_perms, file_perms).
     pub(crate) preopens: Vec<(String, DirPerms, FilePerms)>,
+    /// Files open through descriptors.
+    pub(crate) open_files: OpenFiles,
 }
 
 impl<S: VfsStorage + Clone> VfsCtx<S> {
@@ -23,6 +26,7 @@ impl<S: VfsStorage + Clone> VfsCtx<S> {
         Self {
             storage,
             preopens: vec![("/".to_string(), DirPerms::all(), FilePerms::all())],
+            open_files: OpenFiles::default(),
         }
     }
 
@@ -31,6 +35,7 @@ impl<S: VfsStorage + Clone> VfsCtx<S> {
         Self {
             storage,
             preopens: Vec::new(),
+            open_files: OpenFiles::default(),
         }
     }
 
@@ -143,6 +148,120 @@ impl VfsDescriptor {
                 .is_some_and(|rest| rest.starts_with('/'));
         if inside { Ok(resolved) } else { Err(outside()) }
     }
+}
+
+/// VFS files held open by descriptors, by storage index and path.
+///
+/// POSIX lets a descriptor keep reading and writing a file after its name is
+/// unlinked, but VFS descriptors find their file by path. So unlinking a file
+/// that is still open only marks it here, and the last descriptor to close
+/// deletes it, releasing its bytes from the storage's quota. Until then the
+/// name still shows in `stat` and directory listings, but it can't be opened,
+/// and creating a file there replaces the old contents.
+///
+/// Removing a directory that holds nothing but such files deletes them with
+/// it, and renaming a directory with such files beneath it is refused with
+/// `EBUSY`, since their marks are by path.
+///
+/// Only descriptors in the same context count, or in one forked from it
+/// (`HybridVfsCtx::fork` shares this table). Another context sharing the
+/// storage still deletes the file at once, and a file it creates at the
+/// unlinked name is deleted when this context's last descriptor closes.
+#[derive(Debug, Default)]
+pub(crate) struct OpenFiles(HashMap<(usize, String), OpenFile>);
+
+#[derive(Debug)]
+struct OpenFile {
+    descriptors: usize,
+    unlinked: bool,
+}
+
+impl OpenFiles {
+    /// Note a descriptor opening `path`.
+    pub(crate) fn open(&mut self, storage: usize, path: &str) {
+        self.0
+            .entry((storage, path.to_string()))
+            .or_insert(OpenFile {
+                descriptors: 0,
+                unlinked: false,
+            })
+            .descriptors += 1;
+    }
+
+    /// Note a descriptor on `path` closing. Returns whether it was the last
+    /// one on a file unlinked while open, which the caller must now delete.
+    pub(crate) fn close(&mut self, storage: usize, path: &str) -> bool {
+        let key = (storage, path.to_string());
+        let Some(file) = self.0.get_mut(&key) else {
+            return false;
+        };
+        file.descriptors -= 1;
+        file.descriptors == 0 && self.0.remove(&key).is_some_and(|f| f.unlinked)
+    }
+
+    /// Whether a descriptor has `path` open.
+    pub(crate) fn is_open(&self, storage: usize, path: &str) -> bool {
+        self.0.contains_key(&(storage, path.to_string()))
+    }
+
+    /// Whether `path` was unlinked while open, so the name is gone.
+    pub(crate) fn is_unlinked(&self, storage: usize, path: &str) -> bool {
+        self.0
+            .get(&(storage, path.to_string()))
+            .is_some_and(|f| f.unlinked)
+    }
+
+    /// The files beneath directory `dir` that were unlinked while open.
+    pub(crate) fn unlinked_under(&self, storage: usize, dir: &str) -> Vec<String> {
+        let prefix = child_prefix(dir);
+        self.0
+            .iter()
+            .filter(|((s, path), f)| *s == storage && f.unlinked && path.starts_with(&prefix))
+            .map(|((_, path), _)| path.clone())
+            .collect()
+    }
+
+    /// Mark open `path` unlinked (`linked: false`), or linked again because a
+    /// new file took the name.
+    pub(crate) fn set_linked(&mut self, storage: usize, path: &str, linked: bool) {
+        if let Some(file) = self.0.get_mut(&(storage, path.to_string())) {
+            file.unlinked = !linked;
+        }
+    }
+}
+
+/// `dir` with a trailing `/`, the prefix of every path beneath it.
+fn child_prefix(dir: &str) -> String {
+    format!("{}/", dir.trim_end_matches('/'))
+}
+
+/// Remove directory `dir`. If all it still holds are files unlinked while
+/// open (`unlinked`, from [`OpenFiles::unlinked_under`]), delete those with
+/// it: they have no name left to keep them by, so their descriptors lose the
+/// contents, as before unlinks were deferred. `detach` is called for each, so
+/// the caller can tell its `OpenFiles` the last close has nothing to delete.
+pub(crate) async fn remove_dir<S: VfsStorage>(
+    storage: &S,
+    dir: &str,
+    unlinked: Vec<String>,
+    mut detach: impl FnMut(&str),
+) -> crate::VfsResult<()> {
+    if !unlinked.is_empty() {
+        let prefix = child_prefix(dir);
+        let entries: Vec<String> = storage
+            .list(dir)
+            .await?
+            .into_iter()
+            .map(|e| format!("{prefix}{}", e.name))
+            .collect();
+        if entries.iter().all(|path| unlinked.contains(path)) {
+            for path in &entries {
+                storage.delete(path).await?;
+                detach(path);
+            }
+        }
+    }
+    storage.rmdir(dir).await
 }
 
 /// Iterator over directory entries.

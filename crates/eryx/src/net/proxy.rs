@@ -634,7 +634,8 @@ where
 {
     let (mut child_r, mut child_w) = tokio::io::split(child);
     let (mut up_r, mut up_w) = tokio::io::split(upstream);
-    let mut masker: ResponseMasker = shared.policy.response_masker();
+    // Paired with the framer, whose requests frame the responses.
+    let mut masker: ResponseMasker = framer.response_masker();
 
     if !first.is_empty() {
         // Nothing has been answered yet, so the child can still get a 403.
@@ -1131,6 +1132,65 @@ mod tests {
         assert!(received(&seen).contains(PH) && !received(&seen).contains(REAL));
     }
 
+    /// A child can't reach a blocked host through another spelling of it:
+    /// `CONNECT` targets, absolute-form requests and a narrowed child
+    /// network's blocks all match the canonical form, as the resolver does.
+    #[tokio::test]
+    async fn other_spellings_of_a_blocked_host_are_refused() {
+        let (port, cert, _) = upstream(false).await;
+        let spellings = [
+            "127.0.0.1",
+            "127.0.0.1.",
+            "2130706433",
+            "0x7f.1",
+            "0177.0.0.1",
+            "127.1",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:7f00:1]",
+        ];
+        // Every name resolves to 127.0.0.1 and may reach it; only the
+        // literal `127.0.0.1` is blocked (not the default `127.*`, so the
+        // other spellings are refused by matching it, not by a wildcard).
+        let open = |cert: &[u8]| {
+            NetConfig::default()
+                .allow_all_hosts(true)
+                .with_blocked_hosts(Vec::<String>::new())
+                .allow_internal_host("*")
+                .with_resolver(Localhost)
+                .with_root_cert(cert.to_vec())
+        };
+        let blocked = open(&cert).block_host("127.0.0.1");
+        let narrowed_block = NetConfig::default()
+            .allow_all_hosts(true)
+            .with_blocked_hosts(["127.0.0.1"])
+            .allow_internal_host("*");
+        for proxy in [
+            proxy(blocked, ChildNetwork::Inherit, true),
+            proxy(
+                open(&cert),
+                ChildNetwork::Narrow(Box::new(narrowed_block)),
+                true,
+            ),
+        ] {
+            let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            assert!(status.contains(" 200 "), "api.test: {status}");
+            for host in spellings {
+                let (_, status) = connect_to(&proxy, &format!("{host}:{port}")).await;
+                assert!(status.contains(" 403 "), "CONNECT {host}: {status}");
+
+                let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+                let request = format!(
+                    "GET http://{host}:{port}/ HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+                );
+                let response = exchange(&mut stream, request.as_bytes()).await;
+                assert!(
+                    response.starts_with("HTTP/1.1 403 "),
+                    "GET {host}: {response}"
+                );
+            }
+        }
+    }
+
     /// A narrowed child network allows only what both policies allow.
     #[tokio::test]
     async fn narrow_never_widens() {
@@ -1536,5 +1596,243 @@ mod tests {
         let mut buf = [0u8; 16];
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await;
         assert!(matches!(read, Ok(Ok(0))), "{read:?}");
+    }
+
+    /// A TLS upstream for `api.test` that reads one request's head and
+    /// answers with `script`: each part, then a pause. Returns its port and
+    /// certificate (DER).
+    async fn scripted_upstream(script: Vec<(Vec<u8>, u64)>) -> (u16, Vec<u8>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["api.test".into()]).unwrap();
+        let der = cert.cert.der().to_vec();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.cert.der().clone()], key)
+                .unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            while find_header_end(&head).is_none() {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            for (part, pause_ms) in script {
+                stream.write_all(&part).await.unwrap();
+                stream.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(pause_ms)).await;
+            }
+            let _ = stream.shutdown().await;
+        });
+        (port, der)
+    }
+
+    /// GET / with the placeholder through a CONNECT to `api.test`, and the
+    /// response the child gets.
+    async fn proxied_get(port: u16, cert: &[u8]) -> String {
+        let proxy = proxy(config(cert), ChildNetwork::Inherit, false);
+        let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        let request =
+            format!("GET / HTTP/1.1\r\nHost: api.test\r\nAuthorization: Bearer {PH}\r\n\r\n");
+        exchange(&mut tls, request.as_bytes()).await
+    }
+
+    /// The child proxy frames responses like the sandbox's own connections
+    /// do: a value in a body is masked whole however long the server pauses
+    /// inside it, so how the child gets the bytes says nothing about whether
+    /// they start a secret. Before, it held back only what looked like a
+    /// secret's start, and released it after 100 ms.
+    #[tokio::test]
+    async fn proxied_responses_are_masked_by_their_framing() {
+        let body = format!("a {REAL} b");
+        let split = "a ".len() + 8;
+        let (port, cert) = scripted_upstream(vec![
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    &body[..split]
+                )
+                .into_bytes(),
+                300,
+            ),
+            (body.as_bytes()[split..].to_vec(), 0),
+        ])
+        .await;
+        let response = proxied_get(port, &cert).await;
+        assert!(response.ends_with(&format!("a {PH} b")), "{response}");
+        assert!(!response.contains(&REAL[..8]), "{response}");
+
+        // Split across chunks, it's masked after de-chunking.
+        let (port, cert) = scripted_upstream(vec![
+            (
+                format!(
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                     {:x}\r\na {}\r\n",
+                    2 + 10,
+                    &REAL[..10]
+                )
+                .into_bytes(),
+                30,
+            ),
+            (
+                format!(
+                    "{:x}\r\n{} b\r\n0\r\n\r\n",
+                    REAL.len() - 10 + 2,
+                    &REAL[10..]
+                )
+                .into_bytes(),
+                0,
+            ),
+        ])
+        .await;
+        let response = proxied_get(port, &cert).await;
+        let (_, mut chunks) = response.split_once("\r\n\r\n").unwrap();
+        let mut body = String::new();
+        while let Some((size, rest)) = chunks.split_once("\r\n") {
+            let size = usize::from_str_radix(size, 16).unwrap();
+            body.push_str(&rest[..size]);
+            chunks = &rest[size + 2..];
+        }
+        assert_eq!(body, format!("a {PH} b"), "{response}");
+        assert!(!response.contains(&REAL[..10]), "{response}");
+    }
+
+    /// Requests through the proxy are framed as strictly as the sandbox's
+    /// own: a leading empty line, a malformed chunk, a header name that
+    /// isn't a token, and anything after an `Upgrade` are refused (a 403,
+    /// or for a body it can't frame a 502), and none of it reaches the
+    /// upstream.
+    #[tokio::test]
+    async fn proxied_requests_are_framed_strictly() {
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
+        for request in [
+            &b"\r\nGET / HTTP/1.1\r\nHost: api.test\r\n\r\n"[..],
+            b"POST / HTTP/1.1\r\nHost: api.test\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n",
+            b"GET / HTTP/1.1\r\nHost: api.test\r\nBad Name: x\r\n\r\n",
+            b"GET / HTTP/1.1\r\nHost: api.test\r\nUpgrade: x\r\n\r\nnot a request",
+        ] {
+            let (stream, _) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            let mut tls = tls(&proxy, stream, "api.test").await;
+            let response = exchange(&mut tls, request).await;
+            assert!(
+                response.starts_with("HTTP/1.1 403 ") || response.starts_with("HTTP/1.1 502 "),
+                "{request:?}: {response}"
+            );
+        }
+        assert_eq!(received(&seen), "");
+    }
+
+    /// Request targets outside RFC 9112's forms are refused through the
+    /// proxy too, CONNECTed or plain: one with `://` in its query, and an
+    /// authority a server could decode into a path.
+    #[tokio::test]
+    async fn proxied_request_targets_must_be_in_a_request_target_form() {
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
+        for request in [
+            &b"GET ../secret?x=http://api.test/ HTTP/1.1\r\nHost: api.test\r\n\r\n"[..],
+            b"GET http://..%2fsecret/x HTTP/1.1\r\nHost: api.test\r\n\r\n",
+        ] {
+            let (stream, _) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            let mut tls = tls(&proxy, stream, "api.test").await;
+            let response = exchange(&mut tls, request).await;
+            assert!(
+                response.starts_with("HTTP/1.1 403 "),
+                "{request:?}: {response}"
+            );
+        }
+        for target in ["http://..%2fsecret/x", "http://%2e%2e%2fsecret/x"] {
+            let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+            let request = format!("GET {target} HTTP/1.1\r\nHost: ..%2fsecret\r\n\r\n");
+            let response = exchange(&mut stream, request.as_bytes()).await;
+            assert!(
+                response.starts_with("HTTP/1.1 400 "),
+                "{target}: {response}"
+            );
+        }
+        assert_eq!(received(&seen), "");
+    }
+
+    /// Other spellings of a blocked host (case, a trailing dot) are blocked
+    /// through the proxy too: its host checks are the sandbox's.
+    #[tokio::test]
+    async fn proxied_host_spellings_are_checked_alike() {
+        let (port, cert, _) = upstream(true).await;
+        let proxy = proxy(
+            config(&cert).allow_all_hosts(true).block_host("other.test"),
+            ChildNetwork::Inherit,
+            false,
+        );
+        for host in ["other.test", "other.test.", "OTHER.Test."] {
+            let (_, status) = connect_to(&proxy, &format!("{host}:{port}")).await;
+            assert!(status.contains(" 403 "), "{host}: {status}");
+        }
+        let (_, status) = connect_to(&proxy, &format!("api.test.:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+    }
+
+    /// An upstream that speaks first doesn't turn the connection raw for the
+    /// child: what it writes next is still framed and checked (here, it
+    /// names another host and isn't allowed by the rules), and none of it
+    /// reaches the upstream.
+    #[tokio::test]
+    async fn a_server_speaking_first_doesnt_unframe_the_child() {
+        let cert = rcgen::generate_simple_self_signed(vec!["api.test".into()]).unwrap();
+        let der = cert.cert.der().to_vec();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.cert.der().clone()], key)
+                .unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Received::default();
+        let upstream_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            stream.write_all(b"hello\r\n").await.unwrap();
+            stream.flush().await.unwrap();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => upstream_seen.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
+            }
+        });
+        let config =
+            config(&der).allow_http(crate::net::HttpRule::new("api.test").with_paths(["/public"]));
+        let proxy = proxy(config, ChildNetwork::Inherit, false);
+        let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        // The greeting reaches the child, so the read side has run first.
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(5), tls.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0);
+        let _ = tls
+            .write_all(b"GET /secret HTTP/1.1\r\nHost: other.test\r\n\r\nnot http at all\r\n")
+            .await;
+        let _ = tls.flush().await;
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut rest)).await;
+        assert_eq!(received(&seen), "");
     }
 }

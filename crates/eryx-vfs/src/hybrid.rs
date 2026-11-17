@@ -636,6 +636,13 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     max_open_host_files: usize,
     /// Budget shared with every other context in the process.
     process_budget: &'static HostFileBudget,
+    /// VFS files open through descriptors, shared with [`fork`](Self::fork)ed
+    /// contexts so a child's unlinks and creates see the parent's open files.
+    pub(crate) open_files: Arc<Mutex<crate::wasi_impl::OpenFiles>>,
+    /// How many of `open_files`' descriptor counts are this context's, so
+    /// dropping it with files still open (a child that exits without
+    /// closing them, or is killed) gives them back.
+    held_files: HashMap<(usize, String), usize>,
 }
 
 /// Default limit on host files and directories one guest can hold open at
@@ -733,6 +740,20 @@ impl HostFileBudget {
     }
 }
 
+impl<S: VfsStorage + Clone> Drop for HybridVfsCtx<S> {
+    fn drop(&mut self) {
+        // The guest never closed these, and drop can't await a deletion: an
+        // unlinked file's last count going here leaves it in storage under
+        // its name again, an ordinary file the guest can remove.
+        let mut open_files = lock(&self.open_files);
+        for ((storage, path), held) in self.held_files.drain() {
+            for _ in 0..held {
+                open_files.close(storage, &path);
+            }
+        }
+    }
+}
+
 impl<S: VfsStorage + Clone> std::fmt::Debug for HybridVfsCtx<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridVfsCtx")
@@ -753,6 +774,8 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
             process_budget: &PROCESS_HOST_FILES,
+            open_files: Default::default(),
+            held_files: HashMap::new(),
         }
     }
 
@@ -767,6 +790,8 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: self.max_open_host_files,
             process_budget: self.process_budget,
+            open_files: self.open_files.clone(),
+            held_files: HashMap::new(),
         }
     }
 
@@ -808,6 +833,33 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub(crate) fn with_process_budget(mut self, budget: &'static HostFileBudget) -> Self {
         self.process_budget = budget;
         self
+    }
+
+    /// The VFS files open through descriptors.
+    pub(crate) fn open_files(&self) -> std::sync::MutexGuard<'_, crate::wasi_impl::OpenFiles> {
+        lock(&self.open_files)
+    }
+
+    /// Note a descriptor of this context opening VFS file `path`.
+    pub(crate) fn count_open(&mut self, storage: usize, path: &str) {
+        self.open_files().open(storage, path);
+        *self
+            .held_files
+            .entry((storage, path.to_string()))
+            .or_default() += 1;
+    }
+
+    /// Note a descriptor of this context on `path` closing. Returns whether
+    /// the caller must now delete the file (see `OpenFiles::close`).
+    pub(crate) fn count_close(&mut self, storage: usize, path: &str) -> bool {
+        let key = (storage, path.to_string());
+        if let Some(held) = self.held_files.get_mut(&key) {
+            *held -= 1;
+            if *held == 0 {
+                self.held_files.remove(&key);
+            }
+        }
+        self.open_files().close(storage, path)
     }
 
     /// The storage backing a VFS descriptor.
@@ -1169,6 +1221,16 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
     pub fn new(ctx: &'a mut HybridVfsCtx<S>, table: &'a mut ResourceTable) -> Self {
         Self { ctx, table }
     }
+}
+
+/// Lock a context's open files. Every holder only updates counts and marks,
+/// so a panic mid-update can't leave them worse than a lost mark.
+pub(crate) fn lock(
+    open_files: &Mutex<crate::wasi_impl::OpenFiles>,
+) -> std::sync::MutexGuard<'_, crate::wasi_impl::OpenFiles> {
+    open_files
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
