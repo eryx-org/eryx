@@ -27,9 +27,10 @@ builder methods keeps compiling unchanged.
   `with_package`, `with_package_bytes`, `with_native_extension`, `with_cache`
   and `with_cache_dir`.
 - `build()` works for any language and returns the same untyped `Sandbox`.
-  Only Python has an embedded runtime: for JavaScript or the shell, supply the
-  runtime with `with_wasm_file()` or a precompiled equivalent, or `build()`
-  fails with `ErrorKind::MissingRuntime`. Python-only options set before
+  With `embedded`, JavaScript and the shell use their embedded runtimes when
+  their features (`javascript`, `shell`) are on; otherwise supply the runtime
+  with `with_wasm_file()` or a precompiled equivalent, or `build()` fails
+  with `ErrorKind::MissingRuntime`. Python-only options set before
   switching languages make `build()` fail with `ErrorKind::Initialization`.
 - The marker types `Python`, `JavaScript` and `Shell` and their sealed
   `GuestLanguage` trait live in the new `eryx::language` module, next to the

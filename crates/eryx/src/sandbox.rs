@@ -2516,10 +2516,10 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Run JavaScript instead.
     ///
     /// The language-neutral configuration (runtime source, callbacks, limits,
-    /// network, secrets, ...) carries over. Only Python has an embedded
-    /// runtime, so supply one with
-    /// [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a precompiled
-    /// equivalent, or [`build()`](SandboxBuilder::build) fails with
+    /// network, secrets, ...) carries over. With the `embedded` and
+    /// `javascript` features, the embedded JavaScript runtime is used; otherwise
+    /// supply one with [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a
+    /// precompiled equivalent, or [`build()`](SandboxBuilder::build) fails with
     /// [`ErrorKind::MissingRuntime`]. Python-only options set earlier make
     /// `build()` fail.
     #[must_use]
@@ -2528,7 +2528,8 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     }
 
     /// Run the shell instead. See [`javascript()`](SandboxBuilder::javascript)
-    /// for what carries over.
+    /// for what carries over; the embedded shell runtime needs the `embedded`
+    /// and `shell` features.
     ///
     /// Each callback is a shell command: `weather London --days 3`,
     /// `weather --json '{"city": "London"}'` or `invoke weather '{...}'`.

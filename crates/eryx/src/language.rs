@@ -11,8 +11,9 @@
 /// API. Select one with [`SandboxBuilder::javascript`](crate::SandboxBuilder::javascript)
 /// or [`SandboxBuilder::shell`](crate::SandboxBuilder::shell); the default is Python.
 ///
-/// Only [`Language::Python`] ships an embedded runtime today. The other
-/// languages need their runtime supplied explicitly (for example with
+/// With the `embedded` feature, each language whose feature is enabled
+/// (`python`, the default, `javascript` and `shell`) has an embedded runtime.
+/// Otherwise supply the runtime explicitly (for example with
 /// [`SandboxBuilder::with_wasm_file`](crate::SandboxBuilder::with_wasm_file)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]

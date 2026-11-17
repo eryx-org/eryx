@@ -316,7 +316,8 @@ pub enum ErrorKind {
     },
 
     /// No runtime was supplied for the selected language, and this build
-    /// embeds none for it (only Python has an embedded runtime).
+    /// embeds none for it (a language's runtime is embedded with the
+    /// `embedded` feature and that language's feature).
     ///
     /// Supply one with [`SandboxBuilder::with_wasm_file()`](crate::SandboxBuilder::with_wasm_file)
     /// or a precompiled equivalent.
