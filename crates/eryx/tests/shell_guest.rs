@@ -134,16 +134,28 @@ async fn nonzero_exit_is_a_script_failure_with_output() {
     assert_eq!(*exit_code, Some(3));
     assert_eq!(err.stdout(), Some(&b"before\n"[..]));
 
-    // A missing command is a script failure too, with bash's status.
-    let err = sandbox.execute("no-such-command").await.unwrap_err();
-    assert!(err.to_string().starts_with("exit status 127"), "{err}");
-    assert!(matches!(
-        err.kind(),
-        ErrorKind::ScriptFailed {
-            exit_code: Some(127),
-            ..
-        }
-    ));
+    // A missing command is a script failure too, with bash's status. The
+    // message quotes the last line of stderr after the status, and the
+    // stderr itself is in `stderr`.
+    let err = sandbox
+        .execute("echo first >&2; no-such-command")
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message,
+        exit_code,
+        stderr,
+        ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    assert_eq!(*exit_code, Some(127));
+    let stderr = String::from_utf8_lossy(stderr);
+    let last = stderr.lines().rfind(|line| !line.is_empty()).unwrap();
+    assert!(last.contains("no-such-command"), "{stderr:?}");
+    assert_eq!(*message, format!("exit status 127: {last}"));
+    assert!(stderr.starts_with("first\n"), "{stderr:?}");
 }
 
 #[tokio::test]

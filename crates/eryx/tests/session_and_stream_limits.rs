@@ -216,8 +216,13 @@ fn assert_traceback_has_fd_write(err: Error) {
     else {
         panic!("expected a Python exception, got {err:?}");
     };
-    assert!(traceback.contains("ValueError"), "{traceback:?}");
-    assert!(traceback.contains("fd-err"), "{traceback:?}");
+    assert!(traceback.contains("ValueError: boom"), "{traceback:?}");
+    // On a line of its own, once: not glued to the traceback's last line.
+    assert_eq!(
+        traceback.lines().filter(|line| *line == "fd-err").count(),
+        1,
+        "{traceback:?}"
+    );
 }
 
 #[tokio::test]

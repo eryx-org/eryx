@@ -4195,7 +4195,7 @@ impl Executor {
                     ..
                 } = e.kind_mut()
                 {
-                    append_fd_stderr(message, &fd_stderr);
+                    append_fd_stderr(message, &fd_stderr, self.language);
                     stdout.extend(fd_stdout);
                     stderr.extend(fd_stderr);
                 }
@@ -4417,10 +4417,44 @@ impl Executor {
     }
 }
 
-/// Append the guest's direct fd 2 writes to a script failure's message (for
-/// Python, the traceback), the way a successful run appends them to stderr.
-pub(crate) fn append_fd_stderr(traceback: &mut String, fd_stderr: &[u8]) {
-    traceback.push_str(&String::from_utf8_lossy(fd_stderr));
+/// The most of a shell script's last stderr line its failure message quotes.
+const SHELL_MESSAGE_LINE_MAX: usize = 1024;
+
+/// Add the guest's direct fd 2 writes to a script failure's message, the way
+/// a successful run appends them to stderr.
+///
+/// For Python and JavaScript the message is the exception (Python's
+/// traceback), and fd 2 holds what the runtime itself printed around it: it's
+/// appended on a line of its own. A shell failure's message is its exit
+/// status, and fd 2 is the script's own stderr, already all in the failure's
+/// `stderr`: the message quotes just its last line, as `exit status 127:
+/// error: command not found: x`.
+pub(crate) fn append_fd_stderr(message: &mut String, fd_stderr: &[u8], language: Language) {
+    let text = String::from_utf8_lossy(fd_stderr);
+    if language == Language::Shell {
+        if let Some(line) = text
+            .lines()
+            .map(str::trim_end)
+            .rfind(|line| !line.is_empty())
+        {
+            message.push_str(": ");
+            match line.char_indices().nth(SHELL_MESSAGE_LINE_MAX) {
+                Some((end, _)) => {
+                    message.push_str(&line[..end]);
+                    message.push('…');
+                }
+                None => message.push_str(line),
+            }
+        }
+        return;
+    }
+    if text.is_empty() {
+        return;
+    }
+    if !message.is_empty() && !message.ends_with('\n') {
+        message.push('\n');
+    }
+    message.push_str(&text);
 }
 
 /// Parse a trace request into a `TraceEvent`.
@@ -4738,6 +4772,50 @@ mod tests {
             (&"process_end".into(), &1.into(), &"killed".into())
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A script failure's message gets the runtime's fd 2 writes on a line
+    /// of their own, except a shell's: there they're the script's stderr,
+    /// already in the failure's `stderr`, and its message quotes the last
+    /// line after its exit status.
+    #[test]
+    fn fd_stderr_joins_the_message_on_its_own_line_or_the_shells_last_line() {
+        let mut python = "Traceback (most recent call last):\n  ...\nValueError: x".to_string();
+        append_fd_stderr(&mut python, b"warning from C\n", Language::Python);
+        assert_eq!(
+            python,
+            "Traceback (most recent call last):\n  ...\nValueError: x\nwarning from C\n"
+        );
+
+        let mut ended = "Error: x\n".to_string();
+        append_fd_stderr(&mut ended, b"more", Language::JavaScript);
+        assert_eq!(ended, "Error: x\nmore");
+
+        let mut nothing = "Error: x".to_string();
+        append_fd_stderr(&mut nothing, b"", Language::JavaScript);
+        assert_eq!(nothing, "Error: x");
+
+        // The shell's message quotes the last non-empty line, capped.
+        let mut shell = "exit status 127".to_string();
+        append_fd_stderr(
+            &mut shell,
+            b"first\nerror: command not found: mcp.calc.add\n\n",
+            Language::Shell,
+        );
+        assert_eq!(
+            shell,
+            "exit status 127: error: command not found: mcp.calc.add"
+        );
+        let mut quiet = "exit status 3".to_string();
+        append_fd_stderr(&mut quiet, b"", Language::Shell);
+        assert_eq!(quiet, "exit status 3");
+        let mut long = "exit status 1".to_string();
+        append_fd_stderr(&mut long, "é".repeat(5000).as_bytes(), Language::Shell);
+        assert_eq!(
+            long.chars().count(),
+            "exit status 1: ".len() + SHELL_MESSAGE_LINE_MAX + 1
+        );
+        assert!(long.ends_with('…'));
     }
 
     #[test]

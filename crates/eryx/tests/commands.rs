@@ -292,7 +292,10 @@ async fn a_pipeline_of_large_arguments_fails_the_spawn() {
         matches!(err.kind(), ErrorKind::ScriptFailed { .. }),
         "{err:?}"
     );
-    assert!(err.to_string().contains("upper: limit-exceeded"), "{err}");
+    // In the script's stderr: the message only quotes its last line, which
+    // in a pipeline may be another stage's.
+    let stderr = String::from_utf8_lossy(err.stderr().unwrap_or_default()).into_owned();
+    assert!(stderr.contains("upper: limit-exceeded"), "{err}\n{stderr}");
 
     // The same under a budget smaller than the live-child cap.
     let sandbox = shell()
@@ -303,7 +306,8 @@ async fn a_pipeline_of_large_arguments_fails_the_spawn() {
     let stages = [r#"upper "$BIG""#; 8].join(" | ");
     let script = format!("{BIG}\n{stages}");
     let err = sandbox.execute(&script).await.unwrap_err();
-    assert!(err.to_string().contains("upper: limit-exceeded"), "{err}");
+    let stderr = String::from_utf8_lossy(err.stderr().unwrap_or_default()).into_owned();
+    assert!(stderr.contains("upper: limit-exceeded"), "{err}\n{stderr}");
 
     // Within the budget, the same sandbox still runs children.
     let out = sandbox.execute("echo ok | upper | upper").await.unwrap();

@@ -1824,12 +1824,13 @@ impl SessionExecutor {
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
         // that is always a script failure (for Python, its traceback).
+        let language = self.executor.language();
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")).into())
             .and_then(|output| {
                 output.map_err(|failure| {
                     let mut message = failure.message;
-                    crate::wasm::append_fd_stderr(&mut message, &fd_stderr);
+                    crate::wasm::append_fd_stderr(&mut message, &fd_stderr, language);
                     let mut stdout = failure.stdout;
                     let mut stderr = failure.stderr;
                     stdout.extend(&fd_stdout);
