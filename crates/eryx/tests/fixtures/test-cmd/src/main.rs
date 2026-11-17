@@ -24,6 +24,18 @@
 //! - `spawn CMD ARG...`: run `CMD` through `eryx:process/run` with this
 //!   command's stdin, env and `$PWD`, passing on its output and exit status,
 //!   or printing `error: <run-error>` (e.g. `limit-exceeded`) and exiting 1.
+//! - `copy`: copy stdin to stdout upper-cased as it arrives, a chunk at a
+//!   time (no-args mode reads all of stdin first);
+//! - `pipe CMD ARG...`: run `CMD` through `eryx:process/pipe`, writing all
+//!   of this command's stdin to it, then printing its stdout and exiting
+//!   with its status (`error: <run-error>` and 1 if it fails);
+//! - `pipe-echo N CMD ARG...`: write N bytes to a piped `CMD` (which echoes
+//!   them, as `copy` does) 4 KiB at a time, reading each chunk back before
+//!   the next, and print `echoed <bytes>`;
+//! - `pipe-flood N CMD ARG...`: write N bytes to a piped `CMD` without ever
+//!   reading its output, then wait for it and print `done`;
+//! - `pipe-leak N CMD ARG...`: pipe up to N `CMD`s and exit without waiting
+//!   for them, printing `piped <count>` and the error that stopped it.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -131,6 +143,102 @@ fn main() {
                 }
             }
         }
+        ["copy"] => {
+            let mut buf = [0u8; 4096];
+            let mut stdout = std::io::stdout().lock();
+            loop {
+                match std::io::stdin().read(&mut buf) {
+                    Ok(0) | Err(_) => std::process::exit(0),
+                    Ok(n) => {
+                        buf[..n].make_ascii_uppercase();
+                        if stdout.write_all(&buf[..n]).and_then(|()| stdout.flush()).is_err() {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        ["pipe", cmd, args @ ..] => {
+            let child = piped(cmd, args);
+            let mut input = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut input);
+            if !input.is_empty() {
+                let _ = child.write(&input);
+            }
+            child.close_stdin();
+            let mut stdout = std::io::stdout().lock();
+            loop {
+                match child.read(64 * 1024) {
+                    Ok(chunk) if !chunk.is_empty() => {
+                        let _ = stdout.write_all(&chunk);
+                    }
+                    _ => break,
+                }
+            }
+            let _ = stdout.flush();
+            match child.wait() {
+                Ok(status) => std::process::exit(status),
+                Err(e) => {
+                    println!("error: {}", e.name());
+                    std::process::exit(1);
+                }
+            }
+        }
+        ["pipe-echo", n, cmd, args @ ..] => {
+            let child = piped(cmd, args);
+            let total: usize = n.parse().unwrap_or(0);
+            let chunk = vec![b'x'; 4096];
+            let mut echoed = 0;
+            while echoed < total {
+                let len = chunk.len().min(total - echoed);
+                if child.write(&chunk[..len]).is_err() {
+                    break;
+                }
+                let mut got = 0;
+                while got < len {
+                    match child.read((len - got) as u64) {
+                        Ok(back) if !back.is_empty() => {
+                            assert!(back.iter().all(|&b| b == b'X'), "copy upper-cases");
+                            got += back.len();
+                        }
+                        _ => break,
+                    }
+                }
+                echoed += got;
+                if got < len {
+                    break;
+                }
+            }
+            child.close_stdin();
+            let _ = child.wait();
+            Ok(format!("echoed {echoed}\n"))
+        }
+        ["pipe-flood", n, cmd, args @ ..] => {
+            let child = piped(cmd, args);
+            let _ = child.write(&vec![b'x'; n.parse().unwrap_or(0)]);
+            let _ = child.wait();
+            Ok("done\n".to_owned())
+        }
+        ["pipe-leak", n, cmd, args @ ..] => {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            let env: Vec<(String, String)> = std::env::vars().collect();
+            let cwd = std::env::var("PWD").unwrap_or_else(|_| "/".to_owned());
+            let mut held = Vec::new();
+            let mut stopped = String::new();
+            for _ in 0..n.parse().unwrap_or(0) {
+                match eryx::process::pipe::Piped::spawn(cmd, &args, &env, &cwd) {
+                    Ok(child) => held.push(child),
+                    Err(e) => {
+                        stopped = format!(" error: {}", e.name());
+                        break;
+                    }
+                }
+            }
+            println!("piped {}{stopped}", held.len());
+            let _ = std::io::stdout().flush();
+            // Exiting drops them, which kills them.
+            std::process::exit(0);
+        }
         ["spin"] => loop {
             std::hint::spin_loop();
         },
@@ -150,6 +258,21 @@ fn main() {
         }
         Err(e) => {
             println!("error: {:?}", e.kind());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `cmd args` started through `eryx:process/pipe` with this command's env
+/// and `$PWD`; on failure, print `error: <run-error>` and exit 1.
+fn piped(cmd: &str, args: &[&str]) -> eryx::process::pipe::Piped {
+    let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let cwd = std::env::var("PWD").unwrap_or_else(|_| "/".to_owned());
+    match eryx::process::pipe::Piped::spawn(cmd, &args, &env, &cwd) {
+        Ok(child) => child,
+        Err(e) => {
+            println!("error: {}", e.name());
             std::process::exit(1);
         }
     }

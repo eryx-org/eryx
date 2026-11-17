@@ -57,6 +57,7 @@ use crate::wasm::ExecutorState;
 mod cached;
 mod imports;
 mod pipe;
+mod piped;
 mod preview1;
 mod vmctx;
 
@@ -81,6 +82,7 @@ mod child_bindings {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "eryx:process/child",
+        with: { "eryx:process/pipe.piped": super::piped::Piped },
     });
 }
 
@@ -990,7 +992,7 @@ impl Spawner {
             fuel: 0,
             fuel_used: Arc::default(),
             memory,
-            _live: live,
+            _live: Some(live),
             _args: args,
             network,
             spawner: command.spawns.then(|| Spawner {
@@ -1111,6 +1113,7 @@ impl Command {
                 fuel_used: Arc::default(),
                 // Isolated commands run nothing else.
                 spawner: None,
+                stderr: None,
                 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs: None,
             },
@@ -1360,6 +1363,7 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
     .map_err(wasm_err)?;
     count_p3_sockets(&mut linker).map_err(wasm_err)?;
     add_run_to_linker(&mut linker).map_err(wasm_err)?;
+    piped::add_to_linker(&mut linker).map_err(wasm_err)?;
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     {
         eryx_vfs::add_hybrid_vfs_to_linker(&mut linker)
@@ -1396,6 +1400,9 @@ pub(crate) struct ChildState {
     fuel_used: Arc<AtomicU64>,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
+    /// Its stderr, which its piped children's stderr goes to (see
+    /// [`piped`]); `None` when it's captured instead.
+    stderr: Option<pipe::Writer>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -1541,8 +1548,9 @@ struct ChildRun {
     /// Its share of the execution's pool of child memory, holding its
     /// instances' metadata from spawn.
     memory: ChildMemory,
-    /// Its live slot, given back when the run ends or is dropped.
-    _live: LiveSlot,
+    /// Its live slot, given back when the run ends or is dropped (a piped
+    /// command's handle holds it instead; see [`piped`]).
+    _live: Option<LiveSlot>,
     /// Its argv and env, charged to the execution's budget for as long as
     /// the run (which holds copies of them) lasts.
     _args: Held,
@@ -1575,7 +1583,7 @@ impl ChildRun {
             .envs(&env)
             .stdin(self.stdin)
             .stdout(self.stdout)
-            .stderr(self.stderr)
+            .stderr(self.stderr.clone())
             // The proxy resolves names; children reach it by address.
             .allow_ip_name_lookup(false)
             .allow_udp(false);
@@ -1642,6 +1650,7 @@ impl ChildRun {
                 fuel: self.fuel,
                 fuel_used: Arc::clone(&self.fuel_used),
                 spawner: self.spawner,
+                stderr: Some(self.stderr),
                 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs,
             },
@@ -2023,6 +2032,27 @@ impl Capture {
     }
 }
 
+/// Move the fuel a nested child has burned since the last charge (`used`
+/// in all, `charged` of it already moved) to its caller, and publish the
+/// caller's total, for its own parent to charge. False once the caller has
+/// none left.
+fn charge_caller(
+    store: &mut StoreContextMut<'_, ChildState>,
+    charged: &mut u64,
+    used: u64,
+) -> bool {
+    let delta = used.saturating_sub(*charged);
+    *charged = (*charged).max(used);
+    let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
+    // Fuel is always enabled on both engines.
+    let _ = store.set_fuel(left);
+    let state = store.data();
+    state
+        .fuel_used
+        .store(state.fuel.saturating_sub(left), Ordering::Relaxed);
+    left > 0
+}
+
 /// `eryx:process/run`: run `cmd` to completion for the child whose store
 /// this is, as `wait` does for the guest's children.
 ///
@@ -2093,16 +2123,7 @@ async fn run_nested(
     // (and publish the caller's total, for its own parent to charge);
     // false once the caller has none left.
     let mut charge = |store: &mut StoreContextMut<'_, ChildState>, used: u64| {
-        let delta = used.saturating_sub(charged_fuel);
-        charged_fuel = charged_fuel.max(used);
-        let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
-        // Fuel is always enabled on both engines.
-        let _ = store.set_fuel(left);
-        let state = store.data();
-        state
-            .fuel_used
-            .store(state.fuel.saturating_sub(left), Ordering::Relaxed);
-        left > 0
+        charge_caller(store, &mut charged_fuel, used)
     };
     let result = std::future::poll_fn(|cx| {
         while let Some(writer) = &stdin {
@@ -2656,7 +2677,7 @@ pub(crate) mod tests {
                 fuel: CHILD_FUEL,
                 fuel_used: Arc::default(),
                 memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
-                _live: LiveSlot::take(&Arc::default()).unwrap(),
+                _live: LiveSlot::take(&Arc::default()),
                 _args: Held {
                     budget: ChildBudget::default(),
                     bytes: 0,

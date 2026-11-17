@@ -85,6 +85,41 @@ interface run {
     ) -> result<output, run-error>;
 }
 
+/// Run a command with live pipes to its stdin and stdout: for child
+/// commands that talk to a command of their own while it runs (git and its
+/// `remote-https` helper) but, written against plain WASI, can't drive
+/// `process`'s streams. The command runs alongside its caller, and its
+/// stderr is the caller's. As with `run`, a child may only call it if the
+/// host lets its command spawn, and piped commands share the execution's
+/// limits.
+interface pipe {
+    use run.{run-error};
+
+    /// A running command. Dropping it before `wait` returns kills it.
+    resource piped {
+        /// Start `cmd`, running at once.
+        spawn: static func(
+            cmd: string,
+            args: list<string>,
+            env: list<tuple<string, string>>,
+            cwd: string,
+        ) -> result<piped, run-error>;
+        /// Write all of `data` to its stdin, waiting while the pipe is
+        /// full, and return its length. Fails once it has exited or closed
+        /// its stdin.
+        write: func(data: list<u8>) -> result<u64, run-error>;
+        /// Close its stdin, ending its input.
+        close-stdin: func();
+        /// Read up to `max` bytes of its stdout, waiting until some are
+        /// there: empty once it has ended.
+        read: func(max: u64) -> result<list<u8>, run-error>;
+        /// Close its stdin and wait for it to exit, returning its exit
+        /// code. Output it writes to stdout and nobody reads holds it up,
+        /// as with any pipe.
+        wait: func() -> result<s32, run-error>;
+    }
+}
+
 /// Host side: links just the process interface next to `eryx:sandbox`.
 world spawner {
     import process;
@@ -93,4 +128,5 @@ world spawner {
 /// What child commands import.
 world child {
     import run;
+    import pipe;
 }
