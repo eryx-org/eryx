@@ -624,3 +624,126 @@ async fn nested_children_get_the_same_network() {
     let out = run(&sandbox, "tc spawn tc hold 100").await;
     assert!(out.starts_with("held 32 error:"), "{out}");
 }
+
+/// The script's stdout and stderr under `options`, whether or not it failed.
+async fn run_with(sandbox: &Sandbox, script: &str, options: &eryx::ExecuteOptions) -> String {
+    let (stdout, stderr) = match sandbox.execute_with(script, options).await {
+        Ok(out) => (out.stdout, out.stderr),
+        Err(e) => match e.kind() {
+            eryx::ErrorKind::ScriptFailed { stdout, stderr, .. } => {
+                (stdout.clone(), stderr.clone())
+            }
+            _ => panic!("{e}"),
+        },
+    };
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    )
+}
+
+/// One command's network can be taken away or narrowed for an execution,
+/// leaving the others' as they are, and the next execution gets it back.
+#[tokio::test]
+async fn command_options_narrow_one_commands_network() {
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd())
+        .build()
+        .unwrap();
+    let get = |cmd: &str| format!("{cmd} proxy-get http://api.test:{port}/x");
+
+    let offline = eryx::ExecuteOptions::new().with_command_options(
+        "ta",
+        eryx::CommandOptions::new().with_network(ChildNetwork::None),
+    );
+    let out = run_with(
+        &sandbox,
+        &format!("{}; ta env HTTPS_PROXY", get("tc")),
+        &offline,
+    )
+    .await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(!out.contains("http://127.0.0.1:"), "{out}");
+    let out = run_with(&sandbox, &get("ta"), &offline).await;
+    assert!(!out.contains(" 200 OK") && out.contains("error:"), "{out}");
+
+    // A narrow config allowing no hosts: refused by its own proxy.
+    let narrowed = eryx::ExecuteOptions::new().with_command_options(
+        "ta",
+        eryx::CommandOptions::new().with_network(ChildNetwork::Narrow(Box::default())),
+    );
+    let out = run_with(
+        &sandbox,
+        &format!("{}; {}", get("tc"), get("ta")),
+        &narrowed,
+    )
+    .await;
+    assert_eq!(out.matches(" 200 OK").count(), 1, "{out}");
+    assert!(out.contains(" 403 "), "{out}");
+
+    // Options last one execution.
+    let out = run(&sandbox, &get("ta")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+}
+
+/// A command registered with tunnels or spawning can lose them for one
+/// execution.
+#[tokio::test]
+async fn command_options_take_away_tunnels_and_spawning() {
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("tt", test_cmd().allow_tunnels())
+        .with_command("ts", test_cmd().allow_spawn())
+        .build()
+        .unwrap();
+    let options = eryx::ExecuteOptions::new()
+        .with_command_options("tt", eryx::CommandOptions::new().without_tunnels())
+        .with_command_options("ts", eryx::CommandOptions::new().without_spawn());
+
+    // Inspected instead of tunnelled: the proxy wants TLS from the plain
+    // HTTP upstream, and answers 502 when there's none.
+    let tunnel = format!("tt tunnel-get api.test:{port}");
+    let out = run(&sandbox, &tunnel).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    let out = run_with(&sandbox, &tunnel, &options).await;
+    assert!(out.contains(" 502 ") && !out.contains(" 200 OK"), "{out}");
+
+    let out = run(&sandbox, "ts spawn tc env PWD").await;
+    assert!(out.contains('/') && !out.contains("error:"), "{out}");
+    let out = run_with(&sandbox, "ts spawn tc env PWD", &options).await;
+    assert!(out.contains("error: spawn-failed"), "{out}");
+}
+
+/// Options naming a command that isn't registered, or giving a command
+/// network the execution doesn't have, fail the execution before it runs.
+#[tokio::test]
+async fn command_options_can_only_take_away() {
+    let sandbox = shell(network()).build().unwrap();
+    let unknown = eryx::ExecuteOptions::new()
+        .with_command_options("nope", eryx::CommandOptions::new().without_spawn());
+    let err = sandbox.execute_with("true", &unknown).await.unwrap_err();
+    assert!(
+        err.to_string().contains("isn't a registered command"),
+        "{err}"
+    );
+
+    let offline = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap();
+    let widen = eryx::ExecuteOptions::new().with_command_options(
+        "tc",
+        eryx::CommandOptions::new().with_network(ChildNetwork::Inherit),
+    );
+    let err = offline.execute_with("true", &widen).await.unwrap_err();
+    assert!(err.to_string().contains("can't have network"), "{err}");
+    // Taking away what isn't there is fine.
+    let none = eryx::ExecuteOptions::new().with_command_options(
+        "tc",
+        eryx::CommandOptions::new().with_network(ChildNetwork::None),
+    );
+    offline.execute_with("true", &none).await.unwrap();
+}

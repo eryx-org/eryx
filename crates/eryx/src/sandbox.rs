@@ -437,6 +437,9 @@ impl Sandbox {
         if let Some(token) = &options.cancellation {
             execute_builder = execute_builder.with_cancellation(token.clone());
         }
+        for (name, command_options) in &options.command_options {
+            execute_builder = execute_builder.with_command_options(name, command_options.clone());
+        }
         if let Some(names) = &options.allowed_commands {
             execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
         }
@@ -1121,6 +1124,7 @@ pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) ->
 #[non_exhaustive]
 pub struct ExecuteOptions {
     allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
     cancellation: Option<CancellationToken>,
 }
 
@@ -1145,6 +1149,24 @@ impl ExecuteOptions {
         S: Into<String>,
     {
         self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only): a narrower child network, or no tunnels or spawning.
+    /// Options can only take away from what the command and the sandbox
+    /// give. Setting them again for the same name replaces them. The
+    /// execution fails to start if `name` isn't a registered command, or if
+    /// the options give it network when the sandbox gives children none.
+    /// Sessions take the same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
         self
     }
 
