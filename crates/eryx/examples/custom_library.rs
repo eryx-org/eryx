@@ -49,7 +49,7 @@ impl TypedCallback for MathAdd {
     type Args = BinaryMathArgs;
 
     fn name(&self) -> &str {
-        "math.add"
+        "mymath.add"
     }
 
     fn description(&self) -> &str {
@@ -71,7 +71,7 @@ impl TypedCallback for MathMultiply {
     type Args = BinaryMathArgs;
 
     fn name(&self) -> &str {
-        "math.multiply"
+        "mymath.multiply"
     }
 
     fn description(&self) -> &str {
@@ -93,7 +93,7 @@ impl TypedCallback for MathPower {
     type Args = PowerArgs;
 
     fn name(&self) -> &str {
-        "math.power"
+        "mymath.power"
     }
 
     fn description(&self) -> &str {
@@ -126,15 +126,15 @@ class Math:
 
     async def add(self, a: float, b: float) -> float:
         """Add two numbers together."""
-        return await invoke("math.add", a=a, b=b)
+        return await invoke("mymath.add", a=a, b=b)
 
     async def multiply(self, a: float, b: float) -> float:
         """Multiply two numbers together."""
-        return await invoke("math.multiply", a=a, b=b)
+        return await invoke("mymath.multiply", a=a, b=b)
 
     async def power(self, base: float, exponent: float) -> float:
         """Raise a number to a power."""
-        return await invoke("math.power", base=base, exponent=exponent)
+        return await invoke("mymath.power", base=base, exponent=exponent)
 "#;
 
     // Type stubs for IDE support and LLM context
