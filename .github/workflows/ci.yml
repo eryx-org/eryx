@@ -158,6 +158,7 @@ jobs:
               - 'about.toml'
               - 'third_party/**'
               - 'scripts/notices.py'
+              - 'scripts/*update_preview1_adapter.py'
               - 'crates/eryx-runtime/libs/**'
               - 'crates/eryx-guest-js/src/node/**'
               - 'clis/coreutils.toml'
@@ -224,6 +225,9 @@ jobs:
 
       - name: Check the notices
         run: mise run notices-check
+
+      - name: Test the preview1 adapter sync
+        run: python3 -m unittest discover -s scripts -p 'test_update_preview1_adapter.py'
 
   # The bundled stdlib ships precompiled bytecode (the sandbox mounts it
   # read-only, so Python can't cache it). Fail if it drifts from the sources.
