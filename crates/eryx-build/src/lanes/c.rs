@@ -24,9 +24,11 @@
 //! imports.
 //!
 //! Dependencies: `[[deps]]` libraries (e.g. mbedTLS for curl's TLS) are built
-//! first into `<dep.dir>/build`; their `shims` are compiled and linked into the
-//! main build, and the main build's flags can reference them via
-//! `{dep:NAME:src}` / `{dep:NAME:build}` (and `{repo}`) placeholders.
+//! first, in order, into `<dep.dir>/build`; their `shims` are compiled and
+//! linked into the main build, and the main build's flags can reference them
+//! via `{dep:NAME:src}` / `{dep:NAME:build}` (and `{repo}`) placeholders. So
+//! can a dep's own `cflags` and `cmake_flags`, for the deps listed before it
+//! (e.g. libcurl built against mbedTLS).
 //!
 //! Toolchain input (not per-CLI, so sourced from the environment):
 //! - `WASI_SDK_PATH` — root of the wasi-sdk install. The mise `ensure-wasi-sdk`
@@ -68,8 +70,16 @@ pub fn build(manifest: &Manifest) -> Result<()> {
 
     // Build dependency libraries first; collect shim objects to link into main.
     let mut shim_objs: Vec<String> = Vec::new();
-    for dep in &manifest.deps {
-        shim_objs.extend(build_dep(dep, &clang, &toolchain, &repo_root, &output_dir)?);
+    for (i, dep) in manifest.deps.iter().enumerate() {
+        let earlier = &manifest.deps[..i];
+        shim_objs.extend(build_dep(
+            dep,
+            earlier,
+            &clang,
+            &toolchain,
+            &repo_root,
+            &output_dir,
+        )?);
     }
 
     // Optional patch hook (mirrors the Go lane), applied to the main source tree
@@ -151,10 +161,35 @@ fn substitute(s: &str, deps: &[Dep], repo_root: &Path) -> Result<String> {
     Ok(out)
 }
 
+/// `dep`'s `cflags` and `cmake_flags`, with placeholders for the `earlier`
+/// deps (those built before it) substituted. A placeholder for any other dep
+/// is an error, since that one isn't built yet.
+fn dep_flags(dep: &Dep, earlier: &[Dep], repo_root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    let resolve = |flags: &[String]| -> Result<Vec<String>> {
+        flags
+            .iter()
+            .map(|flag| {
+                let flag = substitute(flag, earlier, repo_root)?;
+                if flag.contains("{dep:") {
+                    bail!(
+                        "dependency '{}' flag `{flag}` refers to a dependency that isn't built \
+                         before it (list it earlier in [[deps]])",
+                        dep.name
+                    );
+                }
+                Ok(flag)
+            })
+            .collect()
+    };
+    Ok((resolve(&dep.cflags)?, resolve(&dep.cmake_flags)?))
+}
+
 /// Build one `[[deps]]` library (cmake) into `<dir>/build`, then compile its
-/// `shims` against it. Returns the shim object paths to link into the main build.
+/// `shims` against it. Its flags may refer to the `earlier` deps. Returns the
+/// shim object paths to link into the main build.
 fn build_dep(
     dep: &Dep,
+    earlier: &[Dep],
     clang: &Path,
     toolchain: &Path,
     repo_root: &Path,
@@ -167,6 +202,7 @@ fn build_dep(
         );
     }
     let dep_src = repo_root.join(&dep.dir);
+    let (cflags, cmake_flags) = dep_flags(dep, earlier, repo_root)?;
     if !toolchain.exists() {
         bail!(
             "wasip2 CMake toolchain file not found at {}",
@@ -198,9 +234,9 @@ fn build_dep(
         "-G".into(),
         "Ninja".into(),
         format!("-DCMAKE_TOOLCHAIN_FILE={}", path_str(toolchain)?),
-        format!("-DCMAKE_C_FLAGS={}", dep.cflags.join(" ")),
+        format!("-DCMAKE_C_FLAGS={}", cflags.join(" ")),
     ];
-    cfg.extend(dep.cmake_flags.iter().cloned());
+    cfg.extend(cmake_flags);
     let cfg_ref: Vec<&str> = cfg.iter().map(String::as_str).collect();
     run("cmake", &cfg_ref, &dep_src, &[])?;
     run("cmake", &["--build", &build_dir_s], &dep_src, &[])?;
@@ -220,7 +256,7 @@ fn build_dep(
             let obj_s = path_str(&obj)?;
             eprintln!("=== [dep:{}] compile shim {} ===", dep.name, shim.display());
             let mut args: Vec<String> = vec!["--target=wasm32-wasip2".into()];
-            args.extend(dep.cflags.iter().cloned());
+            args.extend(cflags.iter().cloned());
             args.push(inc.clone());
             args.extend([
                 "-c".to_string(),
@@ -577,4 +613,57 @@ fn copy_artifact(artifact: &Path, component: &Path) -> Result<()> {
         .with_context(|| format!("copying {} → {}", artifact.display(), component.display()))?;
     eprintln!("  {} → {}", artifact.display(), component.display());
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn deps(toml: &str) -> Vec<Dep> {
+        #[derive(serde::Deserialize)]
+        struct Deps {
+            deps: Vec<Dep>,
+        }
+        toml::from_str::<Deps>(toml).unwrap().deps
+    }
+
+    /// A dep's flags resolve the deps listed before it (libcurl against
+    /// mbedTLS), and refuse one listed after it, which isn't built yet.
+    #[test]
+    fn dep_flags_refer_to_earlier_deps() {
+        let deps = deps(
+            r#"
+            [[deps]]
+            name = "mbedtls"
+            license = "Apache-2.0"
+            dir = "scratch/mbedtls"
+
+            [[deps]]
+            name = "curl"
+            license = "curl"
+            dir = "scratch/curl"
+            cflags = ["-I{dep:mbedtls:src}/include"]
+            cmake_flags = ["-DMBEDTLS_LIBRARY={dep:mbedtls:build}/library/libmbedtls.a", "-DX={repo}"]
+
+            [[deps]]
+            name = "early"
+            license = "MIT"
+            dir = "scratch/early"
+            cmake_flags = ["-DY={dep:later:build}"]
+            "#,
+        );
+        let root = Path::new("/r");
+        let (cflags, cmake_flags) = dep_flags(&deps[1], &deps[..1], root).unwrap();
+        assert_eq!(cflags, ["-I/r/scratch/mbedtls/include"]);
+        assert_eq!(
+            cmake_flags,
+            [
+                "-DMBEDTLS_LIBRARY=/r/scratch/mbedtls/build/library/libmbedtls.a",
+                "-DX=/r",
+            ]
+        );
+        let err = dep_flags(&deps[2], &deps[..2], root).unwrap_err();
+        assert!(err.to_string().contains("isn't built before it"), "{err}");
+    }
 }
