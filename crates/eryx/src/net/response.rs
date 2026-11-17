@@ -116,6 +116,9 @@ pub(super) struct ResponseMasker {
     carry: Vec<u8>,
     /// Bytes ready for the guest.
     pub(super) out: Vec<u8>,
+    /// Whether a compressed or otherwise encoded response fails the
+    /// connection (see [`Self::refusing_encodings`]).
+    refuse_encoded: bool,
 }
 
 impl ResponseMasker {
@@ -132,7 +135,18 @@ impl ResponseMasker {
             pending: Vec::new(),
             carry: Vec::new(),
             out: Vec::new(),
+            refuse_encoded: false,
         })
+    }
+
+    /// Fail the connection on a response with a `Content-Encoding` other
+    /// than `identity` or a transfer coding other than `chunked`, rather than
+    /// pass through a body that may hold a value in a form it can't see. For
+    /// connections carrying a child proxy credential, which the guest must
+    /// never get back.
+    pub(super) fn refusing_encodings(mut self, refuse: bool) -> Self {
+        self.refuse_encoded = refuse;
+        self
     }
 
     #[cfg(test)]
@@ -327,6 +341,11 @@ impl ResponseMasker {
         let Some(body) = response_body(head) else {
             return self.fail("ambiguous or malformed framing in a response");
         };
+        // ponytail: fail closed on encoded bodies; decode, mask and send them
+        // on uncompressed instead if servers that ignore `identity` matter.
+        if self.refuse_encoded && is_encoded(head) {
+            return self.fail("an encoded response on a connection carrying a credential");
+        }
         let masked = self.mask(head);
         self.out.extend(masked);
         if (100..200).contains(&status) && status != 101 {
@@ -503,6 +522,32 @@ fn response_body(head: &[u8]) -> Option<Body> {
         (Some(_), None) | (None, None) => Some(Body::UntilClose),
         (None, Some(len)) => Some(Body::Length(len)),
     }
+}
+
+/// Whether the response with header block `head` has a content coding other
+/// than `identity`, or a transfer coding other than `chunked`.
+fn is_encoded(head: &[u8]) -> bool {
+    let Some(lines) = head_lines(head) else {
+        return true;
+    };
+    lines.iter().skip(1).any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        let codings = || {
+            value
+                .split(',')
+                .map(|c| c.trim_matches([' ', '\t']).to_ascii_lowercase())
+                .filter(|c| !c.is_empty())
+        };
+        if name.eq_ignore_ascii_case("content-encoding") {
+            codings().any(|c| c != "identity")
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            codings().any(|c| c != "chunked")
+        } else {
+            false
+        }
+    })
 }
 
 /// The size on a chunk-size line (ending in `\r\n`), parsed as RFC 9112
@@ -748,6 +793,44 @@ mod tests {
             );
             assert!(!m.out.ends_with(b"more"));
         }
+    }
+
+    /// With encodings refused (a connection carrying a credential), a
+    /// compressed or transfer-coded response fails the connection, and an
+    /// `identity` or chunked one is framed as usual.
+    #[test]
+    fn encoded_responses_fail_closed_when_refused() {
+        for wire in [
+            &b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 11\r\n\r\nSECRETVALUE"[..],
+            b"HTTP/1.1 200 OK\r\ncontent-encoding: identity, br\r\nContent-Length: 11\r\n\r\nSECRETVALUE",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
+        ] {
+            let mut m = masker().refusing_encodings(true);
+            let mut requests = VecDeque::from([RequestKind::Other]);
+            m.feed(wire, &mut requests);
+            m.finish();
+            assert!(m.failure().is_some(), "{:?}", String::from_utf8_lossy(wire));
+            assert!(!m.out.windows(5).any(|w| w == b"SECRE"));
+        }
+        for wire in [
+            &b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: 11\r\n\r\nSECRETVALUE"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
+        ] {
+            let mut m = masker().refusing_encodings(true);
+            let mut requests = VecDeque::from([RequestKind::Other]);
+            let got = run(&mut m, &mut requests, &[wire]);
+            assert!(m.failure().is_none(), "{:?}", String::from_utf8_lossy(wire));
+            assert!(got.windows(2).any(|w| w == b"PH"));
+        }
+        // Without the refusal, an encoded response is framed as before.
+        let mut m = masker();
+        let mut requests = VecDeque::from([RequestKind::Other]);
+        run(
+            &mut m,
+            &mut requests,
+            &[b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nhi"],
+        );
+        assert!(m.failure().is_none());
     }
 
     /// Bare-LF line endings in a response head are accepted, as clients do.

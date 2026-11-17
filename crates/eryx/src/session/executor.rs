@@ -369,6 +369,7 @@ pub struct SessionExecuteBuilder<'a> {
     child_net: Option<crate::process::ChildNet>,
     allowed_commands: Option<Vec<String>>,
     command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<Arc<crate::net::Credential>>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -403,6 +404,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             child_net: None,
             allowed_commands: None,
             command_options: HashMap::new(),
+            credentials: Vec::new(),
         }
     }
 
@@ -433,6 +435,14 @@ impl<'a> SessionExecuteBuilder<'a> {
         options: crate::process::CommandOptions,
     ) -> Self {
         self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's children `credential` too (shell only); see
+    /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
         self
     }
 
@@ -570,6 +580,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.child_net,
                 self.allowed_commands.as_deref(),
                 &self.command_options,
+                &self.credentials,
             )
             .await
     }
@@ -1614,14 +1625,20 @@ impl SessionExecutor {
         child_net: Option<crate::process::ChildNet>,
         allowed_commands: Option<&[String]>,
         command_options: &HashMap<String, crate::process::CommandOptions>,
+        credentials: &[Arc<crate::net::Credential>],
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
         // From the full set every time, so one execution's narrowing
         // doesn't carry into the next. Checked before the store is taken.
+        let credentials: Vec<_> = (self.executor.credentials().iter())
+            .chain(credentials)
+            .cloned()
+            .collect();
         let commands = self.executor.commands().for_execution(
             allowed_commands,
             command_options,
             child_net.is_some(),
+            &credentials,
         )?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(ErrorKind::Cancelled.into());

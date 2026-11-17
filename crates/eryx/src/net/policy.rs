@@ -33,6 +33,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+use super::credential::Credential;
 use super::response::{self, CARRY_GRACE, RequestKind, UNSOLICITED};
 use super::{
     Body, IpNet, MAX_HEADER_LEN, NetConfig, TcpError, TlsError, embedded_ipv4, find_header_end,
@@ -234,9 +235,11 @@ impl NetPolicy {
             return Err(TcpError::HostNotFound);
         }
 
+        // A child proxy is never a destination, whatever the policy allows
+        // (see `proxy::is_child_proxy`).
         let (allowed, blocked): (Vec<_>, Vec<_>) = addrs
             .into_iter()
-            .partition(|a| self.address_allowed(host, a.ip()));
+            .partition(|a| self.address_allowed(host, a.ip()) && !super::proxy::is_child_proxy(*a));
         if allowed.is_empty() {
             // The address stays in the host's logs: telling the guest would let
             // it map internal DNS names to addresses.
@@ -329,6 +332,8 @@ impl NetPolicy {
         RequestFramer {
             policy: Arc::clone(self),
             host: host.to_string(),
+            over_tls,
+            credentials: Vec::new(),
             substitute: self.substitutes_secrets(over_tls),
             http_only: false,
             authority: String::new(),
@@ -663,6 +668,11 @@ pub(crate) struct RequestFramer {
     policy: Arc<NetPolicy>,
     /// The host the connection was made to.
     host: String,
+    /// Whether the connection is TLS (the proxy's terminated TLS).
+    over_tls: bool,
+    /// The child proxy's credentials for this connection (see
+    /// [`RequestFramer::with_credentials`]).
+    credentials: Vec<Arc<Credential>>,
     /// Whether secret placeholders are substituted.
     substitute: bool,
     /// Whether anything but HTTP/1.1 requests is refused (see
@@ -684,6 +694,18 @@ impl RequestFramer {
     pub(crate) fn http_only(mut self, authority: impl Into<String>) -> Self {
         self.http_only = true;
         self.authority = authority.into();
+        self
+    }
+
+    /// Add those of the child proxy's `credentials` that are for this
+    /// connection's host and transport to its requests (see
+    /// [`inject_credentials`]), and mask them out of its responses.
+    pub(crate) fn with_credentials(mut self, credentials: &[Arc<Credential>]) -> Self {
+        self.credentials = credentials
+            .iter()
+            .filter(|c| c.for_connection(&self.host, self.over_tls))
+            .cloned()
+            .collect();
         self
     }
 
@@ -723,13 +745,16 @@ impl RequestFramer {
     /// responses framed and masked, with the secrets that may be sent to its
     /// host: anywhere else none was ever sent.
     pub(crate) fn response_masker(&self) -> ResponseMasker {
-        let masks = if self.substitute {
+        let mut masks = if self.substitute {
             self.policy.read_masks(&self.host)
         } else {
             Vec::new()
         };
+        masks.extend(self.credentials.iter().flat_map(|c| c.masks()));
+        let masker = response::ResponseMasker::new(masks)
+            .map(|m| m.refusing_encodings(!self.credentials.is_empty()));
         ResponseMasker {
-            masker: response::ResponseMasker::new(masks),
+            masker,
             error: None,
             http: Arc::clone(&self.state),
         }
@@ -850,6 +875,13 @@ impl RequestFramer {
                     } else {
                         headers
                     };
+                    // After substitution, so no placeholder is ever expanded
+                    // inside a credential.
+                    let headers = if self.credentials.is_empty() {
+                        headers
+                    } else {
+                        inject_credentials(&headers, &self.credentials)
+                    };
                     if http_only {
                         out.extend(to_origin_form(&headers, &self.authority));
                     } else {
@@ -936,6 +968,53 @@ fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
         out.push_str(&format!("Host: {authority}\r\n"));
     }
     out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// The request head `headers` with `credentials` applied: each one for the
+/// request's path replaces every header of its name the child sent (the
+/// first for a name wins), and `Accept-Encoding` asks for `identity`, since
+/// a credential can't be masked out of a compressed response. A `CONNECT`
+/// or `Upgrade` request gets none: what follows it isn't framed or masked.
+fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8> {
+    // `request_body` has checked that the headers are UTF-8, and the
+    // request line parses (`classify`).
+    let text = String::from_utf8_lossy(headers);
+    let path = request_line(&text).and_then(|(_, target)| super::request_path(target));
+    let mut applied: Vec<&Credential> = Vec::new();
+    if !switches_protocols(headers) {
+        for credential in credentials.iter().filter(|c| c.for_path(path.as_deref())) {
+            let taken = applied.iter().any(|a| {
+                a.header_name()
+                    .eq_ignore_ascii_case(credential.header_name())
+            });
+            if !taken {
+                applied.push(credential);
+            }
+        }
+    }
+    let mut lines = text.lines();
+    let mut out = String::new();
+    if let Some(request_line) = lines.next() {
+        out.push_str(request_line);
+        out.push_str("\r\n");
+    }
+    for line in lines.filter(|line| !line.is_empty()) {
+        let name = line.split(':').next().unwrap_or_default().trim();
+        if name.eq_ignore_ascii_case("accept-encoding")
+            || applied
+                .iter()
+                .any(|c| c.header_name().eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    for credential in applied {
+        out.push_str(&credential.header_line());
+    }
+    out.push_str("Accept-Encoding: identity\r\n\r\n");
     out.into_bytes()
 }
 

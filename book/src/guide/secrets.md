@@ -257,6 +257,7 @@ Alternatively, turn file scrubbing off for that sandbox (`scrub_files=False`, `.
 2. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
 3. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
 4. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
+5. **For child processes, prefer credentials** — a shell's commands (git, gh, curl) can authenticate with a [credential](./sandboxes.md#external-commands) the child proxy adds itself, so the sandbox never holds even the placeholder.
 
 ## Security Model
 

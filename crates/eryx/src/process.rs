@@ -437,6 +437,9 @@ pub struct Command {
     /// registration (see [`Command::with_network`]), or for one execution
     /// (see [`CommandOptions::with_network`]), which replaces that.
     network: Option<crate::net::ChildNetwork>,
+    /// The credentials its requests get in this execution (see
+    /// [`Credential`](crate::net::Credential)).
+    credentials: Vec<Arc<crate::net::Credential>>,
 }
 
 /// Per-execution options for one registered command, which can only take
@@ -448,6 +451,7 @@ pub struct CommandOptions {
     network: Option<crate::net::ChildNetwork>,
     no_tunnels: bool,
     no_spawn: bool,
+    no_credentials: bool,
 }
 
 impl CommandOptions {
@@ -484,6 +488,14 @@ impl CommandOptions {
     #[must_use]
     pub fn without_spawn(mut self) -> Self {
         self.no_spawn = true;
+        self
+    }
+
+    /// No [`Credential`](crate::net::Credential)s for this command's
+    /// requests in this execution, even ones given for every child.
+    #[must_use]
+    pub fn without_credentials(mut self) -> Self {
+        self.no_credentials = true;
         self
     }
 }
@@ -647,6 +659,7 @@ impl Command {
             spawns: false,
             vmctx: usize::try_from(vmctx).unwrap_or(usize::MAX),
             network: None,
+            credentials: Vec::new(),
         })
     }
 
@@ -745,8 +758,8 @@ pub(crate) struct ChildNet {
     /// Commands' narrowed networks (see [`CommandOptions::with_network`]),
     /// by command name, made on first use.
     narrowed: HashMap<String, crate::net::ChildNetPolicy>,
-    /// Started proxies, by the command whose narrowed network they serve
-    /// (`None` for the execution's) and whether they tunnel.
+    /// Started proxies, by the command whose narrowed network or credentials
+    /// they serve (`None` for the execution's) and whether they tunnel.
     proxies: HashMap<(Option<String>, bool), ProxyLink>,
     /// TCP sockets its children hold, together.
     sockets: Arc<AtomicUsize>,
@@ -775,8 +788,11 @@ impl ChildNet {
     /// command's network is [`ChildNetwork::None`](crate::ChildNetwork::None).
     fn link(&mut self, name: &str, command: &Command) -> std::io::Result<Option<ChildLink>> {
         use crate::net::ChildNetwork;
+        // A command with credentials gets a proxy of its own, so no other
+        // command's children can use them.
+        let own = (!command.credentials.is_empty()).then(|| name.to_owned());
         let (key, policy) = match &command.network {
-            None | Some(ChildNetwork::Inherit) => (None, &self.net),
+            None | Some(ChildNetwork::Inherit) => (own, &self.net),
             Some(ChildNetwork::None) => return Ok(None),
             Some(ChildNetwork::Narrow(config)) => {
                 let policy = self
@@ -789,7 +805,7 @@ impl ChildNet {
         let link = match self.proxies.entry((key, command.tunnels)) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let proxy = policy.start_proxy(command.tunnels)?;
+                let proxy = policy.start_proxy_with(command.tunnels, &command.credentials)?;
                 let ca_dir = tempfile::tempdir()?;
                 std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
                 entry.insert(ProxyLink { proxy, ca_dir })
@@ -797,6 +813,7 @@ impl ChildNet {
         };
         Ok(Some(ChildLink {
             proxy: link.proxy.addr(),
+            proxy_auth: link.proxy.userinfo().map(str::to_owned),
             ca_dir: link.ca_dir.path().to_path_buf(),
             sockets: Arc::clone(&self.sockets),
         }))
@@ -807,6 +824,8 @@ impl ChildNet {
 #[derive(Clone)]
 struct ChildLink {
     proxy: std::net::SocketAddr,
+    /// `user:password` the proxy requires, if it holds credentials.
+    proxy_auth: Option<String>,
     ca_dir: std::path::PathBuf,
     /// Its execution's count of children's sockets.
     sockets: Arc<AtomicUsize>,
@@ -815,7 +834,10 @@ struct ChildLink {
 impl ChildLink {
     /// The env vars pointing a child's HTTP clients at the proxy and its CA.
     fn env(&self) -> Vec<(String, String)> {
-        let proxy = format!("http://{}", self.proxy);
+        let proxy = match &self.proxy_auth {
+            Some(auth) => format!("http://{auth}@{}", self.proxy),
+            None => format!("http://{}", self.proxy),
+        };
         let ca = format!("{CA_DIR}/{CA_FILE}");
         let named =
             |names: [&str; 4], value: String| names.map(|name| (name.to_owned(), value.clone()));
@@ -1090,6 +1112,7 @@ impl Command {
             spawns: false,
             vmctx: usize::try_from(precompiled_vmctx(precompiled)).unwrap_or(usize::MAX),
             network: None,
+            credentials: Vec::new(),
         })
     }
 
@@ -1329,12 +1352,16 @@ impl Commands {
     ///
     /// Fails if an option names a command that isn't registered, or gives a
     /// command network when the execution has no child network
-    /// (`child_net`), since an option can only take away.
+    /// (`child_net`), since an option can only take away; or if a credential
+    /// is invalid, the execution has no child network, or a credential names
+    /// a command that isn't registered, has no network or tunnels (so could
+    /// never use it).
     pub(crate) fn for_execution(
         &self,
         allowed: Option<&[String]>,
         options: &HashMap<String, CommandOptions>,
         child_net: bool,
+        credentials: &[Arc<crate::net::Credential>],
     ) -> Result<Self, Error> {
         use crate::net::ChildNetwork;
         let mut commands = self.only(allowed);
@@ -1370,7 +1397,70 @@ impl Commands {
                 }
             }
         }
+        self.attach_credentials(&mut commands, options, child_net, credentials)?;
         Ok(commands)
+    }
+
+    /// Give each of `commands` the `credentials` that are for it, unless its
+    /// options take them away; see [`Self::for_execution`] for the errors.
+    fn attach_credentials(
+        &self,
+        commands: &mut Self,
+        options: &HashMap<String, CommandOptions>,
+        child_net: bool,
+        credentials: &[Arc<crate::net::Credential>],
+    ) -> Result<(), Error> {
+        use crate::net::ChildNetwork;
+        let fail = |message: String| Err(ErrorKind::Initialization(message).into());
+        if credentials.is_empty() {
+            return Ok(());
+        }
+        if !child_net {
+            return fail(
+                "credentials need a child network: the execution gives children none".into(),
+            );
+        }
+        for credential in credentials {
+            credential.validate().map_err(ErrorKind::Initialization)?;
+            for name in credential.commands().unwrap_or_default() {
+                if !self.registered.contains_key(name) {
+                    return fail(format!(
+                        "a credential for {name}, which isn't a registered command"
+                    ));
+                }
+            }
+        }
+        let registered = Arc::make_mut(&mut commands.registered);
+        for (name, command) in registered.iter_mut() {
+            if options.get(name).is_some_and(|o| o.no_credentials) {
+                continue;
+            }
+            let named = || {
+                credentials
+                    .iter()
+                    .any(|c| c.commands().is_some_and(|cs| cs.contains(name)))
+            };
+            if matches!(command.network, Some(ChildNetwork::None)) {
+                if named() {
+                    return fail(format!(
+                        "command {name} has a credential but no network in this execution"
+                    ));
+                }
+                continue;
+            }
+            if command.tunnels && named() {
+                return fail(format!(
+                    "command {name} has a credential but opens blind tunnels, which can't \
+                     carry one: take its tunnels away with CommandOptions::without_tunnels"
+                ));
+            }
+            command.credentials = credentials
+                .iter()
+                .filter(|c| c.for_command(name))
+                .cloned()
+                .collect();
+        }
+        Ok(())
     }
 
     /// What `list-commands` reports: the registered commands, and the

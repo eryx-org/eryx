@@ -314,8 +314,7 @@ fn piped(cmd: &str, args: &[&str]) -> eryx::process::pipe::Piped {
 
 /// `GET url` through the plain-HTTP proxy in `$HTTP_PROXY`.
 fn proxy_get(url: &str) -> std::io::Result<String> {
-    let proxy = std::env::var("HTTP_PROXY").unwrap_or_default();
-    let proxy = proxy.trim_start_matches("http://").trim_end_matches('/');
+    let (proxy, auth) = split_proxy(&std::env::var("HTTP_PROXY").unwrap_or_default());
     let host = url
         .trim_start_matches("http://")
         .split('/')
@@ -329,7 +328,7 @@ fn proxy_get(url: &str) -> std::io::Result<String> {
     )?;
     write!(
         stream,
-        "GET {url} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        "GET {url} HTTP/1.1\r\nHost: {host}\r\n{auth}Authorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     )?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
@@ -338,13 +337,44 @@ fn proxy_get(url: &str) -> std::io::Result<String> {
 
 /// The proxy's address from `$HTTP_PROXY` (children have no name lookup).
 fn proxy_addr() -> std::io::Result<std::net::SocketAddr> {
-    let proxy = std::env::var("HTTP_PROXY").unwrap_or_default();
-    proxy
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
+    split_proxy(&std::env::var("HTTP_PROXY").unwrap_or_default())
+        .0
         .parse()
         .map_err(|_| std::io::ErrorKind::InvalidInput.into())
 }
+
+/// A proxy URL (`http://[user:password@]addr[/]`) as its address and the
+/// `Proxy-Authorization` header line its userinfo makes (or none), as HTTP
+/// clients send it.
+fn split_proxy(url: &str) -> (String, String) {
+    let proxy = url.trim_start_matches("http://").trim_end_matches('/');
+    match proxy.rsplit_once('@') {
+        Some((userinfo, addr)) => (
+            addr.to_owned(),
+            format!("Proxy-Authorization: Basic {}\r\n", base64(userinfo.as_bytes())),
+        ),
+        None => (proxy.to_owned(), String::new()),
+    }
+}
+
+/// Standard base64, with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 
 /// A plain-HTTP `GET /` inside `CONNECT authority` to `$HTTPS_PROXY`,
 /// printing both responses.
@@ -352,9 +382,10 @@ fn tunnel_get(authority: &str) -> std::io::Result<String> {
     let host = authority.split(':').next().unwrap_or_default();
     let token = std::env::var("TOKEN").unwrap_or_default();
     let mut stream = std::net::TcpStream::connect(proxy_addr()?)?;
+    let (_, auth) = split_proxy(&std::env::var("HTTPS_PROXY").unwrap_or_default());
     write!(
         stream,
-        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n"
     )?;
     // The proxy's reply to the CONNECT, up to its blank line.
     let mut reply = Vec::new();

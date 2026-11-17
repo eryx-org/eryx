@@ -440,6 +440,9 @@ impl Sandbox {
         for (name, command_options) in &options.command_options {
             execute_builder = execute_builder.with_command_options(name, command_options.clone());
         }
+        for credential in &options.credentials {
+            execute_builder = execute_builder.with_credential(credential.clone());
+        }
         if let Some(names) = &options.allowed_commands {
             execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
         }
@@ -1131,6 +1134,7 @@ pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) ->
 pub struct ExecuteOptions {
     allowed_commands: Option<Vec<String>>,
     command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<crate::net::Credential>,
     cancellation: Option<CancellationToken>,
 }
 
@@ -1173,6 +1177,22 @@ impl ExecuteOptions {
         options: crate::process::CommandOptions,
     ) -> Self {
         self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's child processes `credential` (shell only), as
+    /// well as the sandbox's own
+    /// ([`SandboxBuilder::with_credential`](crate::SandboxBuilder::with_credential)):
+    /// the child proxy adds it to their requests to its hosts, and the
+    /// sandbox never sees the secret. Hosted services can give each request
+    /// its own token this way. The execution fails to start if the credential
+    /// is invalid, names a command that isn't registered, has no network or
+    /// opens blind tunnels, or if the sandbox gives children no network.
+    /// Sessions take the same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(credential);
         self
     }
 
@@ -1739,6 +1759,8 @@ pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> 
     commands: crate::process::Commands,
     /// How the commands' children reach the network (shell only).
     child_network: crate::net::ChildNetwork,
+    /// Credentials every execution's children get (shell only).
+    credentials: Vec<Arc<crate::net::Credential>>,
     /// Whether the network policy is set per request (a pool's sandboxes),
     /// so a child network needn't have one at build time.
     network_per_request: bool,
@@ -1837,6 +1859,7 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             network_per_request: false,
             embedded_commands: true,
             stdlib_path: None,
@@ -1880,6 +1903,7 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             network_per_request: false,
             embedded_commands: true,
             stdlib_path: None, // Will use embedded stdlib
@@ -1923,6 +1947,7 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
             result_variable: self.result_variable,
             commands: self.commands,
             child_network: self.child_network,
+            credentials: self.credentials,
             network_per_request: self.network_per_request,
             embedded_commands: self.embedded_commands,
             stdlib_path: self.stdlib_path,
@@ -2639,6 +2664,19 @@ impl<R> SandboxBuilder<Shell, R> {
         self
     }
 
+    /// Give every execution's child processes `credential`: the child proxy
+    /// adds it to their requests to its hosts, so they authenticate without
+    /// the sandbox ever seeing the secret (see
+    /// [`Credential`](crate::net::Credential)). For one execution, use
+    /// [`ExecuteOptions::with_credential`]. Needs a child network; an
+    /// execution fails to start if the credential is invalid or names a
+    /// command that isn't registered, has no network or opens blind tunnels.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
     /// Leave out the embedded shell's default commands (uutils coreutils,
     /// with the `coreutils` feature), so only commands registered with
     /// [`with_command`](Self::with_command) run.
@@ -3053,6 +3091,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let commands = self.commands;
         let embedded_commands = self.embedded_commands;
         let child_network = self.child_network;
+        let credentials = self.credentials;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -3070,6 +3109,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             // Each lease sets the network (PooledSandbox::with_network);
             // without one, children stay offline.
             builder.child_network = child_network.clone();
+            builder.credentials = credentials.clone();
             builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
@@ -3303,6 +3343,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             .with_result_variable(self.result_variable)
             .with_commands(commands)
             .with_child_network(self.child_network)
+            .with_credentials(self.credentials)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {

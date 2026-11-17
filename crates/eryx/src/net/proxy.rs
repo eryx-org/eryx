@@ -34,6 +34,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
+use super::credential::Credential;
 use super::policy::{NetPolicy, RequestFramer, ResponseMasker};
 use super::{
     MAX_HEADER_LEN, NetBudget, NetConfig, TcpError, TlsError, find_header_end, request_line,
@@ -129,8 +130,43 @@ impl ChildNetPolicy {
     ///
     /// Fails if the CA can't be generated or the listener can't be bound.
     pub fn start_proxy(&self, allow_tunnels: bool) -> std::io::Result<ChildProxy> {
-        ChildProxy::start_with(self, allow_tunnels)
+        ChildProxy::start_with(self, allow_tunnels, &[])
     }
+
+    /// [`start_proxy`](Self::start_proxy), adding `credentials` to the
+    /// children's requests. A proxy with credentials requires the password
+    /// in [`ChildProxy::userinfo`] from its clients.
+    pub(crate) fn start_proxy_with(
+        &self,
+        allow_tunnels: bool,
+        credentials: &[Arc<Credential>],
+    ) -> std::io::Result<ChildProxy> {
+        ChildProxy::start_with(self, allow_tunnels, credentials)
+    }
+}
+
+/// The ports of every child proxy listening in this process. No policy's
+/// connections may reach one (see [`is_child_proxy`]): a proxy is only for
+/// the children it was started for, and one with credentials would hand
+/// them to whoever connected.
+static PROXY_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+/// Whether a connection to `addr` may reach a child proxy of this process:
+/// its port, on any IPv4 loopback address (the proxies listen on
+/// `127.0.0.1`) or `0.0.0.0` (which the kernel routes there), or either as
+/// IPv4-mapped IPv6.
+pub(super) fn is_child_proxy(addr: SocketAddr) -> bool {
+    let ip = match addr.ip() {
+        std::net::IpAddr::V4(v4) => v4,
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => return false,
+        },
+    };
+    (ip.is_loopback() || ip.is_unspecified())
+        && PROXY_PORTS
+            .lock()
+            .is_ok_and(|ports| ports.contains(&addr.port()))
 }
 
 /// A forward proxy for one sandbox's child processes, listening on
@@ -139,6 +175,8 @@ impl ChildNetPolicy {
 pub struct ChildProxy {
     addr: SocketAddr,
     ca_pem: String,
+    /// `user:password` its clients must send, if it has credentials.
+    userinfo: Option<String>,
     #[cfg(test)]
     ca_der: rustls::pki_types::CertificateDer<'static>,
     task: tokio::task::JoinHandle<()>,
@@ -177,13 +215,37 @@ impl ChildProxy {
             .transpose()
     }
 
-    fn start_with(net: &ChildNetPolicy, allow_tunnels: bool) -> std::io::Result<Self> {
+    fn start_with(
+        net: &ChildNetPolicy,
+        allow_tunnels: bool,
+        credentials: &[Arc<Credential>],
+    ) -> std::io::Result<Self> {
         let policy = Arc::clone(&net.policy);
         let ca = Ca::new().map_err(std::io::Error::other)?;
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(listener)?;
         let addr = listener.local_addr()?;
+        if let Ok(mut ports) = PROXY_PORTS.lock() {
+            ports.push(addr.port());
+        }
+        // Children reach only their own proxy, but other processes on the
+        // host may reach any: a proxy with credentials wants a password.
+        let userinfo = (!credentials.is_empty()).then(|| {
+            use base64::Engine as _;
+            let password: [u8; 24] = rand::random();
+            format!(
+                "eryx:{}",
+                base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(password)
+            )
+        });
+        let proxy_auth = userinfo.as_ref().map(|userinfo| {
+            use base64::Engine as _;
+            format!(
+                "Basic {}",
+                base64::prelude::BASE64_STANDARD.encode(userinfo)
+            )
+        });
         let ca_pem = ca.pem.clone();
         #[cfg(test)]
         let ca_der = ca.der.clone();
@@ -194,11 +256,14 @@ impl ChildProxy {
             ca,
             allow_tunnels,
             budgets: net.budgets.clone(),
+            credentials: credentials.to_vec(),
+            proxy_auth,
         });
         let task = tokio::spawn(accept_loop(listener, shared));
         Ok(Self {
             addr,
             ca_pem,
+            userinfo,
             #[cfg(test)]
             ca_der,
             task,
@@ -217,12 +282,23 @@ impl ChildProxy {
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
     }
+
+    /// The `user:password` its clients must put in its URL
+    /// (`http://user:password@127.0.0.1:<port>`), if it has credentials.
+    pub(crate) fn userinfo(&self) -> Option<&str> {
+        self.userinfo.as_deref()
+    }
 }
 
 impl Drop for ChildProxy {
     fn drop(&mut self) {
         // The accept loop owns every connection's task, so they stop too.
         self.task.abort();
+        if let Ok(mut ports) = PROXY_PORTS.lock()
+            && let Some(i) = ports.iter().position(|&p| p == self.addr.port())
+        {
+            ports.swap_remove(i);
+        }
     }
 }
 
@@ -301,6 +377,11 @@ struct Shared {
     /// [`ChildNetPolicy::budgets`]); the last is the execution's, shared
     /// with its guest.
     budgets: Vec<NetBudget>,
+    /// Credentials added to the children's requests.
+    credentials: Vec<Arc<Credential>>,
+    /// The `Proxy-Authorization` every request to the proxy must carry, if
+    /// it has credentials.
+    proxy_auth: Option<String>,
 }
 
 impl Shared {
@@ -388,6 +469,8 @@ enum ProxyError {
     BadRequest(String),
     /// The policy refused it (403).
     Refused(String),
+    /// It didn't carry the proxy's password (407).
+    AuthRequired,
     /// Too many connections (503).
     Busy,
     /// Reaching the upstream failed (502).
@@ -401,6 +484,7 @@ impl std::fmt::Display for ProxyError {
         match self {
             Self::BadRequest(m) | Self::Refused(m) | Self::Upstream(m) => f.write_str(m),
             Self::Busy => f.write_str("too many proxied connections"),
+            Self::AuthRequired => f.write_str("this proxy needs the password in its URL"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -438,6 +522,9 @@ impl ProxyError {
         let status = match self {
             Self::BadRequest(_) => "400 Bad Request",
             Self::Refused(_) => "403 Forbidden",
+            Self::AuthRequired => {
+                "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"eryx\""
+            }
             Self::Busy => "503 Service Unavailable",
             Self::Upstream(_) => "502 Bad Gateway",
             Self::Io(_) => return None,
@@ -488,6 +575,11 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         .map_err(|_| ProxyError::BadRequest("request is not UTF-8".into()))?;
     let (method, target) = request_line(text)
         .ok_or_else(|| ProxyError::BadRequest("malformed request line".into()))?;
+    if let Some(expected) = &shared.proxy_auth
+        && !proxy_authorized(text, expected)
+    {
+        return Err(ProxyError::AuthRequired);
+    }
     // A spent byte limit gets its 403 now, before anything is dialled,
     // rather than a `200` to a CONNECT tunnel that closes at once.
     if shared.read_cap() == 0 {
@@ -526,7 +618,8 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
     let framer = shared
         .policy
         .request_framer(host, false)
-        .http_only(authority);
+        .http_only(authority)
+        .with_credentials(&shared.credentials);
     let mut first = head;
     first.extend_from_slice(&rest);
     pump(shared, client, upstream, framer, first).await
@@ -547,6 +640,15 @@ async fn connect(
         if policy.has_http_rules(host) {
             return Err(ProxyError::Refused(format!(
                 "{host} has HTTP rules, so it can't be tunnelled"
+            )));
+        }
+        if shared
+            .credentials
+            .iter()
+            .any(|c| c.for_connection(host, true))
+        {
+            return Err(ProxyError::Refused(format!(
+                "{host} has a credential, so it can't be tunnelled"
             )));
         }
         client
@@ -614,7 +716,8 @@ async fn connect(
     }
     let framer = policy
         .request_framer(host, true)
-        .http_only(host_header(host, port, 443));
+        .http_only(host_header(host, port, 443))
+        .with_credentials(&shared.credentials);
     pump(shared, child, upstream, framer, Vec::new()).await
 }
 
@@ -776,6 +879,26 @@ async fn read_head(stream: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>), ProxyEr
 }
 
 /// `host` and `port` of a `host:port` or `[v6]:port` authority.
+/// Whether the request head `text` carries `expected` as its only
+/// `Proxy-Authorization`.
+fn proxy_authorized(text: &str, expected: &str) -> bool {
+    let mut values = text.lines().skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("proxy-authorization")
+            .then(|| value.trim())
+    });
+    values.next().is_some_and(|value| {
+        // Constant-time, so the password can't be guessed byte by byte.
+        value.len() == expected.len()
+            && value
+                .bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    }) && values.next().is_none()
+}
+
 fn split_authority(authority: &str) -> Option<(&str, u16)> {
     let (host, port) = authority.rsplit_once(':')?;
     let host = host
@@ -1189,6 +1312,194 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A proxy for the children of `config`'s sandbox, adding `credentials`.
+    fn credential_proxy(
+        config: NetConfig,
+        credentials: &[Credential],
+        tunnels: bool,
+    ) -> ChildProxy {
+        let budget = NetBudget::new(config.max_connections(), config.max_bytes());
+        let sandbox = Arc::new(NetPolicy::new(config, secrets()));
+        let credentials: Vec<_> = credentials.iter().cloned().map(Arc::new).collect();
+        ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit)
+            .unwrap()
+            .start_proxy_with(tunnels, &credentials)
+            .unwrap()
+    }
+
+    /// `CONNECT target` with the proxy's password, as its children send it.
+    async fn connect_authorized(proxy: &ChildProxy, target: &str) -> (TcpStream, String) {
+        use base64::Engine as _;
+        let auth = base64::prelude::BASE64_STANDARD.encode(proxy.userinfo().unwrap());
+        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\
+                     Proxy-Authorization: Basic {auth}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let (head, _) = read_head(&mut stream).await.unwrap();
+        let status = String::from_utf8(head).unwrap();
+        (stream, status.lines().next().unwrap().to_string())
+    }
+
+    const TOKEN: &str = "test-injected-token-0123456789abcdef";
+
+    /// A credential replaces the header of its name the child sent, asks for
+    /// an uncompressed response, and is masked out of what comes back (here
+    /// an echo of the whole request, which carries it).
+    #[tokio::test]
+    async fn credentials_replace_the_childs_header_and_are_masked() {
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = credential_proxy(
+            config(&cert),
+            &[Credential::token(TOKEN).for_hosts(["api.test"])],
+            false,
+        );
+        let (stream, status) = connect_authorized(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        let response = exchange(
+            &mut tls,
+            b"GET /user HTTP/1.1\r\nHost: api.test\r\nauthorization: token dummy\r\n\
+              Authorization: Bearer other\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let seen = received(&seen);
+        assert!(
+            seen.contains(&format!("Authorization: token {TOKEN}\r\n")),
+            "{seen}"
+        );
+        assert!(
+            !seen.contains("dummy") && !seen.contains("Bearer other"),
+            "{seen}"
+        );
+        assert!(seen.contains("Accept-Encoding: identity\r\n") && !seen.contains("gzip"));
+        assert!(response.contains(" 200 OK"), "{response}");
+        assert!(!response.contains(TOKEN), "{response}");
+        assert!(response.contains("Authorization: [REDACTED]"), "{response}");
+    }
+
+    /// A credential goes only to its hosts and paths, over TLS (unless it
+    /// allows plaintext): other requests through the same proxy don't get it.
+    #[tokio::test]
+    async fn credentials_stay_on_their_hosts_paths_and_transport() {
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = credential_proxy(
+            config(&cert),
+            &[Credential::bearer(TOKEN)
+                .for_hosts(["api.test"])
+                .for_paths(["/org/"])],
+            false,
+        );
+        for (host, path, injected) in [
+            ("api.test", "/org/repo", true),
+            ("api.test", "/other", false),
+            ("api.test", "/org%2frepo", false),
+            ("other.test", "/org/repo", false),
+        ] {
+            seen.lock().unwrap().clear();
+            let (stream, status) = connect_authorized(&proxy, &format!("{host}:{port}")).await;
+            assert!(status.contains(" 200 "), "{status}");
+            let mut tls = tls(&proxy, stream, host).await;
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+            let _ = exchange(&mut tls, request.as_bytes()).await;
+            assert_eq!(received(&seen).contains(TOKEN), injected, "{host}{path}");
+        }
+
+        // Plain HTTP doesn't get it.
+        let (port, _, seen) = upstream(false).await;
+        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+        use base64::Engine as _;
+        let auth = base64::prelude::BASE64_STANDARD.encode(proxy.userinfo().unwrap());
+        let request = format!(
+            "GET http://api.test:{port}/org/repo HTTP/1.1\r\nHost: api.test:{port}\r\n\
+             Proxy-Authorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+        );
+        let response = exchange(&mut stream, request.as_bytes()).await;
+        assert!(response.contains(" 200 OK"), "{response}");
+        assert!(!received(&seen).contains(TOKEN));
+        assert!(!received(&seen).contains("Proxy-Authorization"));
+    }
+
+    /// A proxy with credentials only serves clients with its password, and
+    /// never opens a blind tunnel to a credential's host.
+    #[tokio::test]
+    async fn credential_proxies_want_their_password_and_dont_tunnel() {
+        let (port, cert, _) = upstream(true).await;
+        let credential = Credential::bearer(TOKEN).for_hosts(["api.test"]);
+        let proxy = credential_proxy(config(&cert), std::slice::from_ref(&credential), false);
+        let (_, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 407 "), "{status}");
+        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+        let response = exchange(
+            &mut stream,
+            format!(
+                "CONNECT api.test:{port} HTTP/1.1\r\nProxy-Authorization: Basic ZXJ5eDp3cm9uZw==\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 407 "), "{response}");
+
+        let tunnels = credential_proxy(config(&cert), &[credential], true);
+        let (_, status) = connect_authorized(&tunnels, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 403 "), "{status}");
+        let (_, status) = connect_authorized(&tunnels, &format!("other.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+    }
+
+    /// No policy reaches a child proxy, even one allowing loopback: not the
+    /// guest's own connections, nor a child's through another proxy.
+    #[tokio::test]
+    async fn child_proxies_are_no_ones_destination() {
+        let (_, cert, _) = upstream(true).await;
+        let proxy = credential_proxy(
+            config(&cert),
+            &[Credential::bearer(TOKEN).for_hosts(["api.test"])],
+            false,
+        );
+        let port = proxy.addr().port();
+        for addr in ["127.0.0.1", "0.0.0.0", "[::ffff:127.0.0.1]"] {
+            let addr: SocketAddr = format!("{addr}:{port}").parse().unwrap();
+            assert!(is_child_proxy(addr), "{addr}");
+        }
+        // IPv6 loopback doesn't reach a proxy listening on 127.0.0.1.
+        assert!(!is_child_proxy(format!("[::1]:{port}").parse().unwrap()));
+
+        let open = NetConfig::default()
+            .allow_all_hosts(true)
+            .with_blocked_hosts(Vec::<String>::new())
+            .allow_internal_host("*");
+        let policy = NetPolicy::new(open.clone(), HashMap::new());
+        let err = policy
+            .connect("127.0.0.1", port, Duration::from_secs(5))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, TcpError::NotPermitted(_)), "{err:?}");
+
+        let other = proxy_with_open(open, &cert);
+        let (_, status) = connect_to(&other, &format!("127.0.0.1:{port}")).await;
+        assert!(status.contains(" 403 "), "{status}");
+
+        drop(proxy);
+        assert!(!is_child_proxy(SocketAddr::from(([127, 0, 0, 1], port))));
+    }
+
+    fn proxy_with_open(config: NetConfig, cert: &[u8]) -> ChildProxy {
+        proxy(
+            config.with_root_cert(cert.to_vec()),
+            ChildNetwork::Inherit,
+            true,
+        )
     }
 
     /// A narrowed child network allows only what both policies allow.

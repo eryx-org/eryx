@@ -34,12 +34,11 @@ fn get(url: &str, headers: &[String]) -> Result<String, Box<dyn std::error::Erro
     };
 
     // The proxy is reached by address: children have no name lookup.
-    let proxy = std::env::var("HTTPS_PROXY")?;
-    let proxy = proxy.trim_start_matches("http://").trim_end_matches('/');
+    let (proxy, auth) = split_proxy(&std::env::var("HTTPS_PROXY")?);
     let mut tcp = TcpStream::connect(proxy.parse::<std::net::SocketAddr>()?)?;
     write!(
         tcp,
-        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n"
     )?;
     let mut reader = BufReader::new(tcp);
     let mut status = String::new();
@@ -85,4 +84,36 @@ fn get(url: &str, headers: &[String]) -> Result<String, Box<dyn std::error::Erro
         return Err(e.into());
     }
     Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
+/// A proxy URL (`http://[user:password@]addr[/]`) as its address and the
+/// `Proxy-Authorization` header line its userinfo makes (or none), as HTTP
+/// clients send it.
+fn split_proxy(url: &str) -> (String, String) {
+    let proxy = url.trim_start_matches("http://").trim_end_matches('/');
+    match proxy.rsplit_once('@') {
+        Some((userinfo, addr)) => (
+            addr.to_owned(),
+            format!("Proxy-Authorization: Basic {}\r\n", base64(userinfo.as_bytes())),
+        ),
+        None => (proxy.to_owned(), String::new()),
+    }
+}
+
+/// Standard base64, with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

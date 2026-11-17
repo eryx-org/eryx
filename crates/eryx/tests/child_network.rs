@@ -993,6 +993,145 @@ async fn builder_pools_use_each_leases_network() {
     );
 }
 
+/// A credential only the proxy holds (see [`eryx::Credential`]).
+const INJECTED: &str = "injected-credential-0123456789";
+
+/// A credential goes to the requests of the commands it's for, and only
+/// those: never into any child's env or output, and not to another command
+/// or a command it's taken from for one execution. Unscoped, it goes to
+/// every child.
+#[tokio::test]
+async fn credentials_go_to_their_commands_only() {
+    let (port, seen) = upstream(None).await;
+    let get = |cmd: &str| format!("{cmd} proxy-get http://api.test:{port}/x");
+    let credential = || {
+        eryx::Credential::bearer(INJECTED)
+            .for_hosts(["api.test"])
+            .allow_plaintext()
+    };
+    let sandbox = shell(network())
+        .with_credential(credential().for_commands(["tc"]))
+        .build()
+        .unwrap();
+    let out = run(&sandbox, &get("tc")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(
+        seen.lock()
+            .unwrap()
+            .contains(&format!("Authorization: Bearer {INJECTED}")),
+        "{}",
+        seen.lock().unwrap()
+    );
+    // Masked out of the echo; the child sent its own (placeholder) bearer,
+    // which the credential replaced.
+    assert!(
+        !out.contains(INJECTED) && out.contains("[REDACTED]"),
+        "{out}"
+    );
+
+    seen.lock().unwrap().clear();
+    let out = run(
+        &sandbox,
+        &format!("{}; tc env HTTP_PROXY; tc3 env HTTP_PROXY", get("tc3")),
+    )
+    .await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    assert!(!seen.lock().unwrap().contains(INJECTED));
+    // tc's proxy wants a password, tc3's (another proxy) doesn't.
+    assert!(
+        out.contains("http://eryx:") && out.contains("\nhttp://127.0.0.1:"),
+        "{out}"
+    );
+    assert!(!out.contains(INJECTED), "{out}");
+
+    // Taken away for one execution, and given for one.
+    seen.lock().unwrap().clear();
+    let without = eryx::ExecuteOptions::new()
+        .with_command_options("tc", eryx::CommandOptions::new().without_credentials());
+    let out = run_with(&sandbox, &get("tc"), &without).await;
+    assert!(out.contains(" 200 OK") && !seen.lock().unwrap().contains(INJECTED));
+    let plain = shell(network()).build().unwrap();
+    let given = eryx::ExecuteOptions::new().with_credential(credential());
+    let out = run_with(&plain, &format!("{}; {}", get("tc"), get("tc3")), &given).await;
+    assert_eq!(out.matches(" 200 OK").count(), 2, "{out}");
+    assert_eq!(seen.lock().unwrap().matches(INJECTED).count(), 2);
+}
+
+/// Over TLS (the proxy's own), a credential replaces the child's header and
+/// is masked out of the response: the child never sees it.
+#[tokio::test]
+async fn credentials_are_injected_over_inspected_tls() {
+    let (cert, tls) = tls_config();
+    let (port, seen) = upstream(Some(tls)).await;
+    let sandbox = shell(network().with_root_cert(cert))
+        .with_command("https-get", https_get())
+        .with_credential(
+            eryx::Credential::token(INJECTED)
+                .for_hosts(["api.test"])
+                .for_commands(["https-get"]),
+        )
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!("https-get https://api.test:{port}/x \"Authorization: token dummy\""),
+    )
+    .await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    let got = seen.lock().unwrap().clone();
+    assert!(got.contains(&format!("Authorization: token {INJECTED}")) && !got.contains("dummy"));
+    assert!(
+        !out.contains(INJECTED) && out.contains("Authorization: [REDACTED]"),
+        "{out}"
+    );
+}
+
+/// A credential that can't be used fails the execution before it runs: for
+/// an unregistered command, a command with tunnels or no network, or with
+/// no child network at all.
+#[tokio::test]
+async fn unusable_credentials_fail_the_execution() {
+    let credential = || eryx::Credential::bearer(INJECTED).for_hosts(["api.test"]);
+    let sandbox = shell(network())
+        .with_command("tt", test_cmd().allow_tunnels())
+        .build()
+        .unwrap();
+    for (options, why) in [
+        (
+            eryx::ExecuteOptions::new().with_credential(credential().for_commands(["nope"])),
+            "isn't a registered command",
+        ),
+        (
+            eryx::ExecuteOptions::new().with_credential(credential().for_commands(["tt"])),
+            "blind tunnels",
+        ),
+        (
+            eryx::ExecuteOptions::new()
+                .with_credential(credential().for_commands(["tc"]))
+                .with_command_options(
+                    "tc",
+                    eryx::CommandOptions::new().with_network(ChildNetwork::None),
+                ),
+            "no network",
+        ),
+        (
+            eryx::ExecuteOptions::new().with_credential(eryx::Credential::bearer(INJECTED)),
+            "no hosts",
+        ),
+    ] {
+        let err = sandbox.execute_with("true", &options).await.unwrap_err();
+        assert!(err.to_string().contains(why), "{why}: {err}");
+    }
+    let offline = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap();
+    let options = eryx::ExecuteOptions::new().with_credential(credential());
+    let err = offline.execute_with("true", &options).await.unwrap_err();
+    assert!(err.to_string().contains("need a child network"), "{err}");
+}
+
 /// The git tests' repositories: a bare `repo.git` under `<dir>/repos` with
 /// two commits on `main` and one more on `feature`, made with the host's git.
 fn git_repos(dir: &std::path::Path) -> PathBuf {
@@ -1304,6 +1443,77 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authori
     .await;
     assert!(out.starts_with("commit 2\nenv-fetch\n"), "{out}");
     assert!(!out.contains(REAL));
+}
+
+/// git clones, fetches and pushes with a credential only the proxy holds:
+/// no token, placeholder or credential config in the sandbox, which can't
+/// find it afterwards in git's files, its env or any output. Another
+/// command's requests to the same server don't get it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the host's git"]
+async fn git_authenticates_with_a_credential_the_sandbox_never_sees() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let repos = git_repos(dir.path());
+    let port = git_server(repos.clone()).await;
+    let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
+    let sandbox = Sandbox::embedded()
+        .shell()
+        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .with_command("tc", test_cmd())
+        .with_network(git_test_network())
+        .with_child_network(ChildNetwork::Inherit)
+        .with_credential(
+            eryx::Credential::basic("x-access-token", REAL)
+                .for_hosts(["git.test"])
+                .for_commands(["git"])
+                .allow_plaintext(),
+        )
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+    let url = format!("http://git.test:{port}/repo.git");
+    let script = format!(
+        r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+cd /tmp
+git clone -q {url} c && git -C c log --format=%s
+git -C c fetch -q origin feature && git -C c log -1 --format=%s FETCH_HEAD
+cd c && git config user.name eryx && git config user.email eryx@example.com
+echo pushed >> f.txt && git commit -qam 'pushed from eryx' && git push -q origin HEAD:refs/heads/pushed && echo pushed
+tc proxy-get {url}/info/refs?service=git-upload-pack | head -1
+cat /tmp/c/.git/config; env; git config --list
+"#
+    );
+    let out = match sandbox.execute(&script).await {
+        Ok(out) => out,
+        Err(e) => panic!("{e}"),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.starts_with("commit 2\ncommit 1\nfeature commit\npushed\nHTTP/1.1 401 "),
+        "{stdout}\n{stderr}"
+    );
+    let pushed = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s", "pushed"])
+        .current_dir(repos.join("repo.git"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&pushed.stdout),
+        "pushed from eryx\n"
+    );
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{REAL}"));
+    for (what, text) in [
+        ("stdout", stdout.into_owned()),
+        ("stderr", stderr.into_owned()),
+        ("traces", format!("{:?}", out.trace)),
+    ] {
+        assert!(
+            !text.contains(REAL) && !text.contains(&basic),
+            "the credential is in the {what}"
+        );
+    }
 }
 
 /// A network reaching the local git server as `git.test`.

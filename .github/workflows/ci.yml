@@ -1005,6 +1005,7 @@ jobs:
             tests+=('test(=git_stash_runs_git_itself)')
             tests+=('test(=git_clones_fetches_and_pushes_over_http_with_a_secret)')
             tests+=('test(=git_authenticates_without_writing_the_secret_to_a_file)')
+            tests+=('test(=git_authenticates_with_a_credential_the_sandbox_never_sees)')
             tests+=('test(=git_clones_from_github_over_https)')
           fi
           filter=$(IFS='|'; echo "${tests[*]}")
