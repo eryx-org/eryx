@@ -770,14 +770,14 @@ impl VfsConfig {
 /// - State snapshots for persistence and transfer
 ///
 /// It runs on an [`Executor`] (from [`Sandbox::executor`](crate::Sandbox::executor)),
-/// which doesn't carry what lives on the [`Sandbox`](crate::Sandbox): its
-/// network ([`with_network`](crate::SandboxBuilder::with_network)), its child
-/// processes' network
-/// ([`with_child_network`](crate::SandboxBuilder::with_child_network)) and its
-/// secrets. So a `SessionExecutor` has no network, and its children none
-/// either, whatever the sandbox was built with: the network needs a
-/// connection manager running for each execution. For a session with the
-/// sandbox's network, child network and secrets, use
+/// which carries the
+/// [`with_child_network`](crate::SandboxBuilder::with_child_network) setting
+/// but not the [`Sandbox`](crate::Sandbox)'s network
+/// ([`with_network`](crate::SandboxBuilder::with_network)) or secrets, which
+/// are needed to give its children a network. So a `SessionExecutor` has no
+/// network, and its children none either, whatever the sandbox was built
+/// with: the network needs a connection manager running for each execution.
+/// For a session with the sandbox's network, child network and secrets, use
 /// [`InProcessSession`](crate::InProcessSession), which runs them.
 pub struct SessionExecutor {
     /// The parent executor (for engine and instance_pre access).
