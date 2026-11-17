@@ -215,8 +215,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   off what `allow_tunnels()` and `allow_spawn()` gave it at registration.
   Options never add: the execution fails to start if they name a command
   that isn't registered, or give one network when the sandbox gives
-  children none. Nested children of the command get the same. Like
-  `with_allowed_commands`, they last one execution.
+  children none. A command it spawns gets its own options, not its
+  caller's, so pair `None` or `Narrow` with `without_spawn()` to stop it
+  reaching a command with more network. Like `with_allowed_commands`,
+  they last one execution.
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.
 - **Running:** each command runs as a child process with `argv[0]` set to the
