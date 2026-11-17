@@ -91,7 +91,7 @@ containers:
 
 A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-coreutils` is set, and any `--shell-command`s.
 - **Which commands:** `allowed_commands` narrows a request to some of them.
-- **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning.
+- **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.
 - **Limits:** `resource_limits.max_child_host_bytes` bounds their arguments and environments, under `--max-child-host-bytes`.
 - **Results:** `ExecuteResult.exit_code` is the script's exit status. Trace events report each command as `process_start` and `process_end`, with `pid` and `exit_code`.
