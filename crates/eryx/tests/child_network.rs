@@ -770,6 +770,27 @@ async fn command_options_can_only_take_away() {
     offline.execute_with("true", &none).await.unwrap();
 }
 
+/// A narrowed child network is validated like the sandbox's: a pattern that
+/// names no host (here a lone `.`) fails the build, or the execution for a
+/// command's options, instead of silently matching nothing.
+#[tokio::test]
+async fn narrowed_child_networks_are_validated() {
+    let degenerate = || Box::new(NetConfig::default().block_host("."));
+    let err = shell(network())
+        .with_child_network(ChildNetwork::Narrow(degenerate()))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("child network:"), "{err}");
+
+    let sandbox = shell(network()).build().unwrap();
+    let options = eryx::ExecuteOptions::new().with_command_options(
+        "tc",
+        eryx::CommandOptions::new().with_network(ChildNetwork::Narrow(degenerate())),
+    );
+    let err = sandbox.execute_with("true", &options).await.unwrap_err();
+    assert!(err.to_string().contains("command tc's network:"), "{err}");
+}
+
 /// The git tests' repositories: a bare `repo.git` under `<dir>/repos` with
 /// two commits on `main` and one more on `feature`, made with the host's git.
 fn git_repos(dir: &std::path::Path) -> PathBuf {
