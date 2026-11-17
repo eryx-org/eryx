@@ -153,6 +153,9 @@ mod generated {
             "wasi:clocks/wall-clock": wasmtime_wasi::p2::bindings::clocks::wall_clock,
         },
         imports: {
+            // Async so closing the last descriptor on an unlinked file can
+            // delete it.
+            "wasi:filesystem/types.[drop]descriptor": async | trappable,
             "wasi:filesystem/types.[method]descriptor.advise": async | trappable,
             "wasi:filesystem/types.[method]descriptor.create-directory-at": async | trappable,
             "wasi:filesystem/types.[method]descriptor.get-flags": async | trappable,

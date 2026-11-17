@@ -713,7 +713,11 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::AccessDenied(full_path).into());
                 }
 
-                let exists = self.ctx.storage_for(vfs_desc).exists(&full_path).await?;
+                let exists = !self
+                    .ctx
+                    .open_files
+                    .is_unlinked(vfs_desc.storage, &full_path)
+                    && self.ctx.storage_for(vfs_desc).exists(&full_path).await?;
 
                 if is_directory {
                     if !exists {
@@ -749,6 +753,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                             .storage_for(vfs_desc)
                             .write(&full_path, &[])
                             .await?;
+                        self.ctx
+                            .open_files
+                            .set_linked(vfs_desc.storage, &full_path, true);
                     } else {
                         let meta = self.ctx.storage_for(vfs_desc).stat(&full_path).await?;
                         if meta.is_dir {
@@ -771,10 +778,12 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         }
                     }
 
-                    let mut new_vfs_desc = VfsDescriptor::file(full_path, file_perms);
-                    new_vfs_desc.storage = vfs_desc.storage;
+                    let storage = vfs_desc.storage;
+                    let mut new_vfs_desc = VfsDescriptor::file(full_path.clone(), file_perms);
+                    new_vfs_desc.storage = storage;
                     let new_descriptor = HybridDescriptor::Vfs(new_vfs_desc);
                     let resource = self.table.push(new_descriptor)?;
+                    self.ctx.open_files.open(storage, &full_path);
                     Ok(resource)
                 }
             }
@@ -876,8 +885,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         }
     }
 
-    fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
-        self.table.delete(fd)?;
+    async fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
+        if let HybridDescriptor::Vfs(desc) = self.table.delete(fd)?
+            && !desc.is_dir
+            && self.ctx.open_files.close(desc.storage, &desc.path)
+        {
+            // Nothing is left to report a failure to.
+            let _ = self.ctx.storage_for(&desc).delete(&desc.path).await;
+        }
         Ok(())
     }
 
@@ -961,10 +976,16 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 }
                 let old_full = old_vfs.resolve_path(&old_path)?;
                 let new_full = new_vfs.resolve_path(&new_path)?;
+                if self.ctx.open_files.is_unlinked(old_vfs.storage, &old_full) {
+                    return Err(crate::VfsError::NotFound(old_full).into());
+                }
                 self.ctx
                     .storage_for(old_vfs)
                     .rename(&old_full, &new_full)
                     .await?;
+                self.ctx
+                    .open_files
+                    .set_linked(new_vfs.storage, &new_full, true);
                 Ok(())
             }
             (
@@ -1026,7 +1047,23 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                self.ctx.storage_for(vfs_desc).delete(&full_path).await?;
+                let open_files = &self.ctx.open_files;
+                if open_files.is_unlinked(vfs_desc.storage, &full_path) {
+                    return Err(crate::VfsError::NotFound(full_path).into());
+                }
+                let storage = self.ctx.storage_for(vfs_desc);
+                if !open_files.is_open(vfs_desc.storage, &full_path) {
+                    storage.delete(&full_path).await?;
+                    return Ok(());
+                }
+                // Keep the contents for the open descriptors; the last to
+                // close deletes them.
+                if storage.stat(&full_path).await?.is_dir {
+                    return Err(crate::VfsError::NotFile(full_path).into());
+                }
+                self.ctx
+                    .open_files
+                    .set_linked(vfs_desc.storage, &full_path, false);
                 Ok(())
             }
             HybridDescriptor::RealDir { dir, .. } => {
@@ -1575,11 +1612,11 @@ mod tests {
 
         // A stream keeps the host file open after its descriptor is closed.
         let stream = state.read_via_stream(borrow(&first), 0).unwrap();
-        HostDescriptor::drop(&mut state, first).unwrap();
+        HostDescriptor::drop(&mut state, first).await.unwrap();
         assert!(open(&mut state, &mnt, "f", none, read).await.is_err());
         state.table.delete(stream).unwrap();
         open(&mut state, &mnt, "f", none, read).await.unwrap();
-        HostDescriptor::drop(&mut state, dir).unwrap();
+        HostDescriptor::drop(&mut state, dir).await.unwrap();
     }
 
     #[tokio::test]
@@ -1608,7 +1645,7 @@ mod tests {
             err.map(drop).map_err(vfs_err),
             Err(crate::VfsError::TooManyOpenFiles(_))
         ));
-        HostDescriptor::drop(&mut a, first).unwrap();
+        HostDescriptor::drop(&mut a, first).await.unwrap();
         open(&mut b, &b_mnt, "f", none, read).await.unwrap();
     }
 
@@ -1699,5 +1736,68 @@ mod tests {
             assert!(err.is_err(), "{target}");
         }
         assert!(!temp.path().join("link").exists());
+    }
+
+    #[tokio::test]
+    async fn unlinked_files_stay_readable_until_closed() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(1024)));
+        let mut ctx = HybridVfsCtx::new(storage.clone());
+        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let data = preopen(&mut state, 0);
+        let create = types::OpenFlags::CREATE;
+
+        let file = open(&mut state, &data, "a", create, rw).await.unwrap();
+        let second = open(&mut state, &data, "a", create, rw).await.unwrap();
+        state
+            .write(borrow(&file), vec![b'x'; 600], 0)
+            .await
+            .unwrap();
+        state
+            .unlink_file_at(borrow(&data), "a".into())
+            .await
+            .unwrap();
+
+        // The descriptors still read and write the contents...
+        state.write(borrow(&file), b"yz".to_vec(), 0).await.unwrap();
+        let (bytes, _) = state.read(borrow(&second), 3, 0).await.unwrap();
+        assert_eq!(bytes, b"yzx");
+        // ...but the name is gone.
+        let gone =
+            |r: HybridFsResult<()>| matches!(r.map_err(vfs_err), Err(crate::VfsError::NotFound(_)));
+        assert!(gone(
+            open(&mut state, &data, "a", types::OpenFlags::empty(), rw)
+                .await
+                .map(drop)
+        ));
+        assert!(gone(state.unlink_file_at(borrow(&data), "a".into()).await));
+        // The unlinked bytes still count towards the quota until the last close.
+        assert!(storage.write("/data/b", &[0; 600]).await.is_err());
+        HostDescriptor::drop(&mut state, file).await.unwrap();
+        assert!(storage.write("/data/b", &[0; 600]).await.is_err());
+        HostDescriptor::drop(&mut state, second).await.unwrap();
+        assert!(!storage.exists("/data/a").await.unwrap());
+        storage.write("/data/b", &[0; 600]).await.unwrap();
+
+        // A file created in an unlinked file's place outlives the old descriptor.
+        let old = open(&mut state, &data, "b", create, rw).await.unwrap();
+        state
+            .unlink_file_at(borrow(&data), "b".into())
+            .await
+            .unwrap();
+        let new = open(
+            &mut state,
+            &data,
+            "b",
+            create | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await
+        .unwrap();
+        HostDescriptor::drop(&mut state, old).await.unwrap();
+        HostDescriptor::drop(&mut state, new).await.unwrap();
+        assert!(storage.read("/data/b").await.unwrap().is_empty());
     }
 }

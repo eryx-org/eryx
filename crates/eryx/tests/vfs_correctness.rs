@@ -136,3 +136,31 @@ async fn stateless_sandbox_has_tmp() {
         .expect("execution");
     assert_eq!(result.stdout_text().trim(), "/tmp");
 }
+
+#[tokio::test]
+async fn unlinked_open_files_stay_readable() {
+    let out = run(
+        InMemoryStorage::new(),
+        r#"
+import os, tempfile
+with open('/data/x', 'w') as f:
+    f.write('hi')
+f = open('/data/x')
+os.unlink('/data/x')
+print(f.read(), os.path.exists('/data/x') and 'visible' or 'gone')
+f.close()
+print(os.path.exists('/data/x'))
+with tempfile.TemporaryFile(dir='/tmp') as t:
+    t.write(b'spooled')
+    t.seek(0)
+    print(t.read().decode())
+print(os.listdir('/tmp'))
+"#,
+    )
+    .await;
+    assert_eq!(
+        out.trim(),
+        "hi visible\nFalse\nspooled\n[]",
+        "unexpected output: {out}"
+    );
+}
