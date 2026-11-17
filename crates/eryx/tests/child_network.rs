@@ -791,6 +791,208 @@ async fn narrowed_child_networks_are_validated() {
     assert!(err.to_string().contains("command tc's network:"), "{err}");
 }
 
+/// A command's network set at registration applies in every execution:
+/// taken away, or narrowed within the sandbox's (a narrowed config can't
+/// reach a host the sandbox's doesn't allow).
+#[tokio::test]
+async fn registered_networks_apply_to_every_execution() {
+    let (port, _) = upstream(None).await;
+    let other = Box::new(
+        NetConfig::default()
+            .allow_host("other.test")
+            .allow_internal_host("other.test"),
+    );
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd().with_network(ChildNetwork::None))
+        .with_command("tn", test_cmd().with_network(ChildNetwork::Narrow(other)))
+        .build()
+        .unwrap();
+    let get = |cmd: &str, host: &str| format!("{cmd} proxy-get http://{host}:{port}/x");
+    for _ in 0..2 {
+        let out = run(&sandbox, &get("tc", "api.test")).await;
+        assert!(out.contains(" 200 OK"), "{out}");
+        let out = run(
+            &sandbox,
+            &format!("ta env HTTPS_PROXY; {}", get("ta", "api.test")),
+        )
+        .await;
+        assert!(!out.contains("http://127.0.0.1:"), "{out}");
+        assert!(!out.contains(" 200 OK") && out.contains("error:"), "{out}");
+        // Neither what only the narrowed config allows, nor what only the
+        // sandbox's does.
+        let out = run(
+            &sandbox,
+            &format!("{}; {}", get("tn", "other.test"), get("tn", "api.test")),
+        )
+        .await;
+        assert_eq!(out.matches(" 403 ").count(), 2, "{out}");
+    }
+}
+
+/// An execution's command options replace the network the command was
+/// registered with, for that execution only.
+#[tokio::test]
+async fn command_options_override_registered_networks() {
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd().with_network(ChildNetwork::None))
+        .with_command(
+            "tn",
+            test_cmd().with_network(ChildNetwork::Narrow(Box::default())),
+        )
+        .build()
+        .unwrap();
+    let get = |cmd: &str| format!("{cmd} proxy-get http://api.test:{port}/x");
+    let options = eryx::ExecuteOptions::new()
+        .with_command_options(
+            "ta",
+            eryx::CommandOptions::new().with_network(ChildNetwork::Inherit),
+        )
+        .with_command_options(
+            "tn",
+            eryx::CommandOptions::new().with_network(ChildNetwork::Inherit),
+        );
+    let out = run_with(&sandbox, &format!("{}; {}", get("ta"), get("tn")), &options).await;
+    assert_eq!(out.matches(" 200 OK").count(), 2, "{out}");
+
+    let out = run(&sandbox, &format!("{}; {}", get("ta"), get("tn"))).await;
+    assert!(!out.contains(" 200 OK"), "{out}");
+    assert!(out.contains("error:") && out.contains(" 403 "), "{out}");
+}
+
+/// A command can't be registered with network the sandbox doesn't give
+/// children, nor with an invalid narrowed config: the build fails.
+#[test]
+fn registered_networks_cant_exceed_the_sandboxs() {
+    let err = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd().with_network(ChildNetwork::Inherit))
+        .with_network(network())
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("can't have network"), "{err}");
+    let err = Sandbox::embedded()
+        .shell()
+        .with_command(
+            "tc",
+            test_cmd().with_network(ChildNetwork::Narrow(Box::default())),
+        )
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("can't have network"), "{err}");
+    // Taking away what isn't there is fine.
+    Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd().with_network(ChildNetwork::None))
+        .build()
+        .unwrap();
+
+    let degenerate = Box::new(NetConfig::default().block_host("."));
+    let err = shell(network())
+        .with_command(
+            "tn",
+            test_cmd().with_network(ChildNetwork::Narrow(degenerate)),
+        )
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("command tn's network:"), "{err}");
+}
+
+/// Sessions, which take no execute options, use registered networks too.
+#[tokio::test]
+async fn sessions_use_registered_networks() {
+    use eryx::session::{InProcessSession, Session};
+
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd().with_network(ChildNetwork::None))
+        .with_command(
+            "tn",
+            test_cmd().with_network(ChildNetwork::Narrow(Box::default())),
+        )
+        .build()
+        .unwrap();
+    let mut session = InProcessSession::new(&sandbox).await.unwrap();
+    let get = |cmd: &str| format!("{cmd} proxy-get http://api.test:{port}/x");
+    for _ in 0..2 {
+        let out = session
+            .execute(&format!("{}; {}; {}", get("tc"), get("ta"), get("tn")))
+            .await
+            .map_or_else(|e| e.to_string(), |out| out.stdout_text());
+        assert_eq!(out.matches(" 200 OK").count(), 1, "{out}");
+        assert!(out.contains(" 403 "), "{out}");
+    }
+}
+
+/// A `SandboxPool::with_builder` pool's sandboxes can have a child network
+/// with `with_network_per_lease`, and use each lease's network; a lease
+/// without one leaves children offline, whatever the commands' networks.
+#[tokio::test]
+async fn builder_pools_use_each_leases_network() {
+    let builder = || {
+        Sandbox::embedded()
+            .shell()
+            .with_command("tc", test_cmd())
+            .with_command(
+                "tn",
+                test_cmd().with_network(ChildNetwork::Narrow(Box::new(
+                    NetConfig::default()
+                        .allow_host("api.test")
+                        .allow_internal_host("api.test"),
+                ))),
+            )
+            .with_child_network(ChildNetwork::Inherit)
+    };
+    let config = || eryx::PoolConfig::default().with_max_size(1);
+
+    // Without it, the build fails as it does outside a pool.
+    let err = eryx::SandboxPool::with_builder(move || builder().build(), config())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("with_network"), "{err}");
+
+    let (port, seen) = upstream(None).await;
+    let pool = eryx::SandboxPool::with_builder(
+        move || builder().with_network_per_lease().build(),
+        config(),
+    )
+    .await
+    .unwrap();
+    let secrets = std::collections::HashMap::from([(
+        "TOKEN".to_string(),
+        eryx::SecretConfig::new(REAL, vec!["api.test".to_string()]),
+    )]);
+    let lease = pool
+        .acquire()
+        .await
+        .unwrap()
+        .with_network(network().allow_plaintext_secrets(true), secrets)
+        .unwrap();
+    let get = |cmd: &str| format!("{cmd} proxy-get http://api.test:{port}/x");
+    let out = lease
+        .execute(&format!("{}; {}", get("tc"), get("tn")))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_text().matches(" 200 OK").count(),
+        2,
+        "{}",
+        out.stdout_text()
+    );
+    assert!(seen.lock().unwrap().contains(REAL));
+    drop(lease);
+
+    let lease = pool.acquire().await.unwrap();
+    let out = lease
+        .execute("tc env HTTPS_PROXY; tn env HTTPS_PROXY; tc connect 127.0.0.1:1; tn connect 127.0.0.1:1")
+        .await
+        .map_or_else(|e| e.to_string(), |out| out.stdout_text());
+    assert!(
+        !out.contains("http://") && !out.contains("connected"),
+        "{out}"
+    );
+}
+
 /// The git tests' repositories: a bare `repo.git` under `<dir>/repos` with
 /// two commits on `main` and one more on `feature`, made with the host's git.
 fn git_repos(dir: &std::path::Path) -> PathBuf {

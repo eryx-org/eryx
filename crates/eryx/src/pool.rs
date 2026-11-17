@@ -376,6 +376,11 @@ impl SandboxPool {
     /// * `builder_fn` - A function that creates new sandbox instances
     /// * `config` - Pool configuration
     ///
+    /// For shell sandboxes whose commands' children use each lease's network
+    /// ([`PooledSandbox::with_network`]), give the builder
+    /// [`with_network_per_lease`](crate::SandboxBuilder::with_network_per_lease)
+    /// with its [`with_child_network`](crate::SandboxBuilder::with_child_network).
+    ///
     /// # Example
     ///
     /// ```rust,ignore
