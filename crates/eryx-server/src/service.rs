@@ -1,6 +1,6 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -98,6 +98,10 @@ pub struct ServerLimits {
     /// hold open at once. Not client-controllable: descriptors are a shared
     /// process resource.
     pub max_open_host_files: usize,
+    /// Most host memory a shell execution's child processes' arguments and
+    /// environments may hold at once, and the value for requests that set
+    /// none (`resource_limits.max_child_host_bytes`).
+    pub max_child_host_bytes: u64,
     /// Whether a request may set `network_config.allow_plaintext_secrets`,
     /// which sends real secret values over unencrypted connections. Off by
     /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
@@ -117,6 +121,7 @@ impl Default for ServerLimits {
             max_io_timeout: Duration::from_secs(300),
             max_output_bytes: 16 * 1024 * 1024,
             max_open_host_files: eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES,
+            max_child_host_bytes: 64 * 1024 * 1024,
             allow_plaintext_secrets: false,
         }
     }
@@ -129,15 +134,22 @@ impl ServerLimits {
         &self,
         mut nc: crate::proto::eryx::v1::NetworkConfig,
     ) -> Result<(NetConfig, eryx::net::ChildNetwork), Status> {
-        use crate::proto::eryx::v1::child_network::Mode;
-        let child = nc.child_network.take().unwrap_or_default();
+        let child = *nc.child_network.take().unwrap_or_default();
         let config = self.network(nc)?;
-        let invalid = |msg: &str| {
-            Err(Status::invalid_argument(format!(
-                "network_config.child_network: {msg}"
-            )))
-        };
-        let child = match (child.mode(), child.narrow) {
+        let child = self.child_network("network_config.child_network", child)?;
+        Ok((config, child))
+    }
+
+    /// Parse a `ChildNetwork` (at `field`), its narrow config clamped to
+    /// these limits.
+    fn child_network(
+        &self,
+        field: &str,
+        child: crate::proto::eryx::v1::ChildNetwork,
+    ) -> Result<eryx::net::ChildNetwork, Status> {
+        use crate::proto::eryx::v1::child_network::Mode;
+        let invalid = |msg: &str| Err(Status::invalid_argument(format!("{field}: {msg}")));
+        Ok(match (child.mode(), child.narrow) {
             (Mode::None, None) => eryx::net::ChildNetwork::None,
             (Mode::Inherit, None) => eryx::net::ChildNetwork::Inherit,
             (Mode::Narrow, Some(narrow)) => {
@@ -148,8 +160,48 @@ impl ServerLimits {
             }
             (Mode::Narrow, None) => return invalid("MODE_NARROW needs narrow"),
             (_, Some(_)) => return invalid("narrow is only for MODE_NARROW"),
-        };
-        Ok((config, child))
+        })
+    }
+
+    /// Parse a shell request's `commands`: each must be one of `known` (when
+    /// the server knows its commands), and may only take away from what it
+    /// has, so no network when `children` (the request's child network) is
+    /// none.
+    fn command_options(
+        &self,
+        commands: HashMap<String, crate::proto::eryx::v1::CommandOptions>,
+        known: Option<&HashSet<String>>,
+        children: &eryx::net::ChildNetwork,
+    ) -> Result<HashMap<String, eryx::CommandOptions>, Status> {
+        let mut parsed = HashMap::new();
+        for (name, options) in commands {
+            if known.is_some_and(|known| !known.contains(&name)) {
+                return Err(Status::invalid_argument(format!(
+                    "commands: {name} isn't one of this server's shell commands"
+                )));
+            }
+            let mut command = eryx::CommandOptions::new();
+            if let Some(network) = options.network {
+                let network = self.child_network(&format!("commands[{name}].network"), network)?;
+                if matches!(children, eryx::net::ChildNetwork::None)
+                    && !matches!(network, eryx::net::ChildNetwork::None)
+                {
+                    return Err(Status::invalid_argument(format!(
+                        "commands[{name}].network: can't give a command network when \
+                         network_config.child_network gives children none"
+                    )));
+                }
+                command = command.with_network(network);
+            }
+            if options.no_tunnels {
+                command = command.without_tunnels();
+            }
+            if options.no_spawn {
+                command = command.without_spawn();
+            }
+            parsed.insert(name, command);
+        }
+        Ok(parsed)
     }
 
     /// Parse one `NetworkConfig`, clamped to these limits.
@@ -245,6 +297,11 @@ impl ServerLimits {
                 (fuel, ceiling) => fuel.or(ceiling),
             })
             .with_max_open_host_files(self.max_open_host_files)
+            .with_max_child_host_bytes(
+                nonzero(request.max_child_host_bytes)
+                    .unwrap_or(self.max_child_host_bytes)
+                    .min(self.max_child_host_bytes),
+            )
     }
 }
 
@@ -313,6 +370,9 @@ pub struct EryxService {
     max_message_size: usize,
     limits: ServerLimits,
     journal_ttl: Duration,
+    /// The shell's commands, which `ExecuteRequest.commands` may name;
+    /// `None` if not given (see [`Self::with_shell_commands`]).
+    shell_commands: Option<Arc<HashSet<String>>>,
 }
 
 impl EryxService {
@@ -331,6 +391,7 @@ impl EryxService {
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
             journal_ttl: DEFAULT_JOURNAL_TTL,
+            shell_commands: None,
         }
     }
 
@@ -360,6 +421,15 @@ impl EryxService {
     #[must_use]
     pub fn with_limits(mut self, limits: ServerLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The shell's command names, so a request's `commands` naming another
+    /// is refused up front with `INVALID_ARGUMENT`. Without it, such a
+    /// request still fails, when its execution starts.
+    #[must_use]
+    pub fn with_shell_commands(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.shell_commands = Some(Arc::new(names.into_iter().collect()));
         self
     }
 
@@ -508,6 +578,16 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             )));
         }
         let allowed_commands = execute_req.allowed_commands.map(|allowed| allowed.names);
+        if language != eryx::Language::Shell && !execute_req.commands.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "commands is only for the shell, not {language}"
+            )));
+        }
+        let command_options = self.limits.command_options(
+            execute_req.commands,
+            self.shell_commands.as_deref(),
+            &child_network,
+        )?;
 
         // Parse and validate secrets, generating their placeholders.
         let secrets = {
@@ -769,6 +849,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     declarations: &declarations,
                     max_output_bytes,
                     allowed_commands,
+                    command_options,
                 };
 
                 // Race execution against client disconnection: either the
@@ -1018,6 +1099,8 @@ struct SessionParams<'a> {
     max_output_bytes: usize,
     /// The commands the execution may spawn (shell); `None` allows all.
     allowed_commands: Option<Vec<String>>,
+    /// Per-command options for this execution (shell).
+    command_options: HashMap<String, eryx::CommandOptions>,
 }
 
 /// Longest an execution waits for its trace events to reach the client
@@ -1283,6 +1366,9 @@ async fn execute_with_session(
     }
     if let Some(names) = &params.allowed_commands {
         builder = builder.with_allowed_commands(names.iter().cloned());
+    }
+    for (name, options) in &params.command_options {
+        builder = builder.with_command_options(name, options.clone());
     }
     let exec_result = builder.run().await;
 
@@ -1762,6 +1848,86 @@ mod tests {
         assert_eq!(
             no_fuel_ceiling.max_memory_bytes,
             ResourceLimits::default().max_memory_bytes
+        );
+    }
+
+    /// `max_child_host_bytes` defaults to the ceiling and is clamped to it.
+    #[test]
+    fn child_host_bytes_are_clamped() {
+        let ceilings = ServerLimits {
+            max_child_host_bytes: 1000,
+            ..Default::default()
+        };
+        let bytes = |requested: u64| {
+            let request = crate::proto::eryx::v1::ResourceLimits {
+                max_child_host_bytes: requested,
+                ..Default::default()
+            };
+            ceilings
+                .resource_limits(Some(&request))
+                .max_child_host_bytes
+        };
+        assert_eq!(bytes(0), Some(1000));
+        assert_eq!(bytes(10), Some(10));
+        assert_eq!(bytes(5000), Some(1000));
+    }
+
+    /// A request's per-command options are checked against the server's
+    /// commands and the request's child network, and parsed like it.
+    #[test]
+    fn command_options_only_take_away() {
+        use crate::proto::eryx::v1::{
+            ChildNetwork, CommandOptions, NetworkConfig, child_network::Mode,
+        };
+        let limits = ServerLimits::default();
+        let known: HashSet<String> = ["cat".to_owned()].into();
+        let with_network = |mode: Mode, narrow: Option<NetworkConfig>| CommandOptions {
+            network: Some(ChildNetwork {
+                mode: mode as i32,
+                narrow: narrow.map(Box::new),
+            }),
+            ..Default::default()
+        };
+        let parse = |options: CommandOptions, children: &eryx::net::ChildNetwork| {
+            limits.command_options([("cat".to_owned(), options)].into(), Some(&known), children)
+        };
+        let none = eryx::net::ChildNetwork::None;
+        let inherit = eryx::net::ChildNetwork::Inherit;
+
+        assert!(parse(with_network(Mode::None, None), &none).is_ok());
+        assert!(parse(with_network(Mode::Inherit, None), &inherit).is_ok());
+        let narrow = Some(NetworkConfig::default());
+        assert!(parse(with_network(Mode::Narrow, narrow.clone()), &inherit).is_ok());
+        for (options, children) in [
+            (with_network(Mode::Inherit, None), &none),
+            (with_network(Mode::Narrow, narrow.clone()), &none),
+            (with_network(Mode::Narrow, None), &inherit),
+            (with_network(Mode::Inherit, narrow), &inherit),
+        ] {
+            let err = parse(options, children).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+            assert!(
+                err.message().starts_with("commands[cat].network: "),
+                "{err:?}"
+            );
+        }
+        let unknown = limits
+            .command_options(
+                [("rg".to_owned(), CommandOptions::default())].into(),
+                Some(&known),
+                &none,
+            )
+            .unwrap_err();
+        assert_eq!(unknown.code(), tonic::Code::InvalidArgument, "{unknown:?}");
+        // Without the server's command list, the execution checks names.
+        assert!(
+            limits
+                .command_options(
+                    [("rg".to_owned(), CommandOptions::default())].into(),
+                    None,
+                    &none
+                )
+                .is_ok()
         );
     }
 

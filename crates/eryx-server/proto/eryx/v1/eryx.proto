@@ -133,6 +133,31 @@ message ExecuteRequest {
   // other builtins and callbacks aren't restricted. Setting it for another
   // language is INVALID_ARGUMENT.
   AllowedCommands allowed_commands = 16;
+
+  // Shell only: per-execution options for some of the server's commands, by
+  // name. They can only take away from what a command has: a network no wider
+  // than network_config.child_network, and no tunnels or spawning even if the
+  // server grants them (--shell-command-tunnels, --shell-command-spawn). A name
+  // the server doesn't have, network for a command when child_network gives
+  // children none, or setting it for another language is INVALID_ARGUMENT.
+  map<string, CommandOptions> commands = 17;
+}
+
+// Per-execution options for one of the server's shell commands; see
+// ExecuteRequest.commands.
+message CommandOptions {
+  // The network for this command's children. Unset: the request's
+  // child_network. MODE_NONE: none. MODE_INHERIT: the request's
+  // child_network. MODE_NARROW: only what both `narrow` and the request's
+  // child_network allow; its connections and bytes also count against the
+  // request's limits.
+  ChildNetwork network = 1;
+  // Its children may not open blind tunnels, even if the server allows it
+  // (--shell-command-tunnels).
+  bool no_tunnels = 2;
+  // It may not run commands itself, even if the server allows it
+  // (--shell-command-spawn).
+  bool no_spawn = 3;
 }
 
 // The command names in ExecuteRequest.allowed_commands. A message rather
@@ -217,6 +242,12 @@ message ResourceLimits {
 
   // Maximum fuel/instructions (0 = the server's --max-fuel, unlimited if unset).
   uint64 max_fuel = 5;
+
+  // Shell only (ignored for other languages): most host memory the arguments
+  // and environments of the execution's child processes may hold at once
+  // (0 = the server's --max-child-host-bytes). A spawn past it fails, and the
+  // shell reports the command as failed.
+  uint64 max_child_host_bytes = 6;
 }
 
 // Network configuration for the sandbox.

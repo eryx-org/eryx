@@ -156,6 +156,13 @@ struct Args {
     #[arg(long, env = "ERYX_MAX_OPEN_HOST_FILES_TOTAL")]
     max_open_host_files_total: Option<usize>,
 
+    /// Ceiling on `resource_limits.max_child_host_bytes`: the most host
+    /// memory a shell execution's child processes' arguments and
+    /// environments may hold at once. Also the value for requests that set
+    /// none.
+    #[arg(long, default_value_t = 64 * 1024 * 1024, env = "ERYX_MAX_CHILD_HOST_BYTES")]
+    max_child_host_bytes: u64,
+
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
     /// requests are rejected and secrets are only substituted over TLS.
@@ -216,6 +223,19 @@ struct Args {
     )]
     shell_command_tunnels: Vec<String>,
 
+    /// Let a --shell-command NAME run commands itself (through
+    /// `eryx:process/run`), as git runs `git` for `stash`: nested commands
+    /// share the execution's commands, network and limits. Repeat for more
+    /// names; in the environment, separate them with `,`. A request can turn
+    /// it off for one execution (ExecuteRequest.commands), not on.
+    #[arg(
+        long = "shell-command-spawn",
+        env = "ERYX_SHELL_COMMAND_SPAWN",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
+    shell_command_spawn: Vec<String>,
+
     /// Leave out the shell's embedded coreutils (cat, head, ls, ...), so it
     /// runs only the --shell-command commands.
     #[arg(long, env = "ERYX_NO_SHELL_COREUTILS")]
@@ -265,19 +285,23 @@ fn parse_shell_command(value: &str) -> Result<ShellCommand, String> {
 
 /// Load each `--shell-command`, so a bad one fails startup rather than the
 /// first shell request. The names in `tunnels` (`--shell-command-tunnels`)
-/// get [`allow_tunnels`](eryx::Command::allow_tunnels), and must each be one
-/// of the commands' names.
+/// get [`allow_tunnels`](eryx::Command::allow_tunnels), and those in `spawn`
+/// (`--shell-command-spawn`) [`allow_spawn`](eryx::Command::allow_spawn);
+/// each must be one of the commands' names.
 fn load_shell_commands(
     commands: &[ShellCommand],
     tunnels: &[String],
+    spawn: &[String],
 ) -> Result<Vec<(Vec<String>, eryx::Command)>, String> {
-    if let Some(name) = tunnels
-        .iter()
-        .find(|name| !commands.iter().any(|c| c.names.contains(name)))
-    {
-        return Err(format!(
-            "--shell-command-tunnels {name}: not a --shell-command name"
-        ));
+    for (flag, names) in [("tunnels", tunnels), ("spawn", spawn)] {
+        if let Some(name) = names
+            .iter()
+            .find(|name| !commands.iter().any(|c| c.names.contains(name)))
+        {
+            return Err(format!(
+                "--shell-command-{flag} {name}: not a --shell-command name"
+            ));
+        }
     }
     let mut loaded = Vec::new();
     for ShellCommand {
@@ -314,15 +338,24 @@ fn load_shell_commands(
             (false, None) => eryx::Command::from_file(path),
         };
         let command = command.map_err(|e| format!("{}: {e}", flag()))?;
-        let (tunnelling, plain): (Vec<String>, Vec<String>) = names
-            .iter()
-            .cloned()
-            .partition(|name| tunnels.contains(name));
-        if !tunnelling.is_empty() {
-            loaded.push((tunnelling, command.clone().allow_tunnels()));
-        }
-        if !plain.is_empty() {
-            loaded.push((plain, command));
+        // One registration per combination of grants among its names.
+        for grants in [(true, true), (true, false), (false, true), (false, false)] {
+            let granted: Vec<String> = names
+                .iter()
+                .filter(|name| (tunnels.contains(name), spawn.contains(name)) == grants)
+                .cloned()
+                .collect();
+            if granted.is_empty() {
+                continue;
+            }
+            let mut command = command.clone();
+            if grants.0 {
+                command = command.allow_tunnels();
+            }
+            if grants.1 {
+                command = command.allow_spawn();
+            }
+            loaded.push((granted, command));
         }
     }
     Ok(loaded)
@@ -490,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("--max-io-timeout-ms", args.max_io_timeout_ms),
         ("--max-output-bytes", args.max_output_bytes as u64),
         ("--max-open-host-files", args.max_open_host_files as u64),
+        ("--max-child-host-bytes", args.max_child_host_bytes),
         (
             "--max-open-host-files-total",
             args.max_open_host_files_total.unwrap_or(1) as u64,
@@ -578,9 +612,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         commands: load_shell_commands(
             &parse_shell_commands(&args.shell_commands)?,
             &args.shell_command_tunnels,
+            &args.shell_command_spawn,
         )?,
         coreutils: !args.no_shell_coreutils,
     };
+    // What requests' ExecuteRequest.commands may name.
+    let shell_command_names: Vec<String> = shell
+        .commands
+        .iter()
+        .flat_map(|(names, _)| names.iter().cloned())
+        .chain(
+            shell
+                .coreutils
+                .then_some(eryx::embedded::COREUTILS_TOOLS)
+                .into_iter()
+                .flatten()
+                .map(|tool| (*tool).to_owned()),
+        )
+        .collect();
     let shell_configured = !shell.commands.is_empty() || !shell.coreutils;
     if shell_configured && !cfg!(feature = "shell") {
         return Err(
@@ -651,6 +700,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_io_timeout: Duration::from_millis(args.max_io_timeout_ms),
         max_output_bytes: args.max_output_bytes,
         max_open_host_files: args.max_open_host_files,
+        max_child_host_bytes: args.max_child_host_bytes,
         allow_plaintext_secrets: args.allow_plaintext_secrets,
     };
     if let Some(total) = args.max_open_host_files_total {
@@ -668,6 +718,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = service
         .with_max_message_size(args.max_message_size)
         .with_limits(limits)
+        .with_shell_commands(shell_command_names)
         .with_journal_ttl(Duration::from_secs(args.journal_ttl_secs));
 
     // The overall ("") status starts as SERVING; the pool is already warm here.
@@ -783,6 +834,7 @@ mod tests {
                     sha256: None,
                 }],
                 &[],
+                &[],
             )
             .unwrap(),
             coreutils: false,
@@ -828,11 +880,26 @@ mod tests {
             sha256: None,
         };
         let loaded =
-            load_shell_commands(std::slice::from_ref(&coreutils), &["head".into()]).unwrap();
+            load_shell_commands(std::slice::from_ref(&coreutils), &["head".into()], &[]).unwrap();
         let names: Vec<_> = loaded.iter().map(|(names, _)| names.clone()).collect();
         assert_eq!(names, [vec!["head".to_string()], vec!["cat".to_string()]]);
 
-        let err = load_shell_commands(&[coreutils], &["curl".into()]).unwrap_err();
+        let spawning = load_shell_commands(
+            std::slice::from_ref(&coreutils),
+            &["head".into()],
+            &["head".into(), "cat".into()],
+        )
+        .unwrap();
+        let names: Vec<_> = spawning.iter().map(|(names, _)| names.clone()).collect();
+        assert_eq!(names, [vec!["head".to_string()], vec!["cat".to_string()]]);
+        let err = load_shell_commands(std::slice::from_ref(&coreutils), &[], &["curl".into()])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "--shell-command-spawn curl: not a --shell-command name"
+        );
+
+        let err = load_shell_commands(&[coreutils], &["curl".into()], &[]).unwrap_err();
         assert_eq!(
             err,
             "--shell-command-tunnels curl: not a --shell-command name"
@@ -847,6 +914,7 @@ mod tests {
                 path: "/nonexistent/rg.wasm".into(),
                 sha256: None,
             }],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -884,6 +952,7 @@ mod tests {
                     path: path.to_owned(),
                     sha256: Some(pin.clone()),
                 }],
+                &[],
                 &[],
             )
             .map(|_| ())

@@ -411,6 +411,127 @@ async fn shell_requests_narrow_their_commands() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
 }
 
+/// `commands` changes what one shell request's commands get, and may only
+/// take away: a name the server doesn't have, network for a command when the
+/// request gives children none, or `commands` on a Python request is
+/// INVALID_ARGUMENT. `resource_limits.max_child_host_bytes` reaches the
+/// children, and shell state persists across requests like any guest's.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_requests_set_command_options_and_child_limits() {
+    use eryx_server::proto::eryx::v1::{
+        ChildNetwork, CommandOptions, Language, ResourceLimits, child_network::Mode,
+    };
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(1);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool)
+            .with_lazy_pool(eryx::Language::Shell, create)
+            .with_shell_commands(
+                eryx::embedded::COREUTILS_TOOLS
+                    .iter()
+                    .map(|tool| (*tool).to_owned()),
+            )
+    })
+    .await;
+    let shell = |code: &str, commands: Vec<(&str, CommandOptions)>| ExecuteRequest {
+        code: code.to_string(),
+        language: Language::Shell as i32,
+        commands: commands
+            .into_iter()
+            .map(|(name, options)| (name.to_owned(), options))
+            .collect(),
+        ..Default::default()
+    };
+    let offline = CommandOptions {
+        network: Some(ChildNetwork {
+            mode: Mode::None as i32,
+            narrow: None,
+        }),
+        no_tunnels: true,
+        no_spawn: true,
+    };
+
+    // Taking away what an offline request's command doesn't have is fine.
+    let ok = execute_request(
+        channel.clone(),
+        shell("echo hi | cat", vec![("cat", offline)]),
+    )
+    .await
+    .unwrap();
+    assert!(ok.success, "{ok:?}");
+    assert_eq!(ok.stdout, b"hi\n");
+
+    let inherit = CommandOptions {
+        network: Some(ChildNetwork {
+            mode: Mode::Inherit as i32,
+            narrow: None,
+        }),
+        ..Default::default()
+    };
+    for request in [
+        shell("true", vec![("nope", CommandOptions::default())]),
+        shell("true", vec![("cat", inherit)]),
+        ExecuteRequest {
+            code: "pass".to_string(),
+            commands: [("cat".to_owned(), CommandOptions::default())].into(),
+            ..Default::default()
+        },
+    ] {
+        let status = execute_request(channel.clone(), request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+    }
+
+    // A child's arguments and environment over the request's limit.
+    let limited = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            resource_limits: Some(ResourceLimits {
+                max_child_host_bytes: 16,
+                ..Default::default()
+            }),
+            ..shell("echo hi | cat; echo \"cat=$?\"", vec![])
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        String::from_utf8_lossy(&limited.stderr).contains("cat: limit-exceeded")
+            && !String::from_utf8_lossy(&limited.stdout).contains("cat=0"),
+        "{limited:?}"
+    );
+
+    // Shell state carries over through the snapshot.
+    let first = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            persist_state: true,
+            ..shell("greeting=hello", vec![])
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "{first:?}");
+    let second = execute_request(
+        channel,
+        ExecuteRequest {
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            ..shell("echo \"$greeting\"", vec![])
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.stdout, b"hello\n", "{second:?}");
+}
+
 /// An uncaught exception over gRPC. The traceback (which Python writes to
 /// stderr) is surfaced as CPython would — over stderr, not as a sandbox error:
 ///   - streamed live as STDERR `OutputEvent`s while the code runs,
