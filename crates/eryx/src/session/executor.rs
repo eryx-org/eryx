@@ -70,9 +70,14 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// would be millions of years from now.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"ERYXSNAP";
 
-/// The snapshot format [`StateSnapshot::to_bytes`] writes. Version 1
-/// (eryx 0.15.0) had no language byte; its snapshots are all Python.
+/// The newest snapshot format: version 2 adds a language byte. Version 1
+/// (eryx 0.15.0) had none; its snapshots are all Python.
 const SNAPSHOT_FORMAT_VERSION: u8 = 2;
+
+/// The format [`StateSnapshot::to_bytes`] writes for Python snapshots, which
+/// need no language byte: 0.15's, so a rolling deploy or a rollback to 0.15
+/// can still read them. Python moves to format 2 in a later release.
+const PYTHON_SNAPSHOT_FORMAT_VERSION: u8 = 1;
 
 /// The writer recorded in new snapshots.
 const SNAPSHOT_WRITER: &str = concat!("eryx ", env!("CARGO_PKG_VERSION"));
@@ -228,9 +233,13 @@ impl StateSnapshot {
     /// Convert the snapshot to bytes for storage or transmission.
     ///
     /// The format is `ERYXSNAP`, a format version byte, a byte for the guest
-    /// language, the writer's eryx version (a little-endian `u16` length,
-    /// then UTF-8), the capture time (little-endian `u64` milliseconds), then
-    /// the guest's state data. eryx before 0.16.0 can't read it.
+    /// language (in format 2), the writer's eryx version (a little-endian
+    /// `u16` length, then UTF-8), the capture time (little-endian `u64`
+    /// milliseconds), then the guest's state data.
+    ///
+    /// Python snapshots are written in format 1, without the language byte,
+    /// which eryx 0.15 reads too; JavaScript and shell snapshots in format 2,
+    /// which needs eryx 0.16 or later.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         // Empty for a snapshot that predates the version stamp. A version is
@@ -243,8 +252,12 @@ impl StateSnapshot {
             .as_bytes();
         let mut bytes = Vec::with_capacity(8 + 1 + 1 + 2 + writer.len() + 8 + self.data.len());
         bytes.extend_from_slice(SNAPSHOT_MAGIC);
-        bytes.push(SNAPSHOT_FORMAT_VERSION);
-        bytes.push(self.metadata.language.snapshot_tag());
+        if self.metadata.language == Language::Python {
+            bytes.push(PYTHON_SNAPSHOT_FORMAT_VERSION);
+        } else {
+            bytes.push(SNAPSHOT_FORMAT_VERSION);
+            bytes.push(self.metadata.language.snapshot_tag());
+        }
         bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
         bytes.extend_from_slice(writer);
         bytes.extend_from_slice(&self.metadata.timestamp_ms.to_le_bytes());
@@ -760,6 +773,17 @@ impl VfsConfig {
 /// - Persistent Python variables between calls
 /// - REPL-style interactive execution
 /// - State snapshots for persistence and transfer
+///
+/// It runs on an [`Executor`] (from [`Sandbox::executor`](crate::Sandbox::executor)),
+/// which doesn't carry what lives on the [`Sandbox`](crate::Sandbox): its
+/// network ([`with_network`](crate::SandboxBuilder::with_network)), its child
+/// processes' network
+/// ([`with_child_network`](crate::SandboxBuilder::with_child_network)) and its
+/// secrets. So a `SessionExecutor` has no network, and its children none
+/// either, whatever the sandbox was built with: the network needs a
+/// connection manager running for each execution. For a session with the
+/// sandbox's network, child network and secrets, use
+/// [`InProcessSession`](crate::InProcessSession), which runs them.
 pub struct SessionExecutor {
     /// The parent executor (for engine and instance_pre access).
     executor: Arc<Executor>,
@@ -2609,10 +2633,48 @@ mod tests {
 
     #[test]
     fn test_state_snapshot_records_language() {
-        let snapshot = StateSnapshot::new(Language::JavaScript, vec![1, 2, 3], Vec::new());
-        let restored = StateSnapshot::from_bytes(&snapshot.to_bytes()).unwrap();
-        assert_eq!(restored.language(), Language::JavaScript);
-        assert_eq!(restored.data(), &[1, 2, 3]);
+        for language in [Language::JavaScript, Language::Shell] {
+            let snapshot = StateSnapshot::new(language, vec![1, 2, 3], Vec::new());
+            let bytes = snapshot.to_bytes();
+            assert_eq!(
+                bytes[SNAPSHOT_MAGIC.len()],
+                SNAPSHOT_FORMAT_VERSION,
+                "{language:?}"
+            );
+            let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+            assert_eq!(restored.language(), language);
+            assert_eq!(restored.data(), &[1, 2, 3]);
+        }
+    }
+
+    /// Python snapshots stay in eryx 0.15's format 1 (no language byte), so
+    /// 0.15 can read what this eryx writes: a rolling deploy or a rollback
+    /// keeps its sessions. Byte for byte what 0.15 wrote, and they round-trip.
+    #[test]
+    fn test_python_snapshots_are_format_1() {
+        let mut snapshot = StateSnapshot::new(Language::Python, b"pickle".to_vec(), Vec::new());
+        snapshot.metadata.eryx_version = Some("eryx 0.16.0".to_string());
+        snapshot.metadata.timestamp_ms = 1_700_000_000_000;
+        let bytes = snapshot.to_bytes();
+
+        let writer = b"eryx 0.16.0";
+        let mut expected = SNAPSHOT_MAGIC.to_vec();
+        expected.push(1);
+        expected.extend_from_slice(&(writer.len() as u16).to_le_bytes());
+        expected.extend_from_slice(writer);
+        expected.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        expected.extend_from_slice(b"pickle");
+        assert_eq!(bytes, expected);
+
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.language(), Language::Python);
+        assert_eq!(restored.data(), b"pickle");
+        assert_eq!(
+            restored.metadata().eryx_version.as_deref(),
+            Some("eryx 0.16.0")
+        );
+        assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
+        assert_eq!(restored.to_bytes(), bytes);
     }
 
     #[test]
@@ -2658,15 +2720,16 @@ mod tests {
         let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
 
-        // A language this eryx doesn't know.
-        let mut bytes = good.clone();
+        // A language this eryx doesn't know, in a format 2 snapshot.
+        let mut bytes = StateSnapshot::new(Language::JavaScript, vec![1], Vec::new()).to_bytes();
         bytes[SNAPSHOT_MAGIC.len() + 1] = 0xFF;
         let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
 
-        // The writer's first byte isn't valid UTF-8.
+        // The writer's first byte isn't valid UTF-8 (format 1: after the
+        // version byte and the length).
         let mut bytes = good;
-        bytes[SNAPSHOT_MAGIC.len() + 4] = 0xFF;
+        bytes[SNAPSHOT_MAGIC.len() + 3] = 0xFF;
         let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
     }

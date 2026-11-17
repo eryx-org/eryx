@@ -550,10 +550,12 @@ async fn test_snapshot_from_another_language_is_refused() {
     let snapshot = session.snapshot_state().await.unwrap();
     assert_eq!(snapshot.language(), eryx::Language::Python);
 
-    // Restamp it as JavaScript: the language byte follows the magic and
-    // the format version.
+    // Restamp it as JavaScript. A Python snapshot is written in format 1,
+    // which has no language byte; format 2 adds one after the version.
     let mut bytes = snapshot.to_bytes();
-    bytes[b"ERYXSNAP".len() + 1] = 1;
+    assert_eq!(bytes[b"ERYXSNAP".len()], 1);
+    bytes[b"ERYXSNAP".len()] = 2;
+    bytes.insert(b"ERYXSNAP".len() + 1, 1);
     let foreign = StateSnapshot::from_bytes(&bytes).unwrap();
     assert_eq!(foreign.language(), eryx::Language::JavaScript);
 

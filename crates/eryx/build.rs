@@ -260,23 +260,25 @@ mod embedded_runtime {
                     println!("cargo::rerun-if-changed={}", path.display());
                     self.write(out_dir, &bytes);
                 }
-                // Precompile bootstrap: the precompile example builds without
-                // any runtime, so it embeds an empty placeholder.
-                None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
-                    self.write(out_dir, b"");
-                }
                 // The bundler can come from `setup --bundler`'s cache at run
                 // time instead (eryx::cache::setup_bundler), so a build
                 // without it (e.g. eryx-precompile's releases) still works.
+                // Checked before the bootstrap below, which would blank it
+                // without a word.
                 None if !self.with_embedded => {
                     println!(
                         "cargo::warning=Not embedding the {} ({}): it isn't built. \
-                         Environment builds will load it from `eryx-precompile setup {}`'s \
+                         `env pack` will load it from `eryx-precompile setup {}`'s \
                          cache instead.",
                         self.language,
                         self.file_name(),
                         self.setup_args
                     );
+                    self.write(out_dir, b"");
+                }
+                // Precompile bootstrap: the precompile example builds without
+                // any runtime, so it embeds an empty placeholder.
+                None if std::env::var("ERYX_PRECOMPILE_BOOTSTRAP").is_ok() => {
                     self.write(out_dir, b"");
                 }
                 None => {

@@ -743,6 +743,11 @@ impl Sandbox {
     ///
     /// This allows creating a `SessionExecutor` from a pooled sandbox,
     /// enabling state persistence between executions.
+    ///
+    /// The executor doesn't carry what lives on the sandbox: its network
+    /// ([`with_network`](SandboxBuilder::with_network)), child network and
+    /// secrets. A `SessionExecutor` made from it has none of them; use
+    /// [`InProcessSession`](crate::InProcessSession) for a session that does.
     #[must_use]
     pub fn executor(&self) -> Arc<Executor> {
         self.executor.clone()
