@@ -215,7 +215,7 @@ unstable-internals = []
 # (eryx-bundler.cwasm: from `eryx-precompile setup --bundler`, or `mise run
 # precompile-bundler` in the workspace; ERYX_BUNDLER_CWASM names another).
 environment = []
-env-pack = ["environment", "dep:blake3", "dep:hex", "dep:sha2", "dep:rustix"]
+env-pack = ["environment", "dep:hex", "dep:sha2", "dep:rustix"]
 
 
 [dev-dependencies]

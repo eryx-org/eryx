@@ -816,7 +816,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .iter()
         .all(|(c, _)| matches!(c, Component::Bundler))
     {
-        "packages"
+        "env-pack"
     } else {
         "embedded"
     };

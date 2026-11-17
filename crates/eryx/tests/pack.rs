@@ -6,7 +6,7 @@
 //!
 //! ```sh
 //! mise run precompile-bundler
-//! cargo nextest run -p eryx --features packages --test pack
+//! cargo nextest run -p eryx --features env-pack --test pack
 //! ```
 #![cfg(all(feature = "env-pack", unix))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
