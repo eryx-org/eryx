@@ -34,6 +34,7 @@
 //! `restore_state()`, enabling state transfer between processes or
 //! persistence to storage. The Python runtime uses pickle for serialization.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -359,6 +360,7 @@ pub struct SessionExecuteBuilder<'a> {
     cancellation_token: Option<CancellationToken>,
     child_net: Option<crate::process::ChildNet>,
     allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -392,6 +394,7 @@ impl<'a> SessionExecuteBuilder<'a> {
             cancellation_token: None,
             child_net: None,
             allowed_commands: None,
+            command_options: HashMap::new(),
         }
     }
 
@@ -409,6 +412,19 @@ impl<'a> SessionExecuteBuilder<'a> {
         S: Into<String>,
     {
         self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only); see
+    /// [`ExecuteOptions::with_command_options`](crate::ExecuteOptions::with_command_options).
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
         self
     }
 
@@ -545,6 +561,7 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.cancellation_token,
                 self.child_net,
                 self.allowed_commands.as_deref(),
+                &self.command_options,
             )
             .await
     }
@@ -1577,8 +1594,16 @@ impl SessionExecutor {
         cancellation_token: Option<CancellationToken>,
         child_net: Option<crate::process::ChildNet>,
         allowed_commands: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
+        // From the full set every time, so one execution's narrowing
+        // doesn't carry into the next. Checked before the store is taken.
+        let commands = self.executor.commands().for_execution(
+            allowed_commands,
+            command_options,
+            child_net.is_some(),
+        )?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(ErrorKind::Cancelled.into());
         }
@@ -1624,9 +1649,7 @@ impl SessionExecutor {
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
             state.child_net = child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net)));
-            // From the full set every time, so one execution's narrowing
-            // doesn't carry into the next.
-            state.commands = self.executor.commands().only(allowed_commands);
+            state.commands = commands;
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
             state.stream_budget = StreamBudget::default();

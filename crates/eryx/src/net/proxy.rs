@@ -82,11 +82,11 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct ChildNetPolicy {
     policy: Arc<NetPolicy>,
-    budget: NetBudget,
-    /// The children's own limits, across all their proxies: the narrowed
-    /// policy's `max_connections` and `max_bytes` (for `Inherit`, the same
-    /// as `budget`'s).
-    children: NetBudget,
+    /// Every budget a connection through it draws on, narrowest first: its
+    /// own (the narrowed policy's `max_connections` and `max_bytes`, across
+    /// all the proxies started from it), those of the policies it narrows,
+    /// and last the execution's, shared with the guest.
+    budgets: Vec<NetBudget>,
 }
 
 impl ChildNetPolicy {
@@ -104,9 +104,22 @@ impl ChildNetPolicy {
         let children = NetBudget::new(policy.max_connections(), policy.max_bytes());
         Some(Self {
             policy,
-            budget,
-            children,
+            budgets: vec![children, budget],
         })
+    }
+
+    /// Only what both this and `config` allow, for some of the children
+    /// (one command's): its connections and bytes count against `config`'s
+    /// limits and every one of this policy's too.
+    pub(crate) fn narrowed(&self, config: NetConfig) -> Self {
+        let policy = Arc::new(self.policy.narrowed(config));
+        let own = NetBudget::new(policy.max_connections(), policy.max_bytes());
+        Self {
+            policy,
+            budgets: std::iter::once(own)
+                .chain(self.budgets.iter().cloned())
+                .collect(),
+        }
     }
 
     /// Start a proxy for children that may (`allow_tunnels`) or may not
@@ -180,8 +193,7 @@ impl ChildProxy {
             policy,
             ca,
             allow_tunnels,
-            budget: net.budget.clone(),
-            children: net.children.clone(),
+            budgets: net.budgets.clone(),
         });
         let task = tokio::spawn(accept_loop(listener, shared));
         Ok(Self {
@@ -285,18 +297,19 @@ struct Shared {
     allow_tunnels: bool,
     connect_timeout: Duration,
     io_timeout: Duration,
-    /// The execution's budget, shared with its guest.
-    budget: NetBudget,
-    /// Its children's share: `policy`'s limits, across both proxies.
-    children: NetBudget,
+    /// The budgets each connection draws on, narrowest first (see
+    /// [`ChildNetPolicy::budgets`]); the last is the execution's, shared
+    /// with its guest.
+    budgets: Vec<NetBudget>,
 }
 
 impl Shared {
     /// How much one read may take: a buffer, or what's left of the byte
     /// limits (`0` once they're spent).
     fn read_cap(&self) -> usize {
-        let left = [&self.budget, &self.children]
-            .into_iter()
+        let left = self
+            .budgets
+            .iter()
             .filter_map(|b| b.bytes().remaining())
             .min();
         left.map_or(BUF_LEN, |left| {
@@ -308,12 +321,13 @@ impl Shared {
     /// fit.
     fn take_sent(&self, n: usize) -> bool {
         let n = n as u64;
-        if !self.children.bytes().take_sent(n) {
-            return false;
-        }
-        if !self.budget.bytes().take_sent(n) {
-            self.children.bytes().refund_sent(n);
-            return false;
+        for (i, budget) in self.budgets.iter().enumerate() {
+            if !budget.bytes().take_sent(n) {
+                for taken in &self.budgets[..i] {
+                    taken.bytes().refund_sent(n);
+                }
+                return false;
+            }
         }
         true
     }
@@ -322,20 +336,23 @@ impl Shared {
     /// never reached the upstream.
     fn refund_sent(&self, n: usize) {
         let n = n as u64;
-        self.children.bytes().refund_sent(n);
-        self.budget.bytes().refund_sent(n);
+        for budget in &self.budgets {
+            budget.bytes().refund_sent(n);
+        }
     }
 
     /// Charge up to `n` bytes a child received, returning how many fit.
     fn take_received(&self, n: usize) -> usize {
-        let granted = self.children.bytes().take_received(n as u64);
-        let granted = self.budget.bytes().take_received(granted);
+        let granted = self.budgets.iter().fold(n as u64, |granted, budget| {
+            budget.bytes().take_received(granted)
+        });
         usize::try_from(granted).unwrap_or(usize::MAX)
     }
 
     fn over_limit(&self) -> ProxyError {
-        let max = [&self.budget, &self.children]
-            .into_iter()
+        let max = self
+            .budgets
+            .iter()
             .filter_map(|b| b.bytes().max())
             .min()
             .unwrap_or_default();
@@ -443,11 +460,12 @@ impl ProxyError {
 /// Serve one connection from a child, replying with the error if it's
 /// refused before any response has started.
 async fn serve(shared: &Shared, mut client: TcpStream) -> Result<(), ProxyError> {
-    // Both held for as long as the connection is open.
+    // All held for as long as the connection is open.
     let permits = shared
-        .children
-        .try_acquire()
-        .and_then(|child| Ok((child, shared.budget.try_acquire()?)));
+        .budgets
+        .iter()
+        .map(NetBudget::try_acquire)
+        .collect::<Result<Vec<_>, _>>();
     let result = match permits {
         Err(_) => Err(ProxyError::Busy),
         Ok(_permits) => route(shared, &mut client).await,
@@ -1428,6 +1446,51 @@ mod tests {
             "{response}"
         );
         assert_eq!(guest.traffic(), crate::net::NetTraffic::default());
+    }
+
+    /// A command's narrowed network (`ChildNetPolicy::narrowed`) has its
+    /// own limits and still counts against the children's and the
+    /// execution's: one connection through it takes the children's only
+    /// slot, and its own byte limit refuses what the others would allow.
+    #[tokio::test]
+    async fn a_narrowed_childrens_network_counts_against_every_budget() {
+        let (port, cert, _) = upstream(true).await;
+        let target = format!("api.test:{port}");
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let children = guest
+            .child_network(ChildNetwork::Narrow(Box::new(
+                NetConfig::permissive()
+                    .allow_internal_host("*.test")
+                    .with_max_connections(1),
+            )))
+            .unwrap();
+        let command = children.narrowed(NetConfig::permissive().allow_internal_host("*.test"));
+        let narrowed = command.start_proxy(false).unwrap();
+        let others = children.start_proxy(false).unwrap();
+        let (_held, status) = connect_to(&narrowed, &target).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let (_, status) = connect_to(&others, &target).await;
+        assert!(status.contains(" 503 "), "{status}");
+
+        let (port, cert, _) = upstream(false).await;
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let children = guest.child_network(ChildNetwork::Inherit).unwrap();
+        let command = children.narrowed(
+            NetConfig::permissive()
+                .allow_internal_host("*.test")
+                .with_max_bytes(20),
+        );
+        let proxy = command.start_proxy(false).unwrap();
+        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+        let request = format!(
+            "GET http://api.test:{port}/ HTTP/1.1\r\nHost: api.test:{port}\r\nConnection: close\r\n\r\n"
+        );
+        let response = exchange(&mut stream, request.as_bytes()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403 ")
+                && response.contains("network limit reached: 20 bytes"),
+            "{response}"
+        );
     }
 
     /// An idle tunnel is closed after the I/O timeout.

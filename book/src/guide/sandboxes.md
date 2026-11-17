@@ -205,6 +205,18 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   aren't commands and keep working. In a
   session, a command an earlier call allowed still shows in the shell's
   `hash` table, but running it is refused.
+- **Per command, per execution:** `with_command_options(name, options)` on
+  the same builders (and `ExecuteOptions`) takes away from what one
+  registered command gets in that execution, as a `CommandOptions`:
+  `with_network(ChildNetwork::None | Inherit | Narrow(config))` gives its
+  children no network, the execution's, or only what both `config` and the
+  execution's allow (its connections and bytes count against `config`'s
+  limits and the execution's); `without_tunnels()` and `without_spawn()` turn
+  off what `allow_tunnels()` and `allow_spawn()` gave it at registration.
+  Options never add: the execution fails to start if they name a command
+  that isn't registered, or give one network when the sandbox gives
+  children none. Nested children of the command get the same. Like
+  `with_allowed_commands`, they last one execution.
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.
 - **Running:** each command runs as a child process with `argv[0]` set to the

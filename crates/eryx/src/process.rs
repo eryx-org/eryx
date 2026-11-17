@@ -430,6 +430,58 @@ pub struct Command {
     /// Host memory its instances' metadata takes, charged to the children's
     /// memory pool while one runs (see `vmctx`).
     vmctx: usize,
+    /// This execution's network for it, if it's been narrowed from the
+    /// execution's (see [`CommandOptions::with_network`]).
+    network: Option<crate::net::ChildNetwork>,
+}
+
+/// Per-execution options for one registered command, which can only take
+/// away from what it has: see
+/// [`ExecuteOptions::with_command_options`](crate::ExecuteOptions::with_command_options).
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct CommandOptions {
+    network: Option<crate::net::ChildNetwork>,
+    no_tunnels: bool,
+    no_spawn: bool,
+}
+
+impl CommandOptions {
+    /// No changes: the command as registered.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Give this command's children `network` instead of the execution's
+    /// child network, within it: [`ChildNetwork::None`](crate::ChildNetwork::None)
+    /// takes their network away, [`Inherit`](crate::ChildNetwork::Inherit)
+    /// keeps the execution's, and [`Narrow`](crate::ChildNetwork::Narrow)
+    /// allows only what both it and the execution's allow. Their connections
+    /// and bytes count against the narrowed config's limits and the
+    /// execution's. An execution with no child network can't give one
+    /// command any: the execution fails to start.
+    #[must_use]
+    pub fn with_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// No blind tunnels for this command's children in this execution, even
+    /// if it was registered with [`Command::allow_tunnels`].
+    #[must_use]
+    pub fn without_tunnels(mut self) -> Self {
+        self.no_tunnels = true;
+        self
+    }
+
+    /// Don't let this command run commands in this execution, even if it was
+    /// registered with [`Command::allow_spawn`].
+    #[must_use]
+    pub fn without_spawn(mut self) -> Self {
+        self.no_spawn = true;
+        self
+    }
 }
 
 impl std::fmt::Debug for Command {
@@ -590,6 +642,7 @@ impl Command {
             tunnels: false,
             spawns: false,
             vmctx: usize::try_from(vmctx).unwrap_or(usize::MAX),
+            network: None,
         })
     }
 
@@ -650,12 +703,18 @@ fn file_tail(path: &Path) -> std::io::Result<Vec<u8>> {
 
 /// An execution's network for its children: the sandbox's policy, secrets
 /// and budget (shared with the guest's connections), and the proxies started
-/// for them, at most one inspecting and one tunnelling. Nested children use
-/// the same one. They live as long as the execution (see
-/// [`ExecutorState::disconnect`]), well inside their CAs' validity.
+/// for them, one inspecting and one tunnelling per network (the execution's,
+/// and each command's narrowed one). Nested children use the same one. They
+/// live as long as the execution (see [`ExecutorState::disconnect`]), well
+/// inside their CAs' validity.
 pub(crate) struct ChildNet {
     net: crate::net::ChildNetPolicy,
-    proxies: [Option<ProxyLink>; 2],
+    /// Commands' narrowed networks (see [`CommandOptions::with_network`]),
+    /// by command name, made on first use.
+    narrowed: HashMap<String, crate::net::ChildNetPolicy>,
+    /// Started proxies, by the command whose narrowed network they serve
+    /// (`None` for the execution's) and whether they tunnel.
+    proxies: HashMap<(Option<String>, bool), ProxyLink>,
     /// TCP sockets its children hold, together.
     sockets: Arc<AtomicUsize>,
 }
@@ -672,29 +731,42 @@ impl ChildNet {
     pub(crate) fn new(net: crate::net::ChildNetPolicy) -> Self {
         Self {
             net,
-            proxies: [None, None],
+            narrowed: HashMap::new(),
+            proxies: HashMap::new(),
             sockets: Arc::default(),
         }
     }
 
-    /// The proxy for a child that may (`tunnels`) or may not open blind
-    /// tunnels, started on first use.
-    fn link(&mut self, tunnels: bool) -> std::io::Result<ChildLink> {
-        let slot = &mut self.proxies[usize::from(tunnels)];
-        let link = match slot {
-            Some(link) => link,
-            None => {
-                let proxy = self.net.start_proxy(tunnels)?;
-                let ca_dir = tempfile::tempdir()?;
-                std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
-                slot.insert(ProxyLink { proxy, ca_dir })
+    /// The proxy for a child of the command `name` (`command`) that may or
+    /// may not open blind tunnels, started on first use; `None` if the
+    /// command's network is [`ChildNetwork::None`](crate::ChildNetwork::None).
+    fn link(&mut self, name: &str, command: &Command) -> std::io::Result<Option<ChildLink>> {
+        use crate::net::ChildNetwork;
+        let (key, policy) = match &command.network {
+            None | Some(ChildNetwork::Inherit) => (None, &self.net),
+            Some(ChildNetwork::None) => return Ok(None),
+            Some(ChildNetwork::Narrow(config)) => {
+                let policy = self
+                    .narrowed
+                    .entry(name.to_owned())
+                    .or_insert_with(|| self.net.narrowed((**config).clone()));
+                (Some(name.to_owned()), &*policy)
             }
         };
-        Ok(ChildLink {
+        let link = match self.proxies.entry((key, command.tunnels)) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let proxy = policy.start_proxy(command.tunnels)?;
+                let ca_dir = tempfile::tempdir()?;
+                std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
+                entry.insert(ProxyLink { proxy, ca_dir })
+            }
+        };
+        Ok(Some(ChildLink {
             proxy: link.proxy.addr(),
             ca_dir: link.ca_dir.path().to_path_buf(),
             sockets: Arc::clone(&self.sockets),
-        })
+        }))
     }
 }
 
@@ -862,9 +934,9 @@ impl Spawner {
                 .and_then(|net| {
                     net.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .link(command.tunnels)
+                        .link(&cmd, &command)
                 }) {
-                Ok(link) => Some(link),
+                Ok(link) => link,
                 Err(e) => {
                     tracing::warn!(error = %e, "starting the child proxy failed");
                     return Err(ProcessError::SpawnFailed);
@@ -984,6 +1056,7 @@ impl Command {
             tunnels: false,
             spawns: false,
             vmctx: usize::try_from(precompiled_vmctx(precompiled)).unwrap_or(usize::MAX),
+            network: None,
         })
     }
 
@@ -1181,6 +1254,52 @@ impl Commands {
             registered: Arc::new(registered),
             guest: Some(guest),
         }
+    }
+
+    /// The commands one execution gets: just those in `allowed` (see
+    /// [`only`](Self::only)), with `options` applied.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an option names a command that isn't registered, or gives a
+    /// command network when the execution has no child network
+    /// (`child_net`), since an option can only take away.
+    pub(crate) fn for_execution(
+        &self,
+        allowed: Option<&[String]>,
+        options: &HashMap<String, CommandOptions>,
+        child_net: bool,
+    ) -> Result<Self, Error> {
+        use crate::net::ChildNetwork;
+        let mut commands = self.only(allowed);
+        for (name, option) in options {
+            if !self.registered.contains_key(name) {
+                return Err(ErrorKind::Initialization(format!(
+                    "command options for {name}, which isn't a registered command"
+                ))
+                .into());
+            }
+            if !child_net
+                && matches!(
+                    option.network,
+                    Some(ChildNetwork::Inherit | ChildNetwork::Narrow(_))
+                )
+            {
+                return Err(ErrorKind::Initialization(format!(
+                    "command {name} can't have network: the execution gives children none"
+                ))
+                .into());
+            }
+            let registered = Arc::make_mut(&mut commands.registered);
+            if let Some(command) = registered.get_mut(name) {
+                command.tunnels &= !option.no_tunnels;
+                command.spawns &= !option.no_spawn;
+                if option.network.is_some() {
+                    command.network.clone_from(&option.network);
+                }
+            }
+        }
+        Ok(commands)
     }
 
     /// What `list-commands` reports: the registered commands, and the

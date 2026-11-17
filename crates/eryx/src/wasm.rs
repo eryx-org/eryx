@@ -23,7 +23,7 @@
 //! Alternatively, enable the `embedded` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2224,6 +2224,7 @@ pub struct ExecuteBuilder<'a> {
     max_child_host_bytes: Option<u64>,
     child_net: Option<crate::process::ChildNet>,
     allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
@@ -2275,6 +2276,7 @@ impl<'a> ExecuteBuilder<'a> {
             max_child_host_bytes: None,
             child_net: None,
             allowed_commands: None,
+            command_options: HashMap::new(),
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
@@ -2456,6 +2458,19 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only); see
+    /// [`ExecuteOptions::with_command_options`](crate::ExecuteOptions::with_command_options).
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2477,6 +2492,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.max_child_host_bytes,
                 self.child_net,
                 self.allowed_commands.as_deref(),
+                &self.command_options,
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
@@ -3990,6 +4006,7 @@ impl Executor {
         max_child_host_bytes: Option<u64>,
         child_net: Option<crate::process::ChildNet>,
         allowed_commands: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
@@ -3997,6 +4014,9 @@ impl Executor {
         vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
+        let commands =
+            self.commands
+                .for_execution(allowed_commands, command_options, child_net.is_some())?;
 
         // Avoid making an already-cancelled request wait for the first epoch
         // tick. Cancellation that races this check is still observed by the
@@ -4116,7 +4136,7 @@ impl Executor {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
-            commands: self.commands.only(allowed_commands),
+            commands,
             child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
             child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
             trace_clock: TraceClock::default(),
