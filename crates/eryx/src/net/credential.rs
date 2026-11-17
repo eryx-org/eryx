@@ -260,6 +260,14 @@ impl Credential {
             || path.is_some_and(|path| self.paths.iter().any(|p| super::path_is_under(path, p)))
     }
 
+    /// What output and traces are scrubbed of, should it get there some way
+    /// masking misses: the header value, a `Basic` payload, and the secret.
+    pub(crate) fn sensitive_values(&self) -> impl Iterator<Item = String> + '_ {
+        self.masks()
+            .into_iter()
+            .map(|(value, _)| String::from_utf8_lossy(&value).into_owned())
+    }
+
     /// The header line it adds.
     pub(super) fn header_line(&self) -> String {
         format!("{}: {}\r\n", self.header, self.value)

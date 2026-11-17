@@ -384,12 +384,13 @@ impl Sandbox {
         });
 
         // Create the trace channel and collector only when tracing is enabled.
+        let scrub_secrets = self.scrub_secrets(&options.credentials);
         let tracing_enabled = self.tracing_enabled();
         let (trace_tx, trace_collector) = if tracing_enabled {
             let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
             let trace_handler = self.trace_handler.clone();
             let collect_trace = self.collect_trace;
-            let trace_secrets = self.secrets.clone();
+            let trace_secrets = scrub_secrets.clone();
             let trace_collector = tokio::spawn(async move {
                 run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
             });
@@ -416,7 +417,7 @@ impl Sandbox {
         let (output_tx, output_handler_task) = if self.output_handler.is_some() {
             let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
             let handler = self.output_handler.clone();
-            let output_secrets = self.secrets.clone();
+            let output_secrets = scrub_secrets.clone();
             let scrub_stdout = matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All);
             let scrub_stderr = matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All);
             let task = tokio::spawn(async move {
@@ -571,7 +572,7 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                let output = self.scrub_output(output);
+                let output = self.scrub_output(output, &scrub_secrets);
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -610,7 +611,7 @@ impl Sandbox {
                     }),
                     None => error,
                 };
-                Err(self.scrub_error(error))
+                Err(self.scrub_error(error, &scrub_secrets))
             }
         }
     }
@@ -697,24 +698,51 @@ impl Sandbox {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
     }
 
-    /// Scrub secret placeholders from an execution's output per the
-    /// configured policies.
-    pub(crate) fn scrub_output(&self, mut output: ExecutionOutput) -> ExecutionOutput {
+    /// What an execution's output and traces are scrubbed of: the secrets'
+    /// placeholders, and the values of the credentials its children get (the
+    /// sandbox's and `extra`, the execution's own), in case one gets there
+    /// some way the proxy's response masking misses.
+    pub(crate) fn scrub_secrets(
+        &self,
+        extra: &[crate::net::Credential],
+    ) -> HashMap<String, crate::secrets::SecretConfig> {
+        let mut secrets = self.secrets.clone();
+        let credentials = self
+            .executor
+            .credentials()
+            .iter()
+            .map(|c| &**c)
+            .chain(extra);
+        for (i, value) in credentials.flat_map(|c| c.sensitive_values()).enumerate() {
+            // Not a name a secret can have (names are env var names).
+            secrets.insert(
+                format!("eryx credential {i}"),
+                crate::secrets::SecretConfig::scrub_only(value),
+            );
+        }
+        secrets
+    }
+
+    /// Scrub `secrets` (from [`Self::scrub_secrets`]) from an execution's
+    /// output per the configured policies.
+    pub(crate) fn scrub_output(
+        &self,
+        mut output: ExecutionOutput,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> ExecutionOutput {
         use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
         if self.scrub_stdout() {
-            output.stdout = scrub_placeholders_bytes(&output.stdout, &self.secrets);
+            output.stdout = scrub_placeholders_bytes(&output.stdout, secrets);
         }
         if self.scrub_stderr() {
-            output.stderr = scrub_placeholders_bytes(&output.stderr, &self.secrets);
+            output.stderr = scrub_placeholders_bytes(&output.stderr, secrets);
         }
         // The structured result is an output channel too, but scrubbing is
         // opt-in (it's a programmatic side channel). When enabled, scrub both
         // the result and its error message.
         if self.scrub_result {
-            output.result = output.result.map(|r| scrub_placeholders(&r, &self.secrets));
-            output.result_error = output
-                .result_error
-                .map(|e| scrub_placeholders(&e, &self.secrets));
+            output.result = output.result.map(|r| scrub_placeholders(&r, secrets));
+            output.result_error = output.result_error.map(|e| scrub_placeholders(&e, secrets));
         }
         output
     }
@@ -722,7 +750,11 @@ impl Sandbox {
     /// Scrub secret placeholders from a script failure's message (for Python,
     /// the traceback the guest would otherwise print to stderr), and from the
     /// output captured with it.
-    pub(crate) fn scrub_error(&self, mut error: Error) -> Error {
+    pub(crate) fn scrub_error(
+        &self,
+        mut error: Error,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Error {
         if let ErrorKind::ScriptFailed {
             message,
             stdout,
@@ -732,11 +764,11 @@ impl Sandbox {
         {
             use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
             if self.scrub_stderr() {
-                *message = scrub_placeholders(message, &self.secrets);
-                *stderr = scrub_placeholders_bytes(stderr, &self.secrets);
+                *message = scrub_placeholders(message, secrets);
+                *stderr = scrub_placeholders_bytes(stderr, secrets);
             }
             if self.scrub_stdout() {
-                *stdout = scrub_placeholders_bytes(stdout, &self.secrets);
+                *stdout = scrub_placeholders_bytes(stdout, secrets);
             }
         }
         error

@@ -308,7 +308,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     `Accept-Encoding: identity` and a compressed or transfer-coded response
     ends the connection, since the credential can't be found in an encoded
     body. The value (and for `Basic` its base64 payload, and the secret) is
-    masked out as `[REDACTED]`, as secrets' real values are; a host that
+    masked out as `[REDACTED]`, as secrets' real values are, and scrubbed
+    from stdout, stderr and traces too in case any reaches them. A host that
     echoes it in another form (its base64 alone, hex) isn't masked, so don't
     give credentials for hosts that echo request headers.
   - **Limits:** a command with a credential can do anything with it its hosts

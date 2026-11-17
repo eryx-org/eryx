@@ -1055,6 +1055,23 @@ async fn credentials_go_to_their_commands_only() {
     let out = run_with(&plain, &format!("{}; {}", get("tc"), get("tc3")), &given).await;
     assert_eq!(out.matches(" 200 OK").count(), 2, "{out}");
     assert_eq!(seen.lock().unwrap().matches(INJECTED).count(), 2);
+
+    // Should a credential reach the output some way masking misses (here
+    // the script just has it), it's scrubbed there too, with the sandbox's
+    // credentials and with an execution's own.
+    let leak = format!("echo {INJECTED}; echo 'Bearer {INJECTED}' >&2");
+    let out = run(&sandbox, &leak).await;
+    assert!(
+        !out.contains(INJECTED) && out.contains("[REDACTED]"),
+        "{out}"
+    );
+    let out = run_with(&plain, &leak, &given).await;
+    assert!(
+        !out.contains(INJECTED) && out.contains("[REDACTED]"),
+        "{out}"
+    );
+    let out = run(&plain, &leak).await;
+    assert!(out.contains(INJECTED), "{out}");
 }
 
 /// Over TLS (the proxy's own), a credential replaces the child's header and

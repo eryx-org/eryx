@@ -45,6 +45,17 @@ impl SecretConfig {
         }
     }
 
+    /// An entry only output scrubbing uses: `value` is replaced with
+    /// `[REDACTED]` as a placeholder would be, and it's never substituted.
+    pub(crate) fn scrub_only(value: String) -> Self {
+        Self {
+            real_value: String::new(),
+            placeholder: value,
+            allowed_hosts: Vec::new(),
+            header: None,
+        }
+    }
+
     /// Only substitute the real value in the HTTP header `name` (compared
     /// ignoring case). A request with the placeholder in any other header is
     /// refused, as for a host the secret isn't allowed for.
