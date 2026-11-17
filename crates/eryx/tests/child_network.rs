@@ -984,13 +984,14 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
 /// A shell whose `git` (ERYX_TEST_GIT_WASM: git with HTTPS) may spawn its
 /// helpers, with the secret TOKEN for `host` and a child network allowing
 /// `network`'s hosts.
-fn git_shell(network: NetConfig, host: &str) -> Sandbox {
+fn git_shell(network: NetConfig, host: &str, scrub_files: bool) -> Sandbox {
     let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
     Sandbox::embedded()
         .shell()
         .with_command("git", Command::from_file(git).unwrap().allow_spawn())
         .with_network(network)
         .with_secret("TOKEN", REAL, vec![host.to_string()])
+        .scrub_files(scrub_files)
         .with_child_network(ChildNetwork::Inherit)
         .with_trace_collection(true)
         .build()
@@ -1009,12 +1010,10 @@ async fn git_clones_fetches_and_pushes_over_http_with_a_secret() {
     let dir = tempfile::tempdir().unwrap();
     let repos = git_repos(dir.path());
     let port = git_server(repos.clone()).await;
-    let network = NetConfig::default()
-        .allow_host("git.test")
-        .allow_internal_host("git.test")
-        .with_resolver(Localhost)
-        .allow_plaintext_secrets(true);
-    let sandbox = git_shell(network, "git.test");
+    // git keeps these credentials in files (config, the remote URL in
+    // .git/config, the credential store); with the VFS, file scrubbing would
+    // replace the placeholder there before git sends it.
+    let sandbox = git_shell(git_test_network(), "git.test", false);
     let url = format!("http://git.test:{port}/repo.git");
     let script = format!(
         r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
@@ -1061,12 +1060,49 @@ git ls-remote {url} >/dev/null 2>&1 || echo refused-without-token
     }
 }
 
+/// With file scrubbing on, git still authenticates when the placeholder only
+/// reaches it on the command line or in the environment, never in a file.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the host's git"]
+async fn git_authenticates_without_writing_the_secret_to_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = git_server(git_repos(dir.path())).await;
+    let sandbox = git_shell(git_test_network(), "git.test", true);
+    let url = format!("http://git.test:{port}/repo.git");
+    let out = run(
+        &sandbox,
+        &format!(
+            r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+cd /tmp
+git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone -q {url} c && git -C c log -1 --format=%s
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Bearer $TOKEN" git -C c fetch -q origin feature && echo env-fetch
+"#
+        ),
+    )
+    .await;
+    assert!(out.starts_with("commit 2\nenv-fetch\n"), "{out}");
+    assert!(!out.contains(REAL));
+}
+
+/// A network reaching the local git server as `git.test`.
+fn git_test_network() -> NetConfig {
+    NetConfig::default()
+        .allow_host("git.test")
+        .allow_internal_host("git.test")
+        .with_resolver(Localhost)
+        .allow_plaintext_secrets(true)
+}
+
 /// git clones a public repository from GitHub over HTTPS, through the child
 /// proxy's TLS, trusting its CA from where children find it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the network"]
 async fn git_clones_from_github_over_https() {
-    let sandbox = git_shell(NetConfig::default().allow_host("github.com"), "github.com");
+    let sandbox = git_shell(
+        NetConfig::default().allow_host("github.com"),
+        "github.com",
+        true,
+    );
     let out = run(
         &sandbox,
         "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; cd /tmp; \

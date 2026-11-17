@@ -238,6 +238,19 @@ let sandbox = Sandbox::embedded()
     .build()?;
 ```
 
+### Secrets in files
+
+File scrubbing also applies to files the sandboxed code writes for itself, so a secret a program reads back from a file arrives as `[REDACTED]`, and the request it makes isn't authenticated. git is the common case: `git config http.extraHeader`, a token in a remote URL (which git stores in `.git/config`) and `credential.helper store` all keep the secret in a file. With file scrubbing on, hand it to git per command instead:
+
+```sh
+git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone https://example.com/repo.git
+# or through git's environment
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+  GIT_CONFIG_VALUE_0="Authorization: Bearer $TOKEN" git -C repo fetch
+```
+
+Alternatively, turn file scrubbing off for that sandbox (`scrub_files=False`, `.scrub_files(false)`), accepting that placeholders then persist in its files.
+
 ## Best Practices
 
 1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret falls back to the network config's allowed hosts, which could be broader than intended.
