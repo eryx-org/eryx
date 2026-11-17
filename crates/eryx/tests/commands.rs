@@ -1245,6 +1245,272 @@ async fn nested_output_is_capped() {
     assert_eq!(out, "error: limit-exceeded\n");
 }
 
+/// A command piped through `eryx:process/pipe` gets its caller's input as
+/// it's written and gives back its output, chained through more piped
+/// commands; its stderr is its caller's, and `wait` returns its status. It
+/// needs `allow_spawn`, and nests at most as deep as `run`.
+#[tokio::test]
+async fn piped_children_stream_both_ways() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_command("plain", test_cmd())
+        .build()
+        .unwrap();
+    let out = run_script(
+        &sandbox,
+        "echo hi | tc pipe tc copy; echo lo | tc pipe tc pipe tc copy; \
+         tc pipe tc exit 3; echo \"status=$?\"; tc pipe nope; plain pipe tc argv0; true",
+    )
+    .await;
+    assert_eq!(
+        out, "HI\nLO\nstatus=3\nerror: command-not-found\nerror: spawn-failed\nbye\n",
+        "{out}"
+    );
+    let out = run_script(&sandbox, "tc pipe tc pipe tc pipe tc argv0").await;
+    assert_eq!(out, "tc\n");
+    let out = run_script(&sandbox, "tc pipe tc pipe tc pipe tc pipe tc argv0").await;
+    assert_eq!(out, "error: limit-exceeded\n");
+}
+
+/// Much more than the pipes hold flows through a piped command, a chunk at
+/// a time, with each side waiting on the other; one that's written without
+/// being read stalls, as with any pipe, until the timeout stops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_apply_backpressure() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(500)),
+        )
+        .build()
+        .unwrap();
+    let out = run_script(&sandbox, "tc pipe-echo 1048576 tc copy").await;
+    assert_eq!(out, "echoed 1048576\n");
+
+    let start = Instant::now();
+    let err = sandbox
+        .execute("tc pipe-flood 1048576 tc copy")
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Piped commands hold live-child slots, so their number is capped, and a
+/// caller exiting without waiting for them kills them and frees their
+/// slots at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_are_capped_and_killed_with_their_caller() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc pipe-leak 100 tc spin").await;
+    let (piped, error) = out
+        .trim()
+        .strip_prefix("piped ")
+        .and_then(|rest| rest.split_once(' '))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(piped.parse::<usize>().unwrap() < 64, "{out}");
+    assert_eq!(error, "error: limit-exceeded", "{out}");
+
+    // 25 callers leaking 10 each: more than the 64 slots, unless each
+    // caller's exit gives them back.
+    let start = Instant::now();
+    let out = run_script(
+        &sandbox,
+        "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do \
+         tc pipe-leak 10 tc spin; done",
+    )
+    .await;
+    assert_eq!(out, "piped 10\n".repeat(25), "{out}");
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// A piped command burns its execution's fuel, stops at its timeout, and
+/// reports trace events, killed with its caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_share_the_executions_limits() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(100_000_000))
+        .build()
+        .unwrap();
+    sandbox.execute("tc pipe tc argv0").await.unwrap();
+    let err = sandbox.execute("tc pipe tc spin").await.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+
+    let handler = CollectTrace::default();
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_trace_handler(handler.clone())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox.execute("tc pipe tc spin").await.unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    let mut events = process_events(&handler.0.lock().unwrap());
+    events.sort_by_key(|&(event, _, pid, ..)| (pid, event == "end"));
+    let killed = |pid| {
+        [
+            ("start", "tc".to_string(), pid, None, None),
+            (
+                "end",
+                "tc".to_string(),
+                pid,
+                None,
+                Some("killed".to_string()),
+            ),
+        ]
+    };
+    assert_eq!(events, [killed(1), killed(2)].concat());
+}
+
+/// A session with a VFS whose children may spawn, and its storage.
+#[cfg(feature = "unstable-vfs")]
+async fn spawning_session() -> (SessionExecutor, eryx::vfs::ArcStorage) {
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    (session, storage)
+}
+
+/// The rounds `tc burn PATH N` recorded at `path`, 0 if none.
+#[cfg(feature = "unstable-vfs")]
+async fn rounds(storage: &eryx::vfs::ArcStorage, path: &str) -> u64 {
+    use eryx::vfs::VfsStorage;
+    match storage.read(path).await {
+        Ok(data) => String::from_utf8_lossy(&data).trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// A piped command that has exited keeps its live-child slot while its
+/// handle is kept (with its unread output), so kept handles hit the cap;
+/// waiting on one again returns its status again.
+#[tokio::test]
+async fn kept_piped_children_keep_their_slots() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc pipe-keep 100 tc exit 3").await;
+    let (kept, rest) = out
+        .strip_prefix("kept ")
+        .and_then(|rest| rest.split_once(' '))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(kept.parse::<usize>().unwrap() < 64, "{out}");
+    assert!(
+        rest.starts_with("error: limit-exceeded\nagain Some(Ok(3))\n"),
+        "{out}"
+    );
+}
+
+/// A caller killed while it waits for a piped command, by running out of
+/// fuel or by the timeout, takes the command with it: it makes no progress
+/// afterwards.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_die_with_a_caller_killed_in_wait() {
+    let (mut session, storage) = spawning_session().await;
+    let stays_put = async |path: &str| {
+        let before = rounds(&storage, path).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rounds(&storage, path).await, before, "{path}");
+        before
+    };
+
+    // Fuel for a few rounds (a round is ~0.5 billion).
+    session.set_fuel_limit(Some(2_500_000_000));
+    let err = session
+        .execute("tc pipe-flood 0 tc burn /data/f 1000")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    assert!(
+        stays_put("/data/f").await >= 1,
+        "it ran while its caller waited"
+    );
+
+    session.set_fuel_limit(None);
+    session.set_execution_timeout(Some(Duration::from_millis(300)));
+    let err = session
+        .execute("tc pipe-flood 0 tc burn /data/t 1000")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    stays_put("/data/t").await;
+}
+
+/// Piped commands burn their execution's fuel as they run, wherever their
+/// caller waits: twenty spinning while their caller waits on one stop
+/// within the limit, at most a partial round each over it, not twenty
+/// times over.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_burn_their_executions_fuel() {
+    let (mut session, storage) = spawning_session().await;
+    // What a round of `burn` costs the execution, through a piped command.
+    session.set_fuel_limit(Some(u64::MAX / 2));
+    let mut fuel = async |rounds: u32| {
+        session
+            .execute(format!("tc pipe tc burn /data/r {rounds}"))
+            .run()
+            .await
+            .unwrap()
+            .fuel_consumed
+            .unwrap()
+    };
+    let (one, three) = (fuel(1).await, fuel(3).await);
+    let round = (three - one) / 2;
+    assert!(round > 0, "{one} {three}");
+
+    // Room for ten rounds.
+    session.set_fuel_limit(Some(one + 9 * round));
+    let err = session
+        .execute("mkdir -p /data/b; tc pipe-burn 20 1000 /data/b tc")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let mut total = 0;
+    for i in 0..20 {
+        total += rounds(&storage, &format!("/data/b/{i}")).await;
+    }
+    // Ten rounds of fuel, and a round started by each before it ran out.
+    assert!(total <= 10 + 20, "{total} rounds");
+}
+
 /// Nested children see the same VFS as the shell and their caller.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]

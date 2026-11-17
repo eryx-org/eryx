@@ -81,8 +81,9 @@ pub struct CommandImport {
 pub enum ImportSupport {
     /// Children get it.
     Provided,
-    /// `eryx:process/run`: linked, but its calls are refused unless the
-    /// command is registered with [`allow_spawn`](crate::Command::allow_spawn).
+    /// `eryx:process/run` or `pipe`: linked, but its calls are refused
+    /// unless the command is registered with
+    /// [`allow_spawn`](crate::Command::allow_spawn).
     NeedsSpawn,
     /// Children don't get it, and why.
     Missing(String),
@@ -110,10 +111,10 @@ pub(super) fn support(name: &str) -> ImportSupport {
     let minor = |prefix: &str| version.starts_with(prefix) && !version.contains('-');
     let known = |list: &[&str]| list.contains(&package);
     if package == "eryx:process" {
-        return if path == "eryx:process/run" && minor("0.1.") {
+        return if matches!(path, "eryx:process/run" | "eryx:process/pipe") && minor("0.1.") {
             ImportSupport::NeedsSpawn
         } else {
-            ImportSupport::Missing("children get only eryx:process/run@0.1".into())
+            ImportSupport::Missing("children get only eryx:process/run and pipe @0.1".into())
         };
     }
     if path == "wasi:cli/run" {
