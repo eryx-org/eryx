@@ -33,6 +33,9 @@
 #               Cargo.lock version `crate_version` must match
 #   npm       - vendored npm package name, matched against the `name@version`
 #               lines in crates/eryx-guest-js/src/node/*.js
+#   update    - the command that brings the entry and what it covers back in
+#               step, named in the check's error when its crate version or a
+#               covered file's sha256 no longer matches
 
 [[component]]
 name = "CPython"
@@ -435,15 +438,17 @@ license = "Apache-2.0 WITH LLVM-exception"
 url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
 # Adapts WASI preview 1 command modules into components (#993): the release
 # asset of the wasmtime eryx links, so a wasmtime bump fails this check until
-# the adapter is replaced with the new release's:
-#   gh release download v<version> -R bytecodealliance/wasmtime \
-#     -p wasi_snapshot_preview1.command.wasm -D crates/eryx/adapters --clobber
-# then update version, crate_version and sha256 here, and the
-# wit-component-wasmtime pin in Cargo.toml to wasmtime's wit-component.
+# the adapter is replaced with the new release's. `mise run
+# update-preview1-adapter` does that (and updates version, url,
+# crate_version and sha256 here, and mise.toml's wasmtime CLI pin), and
+# checks wasmtime's LICENSE and the wit-component-wasmtime and
+# wasmtime-environ pins; CI runs it on PRs into
+# multi-guest that change Cargo.lock (.github/workflows/preview1-adapter.yml).
 files = ["third_party/licenses/wasmtime-LICENSE"]
 artifacts = ["host"]
 crate = "wasmtime"
 crate_version = "50.0.2"
+update = "mise run update-preview1-adapter"
 covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "d708f61fca2f39ad1ad3e0e60787c9e7d66c4789fe4046206afb16eda661c717" }]
 
 [[component]]

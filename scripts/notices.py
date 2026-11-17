@@ -484,9 +484,10 @@ def check_manual():
             if not (ROOT / f).is_file():
                 errors.append(f"{c['name']}: missing licence file {f}")
         if "crate" in c and c["crate_version"] not in lock_version(c["crate"]):
+            fix = f"run `{c['update']}`" if "update" in c else "update the entry and its licence files"
             errors.append(
                 f"{c['name']}: {c['crate']} is {sorted(lock_version(c['crate']))} in Cargo.lock, "
-                f"not {c['crate_version']}; update the entry and its licence files"
+                f"not {c['crate_version']}; {fix}"
             )
         if "cli" in c:
             manifest = tomllib.loads((ROOT / c["cli"]).read_text())
@@ -529,17 +530,18 @@ def check_manual():
         if not any(artifact in c["artifacts"] and c.get("rust_toolchain") == toolchain for c in comps):
             errors.append(f"{artifact}: no third_party/manual.toml entry for the Rust toolchain {toolchain}")
 
-    covers = {cv["path"]: (c["name"], cv.get("sha256")) for c in comps for cv in c.get("covers", [])}
+    covers = {cv["path"]: (c["name"], cv.get("sha256"), c.get("update")) for c in comps for cv in c.get("covers", [])}
     for d in VENDORED_DIRS:
         for f in sorted(d.glob("*.zst")):
             rel = str(f.relative_to(ROOT))
             if rel not in covers:
                 errors.append(f"{rel} has no entry in third_party/manual.toml")
-    for rel, (name, sha) in sorted(covers.items()):
+    for rel, (name, sha, update) in sorted(covers.items()):
         if not (ROOT / rel).exists():
             errors.append(f"{name}: covers {rel}, which doesn't exist")
         elif sha and hashlib.sha256((ROOT / rel).read_bytes()).hexdigest() != sha:
-            errors.append(f"{name}: {rel} has changed since its entry was written; check the entry and update its sha256")
+            fix = f"run `{update}`" if update else "check the entry and update its sha256"
+            errors.append(f"{name}: {rel} has changed since its entry was written; {fix}")
 
     listed = {n for c in comps for n in c.get("stdlib", [])}
     shipped = stdlib_names()
