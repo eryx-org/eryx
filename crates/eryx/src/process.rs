@@ -25,8 +25,9 @@
 //!   (#812); otherwise none.
 //! - **Commands:** a child whose command was registered with
 //!   [`Command::allow_spawn`] runs commands itself through
-//!   `eryx:process/run`, to completion, with the same commands, filesystem,
-//!   network and execution limits, at most `MAX_SPAWN_DEPTH` deep.
+//!   `eryx:process/run`, to completion, or `eryx:process/pipe`, with live
+//!   pipes (see [`piped`]), with the same commands, filesystem, network and
+//!   execution limits, at most `MAX_SPAWN_DEPTH` deep.
 //! - **Limits:** children burn the parent execution's fuel as they run (at
 //!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
 //!   work per running child, and stop at its timeout and cancellation. The
@@ -668,13 +669,16 @@ impl Command {
     }
 
     /// Let this command's children run commands themselves, through
-    /// `eryx:process/run`, as git runs `git` for `stash` or `worktree add`.
+    /// `eryx:process/run`, as git runs `git` for `stash` or `worktree add`,
+    /// or `eryx:process/pipe`, with live pipes, as git runs its
+    /// `remote-https` helper.
     ///
     /// They resolve names against the same commands, see the same filesystem
     /// and get the same child network as the shell's children, and share
     /// their execution's limits: its fuel, child memory, live children and
     /// host memory. Children nest at most 4 deep (the shell's are the
-    /// first), and each nested run's stdout and stderr are capped at 16 MiB.
+    /// first), and each nested run's stdout and stderr are capped at 16 MiB
+    /// (a piped command's flow through pipes instead).
     /// A command spawns only if it was registered with this too.
     #[must_use]
     pub fn allow_spawn(mut self) -> Self {

@@ -229,7 +229,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   wasi-libc ignores both (WebAssembly/wasi-libc#915).
 - **What children get:** WASI 0.2.x and 0.3.x `wasi:cli`, `wasi:clocks`,
   `wasi:filesystem`, `wasi:random` and `wasi:sockets` (and 0.2's `wasi:io`),
-  plus `eryx:process/run@0.1` for commands registered with `allow_spawn`.
+  plus `eryx:process/run@0.1` and `eryx:process/pipe@0.1` for commands
+  registered with `allow_spawn`: `run` runs a command to completion, and
+  `pipe` starts one with live pipes to its stdin and stdout (as git talks to
+  its `remote-https` helper).
   Nothing else: no `wasi:http` (children reach the network over sockets,
   through the proxy below), and no WASI prereleases. A command importing
   anything else is refused when it's loaded (`Command::from_file` and
