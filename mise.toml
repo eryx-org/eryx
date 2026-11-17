@@ -687,6 +687,10 @@ sources = [
 ]
 outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
 
+[tasks.update-preview1-adapter]
+description = "Update the vendored WASI preview 1 command adapter (and its notices entry) to the wasmtime in Cargo.lock; check wasmtime's LICENSE and the pins that follow it"
+run = "python3 scripts/update_preview1_adapter.py"
+
 [tasks.notices]
 description = "Write each shipped artifact's third-party notices to target/notices (#837)"
 depends = ["ensure-rust-src"]

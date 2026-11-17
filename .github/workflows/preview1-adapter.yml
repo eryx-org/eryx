@@ -1,0 +1,73 @@
+# Keep the vendored WASI preview 1 command adapter in step with wasmtime on
+# Renovate's wasmtime bumps: run `scripts/update_preview1_adapter.py` (what
+# `mise run update-preview1-adapter` runs) on the PR, and push its changes
+# (the adapter and its third_party/manual.toml entry) back to the PR branch.
+#
+# - Only on renovate[bot]'s own branches in this repository, never a fork's:
+#   pull_request (not pull_request_target) runs the PR's code, and secrets
+#   aren't given to fork PRs anyway.
+# - The push uses the release-plz App's token (as release-plz.yml does), so it
+#   starts CI on the new commit; a GITHUB_TOKEN push wouldn't. The run that
+#   push triggers finds nothing to change, so it doesn't loop.
+# - A change the script can't make (wasmtime's LICENSE, or the
+#   wit-component-wasmtime or wasmtime-environ pin) fails the job, naming it.
+
+name: preview1-adapter
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+
+permissions: {}
+
+concurrency:
+  group: preview1-adapter-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Sync the preview1 adapter
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.pull_request.user.login == 'renovate[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && startsWith(github.event.pull_request.head.ref, 'renovate/')
+    permissions:
+      contents: read
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          # Only pushing a commit to the PR branch.
+          permission-contents: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Update the adapter to Cargo.lock's wasmtime
+        env:
+          # Read-only, for GitHub API rate limits.
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/update_preview1_adapter.py
+
+      - name: Push the changes to the PR branch
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          if git diff --quiet; then
+            echo "The preview1 adapter is already in step; nothing to push."
+            exit 0
+          fi
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+          git commit -am "chore(deps): update the preview1 adapter to Cargo.lock's wasmtime"
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${BRANCH}"

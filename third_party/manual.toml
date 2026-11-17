@@ -435,11 +435,11 @@ license = "Apache-2.0 WITH LLVM-exception"
 url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
 # Adapts WASI preview 1 command modules into components (#993): the release
 # asset of the wasmtime eryx links, so a wasmtime bump fails this check until
-# the adapter is replaced with the new release's:
-#   gh release download v<version> -R bytecodealliance/wasmtime \
-#     -p wasi_snapshot_preview1.command.wasm -D crates/eryx/adapters --clobber
-# then update version, crate_version and sha256 here, and the
-# wit-component-wasmtime pin in Cargo.toml to wasmtime's wit-component.
+# the adapter is replaced with the new release's. `mise run
+# update-preview1-adapter` does that (and updates version, url,
+# crate_version and sha256 here), and checks wasmtime's LICENSE and the
+# wit-component-wasmtime and wasmtime-environ pins; CI runs it on Renovate's
+# wasmtime bumps (.github/workflows/preview1-adapter.yml).
 files = ["third_party/licenses/wasmtime-LICENSE"]
 artifacts = ["host"]
 crate = "wasmtime"
