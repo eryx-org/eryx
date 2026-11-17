@@ -358,10 +358,19 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
 
             // Creating checks and creates in one storage step, so concurrent
             // `CREATE|EXCLUSIVE` opens (lockfiles) can't both succeed.
+            let unlinked = self.ctx.open_files.is_unlinked(0, &full_path);
             let created = if create && descriptor.dir_perms.contains(DirPerms::MUTATE) {
-                self.ctx.storage.create_file(&full_path, exclusive).await?
+                if unlinked {
+                    // A new file takes the unlinked name, replacing the old
+                    // contents that open descriptors still use.
+                    self.ctx.open_files.set_linked(0, &full_path, true);
+                    self.ctx.storage.write(&full_path, &[]).await?;
+                    true
+                } else {
+                    self.ctx.storage.create_file(&full_path, exclusive).await?
+                }
             } else {
-                let exists = self.ctx.storage.exists(&full_path).await?;
+                let exists = !unlinked && self.ctx.storage.exists(&full_path).await?;
                 if exclusive && exists {
                     return Err(crate::VfsError::AlreadyExists(full_path).into());
                 }
@@ -397,15 +406,20 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
                 }
             }
 
-            let mut new_descriptor = VfsDescriptor::file(full_path, file_perms);
+            let mut new_descriptor = VfsDescriptor::file(full_path.clone(), file_perms);
             new_descriptor.mount_file_perms = descriptor.mount_file_perms;
             let resource = self.table.push(new_descriptor)?;
+            self.ctx.open_files.open(0, &full_path);
             Ok(resource)
         }
     }
 
-    fn drop(&mut self, fd: Resource<VfsDescriptor>) -> wasmtime::Result<()> {
-        self.table.delete(fd)?;
+    async fn drop(&mut self, fd: Resource<VfsDescriptor>) -> wasmtime::Result<()> {
+        let desc = self.table.delete(fd)?;
+        if !desc.is_dir && self.ctx.open_files.close(0, &desc.path) {
+            // Nothing is left to report a failure to.
+            let _ = self.ctx.storage.delete(&desc.path).await;
+        }
         Ok(())
     }
 
@@ -431,7 +445,12 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
         let full_path = descriptor.resolve_path(&path)?;
-        self.ctx.storage.rmdir(&full_path).await?;
+        let unlinked = self.ctx.open_files.unlinked_under(0, &full_path);
+        let open_files = &mut self.ctx.open_files;
+        crate::wasi_impl::remove_dir(&self.ctx.storage, &full_path, unlinked, |path| {
+            open_files.set_linked(0, path, true);
+        })
+        .await?;
         Ok(())
     }
 
@@ -456,10 +475,22 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
 
         let old_full_path = old_descriptor.resolve_path(&old_path)?;
         let new_full_path = new_descriptor.resolve_path(&new_path)?;
+        if self.ctx.open_files.is_unlinked(0, &old_full_path) {
+            return Err(crate::VfsError::NotFound(old_full_path).into());
+        }
+        if !self
+            .ctx
+            .open_files
+            .unlinked_under(0, &old_full_path)
+            .is_empty()
+        {
+            return Err(crate::VfsError::Busy(old_full_path).into());
+        }
         self.ctx
             .storage
             .rename(&old_full_path, &new_full_path)
             .await?;
+        self.ctx.open_files.set_linked(0, &new_full_path, true);
         Ok(())
     }
 
@@ -486,7 +517,19 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
         let full_path = descriptor.resolve_path(&path)?;
-        self.ctx.storage.delete(&full_path).await?;
+        if self.ctx.open_files.is_unlinked(0, &full_path) {
+            return Err(crate::VfsError::NotFound(full_path).into());
+        }
+        if !self.ctx.open_files.is_open(0, &full_path) {
+            self.ctx.storage.delete(&full_path).await?;
+            return Ok(());
+        }
+        // Keep the contents for the open descriptors; the last to close
+        // deletes them.
+        if self.ctx.storage.stat(&full_path).await?.is_dir {
+            return Err(crate::VfsError::NotFile(full_path).into());
+        }
+        self.ctx.open_files.set_linked(0, &full_path, false);
         Ok(())
     }
 
@@ -694,5 +737,40 @@ mod tests {
             Err(VfsError::PermissionDenied(_))
         ));
         open("f", read).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unlinked_files_stay_readable_until_closed() {
+        let storage = Arc::new(InMemoryStorage::new());
+        storage.mkdir("/data").await.unwrap();
+        storage.write("/data/f", b"hi").await.unwrap();
+        let mut ctx = VfsCtx::new_empty(ArcStorage::new(storage.clone()));
+        ctx.preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = VfsState {
+            ctx: &mut ctx,
+            table: &mut table,
+        };
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        let data = || Resource::new_borrow(dirs[0].0.rep());
+        let file = state
+            .open_at(
+                data(),
+                types::PathFlags::empty(),
+                "f".to_string(),
+                types::OpenFlags::empty(),
+                types::DescriptorFlags::READ,
+            )
+            .await
+            .unwrap();
+
+        state.unlink_file_at(data(), "f".to_string()).await.unwrap();
+        let (bytes, _) = state
+            .read(Resource::new_borrow(file.rep()), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"hi");
+        HostDescriptor::drop(&mut state, file).await.unwrap();
+        assert!(!storage.exists("/data/f").await.unwrap());
     }
 }

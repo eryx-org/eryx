@@ -21,6 +21,7 @@ pub use ipnet::IpNet;
 
 mod policy;
 mod proxy;
+mod response;
 use ipnet::{Ipv4Net, Ipv6Net};
 use policy::{CheckedTcp, NetPolicy, RequestFramer, ResponseMasker};
 pub use proxy::{ChildNetPolicy, ChildNetwork, ChildProxy};
@@ -558,6 +559,26 @@ impl NetConfig {
         for rule in &self.http_rules {
             rule.validate()?;
         }
+        let patterns = [
+            ("allowed_hosts", &self.allowed_hosts),
+            ("blocked_hosts", &self.blocked_hosts),
+            ("internal_hosts", &self.internal_hosts),
+        ]
+        .into_iter()
+        .flat_map(|(field, patterns)| patterns.iter().map(move |p| (field, p)))
+        .chain(
+            self.http_rules
+                .iter()
+                .map(|rule| ("an HTTP rule's host", &rule.host)),
+        );
+        for (field, pattern) in patterns {
+            if pattern != "*" && !is_host_pattern(&normalize_host(pattern)) {
+                return Err(format!(
+                    "{field} pattern {pattern:?} names no host once its trailing dot is \
+                     ignored"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -821,20 +842,19 @@ impl HttpRule {
     }
 }
 
-/// The decoded path of request target `target` (a path, or an absolute
-/// URL's path), without its query; `None` if it has none or is ambiguous:
-/// see [`HttpRule`].
+/// The decoded path of request target `target` (origin-form, a path, or
+/// absolute-form, an absolute URL's path), without its query; `None` if it
+/// has none or is ambiguous: see [`HttpRule`]. Any other target (`*`, an
+/// authority, or something a server might resolve as a relative path, like
+/// `../x?u=http://host/`) has none.
 fn request_path(target: &str) -> Option<String> {
-    let path = if target.starts_with('/') {
-        target
+    let uri = if target.starts_with('/') {
+        parse_target(target)?
     } else {
-        let (_, rest) = target.split_once("://")?;
-        match rest.find(['/', '?', '#']) {
-            Some(i) if rest[i..].starts_with('/') => &rest[i..],
-            _ => "/",
-        }
+        absolute_form(target)?
     };
-    let path = path.split(['?', '#']).next().unwrap_or_default();
+    // The raw path: parse_target checked the parsed target is the text.
+    let path = uri.path();
 
     let mut decoded = Vec::with_capacity(path.len());
     let mut bytes = path.bytes();
@@ -867,10 +887,68 @@ fn request_path(target: &str) -> Option<String> {
     Some(decoded)
 }
 
-/// `host` lowercased, without a trailing dot or IPv6 brackets.
+/// `host` lowercased, without a trailing dot or IPv6 brackets, and an IP
+/// address in its canonical form: the resolver accepts other spellings of
+/// the same address (`2130706433`, `0x7f.1`, `0177.0.0.1`,
+/// `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1`), so they must match the same
+/// patterns. An IPv4-mapped IPv6 address becomes its IPv4 address.
 fn normalize_host(host: &str) -> String {
     let host = host.strip_circumfix('[', ']').unwrap_or(host);
-    host.trim_suffix('.').to_ascii_lowercase()
+    let host = host.trim_suffix('.').to_ascii_lowercase();
+    // The resolver accepts a zone (`fe80::1%lo`, `::1%1`, and with
+    // systemd-resolved `203.0.113.5%lo`) after an address and connects to
+    // the address, so match on the address alone.
+    let addr = host
+        .split_once('%')
+        .map_or(host.as_str(), |(addr, _zone)| addr);
+    if let Ok(v6) = addr.parse::<Ipv6Addr>() {
+        return match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => v6.to_string(),
+        };
+    }
+    match parse_inet_aton(addr) {
+        Some(v4) => v4.to_string(),
+        None => host,
+    }
+}
+
+/// `host` as an IPv4 address in any form `inet_aton` (and so the system
+/// resolver) accepts: one to four parts, each decimal, `0x` hex (with at
+/// least one digit) or leading-`0` octal, the last filling the remaining
+/// bytes.
+fn parse_inet_aton(host: &str) -> Option<Ipv4Addr> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let (digits, radix) = if let Some(hex) = part.strip_prefix("0x") {
+            (hex, 16)
+        } else if part.len() > 1 && part.starts_with('0') {
+            (&part[1..], 8)
+        } else {
+            (*part, 10)
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        values.push(u32::from_str_radix(digits, radix).ok()?);
+    }
+    let (last, init) = values.split_last()?;
+    if init.iter().any(|&v| v > 0xff) {
+        return None;
+    }
+    let last_bits = 8 * (4 - init.len() as u32);
+    if last_bits < 32 && *last >= 1 << last_bits {
+        return None;
+    }
+    let high = init
+        .iter()
+        .enumerate()
+        .fold(0u32, |acc, (i, &v)| acc | (v << (24 - 8 * i)));
+    Some(Ipv4Addr::from(high | last))
 }
 
 // ============================================================================
@@ -966,23 +1044,45 @@ enum Body {
     Chunked(Chunked),
 }
 
-/// Position within a `Transfer-Encoding: chunked` body.
+/// Position within a `Transfer-Encoding: chunked` body, which is parsed
+/// strictly: a server more lenient than this could read the next request as
+/// part of the body, and one stricter would refuse it, so anything that
+/// isn't exactly the RFC 9112 grammar is refused.
 #[derive(Debug)]
 enum Chunked {
-    /// On a chunk-size line; `ext` once past the hex digits.
-    Size { size: usize, ext: bool },
+    /// On a chunk-size line, after `digits` hex digits giving `size`.
+    Size {
+        size: usize,
+        digits: usize,
+        part: SizePart,
+    },
     /// Inside chunk data, with this many bytes left.
     Data(usize),
-    /// On the line break after chunk data.
-    DataEnd,
-    /// In the trailer section; `line` is the current line's length so far.
-    Trailer { line: usize },
+    /// On the `\r\n` after chunk data; `cr` once its `\r` is seen.
+    DataEnd { cr: bool },
+    /// In the trailer section; `line` is the current line's length so far,
+    /// and `cr` whether its `\r` is seen.
+    Trailer { line: usize, cr: bool },
+}
+
+/// Where a chunk-size line is, after its hex digits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SizePart {
+    /// Still in the digits.
+    Digits,
+    /// In whitespace after them, before a `;`.
+    Space,
+    /// In the chunk extensions, after a `;`.
+    Ext,
+    /// After the line's `\r`, before its `\n`.
+    Cr,
 }
 
 impl Chunked {
     const START: Self = Self::Size {
         size: 0,
-        ext: false,
+        digits: 0,
+        part: SizePart::Digits,
     };
 
     /// Advance over `data`, returning the length of the prefix that ends the
@@ -998,34 +1098,49 @@ impl Chunked {
                     *left -= n;
                     i += n;
                     if *left == 0 {
-                        *self = Self::DataEnd;
+                        *self = Self::DataEnd { cr: false };
                     }
                     continue;
                 }
-                Self::Size { size, ext } => match byte {
-                    b'\n' if *size == 0 => *self = Self::Trailer { line: 0 },
-                    b'\n' => *self = Self::Data(*size),
-                    b'\r' => {}
-                    _ if *ext => {}
-                    b';' | b' ' | b'\t' => *ext = true,
-                    _ => {
+                Self::Size { size, digits, part } => match (*part, byte) {
+                    (SizePart::Cr, b'\n') if *size == 0 => {
+                        *self = Self::Trailer { line: 0, cr: false };
+                    }
+                    (SizePart::Cr, b'\n') => *self = Self::Data(*size),
+                    (SizePart::Cr, _) => return Err(malformed()),
+                    // A size needs at least one digit before anything else.
+                    (_, _) if *digits == 0 && !byte.is_ascii_hexdigit() => {
+                        return Err(malformed());
+                    }
+                    (_, b'\r') => *part = SizePart::Cr,
+                    (_, b'\n') => return Err(malformed()),
+                    (SizePart::Ext, _) => {}
+                    (_, b';') => *part = SizePart::Ext,
+                    (_, b' ' | b'\t') => *part = SizePart::Space,
+                    (SizePart::Digits, _) => {
                         let digit = char::from(byte).to_digit(16).ok_or_else(malformed)?;
                         *size = size
                             .checked_mul(16)
                             .and_then(|s| s.checked_add(digit as usize))
                             .ok_or_else(malformed)?;
+                        *digits += 1;
                     }
+                    (SizePart::Space, _) => return Err(malformed()),
                 },
-                Self::DataEnd => {
-                    if byte == b'\n' {
-                        *self = Self::START;
+                Self::DataEnd { cr } => match (*cr, byte) {
+                    (false, b'\r') => *cr = true,
+                    (true, b'\n') => *self = Self::START,
+                    _ => return Err(malformed()),
+                },
+                Self::Trailer { line, cr } => match (*cr, byte) {
+                    (true, b'\n') if *line == 0 => return Ok(Some(i + 1)),
+                    (true, b'\n') => {
+                        *line = 0;
+                        *cr = false;
                     }
-                }
-                Self::Trailer { line } => match byte {
-                    b'\n' if *line == 0 => return Ok(Some(i + 1)),
-                    b'\n' => *line = 0,
-                    b'\r' => {}
-                    _ => *line += 1,
+                    (false, b'\r') => *cr = true,
+                    (false, b'\n') | (true, _) => return Err(malformed()),
+                    (false, _) => *line += 1,
                 },
             }
             i += 1;
@@ -1308,6 +1423,11 @@ impl ConnectionManager {
     /// Returns the bytes to send now: empty while a request's headers are
     /// still incomplete.
     fn process_write_data(&mut self, handle: u32, data: &[u8]) -> Result<Vec<u8>, TcpError> {
+        self.framer(handle)?.frame(data)
+    }
+
+    /// The request framer of `handle`, created on its first write or read.
+    fn framer(&mut self, handle: u32) -> Result<&mut RequestFramer, TcpError> {
         if !self.http_states.contains_key(&handle) {
             let host = self
                 .connection_hosts
@@ -1320,8 +1440,17 @@ impl ConnectionManager {
         }
         self.http_states
             .get_mut(&handle)
-            .ok_or(TcpError::InvalidHandle)?
-            .frame(data)
+            .ok_or(TcpError::InvalidHandle)
+    }
+
+    /// Create the response masker of `handle`, paired with its request
+    /// framer, if it has none yet.
+    fn ensure_masker(&mut self, handle: u32) -> Result<(), TcpError> {
+        if !self.read_states.contains_key(&handle) {
+            let masker = self.framer(handle)?.response_masker();
+            self.read_states.insert(handle, masker);
+        }
+        Ok(())
     }
 
     /// Whether writes on `handle` go through HTTP request framing.
@@ -1379,8 +1508,16 @@ impl ConnectionManager {
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
     /// bytes than requested. Real secret values that appear verbatim in the
     /// data (even split across reads) are replaced with their placeholders;
-    /// compressed or otherwise encoded copies are not. Bytes that may start a
-    /// secret are held back for up to 100 ms waiting for the rest.
+    /// compressed or otherwise encoded copies are not. Only secrets allowed
+    /// for this connection's host are masked, and only on a connection whose
+    /// requests get real values substituted. There, responses are framed:
+    /// a header block is masked whole, a chunked body after de-chunking
+    /// (and re-chunked), and the last few bytes of a body (one less than the
+    /// longest secret value) are held back until more of it arrives or it
+    /// ends (for a close-delimited body, until the connection closes), or,
+    /// between chunks and after a `101` or a `CONNECT`'s `2xx`, the stream
+    /// goes quiet for 100 ms. A reply that isn't a response to a request
+    /// sent, or can't be framed, fails this and every later read.
     pub async fn tcp_read(
         &mut self,
         handle: u32,
@@ -1389,16 +1526,16 @@ impl ConnectionManager {
     ) -> Result<Vec<u8>, TcpError> {
         let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let len = self.read_len(len)?;
+        self.ensure_masker(handle)?;
         let stream = self
             .tcp_connections
             .get_mut(&handle)
             .ok_or(TcpError::InvalidHandle)?
             .stream();
-
         let masker = self
             .read_states
-            .entry(handle)
-            .or_insert_with(|| self.policy.response_masker());
+            .get_mut(&handle)
+            .ok_or(TcpError::InvalidHandle)?;
         let data = masker
             .read(stream, len, io_timeout)
             .await
@@ -1563,8 +1700,16 @@ impl ConnectionManager {
     /// `len` is capped at 1 MiB; like any socket read, this may return fewer
     /// bytes than requested. Real secret values that appear verbatim in the
     /// data (even split across reads) are replaced with their placeholders;
-    /// compressed or otherwise encoded copies are not. Bytes that may start a
-    /// secret are held back for up to 100 ms waiting for the rest.
+    /// compressed or otherwise encoded copies are not. Only secrets allowed
+    /// for this connection's host are masked, and only on a connection whose
+    /// requests get real values substituted. There, responses are framed:
+    /// a header block is masked whole, a chunked body after de-chunking
+    /// (and re-chunked), and the last few bytes of a body (one less than the
+    /// longest secret value) are held back until more of it arrives or it
+    /// ends (for a close-delimited body, until the connection closes), or,
+    /// between chunks and after a `101` or a `CONNECT`'s `2xx`, the stream
+    /// goes quiet for 100 ms. A reply that isn't a response to a request
+    /// sent, or can't be framed, fails this and every later read.
     pub async fn tls_read(
         &mut self,
         handle: u32,
@@ -1573,15 +1718,15 @@ impl ConnectionManager {
     ) -> Result<Vec<u8>, TlsError> {
         let io_timeout = Self::effective_timeout(self.policy.config.io_timeout, timeout_ms);
         let len = self.read_len(len).map_err(TlsError::Tcp)?;
+        self.ensure_masker(handle).map_err(TlsError::Tcp)?;
         let stream = self
             .tls_connections
             .get_mut(&handle)
             .ok_or(TlsError::InvalidHandle)?;
-
         let masker = self
             .read_states
-            .entry(handle)
-            .or_insert_with(|| self.policy.response_masker());
+            .get_mut(&handle)
+            .ok_or(TlsError::InvalidHandle)?;
         let data = masker
             .read(stream, len, io_timeout)
             .await
@@ -1711,19 +1856,6 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
         .map(|pos| pos + 4)
 }
 
-/// Request-line prefixes recognised as the start of an HTTP request.
-const HTTP_METHODS: [&[u8]; 9] = [
-    b"GET ",
-    b"POST ",
-    b"PUT ",
-    b"DELETE ",
-    b"PATCH ",
-    b"HEAD ",
-    b"OPTIONS ",
-    b"CONNECT ",
-    b"TRACE ",
-];
-
 /// Whether `data` may start an HTTP request, by the shape of its first
 /// line: a method token, then whitespace and a target that starts with `/`
 /// or `*` or contains `://`, or `HTTP/` (ignoring case) anywhere on the
@@ -1733,11 +1865,13 @@ const HTTP_METHODS: [&[u8]; 9] = [
 /// (HTTP/0.9 included) is framed, and `request_line` then refuses the
 /// malformed ones.
 fn request_start(data: &[u8]) -> Option<bool> {
-    let is_tchar = |b: &u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b);
-    let method_len = data.iter().take_while(|b| is_tchar(b)).count();
+    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
+    let method_len = data.iter().take_while(|b| is_tchar(**b)).count();
+    // Only a method token and then whitespace can start a request line, so
+    // anything else (e.g. a binary protocol's header) is known at once.
     match data.get(method_len) {
         None => return None,
-        Some(_) if method_len > 0 => {}
+        Some(b) if method_len > 0 && is_space(b) => {}
         Some(_) => return Some(false),
     }
     let line_end = data.iter().position(|&b| b == b'\n')?;
@@ -1745,7 +1879,6 @@ fn request_start(data: &[u8]) -> Option<bool> {
     if line.windows(5).any(|w| w.eq_ignore_ascii_case(b"HTTP/")) {
         return Some(true);
     }
-    let is_space = |b: &u8| matches!(b, b' ' | b'\t');
     let rest = &line[method_len..];
     if !rest.first().is_some_and(is_space) {
         return Some(false);
@@ -1762,17 +1895,28 @@ fn request_start(data: &[u8]) -> Option<bool> {
     )
 }
 
-/// Check if data starts with an HTTP request method.
-fn is_http_request(data: &[u8]) -> bool {
-    HTTP_METHODS.iter().any(|m| data.starts_with(m))
+/// Whether a request's `headers` make what follows it something other than
+/// requests: a `CONNECT` (a tunnel, maybe to another host) or any `Upgrade`.
+fn switches_protocols(headers: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(headers);
+    let mut lines = text.split("\r\n");
+    // Methods are case-sensitive, but a lenient proxy may take `connect`.
+    let connect = lines.next().is_some_and(|line| {
+        line.split(' ')
+            .next()
+            .is_some_and(|method| method.eq_ignore_ascii_case("CONNECT"))
+    });
+    connect
+        || lines.any(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
+        })
 }
 
-/// Whether `data` is, or may still become, the start of an HTTP request.
-/// Anything else is passed through without waiting for a blank line.
-fn could_be_http_request(data: &[u8]) -> bool {
-    HTTP_METHODS
-        .iter()
-        .any(|m| data.starts_with(m) || m.starts_with(data))
+/// Whether `b` is an HTTP token character (RFC 9110 `tchar`), as in a method
+/// or a header name.
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
 /// The hosts a request names: its absolute-form target's authority (e.g.
@@ -1785,12 +1929,11 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     let (_, target) = request_line(headers)?;
     let lines = headers.lines().skip(1);
     let mut hosts = Vec::new();
-    if let Some((_, rest)) = is_absolute_form(target)
-        .then(|| target.split_once("://"))
-        .flatten()
-    {
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        if authority.is_empty() || authority.contains('@') {
+    if let Some(uri) = absolute_form(target) {
+        // As it's written in `target` (see parse_target), borrowed from it.
+        let start = uri.scheme_str()?.len() + "://".len();
+        let authority = target.get(start..start + uri.authority()?.as_str().len())?;
+        if authority.contains('@') {
             return None;
         }
         hosts.push(authority);
@@ -1804,15 +1947,74 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     Some(hosts)
 }
 
-/// Whether request target `target` is absolute-form (`scheme://host/...`),
-/// rather than a path that may contain `://` in its query.
+/// Whether request target `target` is absolute-form (`scheme://host/...`).
 fn is_absolute_form(target: &str) -> bool {
-    !target.starts_with('/') && target.contains("://")
+    absolute_form(target).is_some()
+}
+
+/// `target` parsed as a request target (RFC 9112's origin-, absolute- or
+/// authority-form, or `*`), if the parse reads back as exactly `target`.
+/// What HTTP rules check has to be what the server gets, so a target the
+/// parser reads differently from its text is refused: one with a fragment
+/// (dropped) or an upper-case scheme (lowered). The one difference allowed
+/// is the `/` the parser gives an absolute URL with an empty path
+/// (`http://host`, `http://host?q`), which is what an empty path means
+/// (RFC 9112 section 3.2.2), so it's checked as `/`.
+fn parse_target(target: &str) -> Option<http::Uri> {
+    let uri: http::Uri = target.parse().ok()?;
+    // Not `uri == target`, which ignores case in the scheme and authority.
+    let read_back = uri.to_string();
+    if read_back == target {
+        return Some(uri);
+    }
+    let prefix = format!("{}://{}", uri.scheme_str()?, uri.authority()?);
+    let rest = target.strip_prefix(&prefix)?;
+    (rest.is_empty() || rest.starts_with('?'))
+        .then(|| format!("{prefix}/{rest}"))
+        .filter(|with_slash| *with_slash == read_back)
+        .map(|_| uri)
+}
+
+/// `target` parsed, if it's absolute-form: a scheme at its very start (a
+/// letter, then letters, digits, `+`, `-` or `.`; the parser takes any
+/// scheme characters), `://` and an authority. A target with `://` anywhere
+/// else (`../x?u=http://host/`, which a server may read as a relative path)
+/// isn't.
+fn absolute_form(target: &str) -> Option<http::Uri> {
+    let uri = parse_target(target)?;
+    let mut scheme = uri.scheme_str()?.chars();
+    let scheme_ok = scheme.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    (scheme_ok && uri.authority().is_some_and(plain_authority)).then_some(uri)
+}
+
+/// Whether `authority` is a plain `host[:port]`: a host name of letters,
+/// digits, `-`, `.` and `_`, or a bracketed IPv6 address, and a port of
+/// 0-65535. The parser takes more (`%` escapes, which a server may decode
+/// into a path, like `..%2fsecret`; other sub-delims; zones).
+fn plain_authority(authority: &http::uri::Authority) -> bool {
+    let host = authority.host();
+    let host_ok = match host.strip_circumfix('[', ']') {
+        Some(v6) => v6.parse::<Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+        }
+    };
+    let port_ok = match &authority.as_str()[host.len()..] {
+        "" => true,
+        port => port.strip_prefix(':').is_some_and(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+        }),
+    };
+    host_ok && port_ok
 }
 
 /// The method and target of a request whose request line is exactly
 /// `METHOD SP target SP HTTP/1.x`, and whose target contains no whitespace or
-/// `\`.
+/// `\` and is in a request-target form ([`request_target_form`]).
 fn request_line(headers: &str) -> Option<(&str, &str)> {
     let mut parts = headers.lines().next()?.split(' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
@@ -1821,10 +2023,33 @@ fn request_line(headers: &str) -> Option<(&str, &str)> {
         || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         || target.is_empty()
         || target.contains(|c: char| c.is_whitespace() || c == '\\')
+        || !request_target_form(method, target)
     {
         return None;
     }
     Some((method, target))
+}
+
+/// Whether `target` is in one of RFC 9112's four request-target forms for
+/// `method`: origin-form (`/path?query`), absolute-form (see
+/// [`absolute_form`]), authority-form (`host:port`) for a CONNECT, or `*` for
+/// an OPTIONS. Anything else is refused, since a server may resolve it in
+/// ways the rules don't see: `../x?u=http://host/` looks absolute to a naive
+/// check but is a relative path to a lenient server.
+fn request_target_form(method: &str, target: &str) -> bool {
+    let Some(uri) = parse_target(target) else {
+        return false;
+    };
+    let path = uri.path_and_query().map(http::uri::PathAndQuery::as_str);
+    match (uri.scheme(), uri.authority(), path) {
+        (None, None, Some("*")) => method.eq_ignore_ascii_case("OPTIONS"),
+        (None, None, Some(_)) => true,
+        (None, Some(authority), None) => {
+            method.eq_ignore_ascii_case("CONNECT") && plain_authority(authority)
+        }
+        (Some(_), Some(_), Some(_)) => absolute_form(target).is_some(),
+        _ => false,
+    }
 }
 
 /// `authority` without a trailing `:port`.
@@ -1874,9 +2099,7 @@ fn request_body(headers: &[u8]) -> Result<Body, TcpError> {
         }
         let (name, value) = line
             .split_once(':')
-            .filter(|(name, _)| {
-                !name.is_empty() && !name.contains(|c: char| c.is_ascii_whitespace())
-            })
+            .filter(|(name, _)| !name.is_empty() && name.bytes().all(is_tchar))
             .ok_or_else(|| ambiguous("malformed header line"))?;
         let value = value.trim_matches([' ', '\t']);
         if name.eq_ignore_ascii_case("transfer-encoding") {
@@ -1930,18 +2153,28 @@ fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
 /// - `*.example.com` matches `api.example.com` but not `example.com`
 /// - `api.*.com` matches `api.foo.com`
 /// - `exact.host.com` matches only that exact host
+///
+/// Both sides are compared as [`normalize_host`] leaves them: ignoring case,
+/// one trailing dot and IPv6 brackets.
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }
+    // `example.com.` is the same host as `example.com`, so a blocked host
+    // must not get through with a trailing dot.
+    let host = normalize_host(host);
+    let pattern = normalize_host(pattern);
+    // A pattern that normalising empties, or turns into `*` (`*.`), names no
+    // host; `NetConfig::validate` refuses them.
+    if !is_host_pattern(&pattern) {
+        return false;
+    }
     if !pattern.contains('*') {
-        return host.eq_ignore_ascii_case(pattern);
+        return host == pattern;
     }
 
     // Glob matching with * as wildcard: the first part anchors at the
     // start, the last at the end, and the parts between match left to right.
-    let host = host.to_ascii_lowercase();
-    let pattern = pattern.to_ascii_lowercase();
     let parts: Vec<&str> = pattern.split('*').collect();
     let (first, last) = (parts[0], parts[parts.len() - 1]);
     if host.len() < first.len() + last.len() || !host.starts_with(first) || !host.ends_with(last) {
@@ -1985,6 +2218,12 @@ async fn write_counted<S: tokio::io::AsyncWrite + Unpin>(
         Err(_) => Err(None),
     };
     (accepted, written)
+}
+
+/// Whether a normalised host pattern names some hosts and not all: not
+/// empty, and not `*` (which is only a pattern as written).
+fn is_host_pattern(normalized: &str) -> bool {
+    !normalized.is_empty() && normalized != "*"
 }
 
 #[cfg(test)]
@@ -2063,6 +2302,8 @@ mod tests {
         assert_eq!(read_buf_len(u32::MAX), MAX_READ_LEN);
     }
 
+    use super::policy::{HttpParsingState, ReadState, read_masked};
+    use super::response::{CARRY_GRACE, RequestKind};
     use super::*;
 
     #[test]
@@ -2211,21 +2452,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_http_request() {
-        assert!(is_http_request(b"GET / HTTP/1.1\r\n"));
-        assert!(is_http_request(b"POST /api HTTP/1.1\r\n"));
-        assert!(is_http_request(b"PUT /resource HTTP/1.1\r\n"));
-        assert!(is_http_request(b"DELETE /item HTTP/1.1\r\n"));
-        assert!(is_http_request(b"PATCH /update HTTP/1.1\r\n"));
-        assert!(is_http_request(b"HEAD / HTTP/1.1\r\n"));
-        assert!(is_http_request(b"OPTIONS * HTTP/1.1\r\n"));
-
-        assert!(!is_http_request(b"NOTHTTP"));
-        assert!(!is_http_request(b""));
-        assert!(!is_http_request(b"GET"));
-    }
-
-    #[test]
     fn test_is_http2() {
         assert!(is_http2(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
         assert!(!is_http2(b"GET / HTTP/1.1\r\n"));
@@ -2260,6 +2486,9 @@ mod tests {
             "GET /a HTTP/1.1\nHost: x\n\nGET /b HTTP/1.1\r\n\r\n",
             "GET /a HTTP/1.1\r\nX-A: b\rc\r\n\r\n",
             "GET /a HTTP/1.1\r\nno colon\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding\x0b: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length\x00: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nX(A): b\r\n\r\n",
         ] {
             assert!(body(headers).is_err(), "{headers:?}");
         }
@@ -3287,6 +3516,185 @@ mod tests {
         );
     }
 
+    /// Without HTTP rules too, bytes the framing can't read as a request
+    /// never let a later write be parsed as a new one: the server may read
+    /// that write as the earlier request's body, so a secret substituted
+    /// into its "headers" would reach the server outside any header.
+    #[test]
+    fn unframed_writes_never_lead_to_substitution() {
+        let smuggled: &[u8] = b"GET / HTTP/1.1\r\nHost: api.example.com\r\nX: &text=PH\r\n\r\n";
+        let post = format!(
+            "POST /x HTTP/1.1\r\nHost: api.example.com\r\nContent-Length: {}\r\n\r\n",
+            smuggled.len()
+        );
+
+        // A leading empty line is refused, and so is the connection after it.
+        let mut m = framing_manager();
+        let preceded = format!("\r\n{post}");
+        assert!(m.process_write_data(1, preceded.as_bytes()).is_err());
+        assert!(m.process_write_data(1, smuggled).is_err());
+        let mut m = framing_manager();
+        assert!(m.process_write_data(1, b"\n").is_err());
+
+        // Bytes that aren't a request pass through, and nothing after them is
+        // parsed or substituted.
+        for first in [
+            &b"\x16\x03\x01"[..],
+            b"PING\r\n",
+            b"SET k v\r\n",
+            b"GET key\r\n",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, first).unwrap(), first);
+            assert_eq!(m.process_write_data(1, smuggled).unwrap(), smuggled);
+        }
+
+        // A request with a method outside the usual ones is framed like any
+        // other, so its body is passed through as a body.
+        let mut m = framing_manager();
+        let propfind = post.replacen("POST", "PROPFIND", 1);
+        assert_eq!(
+            frame(&mut m, &[propfind.as_bytes(), smuggled]),
+            format!("{propfind}{}", String::from_utf8_lossy(smuggled))
+        );
+
+        // A malformed request line is refused.
+        for line in [&b"GET /a b HTTP/1.1\r\n\r\n"[..], b"GET / HTTP/2.0\r\n\r\n"] {
+            let mut m = framing_manager();
+            assert!(m.process_write_data(1, line).is_err(), "{line:?}");
+        }
+    }
+
+    /// A complete request with a body in one write, then another request:
+    /// both get their headers substituted, and the body is left alone.
+    #[test]
+    fn framed_requests_with_bodies_keep_substituting() {
+        let mut m = framing_manager();
+        let post = b"POST / HTTP/1.1\r\nAuthorization: PH\r\nContent-Length: 2\r\n\r\nPH";
+        assert_eq!(
+            frame(&mut m, &[post, GET]),
+            format!(
+                "POST / HTTP/1.1\r\nAuthorization: real\r\nContent-Length: 2\r\n\r\nPH{GET_OUT}"
+            )
+        );
+    }
+
+    /// A binary protocol's first bytes go out at once, whatever byte they
+    /// start with, rather than waiting for a newline (and the connection
+    /// stays unparsed).
+    #[test]
+    fn binary_protocols_are_not_held_back() {
+        for first in [
+            &b"AMQP\x00\x00\x09\x01"[..],
+            b"0\x0c\x02\x01\x01",
+            b"\x16\x03\x01\x02\x00",
+            b"GET\x00",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, first).unwrap(), first, "{first:?}");
+            let later = b"GET / HTTP/1.1\r\nAuthorization: PH\r\n\r\n";
+            assert_eq!(m.process_write_data(1, later).unwrap(), later, "{first:?}");
+        }
+        // A method token that may still be followed by a space waits.
+        let mut m = framing_manager();
+        assert_eq!(frame(&mut m, &[b"GET"]), "");
+        assert_eq!(
+            frame(&mut m, &[b" / HTTP/1.1\r\nAuthorization: PH\r\n\r\n"]),
+            GET_OUT
+        );
+    }
+
+    /// A chunked body is framed exactly by RFC 9112: a size line without a
+    /// hex digit, with junk after its digits, or with a bare CR or LF, and
+    /// anything but CRLF after chunk data or ending a trailer line, are
+    /// refused, so a server can't read the next request as part of the body.
+    #[test]
+    fn chunked_bodies_are_framed_strictly() {
+        let head: &[u8] = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        for body in [
+            &b"\r\n"[..],
+            b" 4\r\nabcd\r\n0\r\n\r\n",
+            b";4\r\nabcd\r\n0\r\n\r\n",
+            b"4 4\r\nabcd\r\n0\r\n\r\n",
+            b"4x\r\nabcd\r\n0\r\n\r\n",
+            b"4\nabcd\r\n0\r\n\r\n",
+            b"4\rxabcd\r\n0\r\n\r\n",
+            b"4;a\nb\r\nabcd\r\n0\r\n\r\n",
+            b"4\r\nabcdXY0\r\n\r\n",
+            b"4\r\nabcd\n0\r\n\r\n",
+            b"4\r\nabcd\r\r\n0\r\n\r\n",
+            b"0\r\nX-T: a\nX-U: b\r\n\r\n",
+            b"0\r\n\n",
+        ] {
+            let mut m = framing_manager();
+            assert!(m.process_write_data(1, head).is_ok());
+            assert!(m.process_write_data(1, body).is_err(), "{body:?}");
+        }
+        // Whitespace before an extension is fine, and so is a trailer.
+        let mut m = framing_manager();
+        let body = "4 ;ext=1\r\nabcd\r\n0\r\nX-T: PH\r\n\r\n";
+        assert_eq!(
+            frame(&mut m, &[head, body.as_bytes(), GET]),
+            format!("{}{body}{GET_OUT}", String::from_utf8_lossy(head))
+        );
+    }
+
+    /// After a `CONNECT` or a request asking for an `Upgrade`, what follows
+    /// may be tunnelled to another host or be another protocol, so it's
+    /// never parsed as requests: passed through as it is without rules, and
+    /// refused with them.
+    #[test]
+    fn nothing_after_connect_or_upgrade_is_substituted() {
+        let later: &[u8] = b"GET / HTTP/1.1\r\nHost: api.example.com\r\nAuthorization: PH\r\n\r\n";
+        for request in [
+            &b"CONNECT evil.example:80 HTTP/1.1\r\nHost: evil.example:80\r\n\r\n"[..],
+            b"connect evil.example:80 HTTP/1.1\r\nHost: evil.example:80\r\n\r\n",
+            b"GET /chat HTTP/1.1\r\nHost: api.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            b"POST / HTTP/1.1\r\nupgrade: h2c\r\nContent-Length: 2\r\n\r\nhi",
+        ] {
+            let mut m = framing_manager();
+            assert_eq!(m.process_write_data(1, request).unwrap(), request);
+            assert_eq!(m.process_write_data(1, later).unwrap(), later);
+            // In the same write too.
+            let mut m = framing_manager();
+            let both = [request, later].concat();
+            assert_eq!(m.process_write_data(1, &both).unwrap(), both);
+        }
+
+        let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+        m.connection_hosts.insert(2, "www.github.com".into());
+        let upgrade = b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(m.process_write_data(2, upgrade).is_ok());
+        assert!(m.process_write_data(2, b"\x81\x05hello").is_err());
+    }
+
+    /// One empty line between requests, which servers skip and some clients
+    /// send after a body, is passed on, and the next request is still
+    /// framed; a second one is refused.
+    #[test]
+    fn one_empty_line_between_requests_is_allowed() {
+        let post: &[u8] = b"POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+        let posted = "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nx";
+        let mut m = framing_manager();
+        assert_eq!(
+            frame(&mut m, &[&[post, b"\r\n"].concat(), GET]),
+            format!("{posted}\r\n{GET_OUT}")
+        );
+        let mut m = framing_manager();
+        assert_eq!(
+            frame(&mut m, &[post, b"\r", &[b"\n", GET].concat()]),
+            format!("{posted}\r\n{GET_OUT}")
+        );
+        let mut m = framing_manager();
+        assert!(
+            m.process_write_data(1, &[post, b"\r\n\r\n"].concat())
+                .is_err()
+        );
+        // Before the first request it's still refused.
+        let mut m = framing_manager();
+        assert!(m.process_write_data(1, &[b"\r\n", GET].concat()).is_err());
+    }
+
     #[test]
     fn test_malformed_chunk_size_is_rejected() {
         let mut m = framing_manager();
@@ -3429,6 +3837,205 @@ mod tests {
         assert_eq!(strip_port("::1"), "::1");
     }
 
+    /// A trailing dot names the same host (`pastebin.com.` is
+    /// `pastebin.com`), so every host check treats the two alike: blocked
+    /// hosts stay blocked, and allowed, internal and secret hosts still match.
+    #[tokio::test]
+    async fn trailing_dot_names_the_same_host_in_every_check() {
+        let config = NetConfig::permissive()
+            .block_host("pastebin.com")
+            .block_host("*.internal.corp")
+            .block_host("Evil.Example.");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "pastebin.com",
+            "pastebin.com.",
+            "PASTEBIN.COM.",
+            "db.internal.corp.",
+            "evil.example",
+            "evil.example.",
+        ] {
+            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+        }
+        assert!(m.policy.check_host("example.com.").is_ok());
+
+        let config = NetConfig::default()
+            .allow_host("api.example.com")
+            .allow_host("*.github.com");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in ["api.example.com.", "API.github.com."] {
+            assert!(m.policy.check_host(host).is_ok(), "{host} refused");
+        }
+        assert!(m.policy.check_host("example.com.").is_err());
+
+        // Secrets go to their allowed hosts with or without the dot.
+        let m = framing_manager();
+        assert!(
+            m.policy
+                .substitute_secrets_in_text("PH", "authorization", "api.example.com.")
+                .is_ok()
+        );
+        assert!(
+            m.policy
+                .substitute_secrets_in_text("PH", "authorization", "other.example.com.")
+                .is_err()
+        );
+
+        // An internal host skips the network checks with the dot too.
+        let config = NetConfig::default()
+            .allow_host("svc.internal")
+            .with_internal_hosts(["svc.internal"])
+            .with_resolver(Fixed);
+        let m = ConnectionManager::new(config, HashMap::new());
+        assert!(m.policy.resolve_allowed("svc.internal.", 443).await.is_ok());
+    }
+
+    /// Other spellings of an IP address (the forms the resolver accepts)
+    /// match the patterns its canonical form does.
+    #[test]
+    fn numeric_hosts_match_in_canonical_form() {
+        let config = NetConfig::permissive()
+            .block_host("127.0.0.1")
+            .block_host("10.*")
+            .block_host("::1")
+            .block_host("[fe80::1]");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "127.0.0.1",
+            "2130706433",
+            "0x7f000001",
+            "0x7f.1",
+            "0177.0.0.1",
+            "127.1",
+            "127.0.1",
+            "0x7F.0.0.01",
+            "127.0.0.1.",
+            "::ffff:127.0.0.1",
+            "[::ffff:7f00:1]",
+            "0xa.0.0.1",
+            "167772161",
+            "012.1.2.3",
+            "::1",
+            "[::1]",
+            "0:0:0:0:0:0:0:1",
+            "0000::0001",
+            "FE80:0:0::1",
+            "::1%1",
+            "[::1%lo]",
+            "::ffff:127.0.0.1%1",
+            "fe80::1%lo",
+            "fe80::1%25eth0",
+            "127.0.0.1%lo",
+        ] {
+            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+        }
+        for host in [
+            "127.0.0.2",
+            "11.0.0.1",
+            "::2",
+            "example.com",
+            "1.2.3.4.5",
+            "08.1.2.3",
+        ] {
+            assert!(m.policy.check_host(host).is_ok(), "{host} refused");
+        }
+        for (host, ip) in [
+            ("2130706433", "127.0.0.1"),
+            ("0x7f.1", "127.0.0.1"),
+            ("0177.0.0.1", "127.0.0.1"),
+            ("1.2.3", "1.2.0.3"),
+            ("0x0", "0.0.0.0"),
+            ("fe80::1%lo", "fe80::1"),
+            ("::ffff:127.0.0.1%1", "127.0.0.1"),
+            ("203.0.113.5%lo", "203.0.113.5"),
+            ("::ffff:10.0.0.1", "10.0.0.1"),
+            ("0:0:0:0:0:0:0:1", "::1"),
+        ] {
+            assert_eq!(normalize_host(host), ip, "{host}");
+        }
+        for host in [
+            "256.1.1.1",
+            "1.256.1.1",
+            "1.2.65536",
+            "4294967296",
+            "1..2",
+            "0xg",
+            "09",
+            "0x",
+            "0x.1",
+            "0x7f.0x",
+            "example.com%lo",
+        ] {
+            assert_eq!(normalize_host(host), host, "{host}");
+        }
+    }
+
+    /// A pattern that's empty or only a wildcard once its trailing dot is
+    /// ignored (`.`, `*.`) names no host: it matches none, and a config
+    /// with one doesn't validate. Bare `*` still matches every host.
+    #[test]
+    fn degenerate_host_patterns_name_no_host() {
+        for pattern in ["", ".", "*.", "[]", "[*.]"] {
+            assert!(!host_matches_pattern("example.com", pattern), "{pattern:?}");
+            for config in [
+                NetConfig::default().allow_host(pattern),
+                NetConfig::default().block_host(pattern),
+                NetConfig::default().with_internal_hosts([pattern]),
+                NetConfig::default().allow_http(HttpRule::new(pattern)),
+            ] {
+                assert!(config.validate().is_err(), "{pattern:?}");
+            }
+        }
+        assert!(host_matches_pattern("example.com", "*"));
+        assert!(NetConfig::default().allow_host("*").validate().is_ok());
+    }
+
+    /// Wildcard patterns with a trailing dot match like their undotted form,
+    /// `::1` and `[::1]` are the same host, and a host not in
+    /// `internal_hosts` doesn't skip the network checks, dot or no dot.
+    #[tokio::test]
+    async fn host_pattern_spellings_match_alike() {
+        let config = NetConfig::permissive()
+            .block_host("*.internal.corp.")
+            .block_host("api.*.com.");
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in [
+            "db.internal.corp",
+            "db.internal.corp.",
+            "api.x.com",
+            "api.x.com.",
+        ] {
+            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+        }
+        assert!(m.policy.check_host("internal.corp").is_ok());
+
+        assert!(same_host("::1", "[::1]"));
+        assert!(host_matches_pattern("[::1]", "::1"));
+        assert!(host_matches_pattern("::1", "[::1]"));
+
+        let config = NetConfig::default()
+            .allow_host("svc.internal")
+            .allow_host("other.internal")
+            .with_internal_hosts(["svc.internal"])
+            .with_resolver(Fixed);
+        let m = ConnectionManager::new(config, HashMap::new());
+        for host in ["other.internal", "other.internal.", "svc.internal.evil"] {
+            assert!(m.policy.resolve_allowed(host, 443).await.is_err(), "{host}");
+        }
+    }
+
+    /// Resolves every name to a loopback address, which the default
+    /// network blocklist refuses.
+    #[derive(Debug)]
+    struct Fixed;
+
+    #[async_trait::async_trait]
+    impl Resolver for Fixed {
+        async fn resolve(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+        }
+    }
+
     /// The certificate must be checked for the host the connection was made
     /// to, so a different TLS name is refused before any handshake.
     #[tokio::test]
@@ -3497,6 +4104,49 @@ mod tests {
     /// Paths match on segment boundaries after decoding, and anything a
     /// server could resolve elsewhere is refused.
     #[test]
+    fn request_targets_must_be_in_a_request_target_form() {
+        for (method, target) in [
+            ("GET", "/x?y=http://z/"),
+            ("GET", "http://host/x"),
+            ("GET", "https://host/"),
+            // An empty path is `/` (RFC 9112 section 3.2.2); proxy clients send it.
+            ("GET", "http://example.com"),
+            ("GET", "http://host?x"),
+            ("GET", "http://[::1]:8080/x"),
+            ("GET", "http://h_o-s.t:80/"),
+            ("CONNECT", "host:443"),
+            ("connect", "[::1]:443"),
+            ("OPTIONS", "*"),
+        ] {
+            let line = format!("{method} {target} HTTP/1.1\r\n\r\n");
+            assert_eq!(request_line(&line), Some((method, target)), "{line}");
+        }
+        for (method, target) in [
+            ("GET", "../x?y=http://host/"),
+            ("GET", "x"),
+            ("GET", "*"),
+            ("GET", "host:443"),
+            ("GET", "http:///x"),
+            ("GET", "HTTPS://host/"),
+            ("GET", "HTTPS://host"),
+            ("GET", "/x#y"),
+            // Authorities must be a plain host[:port].
+            ("GET", "http://..%2fsecret/x"),
+            ("GET", "http://ho!st/"),
+            ("GET", "http://host:99999/"),
+            ("GET", "http://host:/x"),
+            ("GET", "http://[fe80::1%25lo]/"),
+            ("CONNECT", "..%2fx:443"),
+            ("GET", "1http://host/"),
+            ("CONNECT", "host:443/x"),
+            ("OPTIONS", "*x"),
+        ] {
+            let line = format!("{method} {target} HTTP/1.1\r\n\r\n");
+            assert_eq!(request_line(&line), None, "{line}");
+        }
+    }
+
+    #[test]
     fn http_rules_match_methods_and_paths() {
         let config = github_rules();
         let check = |method, target| config.check_http_request("api.github.com", method, target);
@@ -3506,7 +4156,8 @@ mod tests {
             "/repos/org/repo/issues?state=open",
             "/repos/org/%72epo/pulls",
             "/user/keys",
-            "https://api.github.com/repos/org/repo#x",
+            "http://api.github.com/user/keys?x=1",
+            "svn+ssh://api.github.com/user/keys",
         ] {
             assert!(check("GET", target).is_ok(), "{target}");
         }
@@ -3529,6 +4180,21 @@ mod tests {
             "*",
             "api.github.com:443",
             "https://api.github.com",
+            // `://` that isn't right after a scheme at the start: a lenient
+            // server can resolve these as relative paths (`/other`).
+            "../other?x=https://api.github.com/repos/org/repo",
+            "other?x=https://api.github.com/repos/org/repo",
+            "1https://api.github.com/repos/org/repo",
+            "-x://api.github.com/repos/org/repo",
+            "https:///repos/org/repo",
+            "://api.github.com/repos/org/repo",
+            // Targets the parser reads differently from their text: what's
+            // checked has to be what's sent.
+            "https://api.github.com/repos/org/repo#x",
+            "/repos/org/repo#x",
+            "HTTPS://api.github.com/repos/org/repo",
+            // An empty path is `/`, whatever the query says.
+            "https://api.github.com?x=/repos/org/repo",
         ] {
             assert!(check("GET", target).is_err(), "{target}");
         }
@@ -3735,6 +4401,32 @@ mod tests {
             assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
             m.http_states.clear();
         }
+        // A target that only contains `://` isn't absolute-form, so its
+        // "path" after it isn't what the rules check.
+        let relative = b"GET ../other?x=http://api.github.com/repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        assert!(m.process_write_data(1, relative).is_err());
+        m.http_states.clear();
+        // An authority a server may decode into a path, or any host other
+        // than the connection's, isn't sent to a host with rules.
+        for request in [
+            &b"GET http://..%2fsecret/repos/org/repo HTTP/1.1\r\nHost: ..%2fsecret\r\n\r\n"[..],
+            b"GET http://..%2fsecret/repos/org/repo HTTP/1.1\r\n\r\n",
+            b"GET http://%2e%2e%2fsecret/repos/org/repo HTTP/1.1\r\n\r\n",
+            b"GET /repos/org/repo HTTP/1.1\r\nHost: ..%2fsecret\r\n\r\n",
+            b"GET /repos/org/repo HTTP/1.1\r\nHost: other.example\r\n\r\n",
+        ] {
+            assert!(m.process_write_data(1, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        // An absolute URL with an empty path, as proxy clients send it, goes
+        // to a host without rules.
+        for request in [
+            &b"GET http://www.github.com HTTP/1.1\r\nHost: www.github.com\r\n\r\n"[..],
+            b"GET http://www.github.com?x HTTP/1.1\r\nHost: www.github.com\r\n\r\n",
+        ] {
+            assert!(m.process_write_data(2, request).is_ok(), "{request:?}");
+            m.http_states.clear();
+        }
         let absolute = b"GET https://api.github.com:443/repos/org/repo HTTP/1.1\r\nHost: API.github.com\r\n\r\n";
         assert!(m.process_write_data(1, absolute).is_ok());
         m.http_states.clear();
@@ -3750,8 +4442,9 @@ mod tests {
         );
     }
 
-    /// Headers are buffered only up to a cap, and bytes that can't start a
-    /// request go out at once instead of waiting for a blank line.
+    /// Headers are buffered only up to a cap, and bytes go out as they are
+    /// once their first line shows they aren't a request (or a byte no
+    /// request starts with does), instead of waiting for a blank line.
     #[test]
     fn header_buffer_is_capped() {
         let mut m = framing_manager();
@@ -3768,7 +4461,10 @@ mod tests {
 
         let mut m = framing_manager();
         assert_eq!(frame(&mut m, &[b"G", b"E"]), "");
-        assert_eq!(frame(&mut m, &[b"x hello PH"]), "GEx hello PH");
+        assert_eq!(frame(&mut m, &[b"x hello PH"]), "");
+        assert_eq!(frame(&mut m, &[b"\r\n"]), "GEx hello PH\r\n");
+        assert_eq!(frame(&mut m, &[b"\x16\x03\x01"]), "\x16\x03\x01");
+        let mut m = framing_manager();
         assert_eq!(frame(&mut m, &[b"\x16\x03\x01"]), "\x16\x03\x01");
     }
 
@@ -3785,29 +4481,718 @@ mod tests {
         let handle = handle.unwrap();
         let mut server = server;
 
-        async fn read_until(m: &mut ConnectionManager, handle: u32, want: usize) -> String {
-            let mut got = Vec::new();
-            while got.len() < want {
-                let chunk = m.tcp_read(handle, 2, 0).await.unwrap();
-                assert!(!chunk.is_empty(), "unexpected EOF");
-                got.extend(chunk);
-            }
-            String::from_utf8(got).unwrap()
-        }
-
-        server.write_all(b"a re").await.unwrap();
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        // The value is split across chunks, and across writes.
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\na re\r\n")
+            .await
+            .unwrap();
         server.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
-        server.write_all(b"al b real").await.unwrap();
+        server.write_all(b"9\r\nal b real\r\n").await.unwrap();
+        // A possible start of a secret that nothing completes is still
+        // delivered.
+        server.write_all(b"3\r\n re\r\n0\r\n\r\n").await.unwrap();
         server.flush().await.unwrap();
+        let mut got = Vec::new();
+        while !got.ends_with(b"0\r\n\r\n") {
+            let chunk = m.tcp_read(handle, 7, 0).await.unwrap();
+            assert!(!chunk.is_empty(), "unexpected EOF");
+            got.extend(chunk);
+        }
+        let (head, body) = got.split_at(got.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4);
         assert_eq!(
-            read_until(&mut m, handle, "a PH b PH".len()).await,
-            "a PH b PH"
+            head,
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        );
+        assert_eq!(dechunk(body), b"a PH b PH re");
+    }
+
+    /// The body a client gets from a chunked message: the chunks' data.
+    fn dechunk(mut wire: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        loop {
+            let line = wire.windows(2).position(|w| w == b"\r\n").unwrap();
+            let size =
+                usize::from_str_radix(std::str::from_utf8(&wire[..line]).unwrap(), 16).unwrap();
+            wire = &wire[line + 2..];
+            if size == 0 {
+                return body;
+            }
+            body.extend_from_slice(&wire[..size]);
+            wire = &wire[size + 2..];
+        }
+    }
+
+    /// A framing manager connected to a local server on handle `handle`,
+    /// with the server's side of the connection.
+    async fn connected() -> (ConnectionManager, u32, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut m = framing_manager();
+        let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        (m, handle.unwrap(), server)
+    }
+
+    /// Requests recorded by `tcp_write` frame their responses: a refused
+    /// write doesn't forget the requests sent before it, and a response
+    /// to no recorded request (unsolicited, or after writes that weren't
+    /// requests) fails the connection rather than going through unframed.
+    #[tokio::test]
+    async fn responses_are_framed_by_the_requests_written() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        assert!(
+            m.tcp_write(handle, b"\r\n\r\nGET / HTTP/1.1\r\n\r\n", 0)
+                .await
+                .is_err()
+        );
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Echo: real\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            m.tcp_read(handle, 1024, 0).await.unwrap(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\nX-Echo: PH\r\n\r\n"
         );
 
-        // A possible start of a secret that nothing completes is still delivered.
-        server.write_all(b" re").await.unwrap();
-        server.flush().await.unwrap();
-        assert_eq!(read_until(&mut m, handle, 3).await, " re");
+        // Unsolicited, on an idle keep-alive connection (a 408 before the
+        // server closes it): the stream ends cleanly, and stays ended.
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        server
+            .write_all(b"HTTP/1.1 204 No Content\r\n\r\nHTTP/1.1 408 Request Timeout\r\n\r\nre")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        loop {
+            let data = m.tcp_read(handle, 1024, 0).await.unwrap();
+            if data.is_empty() {
+                break;
+            }
+            got.extend(data);
+        }
+        assert_eq!(got, b"HTTP/1.1 204 No Content\r\n\r\n");
+        assert!(m.tcp_read(handle, 64, 0).await.unwrap().is_empty());
+    }
+
+    /// Everything the server sends on `handle` until it closes.
+    async fn read_to_end(m: &mut ConnectionManager, handle: u32) -> Vec<u8> {
+        let mut got = Vec::new();
+        loop {
+            let data = m.tcp_read(handle, 1024, 0).await.unwrap();
+            if data.is_empty() {
+                return got;
+            }
+            got.extend(data);
+        }
+    }
+
+    /// A connection that's another protocol from the start (its first write
+    /// isn't a request, or the server speaks first) never has anything
+    /// substituted, so its replies get best-effort masking (held back until
+    /// a quiet spell) instead of failing: a one-byte reply comes through,
+    /// an echoed real value is still masked, and a request-shaped write
+    /// later isn't substituted.
+    #[tokio::test]
+    async fn other_protocols_from_the_start_pass_masked() {
+        let (mut m, handle, mut server) = connected().await;
+        // Postgres's SSLRequest, and its one-byte answer.
+        m.tcp_write(handle, b"\x00\x00\x00\x08\x04\xd2\x16\x2f", 0)
+            .await
+            .unwrap();
+        server.write_all(b"S").await.unwrap();
+        assert_eq!(m.tcp_read(handle, 64, 0).await.unwrap(), b"S");
+        let later = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: PH\r\n\r\n";
+        m.tcp_write(handle, later, 0).await.unwrap();
+        let mut received = vec![0; 8 + later.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert!(
+            received.ends_with(later),
+            "{:?}",
+            String::from_utf8_lossy(&received)
+        );
+        server.write_all(b"+echo real").await.unwrap();
+        drop(server);
+        assert_eq!(read_to_end(&mut m, handle).await, b"+echo PH");
+
+        // The server speaks first (e.g. an SMTP greeting).
+        let (mut m, handle, mut server) = connected().await;
+        server.write_all(b"220 ready real").await.unwrap();
+        let mut got = Vec::new();
+        while got.len() < b"220 ready PH".len() {
+            got.extend(m.tcp_read(handle, 64, 0).await.unwrap());
+        }
+        assert_eq!(got, b"220 ready PH");
+        m.tcp_write(handle, later, 0).await.unwrap();
+        let mut received = vec![0; later.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received[..], &later[..]);
+    }
+
+    /// A response head with bare-LF line endings is read as clients read
+    /// it, and masked; malformed framing fails the connection.
+    #[tokio::test]
+    async fn bare_lf_heads_are_framed_and_bad_framing_fails() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+            .await
+            .unwrap();
+        server
+            .write_all(b"HTTP/1.1 200 OK\nX-Echo: real\nContent-Length: 6\n\nreal!!")
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while !got.ends_with(b"PH!!") {
+            got.extend(m.tcp_read(handle, 1024, 0).await.unwrap());
+        }
+        assert_eq!(
+            got,
+            b"HTTP/1.1 200 OK\nX-Echo: PH\nContent-Length: 6\n\nPH!!"
+        );
+
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nre"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nre",
+            b"HTTP/1.1 2000 OK\r\n\r\n",
+        ] {
+            let (mut m, handle, mut server) = connected().await;
+            m.tcp_write(handle, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 0)
+                .await
+                .unwrap();
+            server.write_all(response).await.unwrap();
+            let mut result = m.tcp_read(handle, 1024, 0).await;
+            // The head may come first; the connection fails before the body.
+            if result.as_ref().is_ok_and(|data| !data.is_empty()) {
+                result = m.tcp_read(handle, 1024, 0).await;
+            }
+            assert!(result.is_err(), "{:?}", String::from_utf8_lossy(response));
+        }
+    }
+
+    /// One read, and whether it waited out the grace period first.
+    async fn timed_read(
+        stream: &mut tokio::io::DuplexStream,
+        state: &mut ReadState,
+        len: u32,
+    ) -> (Vec<u8>, bool) {
+        let start = tokio::time::Instant::now();
+        let data = read_masked(stream, state, &mut sent([]), len, Duration::from_secs(30))
+            .await
+            .unwrap();
+        (data, start.elapsed() >= CARRY_GRACE)
+    }
+
+    fn masks(values: &[&str]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        values
+            .iter()
+            .map(|v| (v.as_bytes().to_vec(), b"PH".to_vec()))
+            .collect()
+    }
+
+    /// Request framing with `requests` sent and awaiting responses.
+    fn sent(requests: impl IntoIterator<Item = RequestKind>) -> HttpParsingState {
+        let requests: std::collections::VecDeque<_> = requests.into_iter().collect();
+        HttpParsingState {
+            started: !requests.is_empty(),
+            requests,
+            ..HttpParsingState::default()
+        }
+    }
+
+    /// A read state past a `101`, where bytes aren't framed HTTP and held
+    /// ones go out after the grace period.
+    fn upgraded(values: &[&str]) -> ReadState {
+        let mut state = ReadState::new(masks(values));
+        let masker = state.masker.as_mut().unwrap();
+        masker.feed(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n",
+            &mut std::collections::VecDeque::from([RequestKind::Other]),
+        );
+        masker.out.clear();
+        state
+    }
+
+    /// The server sends `probe` in one write; the length of each read the
+    /// guest gets and whether it was delayed, until it has every byte.
+    async fn read_pattern(values: &[&str], probe: &[u8], len: u32) -> Vec<(usize, bool)> {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(values);
+        server.write_all(probe).await.unwrap();
+        let mut pattern = Vec::new();
+        let mut total = 0;
+        while total < probe.len() {
+            let (data, delayed) = timed_read(&mut guest, &mut state, len).await;
+            assert!(!data.is_empty());
+            total += data.len();
+            pattern.push((data.len(), delayed));
+        }
+        pattern
+    }
+
+    /// An echoing server sends back bytes the guest chose. Whether they're a
+    /// prefix of a real secret value must not change how they're delivered:
+    /// read lengths and delays are the same for matching and non-matching
+    /// probes of the same length, with two secrets of different lengths on
+    /// the host. Holding back only possible prefixes made these differ.
+    #[tokio::test(start_paused = true)]
+    async fn masking_hold_back_is_not_a_prefix_oracle() {
+        let long = "SECRETVALUE";
+        let short = "abc";
+        let filler = b"qrstuvwxyz";
+        for (secret, k) in [(long, 2), (long, 7), (short, 2)] {
+            for trial in 0..50_usize {
+                let pad = vec![b'-'; 12 + trial % 7];
+                let len = u32::try_from(1 + trial % 40).unwrap();
+                let matching = [&pad[..], &secret.as_bytes()[..k]].concat();
+                let other: Vec<u8> = (0..k).map(|i| filler[(trial + i) % filler.len()]).collect();
+                let non_matching = [&pad[..], &other[..]].concat();
+                let a = read_pattern(&[long, short], &matching, len).await;
+                let b = read_pattern(&[long, short], &non_matching, len).await;
+                assert_eq!(a, b, "{secret}[..{k}], trial {trial}");
+            }
+        }
+    }
+
+    /// Both secrets are masked when they arrive one byte per write and the
+    /// guest reads one byte at a time.
+    #[tokio::test(start_paused = true)]
+    async fn masking_handles_byte_by_byte_values() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE", "abc"]);
+        assert_eq!(state.masker.as_ref().unwrap().hold(), 10);
+        let written = b"x SECRETVALUE y abc z";
+        let mut got = Vec::new();
+        for &byte in written {
+            server.write_all(&[byte]).await.unwrap();
+            if let Ok(data) = tokio::time::timeout(
+                Duration::from_millis(1),
+                read_masked(
+                    &mut guest,
+                    &mut state,
+                    &mut sent([]),
+                    1,
+                    Duration::from_secs(30),
+                ),
+            )
+            .await
+            {
+                got.extend(data.unwrap());
+            }
+        }
+        drop(server);
+        loop {
+            let (data, _) = timed_read(&mut guest, &mut state, 1).await;
+            if data.is_empty() {
+                break;
+            }
+            got.extend(data);
+        }
+        assert_eq!(got, b"x PH y PH z");
+    }
+
+    /// The held-back tail goes out at once when the stream ends, and after
+    /// the grace period when it goes quiet.
+    #[tokio::test(start_paused = true)]
+    async fn masking_releases_tail_on_eof_and_quiet() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        server.write_all(b"hello").await.unwrap();
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"hello".to_vec(), true)
+        );
+        server.write_all(b"bye").await.unwrap();
+        drop(server);
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"bye".to_vec(), false)
+        );
+    }
+
+    /// Only secrets allowed for a connection's host are masked on it, so
+    /// other hosts' reads are neither masked nor held back.
+    #[tokio::test(start_paused = true)]
+    async fn masking_only_applies_to_secret_hosts() {
+        let m = framing_manager();
+        let host = |h: &str| m.policy.read_masks(h);
+        assert_eq!(host("api.example.com"), masks(&["real"]));
+        assert!(host("echo.example.net").is_empty());
+        // Nor on a connection whose requests don't get values substituted:
+        // plain TCP without `allow_plaintext_secrets`.
+        let plain = Arc::new(NetPolicy::new(
+            NetConfig::permissive(),
+            m.policy.secrets.clone(),
+        ));
+        assert!(
+            plain
+                .request_framer("api.example.com", false)
+                .response_masker()
+                .masker
+                .is_none()
+        );
+
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(host("echo.example.net"));
+        server.write_all(b"a real").await.unwrap();
+        assert_eq!(
+            timed_read(&mut guest, &mut state, 64).await,
+            (b"a real".to_vec(), false)
+        );
+    }
+
+    /// Reads until the stream ends or a read fails (after `io_timeout`),
+    /// returning each read's length and whether it waited out the grace
+    /// period, and everything read.
+    async fn read_all(
+        stream: &mut (impl tokio::io::AsyncRead + Unpin),
+        state: &mut ReadState,
+        requests: &mut HttpParsingState,
+        io_timeout: Duration,
+    ) -> (Vec<(usize, bool)>, Vec<u8>) {
+        let (mut pattern, mut got) = (Vec::new(), Vec::new());
+        loop {
+            let start = tokio::time::Instant::now();
+            match read_masked(stream, state, requests, 7, io_timeout).await {
+                Ok(data) if !data.is_empty() => {
+                    pattern.push((data.len(), start.elapsed() >= CARRY_GRACE));
+                    got.extend(data);
+                }
+                _ => return (pattern, got),
+            }
+        }
+    }
+
+    /// A server that splits a secret value inside a framed response and
+    /// pauses (as an echo of the guest's own bytes can be made to) doesn't
+    /// get the first part past the masking: in a header, a `Content-Length`
+    /// body and a chunk's data, held bytes wait for the rest, however long.
+    #[tokio::test(start_paused = true)]
+    async fn framed_responses_stay_masked_across_pauses() {
+        for (before, after) in [
+            (
+                &b"HTTP/1.1 200 OK\r\nX-Echo: SECRETVA"[..],
+                &b"LUE\r\nContent-Length: 0\r\n\r\n"[..],
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nx SECRETVA",
+                b"LUE y",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nf\r\nx SECRETVA",
+                b"LUE y\r\n0\r\n\r\n",
+            ),
+        ] {
+            let (mut guest, mut server) = tokio::io::duplex(4096);
+            let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+            let mut requests = sent([RequestKind::Other]);
+            let send = async {
+                server.write_all(before).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                server.write_all(after).await.unwrap();
+                drop(server);
+            };
+            let ((_, got), ()) = tokio::join!(
+                read_all(
+                    &mut guest,
+                    &mut state,
+                    &mut requests,
+                    Duration::from_secs(30)
+                ),
+                send
+            );
+            let got = String::from_utf8(got).unwrap();
+            assert!(got.contains("PH") && !got.contains("SECRET"), "{got:?}");
+        }
+    }
+
+    /// Whether an echoed probe is a prefix of a real value doesn't change
+    /// how a framed response is delivered either: in a `Content-Length`
+    /// body and in a chunk followed by a quiet spell, read lengths and
+    /// delays match those of a non-matching probe of the same length.
+    #[tokio::test(start_paused = true)]
+    async fn framed_hold_back_is_not_a_prefix_oracle() {
+        let long = "SECRETVALUE";
+        let filler = b"qrstuvwxyz";
+        let pattern = |wire: Vec<u8>| async move {
+            let (mut guest, mut server) = tokio::io::duplex(4096);
+            let mut state = ReadState::new(masks(&[long, "abc"]));
+            let mut requests = sent([RequestKind::Other]);
+            server.write_all(&wire).await.unwrap();
+            read_all(
+                &mut guest,
+                &mut state,
+                &mut requests,
+                Duration::from_secs(1),
+            )
+            .await
+            .0
+        };
+        for k in [2, 7, 10] {
+            for trial in 0..50_usize {
+                let pad = vec![b'-'; 12 + trial % 7];
+                let matching = [&pad[..], &long.as_bytes()[..k]].concat();
+                let other: Vec<u8> = (0..k).map(|i| filler[(trial + i) % filler.len()]).collect();
+                let non_matching = [&pad[..], &other[..]].concat();
+                for body in [&matching, &non_matching] {
+                    assert_eq!(body.len(), matching.len());
+                }
+                let length = |body: &[u8]| {
+                    [
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                            .as_bytes(),
+                        body,
+                    ]
+                    .concat()
+                };
+                let chunk = |body: &[u8]| {
+                    [
+                        &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+                        format!("{:x}\r\n", body.len()).as_bytes(),
+                        body,
+                        b"\r\n",
+                    ]
+                    .concat()
+                };
+                assert_eq!(
+                    pattern(length(&matching)).await,
+                    pattern(length(&non_matching)).await,
+                    "length, [..{k}], trial {trial}"
+                );
+                assert_eq!(
+                    pattern(chunk(&matching)).await,
+                    pattern(chunk(&non_matching)).await,
+                    "chunked, [..{k}], trial {trial}"
+                );
+            }
+        }
+    }
+
+    /// A stream that returns each scripted result once, then ends.
+    struct Scripted(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+    impl tokio::io::AsyncRead for Scripted {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(match self.0.pop_front() {
+                Some(Ok(data)) => {
+                    buf.put_slice(&data);
+                    Ok(())
+                }
+                Some(Err(e)) => Err(e),
+                None => Ok(()),
+            })
+        }
+    }
+
+    /// Bytes held back when a read fails are delivered first, and the error
+    /// on the next read, rather than lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_error_delivers_held_bytes_first() {
+        let mut stream = Scripted(
+            [
+                Ok(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhello".to_vec()),
+                Err(std::io::ErrorKind::ConnectionReset.into()),
+            ]
+            .into(),
+        );
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        let mut got = Vec::new();
+        let err = loop {
+            match read_masked(
+                &mut stream,
+                &mut state,
+                &mut requests,
+                64,
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(data) => {
+                    assert!(!data.is_empty());
+                    got.extend(data);
+                }
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(
+            got.ends_with(b"hello"),
+            "{:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+
+    /// Through the manager, a guest's `timeout_ms = 1` doesn't shorten the
+    /// grace period either. (Real time: paused time would advance past real
+    /// I/O.)
+    #[tokio::test]
+    async fn guest_timeout_ms_doesnt_shorten_the_grace() {
+        let (mut m, handle, mut server) = connected().await;
+        m.tcp_write(
+            handle,
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: x\r\n\r\n",
+            0,
+        )
+        .await
+        .unwrap();
+        server
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\nre")
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.extend(m.tcp_read(handle, 64, 0).await.unwrap());
+        }
+        let start = tokio::time::Instant::now();
+        assert_eq!(m.tcp_read(handle, 64, 1).await.unwrap(), b"re");
+        assert!(start.elapsed() >= CARRY_GRACE);
+    }
+
+    /// One read's result and how long it took.
+    async fn timed(
+        guest: &mut tokio::io::DuplexStream,
+        state: &mut ReadState,
+        requests: &mut HttpParsingState,
+        timeout: Duration,
+    ) -> (Result<Vec<u8>, std::io::ErrorKind>, Duration) {
+        let start = tokio::time::Instant::now();
+        let result = read_masked(guest, state, requests, 64, timeout).await;
+        (result.map_err(|e| e.kind()), start.elapsed())
+    }
+
+    /// A guest reading with `timeout_ms = 1` can't make the grace period
+    /// release half a value either: bytes after a `101` split mid-value,
+    /// with a pause shorter than the grace, stay masked however short each
+    /// read's timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_short_guest_timeout_doesnt_split_a_value() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        let mut requests = sent([]);
+        let send = async {
+            server.write_all(b"x SECRETVA").await.unwrap();
+            tokio::time::sleep(CARRY_GRACE / 2).await;
+            server.write_all(b"LUE y").await.unwrap();
+            drop(server);
+        };
+        let read = async {
+            let mut got = Vec::new();
+            loop {
+                match read_masked(
+                    &mut guest,
+                    &mut state,
+                    &mut requests,
+                    64,
+                    Duration::from_millis(1),
+                )
+                .await
+                {
+                    Ok(data) if data.is_empty() => return got,
+                    Ok(data) => got.extend(data),
+                    Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::TimedOut),
+                }
+            }
+        };
+        let (got, ()) = tokio::join!(read, send);
+        assert_eq!(got, b"x PH y");
+    }
+
+    /// Held bytes after a `101` go out after the full grace period, however
+    /// short the read timeout (here 1 ms, as a guest's `timeout_ms` can ask);
+    /// held bytes in a framed body, a close-delimited one included, wait
+    /// for more of it or its end, and the read times out at its own timeout
+    /// instead.
+    #[tokio::test(start_paused = true)]
+    async fn quiet_release_waits_the_full_grace() {
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = upgraded(&["SECRETVALUE"]);
+        let mut requests = sent([]);
+        server.write_all(b"hello").await.unwrap();
+        for timeout in [Duration::from_secs(30), Duration::from_millis(1)] {
+            let (body, waited) = timed(&mut guest, &mut state, &mut requests, timeout).await;
+            assert_eq!(
+                (body.unwrap(), waited),
+                (b"hello".to_vec(), CARRY_GRACE),
+                "{timeout:?}"
+            );
+            server.write_all(b"hello").await.unwrap();
+        }
+
+        // A close-delimited body's tail waits for the close.
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        server
+            .write_all(b"HTTP/1.0 200 OK\r\n\r\nhello")
+            .await
+            .unwrap();
+        let (head, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(head.unwrap(), b"HTTP/1.0 200 OK\r\n\r\n");
+        let (err, waited) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(
+            (err.unwrap_err(), waited),
+            (std::io::ErrorKind::TimedOut, Duration::from_secs(30))
+        );
+        drop(server);
+        let (body, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(body.unwrap(), b"hello");
+
+        let (mut guest, mut server) = tokio::io::duplex(4096);
+        let mut state = ReadState::new(masks(&["SECRETVALUE"]));
+        let mut requests = sent([RequestKind::Other]);
+        server
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhello")
+            .await
+            .unwrap();
+        let (head, _) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(head.unwrap().ends_with(b"\r\n\r\n"));
+        let (err, waited) = timed(
+            &mut guest,
+            &mut state,
+            &mut requests,
+            Duration::from_millis(30),
+        )
+        .await;
+        assert_eq!(
+            (err.unwrap_err(), waited),
+            (std::io::ErrorKind::TimedOut, Duration::from_millis(30))
+        );
     }
 }

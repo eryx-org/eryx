@@ -88,6 +88,18 @@ print(f"Blocked hosts: {config.blocked_hosts}")           # ['localhost', '127.*
 
 ## Host Filtering
 
+### Host Patterns
+
+`allowed_hosts`, `blocked_hosts`, `internal_hosts`, secrets' `allowed_hosts`
+and HTTP rules all match host names the same way. `*` matches any run of
+characters (`*.example.com`, `api.*.com`), and a pattern without `*` matches
+only that host. Case, one trailing dot and IPv6 brackets are ignored on both
+sides, so `API.example.com.` matches `api.example.com`, and a blocked host
+stays blocked with a trailing dot. IP addresses match in their canonical form,
+whatever spelling the resolver accepts: `2130706433`, `0x7f.1` and `127.1` all
+match `127.0.0.1`, `::ffff:127.0.0.1` matches it too, and a zone
+(`fe80::1%lo`, `127.0.0.1%lo`) is ignored.
+
 ### Allowing Specific Hosts (Whitelist)
 
 When you specify `allowed_hosts`, only those hosts can be accessed:

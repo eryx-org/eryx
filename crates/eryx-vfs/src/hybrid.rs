@@ -636,6 +636,9 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     max_open_host_files: usize,
     /// Budget shared with every other context in the process.
     process_budget: &'static HostFileBudget,
+    /// VFS files open through descriptors, shared with [`fork`](Self::fork)ed
+    /// contexts so a child's unlinks and creates see the parent's open files.
+    pub(crate) open_files: Arc<Mutex<crate::wasi_impl::OpenFiles>>,
 }
 
 /// Default limit on host files and directories one guest can hold open at
@@ -753,6 +756,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
             process_budget: &PROCESS_HOST_FILES,
+            open_files: Default::default(),
         }
     }
 
@@ -767,6 +771,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: self.max_open_host_files,
             process_budget: self.process_budget,
+            open_files: self.open_files.clone(),
         }
     }
 
@@ -808,6 +813,11 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub(crate) fn with_process_budget(mut self, budget: &'static HostFileBudget) -> Self {
         self.process_budget = budget;
         self
+    }
+
+    /// The VFS files open through descriptors.
+    pub(crate) fn open_files(&self) -> std::sync::MutexGuard<'_, crate::wasi_impl::OpenFiles> {
+        lock(&self.open_files)
     }
 
     /// The storage backing a VFS descriptor.
@@ -1169,6 +1179,16 @@ impl<'a, S: VfsStorage + Clone> HybridVfsState<'a, S> {
     pub fn new(ctx: &'a mut HybridVfsCtx<S>, table: &'a mut ResourceTable) -> Self {
         Self { ctx, table }
     }
+}
+
+/// Lock a context's open files. Every holder only updates counts and marks,
+/// so a panic mid-update can't leave them worse than a lost mark.
+pub(crate) fn lock(
+    open_files: &Mutex<crate::wasi_impl::OpenFiles>,
+) -> std::sync::MutexGuard<'_, crate::wasi_impl::OpenFiles> {
+    open_files
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

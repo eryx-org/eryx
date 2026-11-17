@@ -233,6 +233,12 @@ fn cap_metadata_to_stat(meta: &capfs::Metadata) -> types::DescriptorStat {
 //   descriptor meanwhile drops nothing it needs and revives nothing; the only
 //   table write afterwards is `open_at` inserting a new, self-contained
 //   descriptor.
+// - Unlinking a file that is still open only marks it in `open_files`, and
+//   the last close deletes it (see `OpenFiles`). That bookkeeping happens in
+//   prepare, or right after `open_at` pushes its descriptor; the one op that
+//   touches it, removing a directory, only locks it briefly between awaits.
+//   An open still in flight isn't counted yet, so an unlink racing it
+//   deletes the file at once.
 
 /// The storage part of an operation, after its checks have passed.
 pub(crate) type Op<T> =
@@ -381,11 +387,13 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         let opened = self
             .open_at_op(&fd, path_flags, path, oflags, flags)?
             .await?;
-        Ok(self.table.push(opened)?)
+        self.push_opened(opened)
     }
 
-    fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
-        self.table.delete(fd)?;
+    async fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
+        if let Some(delete) = self.close_op(fd)? {
+            let _ = delete.await;
+        }
         Ok(())
     }
 
@@ -1045,6 +1053,21 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 }
 
                 let storage = self.ctx.storage_for(vfs_desc).clone();
+                let unlinked = self
+                    .ctx
+                    .open_files()
+                    .is_unlinked(vfs_desc.storage, &full_path);
+                let replace = unlinked
+                    && !is_directory
+                    && oflags.contains(types::OpenFlags::CREATE)
+                    && vfs_desc.dir_perms.contains(DirPerms::MUTATE);
+                if replace {
+                    // A new file takes the unlinked name, so closing the old
+                    // descriptors must not delete it.
+                    self.ctx
+                        .open_files()
+                        .set_linked(vfs_desc.storage, &full_path, true);
+                }
                 let vfs_desc = vfs_desc.clone();
                 Ok(op(async move {
                     if is_directory {
@@ -1065,10 +1088,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                         // Creating checks and creates in one storage step, so
                         // concurrent `CREATE|EXCLUSIVE` opens (lockfiles) can't
                         // both succeed.
-                        let created = if create && vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
+                        let created = if replace {
+                            // Replace the old contents, which open
+                            // descriptors still use.
+                            storage.write(&full_path, &[]).await?;
+                            true
+                        } else if create && vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
                             storage.create_file(&full_path, exclusive).await?
                         } else {
-                            let exists = storage.exists(&full_path).await?;
+                            let exists = !unlinked && storage.exists(&full_path).await?;
                             if exclusive && exists {
                                 return Err(crate::VfsError::AlreadyExists(full_path).into());
                             }
@@ -1305,9 +1333,15 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
+                let index = vfs_desc.storage;
+                let unlinked = self.ctx.open_files().unlinked_under(index, &full_path);
                 let storage = self.ctx.storage_for(vfs_desc).clone();
+                let open_files = self.ctx.open_files.clone();
                 Ok(op(async move {
-                    storage.rmdir(&full_path).await?;
+                    crate::wasi_impl::remove_dir(&storage, &full_path, unlinked, |path| {
+                        crate::hybrid::lock(&open_files).set_linked(index, path, true);
+                    })
+                    .await?;
                     Ok(())
                 }))
             }
@@ -1331,6 +1365,42 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
+    }
+
+    /// Push a descriptor `open_at_op` opened, counting it if it's a VFS file.
+    pub(crate) fn push_opened(
+        &mut self,
+        opened: HybridDescriptor,
+    ) -> HybridFsResult<Resource<HybridDescriptor>> {
+        let file = match &opened {
+            HybridDescriptor::Vfs(desc) if !desc.is_dir => Some((desc.storage, desc.path.clone())),
+            _ => None,
+        };
+        let resource = self.table.push(opened)?;
+        if let Some((storage, path)) = file {
+            self.ctx.open_files().open(storage, &path);
+        }
+        Ok(resource)
+    }
+
+    /// Close a descriptor. Returns the deletion to await if it was the last
+    /// one on a file unlinked while open.
+    pub(crate) fn close_op(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> wasmtime::Result<Option<Op<()>>> {
+        let HybridDescriptor::Vfs(desc) = self.table.delete(fd)? else {
+            return Ok(None);
+        };
+        if desc.is_dir || !self.ctx.open_files().close(desc.storage, &desc.path) {
+            return Ok(None);
+        }
+        let storage = self.ctx.storage_for(&desc).clone();
+        // Nothing is left to report a failure to.
+        Ok(Some(op(async move {
+            let _ = storage.delete(&desc.path).await;
+            Ok(())
+        })))
     }
 
     pub(crate) fn rename_at_op(
@@ -1362,7 +1432,27 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 }
                 let old_full = old_vfs.resolve_path(&old_path)?;
                 let new_full = new_vfs.resolve_path(&new_path)?;
+                if self
+                    .ctx
+                    .open_files()
+                    .is_unlinked(old_vfs.storage, &old_full)
+                {
+                    return Err(crate::VfsError::NotFound(old_full).into());
+                }
+                if !self
+                    .ctx
+                    .open_files()
+                    .unlinked_under(old_vfs.storage, &old_full)
+                    .is_empty()
+                {
+                    return Err(crate::VfsError::Busy(old_full).into());
+                }
                 let storage = self.ctx.storage_for(old_vfs).clone();
+                // The renamed file takes the new name, so closing descriptors
+                // left open on an unlinked file there must not delete it.
+                self.ctx
+                    .open_files()
+                    .set_linked(new_vfs.storage, &new_full, true);
                 Ok(op(async move {
                     storage.rename(&old_full, &new_full).await?;
                     Ok(())
@@ -1428,6 +1518,16 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
+                let mut open_files = self.ctx.open_files();
+                if open_files.is_unlinked(vfs_desc.storage, &full_path) {
+                    return Err(crate::VfsError::NotFound(full_path).into());
+                }
+                if open_files.is_open(vfs_desc.storage, &full_path) {
+                    // Keep the contents for the open descriptors; the last to
+                    // close deletes them.
+                    open_files.set_linked(vfs_desc.storage, &full_path, false);
+                    return Ok(done(()));
+                }
                 let storage = self.ctx.storage_for(vfs_desc).clone();
                 Ok(op(async move {
                     storage.delete(&full_path).await?;
@@ -2417,11 +2517,11 @@ mod tests {
 
         // A stream keeps the host file open after its descriptor is closed.
         let stream = state.read_via_stream(borrow(&first), 0).unwrap();
-        HostDescriptor::drop(&mut state, first).unwrap();
+        HostDescriptor::drop(&mut state, first).await.unwrap();
         assert!(open(&mut state, &mnt, "f", none, read).await.is_err());
         state.table.delete(stream).unwrap();
         open(&mut state, &mnt, "f", none, read).await.unwrap();
-        HostDescriptor::drop(&mut state, dir).unwrap();
+        HostDescriptor::drop(&mut state, dir).await.unwrap();
     }
 
     /// An append stream on a host file holds its own append-mode handle,
@@ -2483,7 +2583,7 @@ mod tests {
             err.map(drop).map_err(vfs_err),
             Err(crate::VfsError::TooManyOpenFiles(_))
         ));
-        HostDescriptor::drop(&mut a, first).unwrap();
+        HostDescriptor::drop(&mut a, first).await.unwrap();
         open(&mut b, &b_mnt, "f", none, read).await.unwrap();
     }
 
@@ -2574,5 +2674,150 @@ mod tests {
             assert!(err.is_err(), "{target}");
         }
         assert!(!temp.path().join("link").exists());
+    }
+
+    #[tokio::test]
+    async fn unlinked_files_stay_readable_until_closed() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::with_max_bytes(1024)));
+        let mut ctx = HybridVfsCtx::new(storage.clone());
+        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let data = preopen(&mut state, 0);
+        let create = types::OpenFlags::CREATE;
+
+        let file = open(&mut state, &data, "a", create, rw).await.unwrap();
+        let second = open(&mut state, &data, "a", create, rw).await.unwrap();
+        state
+            .write(borrow(&file), vec![b'x'; 600], 0)
+            .await
+            .unwrap();
+        state
+            .unlink_file_at(borrow(&data), "a".into())
+            .await
+            .unwrap();
+
+        // The descriptors still read and write the contents...
+        state.write(borrow(&file), b"yz".to_vec(), 0).await.unwrap();
+        let (bytes, _) = state.read(borrow(&second), 3, 0).await.unwrap();
+        assert_eq!(bytes, b"yzx");
+        // ...but the name is gone.
+        let gone =
+            |r: HybridFsResult<()>| matches!(r.map_err(vfs_err), Err(crate::VfsError::NotFound(_)));
+        assert!(gone(
+            open(&mut state, &data, "a", types::OpenFlags::empty(), rw)
+                .await
+                .map(drop)
+        ));
+        assert!(gone(state.unlink_file_at(borrow(&data), "a".into()).await));
+        // The unlinked bytes still count towards the quota until the last close.
+        assert!(storage.write("/data/b", &[0; 600]).await.is_err());
+        HostDescriptor::drop(&mut state, file).await.unwrap();
+        assert!(storage.write("/data/b", &[0; 600]).await.is_err());
+        HostDescriptor::drop(&mut state, second).await.unwrap();
+        assert!(!storage.exists("/data/a").await.unwrap());
+        storage.write("/data/b", &[0; 600]).await.unwrap();
+
+        // A file created in an unlinked file's place outlives the old descriptor.
+        let old = open(&mut state, &data, "b", create, rw).await.unwrap();
+        state
+            .unlink_file_at(borrow(&data), "b".into())
+            .await
+            .unwrap();
+        let new = open(
+            &mut state,
+            &data,
+            "b",
+            create | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await
+        .unwrap();
+        HostDescriptor::drop(&mut state, old).await.unwrap();
+        HostDescriptor::drop(&mut state, new).await.unwrap();
+        assert!(storage.read("/data/b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn directories_holding_unlinked_files() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let storage = storage();
+        let mut ctx = HybridVfsCtx::new(storage.clone());
+        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let data = preopen(&mut state, 0);
+        let create = types::OpenFlags::CREATE;
+        storage.mkdir("/data/d").await.unwrap();
+        storage.mkdir("/data/f").await.unwrap();
+        storage.write("/data/f/x", b"other").await.unwrap();
+
+        // A directory holding only an unlinked open file can be renamed only
+        // after it's gone, and removed at once.
+        let file = open(&mut state, &data, "d/x", create, rw).await.unwrap();
+        state
+            .unlink_file_at(borrow(&data), "d/x".into())
+            .await
+            .unwrap();
+        let busy = state
+            .rename_at(borrow(&data), "d".into(), borrow(&data), "e".into())
+            .await;
+        assert!(matches!(
+            busy.map_err(vfs_err),
+            Err(crate::VfsError::Busy(_))
+        ));
+        state
+            .remove_directory_at(borrow(&data), "d".into())
+            .await
+            .unwrap();
+        assert!(!storage.exists("/data/d").await.unwrap());
+
+        // A new file at the old path isn't the unlinked one: it opens, and
+        // closing the old descriptor leaves it alone.
+        state
+            .rename_at(borrow(&data), "f".into(), borrow(&data), "d".into())
+            .await
+            .unwrap();
+        let new = open(&mut state, &data, "d/x", types::OpenFlags::empty(), rw)
+            .await
+            .unwrap();
+        HostDescriptor::drop(&mut state, file).await.unwrap();
+        HostDescriptor::drop(&mut state, new).await.unwrap();
+        assert_eq!(storage.read("/data/d/x").await.unwrap(), b"other");
+    }
+
+    #[tokio::test]
+    async fn forked_contexts_share_unlinked_files() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let create = types::OpenFlags::CREATE;
+        let storage = storage();
+        let mut parent = HybridVfsCtx::new(storage.clone());
+        parent.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut child = parent.fork();
+        let mut p_table = ResourceTable::new();
+        let mut p = HybridVfsState::new(&mut parent, &mut p_table);
+        let p_data = preopen(&mut p, 0);
+        let mut c_table = ResourceTable::new();
+        let mut c = HybridVfsState::new(&mut child, &mut c_table);
+        let c_data = preopen(&mut c, 0);
+
+        let old = open(&mut p, &p_data, "x", create, rw).await.unwrap();
+        p.unlink_file_at(borrow(&p_data), "x".into()).await.unwrap();
+        // The child sees the name gone, and a file it creates there survives
+        // the parent's close.
+        let new = open(
+            &mut c,
+            &c_data,
+            "x",
+            create | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await
+        .unwrap();
+        c.write(borrow(&new), b"child".to_vec(), 0).await.unwrap();
+        HostDescriptor::drop(&mut c, new).await.unwrap();
+        HostDescriptor::drop(&mut p, old).await.unwrap();
+        assert_eq!(storage.read("/data/x").await.unwrap(), b"child");
     }
 }
