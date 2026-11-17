@@ -612,12 +612,9 @@ async fn connect(
             "TLS server name {name} is not the CONNECT host {host}"
         ))));
     }
-    let authority = if port == 443 {
-        host.to_owned()
-    } else {
-        format!("{host}:{port}")
-    };
-    let framer = policy.request_framer(host, true).http_only(authority);
+    let framer = policy
+        .request_framer(host, true)
+        .http_only(host_header(host, port, 443));
     pump(shared, child, upstream, framer, Vec::new()).await
 }
 
@@ -788,6 +785,22 @@ fn split_authority(authority: &str) -> Option<(&str, u16)> {
     (!host.is_empty() && !host.contains(':') || authority.starts_with('[')).then_some((host, port))
 }
 
+/// `host` and `port` as a `Host` header value: an IPv6 literal (which
+/// [`split_authority`] unbrackets) bracketed, and the port left out when it's
+/// the scheme's `default`.
+fn host_header(host: &str, port: u16, default: u16) -> String {
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    if port == default {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -795,6 +808,14 @@ mod tests {
     use crate::net::Resolver;
     use rustls::pki_types::ServerName;
     use tokio_rustls::TlsConnector;
+
+    #[test]
+    fn host_headers_bracket_ipv6_literals() {
+        assert_eq!(host_header("::1", 8443, 443), "[::1]:8443");
+        assert_eq!(host_header("::1", 443, 443), "[::1]");
+        assert_eq!(host_header("api.test", 443, 443), "api.test");
+        assert_eq!(host_header("api.test", 8443, 443), "api.test:8443");
+    }
 
     const REAL: &str = "real-secret-value-0123456789";
     const PH: &str = "ERYX_PROXY_TEST_PLACEHOLDER_0123456789";
