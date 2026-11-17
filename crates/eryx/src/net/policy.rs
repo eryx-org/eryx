@@ -339,6 +339,7 @@ impl NetPolicy {
             host: host.to_string(),
             substitute: self.substitutes_secrets(over_tls),
             http_only: false,
+            authority: String::new(),
             state: HttpParsingState::default(),
         }
     }
@@ -627,15 +628,20 @@ pub(crate) struct RequestFramer {
     /// Whether anything but HTTP/1.1 requests is refused (see
     /// [`RequestFramer::http_only`]).
     http_only: bool,
+    /// For the child proxy, the `host[:port]` the connection was made to,
+    /// for requests forwarded with no `Host` header.
+    authority: String,
     state: HttpParsingState,
 }
 
 impl RequestFramer {
     /// Refuse anything but HTTP/1.1 requests, from the first byte, as if
-    /// every host had HTTP rules. For the child proxy, which forwards nothing
-    /// it can't check.
-    pub(crate) fn http_only(mut self) -> Self {
+    /// every host had HTTP rules, and forward each in origin-form (see
+    /// [`to_origin_form`]). For the child proxy, which forwards nothing it
+    /// can't check, to `authority` (`host[:port]`).
+    pub(crate) fn http_only(mut self, authority: impl Into<String>) -> Self {
         self.http_only = true;
+        self.authority = authority.into();
         self
     }
 
@@ -746,7 +752,7 @@ impl RequestFramer {
                         headers
                     };
                     if http_only {
-                        out.extend(to_origin_form(&headers));
+                        out.extend(to_origin_form(&headers, &self.authority));
                     } else {
                         out.extend(headers);
                     }
@@ -785,17 +791,17 @@ impl RequestFramer {
 }
 
 /// A request's header block as the child proxy forwards it to the origin
-/// server: its target in origin-form (RFC 9112 section 3.2.1), with a `Host`
-/// header made from an absolute-form target if it had none, and without the
-/// headers addressed to the proxy itself (`Proxy-Connection`,
-/// `Proxy-Authorization`).
-fn to_origin_form(headers: &[u8]) -> Vec<u8> {
+/// server at `connected` (`host[:port]`): its target in origin-form (RFC 9112
+/// section 3.2.1), with a `Host` header if it had none (from an absolute-form
+/// target's authority, else `connected`), and without the headers addressed
+/// to the proxy itself (`Proxy-Connection`, `Proxy-Authorization`).
+fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
     // `request_body` has checked that the headers are UTF-8.
     let text = String::from_utf8_lossy(headers);
     let mut lines = text.lines();
     let request_line = lines.next().unwrap_or_default();
     let mut out = String::with_capacity(text.len() + 16);
-    let mut authority = None;
+    let mut authority = connected;
     match request_line.splitn(3, ' ').collect::<Vec<_>>()[..] {
         [method, target, version] if super::is_absolute_form(target) => {
             let rest = target.split_once("://").map_or("", |(_, rest)| rest);
@@ -808,7 +814,7 @@ fn to_origin_form(headers: &[u8]) -> Vec<u8> {
                 path => path.to_owned(),
             };
             out.push_str(&format!("{method} {path} {version}\r\n"));
-            authority = Some(host);
+            authority = host;
         }
         _ => {
             out.push_str(request_line);
@@ -827,8 +833,8 @@ fn to_origin_form(headers: &[u8]) -> Vec<u8> {
         out.push_str(line);
         out.push_str("\r\n");
     }
-    if let Some(host) = authority.filter(|_| !has_host) {
-        out.push_str(&format!("Host: {host}\r\n"));
+    if !has_host && !authority.is_empty() {
+        out.push_str(&format!("Host: {authority}\r\n"));
     }
     out.push_str("\r\n");
     out.into_bytes()
@@ -952,7 +958,9 @@ mod tests {
     fn proxied_requests_reach_the_origin_in_origin_form() {
         let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()));
         let frame = |data: &[u8]| {
-            let mut framer = policy.request_framer("api.test", false).http_only();
+            let mut framer = policy
+                .request_framer("api.test", false)
+                .http_only("api.test:8080");
             String::from_utf8(framer.frame(data).unwrap()).unwrap()
         };
 
@@ -970,10 +978,20 @@ mod tests {
              POST / HTTP/1.1\r\nHost: api.test:8080\r\nContent-Length: 0\r\n\r\n"
         );
 
-        // No Host header: one is made from the target, as RFC 9112 asks.
+        // No Host header: one is made from the target, as RFC 9112 asks, or,
+        // for an origin-form request (a keep-alive follow-up, say), from the
+        // connection's host and port.
         assert_eq!(
             frame(b"GET http://api.test/ HTTP/1.0\r\n\r\n"),
             "GET / HTTP/1.0\r\nHost: api.test\r\n\r\n"
+        );
+        assert_eq!(
+            frame(
+                b"GET http://api.test:8080/a HTTP/1.1\r\nHost: api.test:8080\r\n\r\n\
+                  GET /x HTTP/1.0\r\n\r\n"
+            ),
+            "GET /a HTTP/1.1\r\nHost: api.test:8080\r\n\r\n\
+             GET /x HTTP/1.0\r\nHost: api.test:8080\r\n\r\n"
         );
         // Already origin-form, as inside a CONNECT tunnel: unchanged.
         assert_eq!(
