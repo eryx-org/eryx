@@ -1382,6 +1382,117 @@ async fn piped_children_share_the_executions_limits() {
     assert_eq!(events, [killed(1), killed(2)].concat());
 }
 
+/// A session with a VFS whose children may spawn, and its storage.
+#[cfg(feature = "unstable-vfs")]
+async fn spawning_session() -> (SessionExecutor, eryx::vfs::ArcStorage) {
+    use eryx::vfs::{ArcStorage, InMemoryStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    (session, storage)
+}
+
+/// The rounds `tc burn PATH N` recorded at `path`, 0 if none.
+#[cfg(feature = "unstable-vfs")]
+async fn rounds(storage: &eryx::vfs::ArcStorage, path: &str) -> u64 {
+    use eryx::vfs::VfsStorage;
+    match storage.read(path).await {
+        Ok(data) => String::from_utf8_lossy(&data).trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// A caller killed while it waits for a piped command, by running out of
+/// fuel or by the timeout, takes the command with it: it makes no progress
+/// afterwards.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_die_with_a_caller_killed_in_wait() {
+    let (mut session, storage) = spawning_session().await;
+    let stays_put = async |path: &str| {
+        let before = rounds(&storage, path).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(rounds(&storage, path).await, before, "{path}");
+        before
+    };
+
+    // Fuel for a few rounds (a round is ~0.5 billion).
+    session.set_fuel_limit(Some(2_500_000_000));
+    let err = session
+        .execute("tc pipe-flood 0 tc burn /data/f 1000")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    assert!(
+        stays_put("/data/f").await >= 1,
+        "it ran while its caller waited"
+    );
+
+    session.set_fuel_limit(None);
+    session.set_execution_timeout(Some(Duration::from_millis(300)));
+    let err = session
+        .execute("tc pipe-flood 0 tc burn /data/t 1000")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    stays_put("/data/t").await;
+}
+
+/// Piped commands burn their execution's fuel as they run, wherever their
+/// caller waits: twenty spinning while their caller waits on one stop
+/// within the limit, at most a partial round each over it, not twenty
+/// times over.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test(flavor = "multi_thread")]
+async fn piped_children_burn_their_executions_fuel() {
+    let (mut session, storage) = spawning_session().await;
+    // What a round of `burn` costs the execution, through a piped command.
+    session.set_fuel_limit(Some(u64::MAX / 2));
+    let mut fuel = async |rounds: u32| {
+        session
+            .execute(format!("tc pipe tc burn /data/r {rounds}"))
+            .run()
+            .await
+            .unwrap()
+            .fuel_consumed
+            .unwrap()
+    };
+    let (one, three) = (fuel(1).await, fuel(3).await);
+    let round = (three - one) / 2;
+    assert!(round > 0, "{one} {three}");
+
+    // Room for ten rounds.
+    session.set_fuel_limit(Some(one + 9 * round));
+    let err = session
+        .execute("mkdir -p /data/b; tc pipe-burn 20 1000 /data/b tc")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let mut total = 0;
+    for i in 0..20 {
+        total += rounds(&storage, &format!("/data/b/{i}")).await;
+    }
+    // Ten rounds of fuel, and a round started by each before it ran out.
+    assert!(total <= 10 + 20, "{total} rounds");
+}
+
 /// Nested children see the same VFS as the shell and their caller.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]

@@ -2,63 +2,124 @@
 //! stdout, for child commands that talk to a command of their own while it
 //! runs, as git does to its `remote-https` helper.
 //!
-//! A piped command runs on its own task, so it makes progress while its
-//! caller computes or waits on another one; a caller connecting two of them
-//! never deadlocks on which one is being polled. It holds a live-child slot
-//! and memory from its execution's budget like any child, and dropping its
-//! handle (which its caller's store does when it exits or is killed) aborts
-//! it, so it never outlives its caller. The fuel it burns is moved to its
-//! caller at each of the caller's pipe calls, so a caller computing while its
-//! command runs can overshoot its fuel by the command's burn since its last
-//! call, as children overshoot by an epoch tick each.
+//! A piped command runs only while its caller is in a pipe call: each
+//! `write`, `read` and `wait` polls every one of the caller's piped
+//! commands, not just the one it's on, so a chain the caller connects (one's
+//! output written into another) keeps moving. Everything runs on the
+//! execution's own task, as the shell's children and nested `run`s do: one
+//! execution never uses more than one core. Each poll returns by the
+//! command's next epoch tick and is followed by charging what it burned to
+//! the caller, so piped commands overshoot their execution's fuel by at most
+//! one tick of work each, as children do.
+//!
+//! The commands live in their caller's state ([`Runs`]), so dropping a
+//! handle, or the caller exiting or being killed mid-call, drops them, and
+//! with them their store and their live-child slot, at once.
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::task::JoinHandle;
+use wasmtime::StoreContextMut;
 use wasmtime::component::{Linker, Resource, ResourceType};
 
 use super::child_bindings::eryx::process::run::RunError;
 use super::{
-    CHILD_FUEL, ChildState, LiveSlot, MAX_SPAWN_DEPTH, NestedTrace, ProcessError, charge_caller,
-    pipe,
+    CHILD_FUEL, ChildState, Held, MAX_SPAWN_DEPTH, NestedTrace, ProcessError, charge_caller, pipe,
 };
 
 /// Most of a piped command's stdout one `read` returns.
 const MAX_READ: u64 = 64 * 1024;
 
-/// A running piped command, a `piped` resource in its caller's table.
-pub struct Piped {
+/// A `piped` resource: the id of a command in its caller's [`Runs`].
+pub struct Piped(u64);
+
+/// A caller's piped commands, by id.
+#[derive(Default)]
+pub(super) struct Runs {
+    next: u64,
+    runs: HashMap<u64, Run>,
+}
+
+type RunFuture = Pin<Box<dyn Future<Output = (Result<i32, String>, u64)> + Send>>;
+
+/// One piped command.
+struct Run {
+    /// The command, until it ends.
+    running: Option<RunFuture>,
+    /// How it ended, once it has.
+    ended: Option<Result<i32, String>>,
     /// Its stdin, until closed.
     stdin: Option<pipe::Writer>,
     stdout: pipe::Reader,
-    /// The command, until `wait` takes it.
-    running: Option<JoinHandle<(Result<i32, String>, u64)>>,
-    /// Copies its stderr to its caller's.
-    stderr: Option<JoinHandle<()>>,
-    /// Fuel it has burned, published on each epoch tick, and how much of
+    /// Its stderr, until it ends, and bytes read from it the caller's stderr
+    /// hasn't taken yet.
+    stderr: Option<pipe::Reader>,
+    pending: Vec<u8>,
+    /// Fuel it has burned (published on each epoch tick), and how much of
     /// that its caller has been charged.
     fuel_used: Arc<AtomicU64>,
     charged: u64,
     trace: Option<NestedTrace>,
-    /// Its live-child slot, held here rather than by the command's task so
-    /// dropping the handle frees it at once, not when the aborted task is
-    /// next polled.
-    _live: Option<LiveSlot>,
 }
 
-impl Drop for Piped {
-    fn drop(&mut self) {
-        // Dropped before `wait` finished: kill it. The trace records the end
-        // as a kill (`NestedTrace`'s own drop).
-        if let Some(running) = self.running.take() {
-            running.abort();
+impl Run {
+    /// Poll the command and copy what it wrote to stderr to `to` (the
+    /// caller's stderr, or nowhere).
+    fn poll(&mut self, cx: &mut Context<'_>, to: Option<&pipe::Writer>) {
+        if let Some(running) = &mut self.running
+            && let Poll::Ready((code, used)) = running.as_mut().poll(cx)
+        {
+            self.fuel_used.fetch_max(used, Ordering::Relaxed);
+            self.ended = Some(code);
+            // Dropping its store closes its end of the pipes.
+            self.running = None;
         }
-        if let Some(stderr) = self.stderr.take() {
-            stderr.abort();
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            if !self.pending.is_empty() {
+                match to.map(|to| to.poll_write(cx, &self.pending)) {
+                    Some(Poll::Ready(Some(n))) => {
+                        self.pending.drain(..n);
+                        continue;
+                    }
+                    Some(Poll::Pending) => break,
+                    // No caller stderr, or it's gone: drop it.
+                    Some(Poll::Ready(None)) | None => self.pending.clear(),
+                }
+            }
+            let Some(stderr) = &self.stderr else { break };
+            match stderr.poll_read(cx, &mut buf) {
+                Poll::Ready(0) => self.stderr = None,
+                Poll::Ready(n) => self.pending.extend_from_slice(&buf[..n]),
+                Poll::Pending => break,
+            }
         }
     }
+
+    /// Fuel burned since the last charge, marked charged.
+    fn take_fuel(&mut self) -> u64 {
+        let used = self.fuel_used.load(Ordering::Relaxed);
+        let delta = used.saturating_sub(self.charged);
+        self.charged = self.charged.max(used);
+        delta
+    }
+}
+
+/// Poll all of the caller's piped commands and charge it what they burned:
+/// false once it has no fuel left.
+fn drive(store: &mut StoreContextMut<'_, ChildState>, cx: &mut Context<'_>) -> bool {
+    let state = store.data_mut();
+    let to = state.stderr.clone();
+    let mut burned = 0;
+    for run in state.piped.runs.values_mut() {
+        run.poll(cx, to.as_ref());
+        burned += run.take_fuel();
+    }
+    charge_caller(store, &mut 0, burned)
 }
 
 fn run_error(e: ProcessError) -> RunError {
@@ -69,21 +130,19 @@ fn run_error(e: ProcessError) -> RunError {
     }
 }
 
-/// Charge `res`'s caller what its command has burned since the last
-/// charge; false (after warning) once the caller has no fuel left.
-fn charge(
-    store: &mut wasmtime::StoreContextMut<'_, ChildState>,
-    res: &Resource<Piped>,
-) -> wasmtime::Result<bool> {
-    let piped = store.data_mut().table.get_mut(res)?;
-    let used = piped.fuel_used.load(Ordering::Relaxed);
-    let mut charged = piped.charged;
-    let left = charge_caller(store, &mut charged, used);
-    store.data_mut().table.get_mut(res)?.charged = charged;
-    if !left {
-        tracing::warn!("caller ran out of fuel; killing its piped command");
-    }
-    Ok(left)
+/// The run `res` names in its caller's state.
+fn run<'a>(state: &'a mut ChildState, res: &Resource<Piped>) -> wasmtime::Result<&'a mut Run> {
+    let id = state.table.get(res)?.0;
+    state
+        .piped
+        .runs
+        .get_mut(&id)
+        .ok_or_else(|| wasmtime::format_err!("piped command {id} is gone"))
+}
+
+fn out_of_fuel() -> RunError {
+    tracing::warn!("caller ran out of fuel in a pipe call");
+    RunError::SpawnFailed
 }
 
 /// Link `eryx:process/pipe` for children.
@@ -91,10 +150,17 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
     type Spawn = (String, Vec<String>, Vec<(String, String)>, String);
     let mut pipe = linker.instance("eryx:process/pipe@0.1.0")?;
     pipe.resource("piped", ResourceType::host::<Piped>(), |mut store, rep| {
-        store
+        let Piped(id) = store
             .data_mut()
             .table
             .delete(Resource::<Piped>::new_own(rep))?;
+        // Dropping the run kills it if it's still going; its trace records a
+        // kill. What it burned since its last charge is charged now.
+        if let Some(mut run) = store.data_mut().piped.runs.remove(&id) {
+            let burned = run.take_fuel();
+            drop(run);
+            charge_caller(&mut store, &mut 0, burned);
+        }
         Ok(())
     })?;
     pipe.func_wrap(
@@ -105,24 +171,48 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
         "[method]piped.write",
         |mut store, (res, data): (Resource<Piped>, Vec<u8>)| {
             Box::new(async move {
-                if !charge(&mut store, &res)? {
-                    return Ok((Err(RunError::SpawnFailed),));
-                }
-                let Some(mut stdin) = store.data_mut().table.get(&res)?.stdin.clone() else {
+                // The data is held on the host until it's written.
+                let Some(budget) = store.data().spawner.as_ref().map(|s| s.budget.clone()) else {
                     return Ok((Err(RunError::SpawnFailed),));
                 };
-                // It exited or closed its stdin.
-                Ok((match stdin.write_all(&data).await {
-                    Ok(()) => Ok(data.len() as u64),
-                    Err(_) => Err(RunError::SpawnFailed),
-                },))
+                let mut held = Held { budget, bytes: 0 };
+                if held.charge(data.len() as u64).is_err() {
+                    return Ok((Err(RunError::LimitExceeded),));
+                }
+                let mut written = 0;
+                let result = std::future::poll_fn(|cx| {
+                    if !drive(&mut store, cx) {
+                        return Poll::Ready(Ok(Err(out_of_fuel())));
+                    }
+                    let run = match run(store.data_mut(), &res) {
+                        Ok(run) => run,
+                        Err(e) => return Poll::Ready(Err(e)),
+                    };
+                    let Some(stdin) = &run.stdin else {
+                        return Poll::Ready(Ok(Err(RunError::SpawnFailed)));
+                    };
+                    while written < data.len() {
+                        match stdin.poll_write(cx, &data[written..]) {
+                            Poll::Ready(Some(n)) => written += n,
+                            // It exited or closed its stdin.
+                            Poll::Ready(None) => {
+                                return Poll::Ready(Ok(Err(RunError::SpawnFailed)));
+                            }
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    }
+                    Poll::Ready(Ok(Ok(data.len() as u64)))
+                })
+                .await?;
+                drop(held);
+                Ok((result,))
             })
         },
     )?;
     pipe.func_wrap(
         "[method]piped.close-stdin",
         |mut store, (res,): (Resource<Piped>,)| {
-            store.data_mut().table.get_mut(&res)?.stdin = None;
+            run(store.data_mut(), &res)?.stdin = None;
             Ok(())
         },
     )?;
@@ -130,15 +220,22 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
         "[method]piped.read",
         |mut store, (res, max): (Resource<Piped>, u64)| {
             Box::new(async move {
-                if !charge(&mut store, &res)? {
-                    return Ok((Err(RunError::SpawnFailed),));
-                }
-                let mut stdout = store.data_mut().table.get(&res)?.stdout.clone();
                 let mut buf = vec![0; usize::try_from(max.clamp(1, MAX_READ)).unwrap_or(1)];
-                // A closed pipe reads as its end.
-                let n = stdout.read(&mut buf).await.unwrap_or(0);
-                buf.truncate(n);
-                Ok((Ok::<_, RunError>(buf),))
+                let result = std::future::poll_fn(|cx| {
+                    if !drive(&mut store, cx) {
+                        return Poll::Ready(Ok(Err(out_of_fuel())));
+                    }
+                    let run = match run(store.data_mut(), &res) {
+                        Ok(run) => run,
+                        Err(e) => return Poll::Ready(Err(e)),
+                    };
+                    // Its end of the pipe closes when it exits.
+                    run.stdout
+                        .poll_read(cx, &mut buf)
+                        .map(|n| Ok(Ok(buf[..n].to_vec())))
+                })
+                .await?;
+                Ok((result,))
             })
         },
     )?;
@@ -146,30 +243,33 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
         "[method]piped.wait",
         |mut store, (res,): (Resource<Piped>,)| {
             Box::new(async move {
-                let piped = store.data_mut().table.get_mut(&res)?;
-                piped.stdin = None;
-                let (Some(running), stderr) = (piped.running.take(), piped.stderr.take()) else {
-                    // Waited on twice.
-                    return Ok((Err(RunError::SpawnFailed),));
+                run(store.data_mut(), &res)?.stdin = None;
+                let result = std::future::poll_fn(|cx| {
+                    if !drive(&mut store, cx) {
+                        return Poll::Ready(Ok(None));
+                    }
+                    let run = match run(store.data_mut(), &res) {
+                        Ok(run) => run,
+                        Err(e) => return Poll::Ready(Err(e)),
+                    };
+                    // Done once it has exited and its stderr is all passed on.
+                    if run.ended.is_some() && run.stderr.is_none() && run.pending.is_empty() {
+                        Poll::Ready(Ok(run.ended.take()))
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await?;
+                let run = run(store.data_mut(), &res)?;
+                let trace = run.trace.take();
+                let Some(code) = result else {
+                    if let Some(trace) = trace {
+                        trace.end(Err("its caller ran out of fuel".to_owned()));
+                    }
+                    return Ok((Err(out_of_fuel()),));
                 };
-                let ended = running.await;
-                if let Some(stderr) = stderr {
-                    // Its stderr ends when it exits; finish copying it.
-                    let _ = stderr.await;
-                }
-                let (code, used) = match ended {
-                    Ok((code, used)) => (code, used),
-                    Err(e) => (Err(format!("its task failed: {e}")), 0),
-                };
-                let piped = store.data_mut().table.get_mut(&res)?;
-                let used = used.max(piped.fuel_used.load(Ordering::Relaxed));
-                piped.fuel_used.store(used, Ordering::Relaxed);
-                let left = charge(&mut store, &res)?;
-                if let Some(trace) = store.data_mut().table.get_mut(&res)?.trace.take() {
+                if let Some(trace) = trace {
                     trace.end(code.clone());
-                }
-                if !left {
-                    return Ok((Err(RunError::SpawnFailed),));
                 }
                 Ok((code.map_err(|e| {
                     tracing::warn!(error = %e, "piped command failed");
@@ -183,7 +283,7 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
 
 /// `[static]piped.spawn`: start `cmd` for the child whose store this is.
 fn spawn(
-    store: &mut wasmtime::StoreContextMut<'_, ChildState>,
+    store: &mut StoreContextMut<'_, ChildState>,
     cmd: String,
     args: Vec<String>,
     env: Vec<(String, String)>,
@@ -212,40 +312,26 @@ fn spawn(
         Ok(prepared) => prepared,
         Err(e) => return Ok(Err(run_error(e))),
     };
-    let caller_stderr = state.stderr.clone();
     let trace = spawner
         .traces
         .clone()
         .map(|traces| NestedTrace::start(traces, prepared.run.argv.clone()));
-    let mut run = prepared.run;
-    run.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
-    let live = run._live.take();
-    let fuel_used = Arc::clone(&run.fuel_used);
-    let mut stderr = prepared.stderr;
-    let stderr = tokio::spawn(async move {
-        let mut buf = vec![0; 16 * 1024];
-        let mut to = caller_stderr;
-        loop {
-            match stderr.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                // Without the caller's stderr (or once it's gone), drain it.
-                Ok(n) => {
-                    if let Some(to) = to.as_mut() {
-                        let _ = to.write_all(&buf[..n]).await;
-                    }
-                }
-            }
-        }
-    });
-    let piped = Piped {
+    let mut command = prepared.run;
+    command.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
+    let run = Run {
+        fuel_used: Arc::clone(&command.fuel_used),
+        running: Some(Box::pin(command.run())),
+        ended: None,
         stdin: Some(prepared.stdin),
         stdout: prepared.stdout,
-        running: Some(tokio::spawn(run.run())),
-        stderr: Some(stderr),
-        fuel_used,
+        stderr: Some(prepared.stderr),
+        pending: Vec::new(),
         charged: 0,
         trace,
-        _live: live,
     };
-    Ok(Ok(store.data_mut().table.push(piped)?))
+    let state = store.data_mut();
+    let id = state.piped.next;
+    state.piped.next += 1;
+    state.piped.runs.insert(id, run);
+    Ok(Ok(state.table.push(Piped(id))?))
 }

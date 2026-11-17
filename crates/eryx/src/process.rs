@@ -996,7 +996,7 @@ impl Spawner {
             fuel: 0,
             fuel_used: Arc::default(),
             memory,
-            _live: Some(live),
+            _live: live,
             _args: args,
             network,
             spawner: command.spawns.then(|| Spawner {
@@ -1118,6 +1118,7 @@ impl Command {
                 // Isolated commands run nothing else.
                 spawner: None,
                 stderr: None,
+                piped: piped::Runs::default(),
                 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs: None,
             },
@@ -1407,6 +1408,8 @@ pub(crate) struct ChildState {
     /// Its stderr, which its piped children's stderr goes to (see
     /// [`piped`]); `None` when it's captured instead.
     stderr: Option<pipe::Writer>,
+    /// Its piped commands (see [`piped`]), run by its pipe calls.
+    piped: piped::Runs,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -1552,9 +1555,8 @@ struct ChildRun {
     /// Its share of the execution's pool of child memory, holding its
     /// instances' metadata from spawn.
     memory: ChildMemory,
-    /// Its live slot, given back when the run ends or is dropped (a piped
-    /// command's handle holds it instead; see [`piped`]).
-    _live: Option<LiveSlot>,
+    /// Its live slot, given back when the run ends or is dropped.
+    _live: LiveSlot,
     /// Its argv and env, charged to the execution's budget for as long as
     /// the run (which holds copies of them) lasts.
     _args: Held,
@@ -1655,6 +1657,7 @@ impl ChildRun {
                 fuel_used: Arc::clone(&self.fuel_used),
                 spawner: self.spawner,
                 stderr: Some(self.stderr),
+                piped: piped::Runs::default(),
                 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
                 vfs,
             },
@@ -2681,7 +2684,7 @@ pub(crate) mod tests {
                 fuel: CHILD_FUEL,
                 fuel_used: Arc::default(),
                 memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
-                _live: LiveSlot::take(&Arc::default()),
+                _live: LiveSlot::take(&Arc::default()).unwrap(),
                 _args: Held {
                     budget: ChildBudget::default(),
                     bytes: 0,

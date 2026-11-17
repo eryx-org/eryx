@@ -35,7 +35,10 @@
 //! - `pipe-flood N CMD ARG...`: write N bytes to a piped `CMD` without ever
 //!   reading its output, then wait for it and print `done`;
 //! - `pipe-leak N CMD ARG...`: pipe up to N `CMD`s and exit without waiting
-//!   for them, printing `piped <count>` and the error that stopped it.
+//!   for them, printing `piped <count>` and the error that stopped it;
+//! - `pipe-burn N ROUNDS DIR CMD`: pipe N `CMD burn DIR/<i> ROUNDS`, then
+//!   read a byte from the first (which never writes one), printing the
+//!   result.
 //!
 //! A failure prints `error: <io::ErrorKind>` and exits 1.
 
@@ -238,6 +241,13 @@ fn main() {
             let _ = std::io::stdout().flush();
             // Exiting drops them, which kills them.
             std::process::exit(0);
+        }
+        ["pipe-burn", n, rounds, dir, cmd] => {
+            let children: Vec<_> = (0..n.parse().unwrap_or(0))
+                .map(|i| piped(cmd, &["burn", &format!("{dir}/{i}"), rounds]))
+                .collect();
+            let read = children.first().map(|child| child.read(1));
+            Ok(format!("{read:?}\n"))
         }
         ["spin"] => loop {
             std::hint::spin_loop();

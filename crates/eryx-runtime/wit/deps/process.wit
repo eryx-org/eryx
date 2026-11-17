@@ -88,16 +88,22 @@ interface run {
 /// Run a command with live pipes to its stdin and stdout: for child
 /// commands that talk to a command of their own while it runs (git and its
 /// `remote-https` helper) but, written against plain WASI, can't drive
-/// `process`'s streams. The command runs alongside its caller, and its
-/// stderr is the caller's. As with `run`, a child may only call it if the
-/// host lets its command spawn, and piped commands share the execution's
-/// limits.
+/// `process`'s streams. Its stderr is the caller's.
+///
+/// A piped command runs only while its caller is in a pipe call (`write`,
+/// `read` or `wait`, on it or on another of the caller's piped commands),
+/// which keeps them all on the caller's execution, and its fuel and timeout.
+/// So a caller should only block on its pipes, or exit, while its piped
+/// commands have work to do: one waiting on something else that depends on
+/// them (a file, its own stdin) waits until the timeout. As with `run`, a
+/// child may only call it if the host lets its command spawn, and piped
+/// commands share the execution's limits.
 interface pipe {
     use run.{run-error};
 
     /// A running command. Dropping it before `wait` returns kills it.
     resource piped {
-        /// Start `cmd`, running at once.
+        /// Start `cmd`. It runs during its caller's pipe calls.
         spawn: static func(
             cmd: string,
             args: list<string>,

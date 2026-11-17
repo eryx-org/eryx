@@ -232,7 +232,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   plus `eryx:process/run@0.1` and `eryx:process/pipe@0.1` for commands
   registered with `allow_spawn`: `run` runs a command to completion, and
   `pipe` starts one with live pipes to its stdin and stdout (as git talks to
-  its `remote-https` helper).
+  its `remote-https` helper). A piped command runs only while its caller is
+  in a pipe call (writing, reading or waiting on any of its piped commands),
+  so a caller blocked on something else that depends on it waits until the
+  timeout.
   Nothing else: no `wasi:http` (children reach the network over sockets,
   through the proxy below), and no WASI prereleases. A command importing
   anything else is refused when it's loaded (`Command::from_file` and
