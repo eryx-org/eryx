@@ -255,7 +255,13 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   Python `child_network="inherit"` or a `NetConfig`; in eryx-server
   `network_config.child_network`. A narrowing config starts from the
   defaults, which block localhost and private networks, so it must repeat
-  any allowed networks or internal hosts its children need. Children get `HTTPS_PROXY`/`HTTP_PROXY`
+  any allowed networks or internal hosts its children need. In Rust, a
+  command can have less from registration on, with
+  `Command::with_network(ChildNetwork::None | Inherit | Narrow(config))`
+  (the same narrowing, in every execution and session call); an execution's
+  `CommandOptions::with_network` replaces it for that execution. `build`
+  fails if a command is registered with network when the sandbox gives
+  children none, or with an invalid narrowing config. Children get `HTTPS_PROXY`/`HTTP_PROXY`
   and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
   secrets only as their placeholders, which the proxy replaces in requests
   to each secret's hosts. A command allowed tunnels

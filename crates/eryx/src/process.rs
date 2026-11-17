@@ -433,8 +433,9 @@ pub struct Command {
     /// Host memory its instances' metadata takes, charged to the children's
     /// memory pool while one runs (see `vmctx`).
     vmctx: usize,
-    /// This execution's network for it, if it's been narrowed from the
-    /// execution's (see [`CommandOptions::with_network`]).
+    /// Its network, if it's been narrowed from the execution's: at
+    /// registration (see [`Command::with_network`]), or for one execution
+    /// (see [`CommandOptions::with_network`]), which replaces that.
     network: Option<crate::net::ChildNetwork>,
 }
 
@@ -665,6 +666,32 @@ impl Command {
     #[must_use]
     pub fn allow_tunnels(mut self) -> Self {
         self.tunnels = true;
+        self
+    }
+
+    /// Give this command's children `network` instead of the sandbox's
+    /// child network (see
+    /// [`SandboxBuilder::with_child_network`](crate::SandboxBuilder::with_child_network)),
+    /// within it, in every execution:
+    /// [`ChildNetwork::None`](crate::ChildNetwork::None) takes their network
+    /// away, [`Inherit`](crate::ChildNetwork::Inherit) keeps the sandbox's,
+    /// and [`Narrow`](crate::ChildNetwork::Narrow) allows only what both it
+    /// and the sandbox's allow, with its limits counted per name the command
+    /// is registered under, on top of the execution's.
+    ///
+    /// An execution's [`CommandOptions::with_network`] replaces it for that
+    /// execution, within the sandbox's child network too.
+    ///
+    /// [`build`](crate::SandboxBuilder::build) fails if the sandbox gives
+    /// children no network and this gives the command some, or if a
+    /// [`Narrow`](crate::ChildNetwork::Narrow) config is invalid (see
+    /// [`NetConfig::validate`](crate::NetConfig::validate)). A pool lease
+    /// without a network (see
+    /// [`SandboxBuilder::with_network_per_lease`](crate::SandboxBuilder::with_network_per_lease))
+    /// leaves the command's children offline, whatever this says.
+    #[must_use]
+    pub fn with_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.network = Some(network);
         self
     }
 
@@ -1262,6 +1289,37 @@ impl Commands {
             registered: Arc::new(registered),
             guest: Some(guest),
         }
+    }
+
+    /// Check the networks commands were registered with (see
+    /// [`Command::with_network`]) against the sandbox's child network:
+    /// whether it gives children any (`child_net`).
+    ///
+    /// # Errors
+    ///
+    /// Fails if a command has network the sandbox doesn't give children, or
+    /// an invalid narrowed config.
+    pub(crate) fn check_networks(&self, child_net: bool) -> Result<(), Error> {
+        use crate::net::ChildNetwork;
+        for (name, command) in self.registered.iter() {
+            if !child_net
+                && matches!(
+                    command.network,
+                    Some(ChildNetwork::Inherit | ChildNetwork::Narrow(_))
+                )
+            {
+                return Err(ErrorKind::Initialization(format!(
+                    "command {name} can't have network: the sandbox gives children none"
+                ))
+                .into());
+            }
+            if let Some(ChildNetwork::Narrow(config)) = &command.network {
+                config.validate().map_err(|e| {
+                    ErrorKind::Initialization(format!("command {name}'s network: {e}"))
+                })?;
+            }
+        }
+        Ok(())
     }
 
     /// The commands one execution gets: just those in `allowed` (see

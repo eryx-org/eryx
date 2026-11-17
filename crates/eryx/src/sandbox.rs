@@ -2601,14 +2601,41 @@ impl<R> SandboxBuilder<Shell, R> {
     /// HTTP/1.1 is proxied; see [`Command::allow_tunnels`] for other
     /// protocols. The proxy lives for one execution.
     ///
+    /// A command can have less (see [`Command::with_network`], and
+    /// [`CommandOptions::with_network`](crate::CommandOptions::with_network)
+    /// for one execution), never more.
+    ///
     /// Needs [`with_network`](Self::with_network): [`build`](Self::build)
     /// fails without it. A [`SandboxPool`](crate::SandboxPool)'s sandboxes
     /// use each lease's network
-    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network)),
-    /// and children of a lease without one stay offline.
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network))
+    /// instead: [`SandboxPool::new`](crate::SandboxPool::new) sets that up,
+    /// and sandboxes for [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
+    /// need [`with_network_per_lease`](Self::with_network_per_lease).
+    /// Children of a lease without one stay offline.
     #[must_use]
     pub fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
         self.child_network = network;
+        self
+    }
+
+    /// Build this sandbox for a [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
+    /// pool whose leases set the network
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network)),
+    /// so [`with_child_network`](Self::with_child_network) needn't have
+    /// [`with_network`](Self::with_network) at build time.
+    /// [`SandboxPool::new`](crate::SandboxPool::new) does this itself.
+    ///
+    /// Fails closed: an execution without a network, such as a lease that
+    /// didn't set one or a sandbox never given one with
+    /// [`Sandbox::set_network`], gives children none
+    /// (no proxy, no proxy env vars), whatever the child network and
+    /// commands' networks say, and doesn't fail. Only an execution's
+    /// [`CommandOptions::with_network`](crate::CommandOptions::with_network)
+    /// giving a command network makes it fail to start.
+    #[must_use]
+    pub fn with_network_per_lease(mut self) -> Self {
+        self.network_per_request = true;
         self
     }
 
@@ -3268,6 +3295,10 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             )
             .into());
         }
+        commands.check_networks(!matches!(
+            self.child_network,
+            crate::net::ChildNetwork::None
+        ))?;
         let executor = executor
             .with_result_variable(self.result_variable)
             .with_commands(commands)
