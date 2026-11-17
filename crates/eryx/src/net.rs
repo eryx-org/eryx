@@ -4538,6 +4538,35 @@ mod tests {
         (m, handle.unwrap(), server)
     }
 
+    /// A server that speaks first marks the connection raw (another
+    /// protocol), but on a host with HTTP rules what the guest writes next
+    /// is still refused unless it's a request the rules allow.
+    #[tokio::test]
+    async fn a_server_speaking_first_doesnt_skip_http_rules() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = framing_manager();
+        let mut m = ConnectionManager::new(
+            base.policy
+                .config
+                .clone()
+                .allow_http(HttpRule::new("127.0.0.1").with_paths(["/public"])),
+            base.policy.secrets.clone(),
+        );
+        let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
+            listener.accept().await.unwrap().0
+        });
+        let (handle, mut server) = (handle.unwrap(), server);
+        server.write_all(b"hello\r\n").await.unwrap();
+        // The read side has seen the server speak first.
+        assert!(!m.tcp_read(handle, 64, 0).await.unwrap().is_empty());
+        assert!(
+            m.tcp_write(handle, b"GET /secret HTTP/1.1\r\nHost: other\r\n\r\n", 0)
+                .await
+                .is_err()
+        );
+    }
+
     /// Requests recorded by `tcp_write` frame their responses: a refused
     /// write doesn't forget the requests sent before it, and a response
     /// to no recorded request (unsolicited, or after writes that weren't
