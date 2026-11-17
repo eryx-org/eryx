@@ -740,10 +740,15 @@ impl RequestFramer {
                     if checked {
                         policy.check_http_rules(&headers, host, http_only)?;
                     }
-                    if self.substitute {
-                        out.extend(policy.substitute_http_headers(&headers, host)?);
+                    let headers = if self.substitute {
+                        policy.substitute_http_headers(&headers, host)?
                     } else {
-                        out.extend_from_slice(&headers);
+                        headers
+                    };
+                    if http_only {
+                        out.extend(to_origin_form(&headers));
+                    } else {
+                        out.extend(headers);
                     }
                 }
                 Body::Length(left) => {
@@ -777,6 +782,56 @@ impl RequestFramer {
         }
         Ok(out)
     }
+}
+
+/// A request's header block as the child proxy forwards it to the origin
+/// server: its target in origin-form (RFC 9112 section 3.2.1), with a `Host`
+/// header made from an absolute-form target if it had none, and without the
+/// headers addressed to the proxy itself (`Proxy-Connection`,
+/// `Proxy-Authorization`).
+fn to_origin_form(headers: &[u8]) -> Vec<u8> {
+    // `request_body` has checked that the headers are UTF-8.
+    let text = String::from_utf8_lossy(headers);
+    let mut lines = text.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut authority = None;
+    match request_line.splitn(3, ' ').collect::<Vec<_>>()[..] {
+        [method, target, version] if super::is_absolute_form(target) => {
+            let rest = target.split_once("://").map_or("", |(_, rest)| rest);
+            let (host, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+            let path = path.split('#').next().unwrap_or_default();
+            let path = match path {
+                "" if method == "OPTIONS" => "*".to_owned(),
+                "" => "/".to_owned(),
+                query if query.starts_with('?') => format!("/{query}"),
+                path => path.to_owned(),
+            };
+            out.push_str(&format!("{method} {path} {version}\r\n"));
+            authority = Some(host);
+        }
+        _ => {
+            out.push_str(request_line);
+            out.push_str("\r\n");
+        }
+    }
+    let mut has_host = false;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let name = line.split(':').next().unwrap_or_default().trim();
+        if name.eq_ignore_ascii_case("proxy-connection")
+            || name.eq_ignore_ascii_case("proxy-authorization")
+        {
+            continue;
+        }
+        has_host |= name.eq_ignore_ascii_case("host");
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    if let Some(host) = authority.filter(|_| !has_host) {
+        out.push_str(&format!("Host: {host}\r\n"));
+    }
+    out.push_str("\r\n");
+    out.into_bytes()
 }
 
 /// Read data held back by one connection's [`ResponseMasker`].
@@ -890,5 +945,40 @@ mod tests {
 
         let addrs = policy.resolve_allowed("public.example", 443).await.unwrap();
         assert_eq!(addrs, vec![SocketAddr::new(ip("8.8.8.8"), 443)]);
+    }
+    /// The child proxy forwards every request on a connection in
+    /// origin-form, without the headers addressed to the proxy itself.
+    #[test]
+    fn proxied_requests_reach_the_origin_in_origin_form() {
+        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()));
+        let frame = |data: &[u8]| {
+            let mut framer = policy.request_framer("api.test", false).http_only();
+            String::from_utf8(framer.frame(data).unwrap()).unwrap()
+        };
+
+        // A keep-alive connection: both requests are rewritten.
+        let out = frame(
+            b"GET http://api.test:8080/x?y=1 HTTP/1.1\r\nHost: api.test:8080\r\n\
+              Proxy-Connection: keep-alive\r\nproxy-authorization: Basic c2VjcmV0\r\n\
+              Content-Length: 2\r\n\r\nhi\
+              POST http://api.test:8080 HTTP/1.1\r\nHost: api.test:8080\r\n\
+              Content-Length: 0\r\n\r\n",
+        );
+        assert_eq!(
+            out,
+            "GET /x?y=1 HTTP/1.1\r\nHost: api.test:8080\r\nContent-Length: 2\r\n\r\nhi\
+             POST / HTTP/1.1\r\nHost: api.test:8080\r\nContent-Length: 0\r\n\r\n"
+        );
+
+        // No Host header: one is made from the target, as RFC 9112 asks.
+        assert_eq!(
+            frame(b"GET http://api.test/ HTTP/1.0\r\n\r\n"),
+            "GET / HTTP/1.0\r\nHost: api.test\r\n\r\n"
+        );
+        // Already origin-form, as inside a CONNECT tunnel: unchanged.
+        assert_eq!(
+            frame(b"GET /x HTTP/1.1\r\nHost: api.test\r\n\r\n"),
+            "GET /x HTTP/1.1\r\nHost: api.test\r\n\r\n"
+        );
     }
 }

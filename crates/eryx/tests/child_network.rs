@@ -282,6 +282,29 @@ async fn secrets_are_substituted_for_their_hosts_only() {
     assert_eq!(seen.lock().unwrap().len(), before);
 }
 
+/// A plain-HTTP request reaches the upstream in origin-form, as a client
+/// talking to it directly would send it, not in the absolute form the child
+/// sent the proxy.
+#[tokio::test]
+async fn plain_http_requests_reach_the_upstream_in_origin_form() {
+    let (port, seen) = upstream(None).await;
+    let sandbox = shell(network().allow_plaintext_secrets(true))
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!("tc proxy-get http://api.test:{port}/x?y=1"),
+    )
+    .await;
+    assert!(out.contains(" 200 OK"), "{out}");
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.starts_with("GET /x?y=1 HTTP/1.1\r\n"), "{seen}");
+    assert!(
+        seen.contains(&format!("Host: api.test:{port}\r\n")),
+        "{seen}"
+    );
+}
+
 /// Hosts the policy refuses get a proxy error, by name or by address.
 #[tokio::test]
 async fn refused_hosts_get_a_proxy_error() {
