@@ -931,7 +931,13 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                self.ctx.storage_for(vfs_desc).rmdir(&full_path).await?;
+                crate::wasi_impl::remove_dir(
+                    &self.ctx.storages[vfs_desc.storage],
+                    &mut self.ctx.open_files,
+                    vfs_desc.storage,
+                    &full_path,
+                )
+                .await?;
                 Ok(())
             }
             HybridDescriptor::RealDir { dir, .. } => {
@@ -978,6 +984,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let new_full = new_vfs.resolve_path(&new_path)?;
                 if self.ctx.open_files.is_unlinked(old_vfs.storage, &old_full) {
                     return Err(crate::VfsError::NotFound(old_full).into());
+                }
+                if !self
+                    .ctx
+                    .open_files
+                    .unlinked_under(old_vfs.storage, &old_full)
+                    .is_empty()
+                {
+                    return Err(crate::VfsError::Busy(old_full).into());
                 }
                 self.ctx
                     .storage_for(old_vfs)
@@ -1799,5 +1813,53 @@ mod tests {
         HostDescriptor::drop(&mut state, old).await.unwrap();
         HostDescriptor::drop(&mut state, new).await.unwrap();
         assert!(storage.read("/data/b").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn directories_holding_unlinked_files() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let storage = storage();
+        let mut ctx = HybridVfsCtx::new(storage.clone());
+        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let data = preopen(&mut state, 0);
+        let create = types::OpenFlags::CREATE;
+        storage.mkdir("/data/d").await.unwrap();
+        storage.mkdir("/data/f").await.unwrap();
+        storage.write("/data/f/x", b"other").await.unwrap();
+
+        // A directory holding only an unlinked open file can be renamed only
+        // after it's gone, and removed at once.
+        let file = open(&mut state, &data, "d/x", create, rw).await.unwrap();
+        state
+            .unlink_file_at(borrow(&data), "d/x".into())
+            .await
+            .unwrap();
+        let busy = state
+            .rename_at(borrow(&data), "d".into(), borrow(&data), "e".into())
+            .await;
+        assert!(matches!(
+            busy.map_err(vfs_err),
+            Err(crate::VfsError::Busy(_))
+        ));
+        state
+            .remove_directory_at(borrow(&data), "d".into())
+            .await
+            .unwrap();
+        assert!(!storage.exists("/data/d").await.unwrap());
+
+        // A new file at the old path isn't the unlinked one: it opens, and
+        // closing the old descriptor leaves it alone.
+        state
+            .rename_at(borrow(&data), "f".into(), borrow(&data), "d".into())
+            .await
+            .unwrap();
+        let new = open(&mut state, &data, "d/x", types::OpenFlags::empty(), rw)
+            .await
+            .unwrap();
+        HostDescriptor::drop(&mut state, file).await.unwrap();
+        HostDescriptor::drop(&mut state, new).await.unwrap();
+        assert_eq!(storage.read("/data/d/x").await.unwrap(), b"other");
     }
 }

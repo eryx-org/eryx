@@ -153,8 +153,13 @@ impl VfsDescriptor {
 /// name still shows in `stat` and directory listings, but it can't be opened,
 /// and creating a file there replaces the old contents.
 ///
-/// Only descriptors in the same context count: another context sharing the
-/// storage still deletes the file at once.
+/// Removing a directory that holds nothing but such files deletes them with
+/// it, and renaming a directory with such files beneath it is refused with
+/// `EBUSY`, since their marks are by path.
+///
+/// Only descriptors in the same context count. Another context sharing the
+/// storage still deletes the file at once, and a file it creates at the
+/// unlinked name is deleted when this context's last descriptor closes.
 #[derive(Debug, Default)]
 pub(crate) struct OpenFiles(HashMap<(usize, String), OpenFile>);
 
@@ -199,6 +204,16 @@ impl OpenFiles {
             .is_some_and(|f| f.unlinked)
     }
 
+    /// The files beneath directory `dir` that were unlinked while open.
+    pub(crate) fn unlinked_under(&self, storage: usize, dir: &str) -> Vec<String> {
+        let prefix = child_prefix(dir);
+        self.0
+            .iter()
+            .filter(|((s, path), f)| *s == storage && f.unlinked && path.starts_with(&prefix))
+            .map(|((_, path), _)| path.clone())
+            .collect()
+    }
+
     /// Mark open `path` unlinked (`linked: false`), or linked again because a
     /// new file took the name.
     pub(crate) fn set_linked(&mut self, storage: usize, path: &str, linked: bool) {
@@ -206,6 +221,40 @@ impl OpenFiles {
             file.unlinked = !linked;
         }
     }
+}
+
+/// `dir` with a trailing `/`, the prefix of every path beneath it.
+fn child_prefix(dir: &str) -> String {
+    format!("{}/", dir.trim_end_matches('/'))
+}
+
+/// Remove directory `dir`. If all it still holds are files unlinked while
+/// open, delete those with it: they have no name left to keep them by, so
+/// their descriptors lose the contents, as before unlinks were deferred.
+pub(crate) async fn remove_dir<S: VfsStorage>(
+    storage: &S,
+    open_files: &mut OpenFiles,
+    index: usize,
+    dir: &str,
+) -> crate::VfsResult<()> {
+    let unlinked = open_files.unlinked_under(index, dir);
+    if !unlinked.is_empty() {
+        let prefix = child_prefix(dir);
+        let entries: Vec<String> = storage
+            .list(dir)
+            .await?
+            .into_iter()
+            .map(|e| format!("{prefix}{}", e.name))
+            .collect();
+        if entries.iter().all(|path| unlinked.contains(path)) {
+            for path in &entries {
+                storage.delete(path).await?;
+                // Nothing for the last close to delete now.
+                open_files.set_linked(index, path, true);
+            }
+        }
+    }
+    storage.rmdir(dir).await
 }
 
 /// Iterator over directory entries.

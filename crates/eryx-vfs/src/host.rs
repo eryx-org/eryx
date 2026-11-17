@@ -430,7 +430,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
         let full_path = descriptor.resolve_path(&path)?;
-        self.ctx.storage.rmdir(&full_path).await?;
+        crate::wasi_impl::remove_dir(&self.ctx.storage, &mut self.ctx.open_files, 0, &full_path)
+            .await?;
         Ok(())
     }
 
@@ -457,6 +458,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         let new_full_path = new_descriptor.resolve_path(&new_path)?;
         if self.ctx.open_files.is_unlinked(0, &old_full_path) {
             return Err(crate::VfsError::NotFound(old_full_path).into());
+        }
+        if !self
+            .ctx
+            .open_files
+            .unlinked_under(0, &old_full_path)
+            .is_empty()
+        {
+            return Err(crate::VfsError::Busy(old_full_path).into());
         }
         self.ctx
             .storage
