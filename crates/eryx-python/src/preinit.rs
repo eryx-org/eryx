@@ -306,6 +306,10 @@ fn build_component(
             ),
         }
         .map_err(|e| InitializationError::new_err(format!("pre-compilation failed: {e}")))?;
+        // Stamped like `eryx-precompile compile` output, so loading the factory
+        // in an eryx with other guest sources is IncompatiblePrecompiled.
+        let mut precompiled = precompiled;
+        eryx::Executor::stamp_language(&mut precompiled, eryx::Language::Python);
         Ok(make_precompiled_artifact(precompiled, cache))
     })
 }

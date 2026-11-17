@@ -250,6 +250,8 @@ A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha25
 
 A precompiled runtime records the eryx version that built it and only loads in that version. Loading it in any other fails with an error naming both versions, so precompiled runtimes have to be rebuilt after every eryx upgrade, patch releases included.
 
+An eryx built from a git checkout also records the hash of the guest's sources (`eryx-guest-python`, `eryx-guest-js` or `eryx-guest-shell`, and the code and WIT they share) in each runtime it precompiles, and refuses a runtime built from other guest sources, with an error naming the language and its `mise run precompile-runtime-<language>` task. Between releases the version stays the same, so this is what catches a stale runtime in development. Builds from crates.io have no guest sources, so they only check the version.
+
 The output of `compile --preinit` stores what it was built from after the component: its site-packages, imports, setup code, callback declarations, target and CPU feature level. `upgrade` rebuilds it with the installed `eryx-precompile`'s version, without the original packages or flags:
 
 ```bash

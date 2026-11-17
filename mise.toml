@@ -485,13 +485,13 @@ CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip3 --release
 cp target/wasm32-wasip3/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell.wasm
 """
 sources = [
-  "crates/eryx-guest-shell/src/**/*",
-  "crates/eryx-guest-shell/wit/**/*",
-  "crates/eryx-guest-shell/Cargo.toml",
-  "crates/eryx-guest-shell/Cargo.lock",
-  "crates/eryx-runtime/wit/**/*.wit",
+  "{{config_root}}/crates/eryx-guest-shell/src/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/wit/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.toml",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.lock",
+  "{{config_root}}/crates/eryx-runtime/wit/**/*.wit",
 ]
-outputs = ["crates/eryx-runtime/runtime-shell.wasm"]
+outputs = ["{{config_root}}/crates/eryx-runtime/runtime-shell.wasm"]
 
 [tasks.build-runtime-shell-p2]
 description = "Build the brush guest for WASI 0.2 into runtime-shell-p2.wasm, for js/eryx"
@@ -502,13 +502,13 @@ CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
 cp target/wasm32-wasip2/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell-p2.wasm
 """
 sources = [
-  "crates/eryx-guest-shell/src/**/*",
-  "crates/eryx-guest-shell/wit/**/*",
-  "crates/eryx-guest-shell/Cargo.toml",
-  "crates/eryx-guest-shell/Cargo.lock",
-  "crates/eryx-runtime/wit/**/*.wit",
+  "{{config_root}}/crates/eryx-guest-shell/src/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/wit/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.toml",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.lock",
+  "{{config_root}}/crates/eryx-runtime/wit/**/*.wit",
 ]
-outputs = ["crates/eryx-runtime/runtime-shell-p2.wasm"]
+outputs = ["{{config_root}}/crates/eryx-runtime/runtime-shell-p2.wasm"]
 
 [tasks.precompile-runtime-javascript]
 description = "Pre-initialize and pre-compile runtime-javascript.wasm to runtime-javascript.cwasm"
@@ -576,12 +576,12 @@ CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
 cp target/wasm32-wasip2/release/eryx-bundler.wasm ../eryx-runtime/eryx-bundler.wasm
 """
 sources = [
-  "crates/eryx-bundler/src/**/*",
-  "crates/eryx-bundler/vendor/**/*",
-  "crates/eryx-bundler/Cargo.toml",
-  "crates/eryx-bundler/Cargo.lock",
+  "{{config_root}}/crates/eryx-bundler/src/**/*",
+  "{{config_root}}/crates/eryx-bundler/vendor/**/*",
+  "{{config_root}}/crates/eryx-bundler/Cargo.toml",
+  "{{config_root}}/crates/eryx-bundler/Cargo.lock",
 ]
-outputs = ["crates/eryx-runtime/eryx-bundler.wasm"]
+outputs = ["{{config_root}}/crates/eryx-runtime/eryx-bundler.wasm"]
 
 [tasks.precompile-bundler]
 description = "Pre-compile eryx-bundler.wasm to eryx-bundler.cwasm"

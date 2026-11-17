@@ -26,7 +26,11 @@
 #[path = "build/cached_runtime.rs"]
 mod cached_runtime;
 
+#[path = "build/guest_sources.rs"]
+mod guest_sources;
+
 fn main() {
+    guest_sources::prepare();
     #[cfg(feature = "embedded-stdlib")]
     embedded_stdlib::prepare();
     #[cfg(any(feature = "embedded", feature = "env-pack"))]
