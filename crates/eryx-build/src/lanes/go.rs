@@ -2,7 +2,8 @@
 //! componentizes with `wasm-tools`.
 //!
 //! The fork targets WASI 0.3.0, as implemented by the wasmtime version eryx
-//! uses. Its repo and commit are pinned in `scripts/bootstrap-go-wasip3.sh`.
+//! uses. Its repo and commit are pinned in eryx-org/eryx-commands'
+//! `scripts/bootstrap-go-wasip3.sh`, which builds it.
 //!
 //! Toolchain inputs (not per-CLI, so sourced from the environment):
 //! - `ERYX_GO_WASIP3_ROOT` — GOROOT of the wasip3 Go fork

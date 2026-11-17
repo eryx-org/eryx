@@ -2072,11 +2072,11 @@ async fn children_start_in_the_shells_directory() {
     assert_eq!(out.stdout_utf8().unwrap(), "hi\nf\nsub\nhi\n");
 }
 
-/// Opt-in: C git (clis/gpl/git) runs `git` itself for `stash` (and aliases), through
+/// Opt-in: C git runs `git` itself for `stash` (and aliases), through
 /// `eryx:process/run`, when registered with `allow_spawn`. Set
-/// ERYX_TEST_GIT_WASM to its component, e.g. from
-/// `mise run build-cli -- clis/gpl/git/git.toml` or the `git-component`
-/// artifact of the CLI components workflow. It works on the session's VFS.
+/// ERYX_TEST_GIT_WASM to its component: eryx-org/eryx-commands' published
+/// `eryx-gpl/git` (as CI pulls it), or a build of its recipe there. It works
+/// on the session's VFS.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 #[ignore = "needs ERYX_TEST_GIT_WASM"]

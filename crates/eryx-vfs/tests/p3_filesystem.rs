@@ -70,7 +70,8 @@ fn engine() -> &'static Engine {
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.wasm_component_model_async(true);
-        // Go's wasip3 runtime needs these too (see clis/smoke.sh).
+        // Go's wasip3 runtime needs these too (see eryx-org/eryx-commands'
+        // clis/smoke.sh).
         config.wasm_component_model_more_async_builtins(true);
         config.async_stack_size(16 << 20);
         config.max_wasm_stack(8 << 20);

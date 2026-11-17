@@ -4,8 +4,8 @@
 //! The children are small fixtures built by the tests (they need
 //! `rustup target add wasm32-wasip2`): tests/fixtures/test-cmd over the
 //! proxy's plain-HTTP path, and tests/fixtures/https-get, a rustls client
-//! using only the proxy's env vars, over HTTPS. (curl from
-//! `mise run build-cli -- curl` works the same way; see #812.)
+//! using only the proxy's env vars, over HTTPS. (eryx-org/eryx-commands'
+//! curl works the same way; see #812.)
 //!
 //! ```sh
 //! mise run precompile-runtime-shell
@@ -567,8 +567,7 @@ async fn p3_sockets_are_limited() {
 
 /// Opt-in: a Go-built `gh` (WASI 0.3) runs as a child and reaches
 /// api.github.com through the child proxy. Set ERYX_TEST_GH_WASM to its
-/// component, e.g. the `gh-component` artifact of the CLI components
-/// workflow. Needs internet access; a placeholder token gets a real 401.
+/// component: eryx-org/eryx-commands' published `eryx/gh`, as CI pulls it. Needs internet access; a placeholder token gets a real 401.
 /// gh needs a writable config dir, which children only get from the VFS.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]

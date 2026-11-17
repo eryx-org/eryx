@@ -806,7 +806,7 @@ description = "Build a CLI component from clis/<name>.toml. Usage: mise run buil
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. coreutils, curl, gh)}"
+NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. coreutils)}"
 # The C lane needs the WASI SDK. Export it if installed, but don't install it
 # for Rust and Go builds; C manifests point at ensure-wasi-sdk when it's missing.
 if SDK="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}" 2>/dev/null)"; then

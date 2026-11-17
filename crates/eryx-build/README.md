@@ -15,6 +15,10 @@ eryx-build --list          List the manifests in clis/ (and clis/gpl/*/)
 eryx-build --check         Validate every manifest without building
 ```
 
+The published commands' manifests (`eryx:rg`, `eryx-gpl:git` and the rest)
+live in [eryx-org/eryx-commands](https://github.com/eryx-org/eryx-commands);
+this repository keeps only coreutils', which eryx embeds.
+
 Run it from the root of the repository holding the manifests. Every path a
 manifest names (patches, shims, a `[build] wit` world, the output dir) is
 relative to that root, and sources are fetched into its `scratch/` dir.
