@@ -999,8 +999,9 @@ fn git_shell(network: NetConfig, host: &str) -> Sandbox {
 
 /// git clones, fetches and pushes over smart HTTP through the child proxy,
 /// authenticating with a secret it only has as a placeholder: as a bearer
-/// token in `http.extraHeader`, and as Basic credentials in the URL (which
-/// the proxy substitutes inside the encoding). The server accepts only the
+/// token in `http.extraHeader`, and as Basic credentials (which the proxy
+/// substitutes inside the encoding) in the URL and from `credential.helper
+/// store`, a helper git runs as a command. The server accepts only the
 /// real secret, which never appears in the script's output or traces.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the host's git"]
@@ -1025,6 +1026,8 @@ cd c && git config user.name eryx && git config user.email eryx@example.com
 echo pushed >> f.txt && git commit -qam 'pushed from eryx' && git push -q origin HEAD:refs/heads/pushed && echo pushed
 cd /tmp && git config --global --unset http.extraHeader
 git clone -q http://x-access-token:$TOKEN@git.test:{port}/repo.git b && echo basic-clone
+printf 'http://x-access-token:%s@git.test:{port}\n' "$TOKEN" > /tmp/credentials
+git -c "credential.helper=store --file=/tmp/credentials" clone -q {url} s && echo store-clone
 git ls-remote {url} >/dev/null 2>&1 || echo refused-without-token
 "#
     );
@@ -1035,7 +1038,9 @@ git ls-remote {url} >/dev/null 2>&1 || echo refused-without-token
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
-        stdout, "commit 2\ncommit 1\nfeature commit\npushed\nbasic-clone\nrefused-without-token\n",
+        stdout,
+        "commit 2\ncommit 1\nfeature commit\npushed\nbasic-clone\nstore-clone\n\
+         refused-without-token\n",
         "{stderr}"
     );
     let pushed = std::process::Command::new("git")
