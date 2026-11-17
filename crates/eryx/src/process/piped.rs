@@ -28,7 +28,8 @@ use wasmtime::component::{Linker, Resource, ResourceType};
 
 use super::child_bindings::eryx::process::run::RunError;
 use super::{
-    CHILD_FUEL, ChildState, Held, MAX_SPAWN_DEPTH, NestedTrace, ProcessError, charge_caller, pipe,
+    CHILD_FUEL, ChildState, Held, LiveSlot, MAX_SPAWN_DEPTH, NestedTrace, ProcessError,
+    charge_caller, pipe,
 };
 
 /// Most of a piped command's stdout one `read` returns.
@@ -64,6 +65,10 @@ struct Run {
     fuel_used: Arc<AtomicU64>,
     charged: u64,
     trace: Option<NestedTrace>,
+    /// Its live-child slot, held until the handle is dropped rather than
+    /// only while it runs: an ended command whose handle is kept still holds
+    /// its stdout's pipe buffer, so it keeps counting against the cap.
+    _live: Option<LiveSlot>,
 }
 
 impl Run {
@@ -158,6 +163,11 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
         // kill. What it burned since its last charge is charged now.
         if let Some(mut run) = store.data_mut().piped.runs.remove(&id) {
             let burned = run.take_fuel();
+            // One that exited but wasn't waited for ends its trace with how
+            // it ended, not as killed.
+            if let (Some(trace), Some(ended)) = (run.trace.take(), &run.ended) {
+                trace.end(ended.clone());
+            }
             drop(run);
             charge_caller(&mut store, &mut 0, burned);
         }
@@ -254,7 +264,8 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
                     };
                     // Done once it has exited and its stderr is all passed on.
                     if run.ended.is_some() && run.stderr.is_none() && run.pending.is_empty() {
-                        Poll::Ready(Ok(run.ended.take()))
+                        // Kept, so waiting again returns it again.
+                        Poll::Ready(Ok(run.ended.clone()))
                     } else {
                         Poll::Pending
                     }
@@ -318,6 +329,7 @@ fn spawn(
         .map(|traces| NestedTrace::start(traces, prepared.run.argv.clone()));
     let mut command = prepared.run;
     command.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
+    let live = command._live.take();
     let run = Run {
         fuel_used: Arc::clone(&command.fuel_used),
         running: Some(Box::pin(command.run())),
@@ -328,6 +340,7 @@ fn spawn(
         pending: Vec::new(),
         charged: 0,
         trace,
+        _live: live,
     };
     let state = store.data_mut();
     let id = state.piped.next;

@@ -36,6 +36,9 @@
 //!   reading its output, then wait for it and print `done`;
 //! - `pipe-leak N CMD ARG...`: pipe up to N `CMD`s and exit without waiting
 //!   for them, printing `piped <count>` and the error that stopped it;
+//! - `pipe-keep N CMD ARG...`: up to N times, pipe `CMD`, wait for it and
+//!   keep its handle, printing `kept <count>` and the error that stopped it,
+//!   then wait for the first one again, printing its status;
 //! - `pipe-burn N ROUNDS DIR CMD`: pipe N `CMD burn DIR/<i> ROUNDS`, then
 //!   read a byte from the first (which never writes one), printing the
 //!   result.
@@ -241,6 +244,27 @@ fn main() {
             let _ = std::io::stdout().flush();
             // Exiting drops them, which kills them.
             std::process::exit(0);
+        }
+        ["pipe-keep", n, cmd, args @ ..] => {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            let env: Vec<(String, String)> = std::env::vars().collect();
+            let cwd = std::env::var("PWD").unwrap_or_else(|_| "/".to_owned());
+            let mut kept = Vec::new();
+            let mut stopped = String::new();
+            for _ in 0..n.parse().unwrap_or(0) {
+                match eryx::process::pipe::Piped::spawn(cmd, &args, &env, &cwd) {
+                    Ok(child) => {
+                        let _ = child.wait();
+                        kept.push(child);
+                    }
+                    Err(e) => {
+                        stopped = format!(" error: {}", e.name());
+                        break;
+                    }
+                }
+            }
+            let again = kept.first().map(|child| child.wait());
+            Ok(format!("kept {}{stopped}\nagain {again:?}\n", kept.len()))
         }
         ["pipe-burn", n, rounds, dir, cmd] => {
             let children: Vec<_> = (0..n.parse().unwrap_or(0))

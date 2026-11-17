@@ -1410,6 +1410,24 @@ async fn rounds(storage: &eryx::vfs::ArcStorage, path: &str) -> u64 {
     }
 }
 
+/// A piped command that has exited keeps its live-child slot while its
+/// handle is kept (with its unread output), so kept handles hit the cap;
+/// waiting on one again returns its status again.
+#[tokio::test]
+async fn kept_piped_children_keep_their_slots() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc pipe-keep 100 tc exit 3").await;
+    let (kept, rest) = out
+        .strip_prefix("kept ")
+        .and_then(|rest| rest.split_once(' '))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert!(kept.parse::<usize>().unwrap() < 64, "{out}");
+    assert!(
+        rest.starts_with("error: limit-exceeded\nagain Some(Ok(3))\n"),
+        "{out}"
+    );
+}
+
 /// A caller killed while it waits for a piped command, by running out of
 /// fuel or by the timeout, takes the command with it: it makes no progress
 /// afterwards.

@@ -996,7 +996,7 @@ impl Spawner {
             fuel: 0,
             fuel_used: Arc::default(),
             memory,
-            _live: live,
+            _live: Some(live),
             _args: args,
             network,
             spawner: command.spawns.then(|| Spawner {
@@ -1555,8 +1555,10 @@ struct ChildRun {
     /// Its share of the execution's pool of child memory, holding its
     /// instances' metadata from spawn.
     memory: ChildMemory,
-    /// Its live slot, given back when the run ends or is dropped.
-    _live: LiveSlot,
+    /// Its live slot, given back when the run ends or is dropped (a piped
+    /// command's handle holds it instead, until it's dropped; see
+    /// [`piped`]).
+    _live: Option<LiveSlot>,
     /// Its argv and env, charged to the execution's budget for as long as
     /// the run (which holds copies of them) lasts.
     _args: Held,
@@ -2684,7 +2686,7 @@ pub(crate) mod tests {
                 fuel: CHILD_FUEL,
                 fuel_used: Arc::default(),
                 memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
-                _live: LiveSlot::take(&Arc::default()).unwrap(),
+                _live: LiveSlot::take(&Arc::default()),
                 _args: Held {
                     budget: ChildBudget::default(),
                     bytes: 0,
