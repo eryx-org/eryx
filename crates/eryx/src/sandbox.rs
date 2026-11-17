@@ -396,7 +396,12 @@ impl Sandbox {
             (None, None, None)
         };
 
-        let scrub_secrets = self.scrub_secrets(&options.credentials, child_net.as_ref());
+        let scrub_secrets = self.scrub_secrets(
+            &options.credentials,
+            options.allowed_commands.as_deref(),
+            &options.command_options,
+            child_net.as_ref(),
+        );
         let child_net = child_net.map(crate::process::ChildNet::new);
         // Create the trace channel and collector only when tracing is enabled.
         let tracing_enabled = self.tracing_enabled();
@@ -702,10 +707,14 @@ impl Sandbox {
     /// placeholders, the values of the credentials its children get (the
     /// sandbox's and `extra`, the execution's own), in case one gets there
     /// some way the proxy's response masking misses, and the passwords of
-    /// the proxies holding them (from `child_net`, the execution's).
+    /// the proxies holding them (from `child_net`, the execution's): just
+    /// those of the commands the execution (`allowed`, `command_options`)
+    /// may give a credential to.
     pub(crate) fn scrub_secrets(
         &self,
         extra: &[crate::net::Credential],
+        allowed: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
         child_net: Option<&crate::net::ChildNetPolicy>,
     ) -> HashMap<String, crate::secrets::SecretConfig> {
         let mut secrets = self.secrets.clone();
@@ -717,19 +726,10 @@ impl Sandbox {
             .chain(extra)
             .collect();
         // The commands that may get a proxy of their own with a password.
-        let registered = self.executor.commands().registered_names();
-        let names: std::collections::BTreeSet<&str> = if credentials.is_empty() {
-            std::collections::BTreeSet::new()
-        } else if credentials.iter().any(|c| c.commands().is_none()) {
-            registered.collect()
-        } else {
-            let named: std::collections::BTreeSet<&str> = credentials
-                .iter()
-                .flat_map(|c| c.commands().unwrap_or_default())
-                .map(String::as_str)
-                .collect();
-            registered.filter(|name| named.contains(name)).collect()
-        };
+        let names =
+            self.executor
+                .commands()
+                .credentialed_names(allowed, command_options, &credentials);
         let passwords = child_net.into_iter().flat_map(|net| {
             names
                 .iter()

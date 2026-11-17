@@ -862,6 +862,17 @@ impl RequestFramer {
                         ));
                     }
 
+                    // What follows a CONNECT or a 101 isn't framed or
+                    // masked, so a connection carrying a credential takes
+                    // neither: the server could send an earlier request's
+                    // credential back in pieces.
+                    if !self.credentials.is_empty() && switches_protocols(&headers) {
+                        return Err(TcpError::NotPermitted(format!(
+                            "CONNECT and Upgrade requests (WebSockets, say) can't be sent to \
+                             {host}, which a credential is added for"
+                        )));
+                    }
+
                     state.body = request_body(&headers)?;
                     state.started = true;
                     state.skipped_crlf = false;
@@ -975,10 +986,12 @@ fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
 /// request's path replaces every header of its name the child sent (the
 /// first for a name wins, so callers put an execution's before the
 /// sandbox's), and `Accept-Encoding` asks for `identity`, since a credential
-/// can't be masked out of a compressed response. A request that gets one
-/// loses its `Range` and `If-Range`, so an echo of the credential can't be
-/// fetched in pieces shorter than the masks. A `CONNECT` or `Upgrade`
-/// request gets none: what follows it isn't framed or masked.
+/// can't be masked out of a compressed response. Every request loses its
+/// `Range` and `If-Range`, whether it gets a credential or not, so an echo of
+/// one (a log of earlier requests, say) can't be fetched in pieces shorter
+/// than the masks. A `CONNECT` or `Upgrade` request gets none (the framer
+/// refuses them on these connections anyway): what follows it isn't framed
+/// or masked.
 fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8> {
     // `request_body` has checked that the headers are UTF-8, and the
     // request line parses (`classify`).
@@ -1006,7 +1019,7 @@ fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8
         let name = line.split(':').next().unwrap_or_default().trim();
         let ranged = name.eq_ignore_ascii_case("range") || name.eq_ignore_ascii_case("if-range");
         if name.eq_ignore_ascii_case("accept-encoding")
-            || (ranged && !applied.is_empty())
+            || ranged
             || applied
                 .iter()
                 .any(|c| c.header_name().eq_ignore_ascii_case(name))
@@ -1247,8 +1260,8 @@ mod tests {
     }
 
     /// Of two credentials setting one header, the first wins (an
-    /// execution's, which callers put first); a request that gets one loses
-    /// `Range` and `If-Range`, and one that gets none keeps them.
+    /// execution's, which callers put first); every request on a connection
+    /// carrying one loses `Range` and `If-Range`, even one that gets none.
     #[test]
     fn injection_takes_the_first_credential_and_drops_ranges() {
         let credentials = [
@@ -1271,15 +1284,61 @@ mod tests {
         assert!(!out.contains("sandbox"), "{out}");
         assert!(out.contains("X-Key: key\r\n"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("range"), "{out}");
-        // No credential for the path: the ranges stay.
+        // No credential for the path: the ranges still go, so a logged
+        // credential can't be read back in pieces on the same connection.
         let path_only = [Arc::clone(&credentials[2])];
         let out = inject(
-            "GET /other HTTP/1.1\r\nHost: api.test\r\nRange: bytes=0-3\r\n\r\n",
+            "GET /other HTTP/1.1\r\nHost: api.test\r\nRange: bytes=0-3\r\nIf-Range: \"e\"\r\n\r\n",
             &path_only,
         );
-        assert!(
-            out.contains("Range: bytes=0-3\r\n") && !out.contains("X-Key"),
-            "{out}"
-        );
+        assert!(!out.contains("X-Key"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("range"), "{out}");
+    }
+
+    /// A connection carrying a credential refuses `Upgrade` and `CONNECT`
+    /// requests, before or after a credentialed one, so nothing on it is
+    /// ever passed through unframed; one without a credential takes them.
+    #[test]
+    fn credentialed_connections_refuse_upgrades() {
+        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()));
+        let credentials = [Arc::new(
+            Credential::bearer("tok")
+                .for_hosts(["api.test"])
+                .for_paths(["/api/"])
+                .allow_plaintext(),
+        )];
+        let framer = |credentials: &[Arc<Credential>]| {
+            policy
+                .request_framer("api.test", false)
+                .http_only("api.test")
+                .with_credentials(credentials)
+        };
+        let upgrade = &b"GET /ws HTTP/1.1\r\nHost: api.test\r\nConnection: Upgrade\r\n\
+                         Upgrade: websocket\r\n\r\n"[..];
+        for data in [
+            upgrade.to_vec(),
+            [
+                &b"GET /api/x HTTP/1.1\r\nHost: api.test\r\n\r\n"[..],
+                upgrade,
+            ]
+            .concat(),
+            b"GET /api/x HTTP/1.1\r\nHost: api.test\r\nupgrade: h2c\r\n\r\n".to_vec(),
+            b"CONNECT api.test:443 HTTP/1.1\r\nHost: api.test:443\r\n\r\n".to_vec(),
+        ] {
+            let err = framer(&credentials).frame(&data).unwrap_err();
+            assert!(
+                err.to_string().contains("Upgrade"),
+                "{err} for {:?}",
+                String::from_utf8_lossy(&data)
+            );
+        }
+        // Another host's credential doesn't apply here: the upgrade goes.
+        let elsewhere = [Arc::new(
+            Credential::bearer("tok")
+                .for_hosts(["other.test"])
+                .allow_plaintext(),
+        )];
+        assert!(framer(&elsewhere).frame(upgrade).is_ok());
+        assert!(framer(&[]).frame(upgrade).is_ok());
     }
 }

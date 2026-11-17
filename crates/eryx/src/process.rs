@@ -1401,6 +1401,36 @@ impl Commands {
         Ok(commands)
     }
 
+    /// The registered commands one execution (`allowed`, `options`, as for
+    /// [`Self::for_execution`]) may give one of `credentials` to, and so a
+    /// proxy with a password: those it allows that have a network and that
+    /// a credential is for.
+    pub(crate) fn credentialed_names(
+        &self,
+        allowed: Option<&[String]>,
+        options: &HashMap<String, CommandOptions>,
+        credentials: &[&crate::net::Credential],
+    ) -> Vec<String> {
+        use crate::net::ChildNetwork;
+        if credentials.is_empty() {
+            return Vec::new();
+        }
+        self.only(allowed)
+            .registered
+            .iter()
+            .filter(|(name, command)| {
+                let option = options.get(*name);
+                let network = option
+                    .and_then(|o| o.network.as_ref())
+                    .or(command.network.as_ref());
+                !option.is_some_and(|o| o.no_credentials)
+                    && !matches!(network, Some(ChildNetwork::None))
+                    && credentials.iter().any(|c| c.for_command(name))
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Give each of `commands` the `credentials` that are for it, unless its
     /// options take them away; see [`Self::for_execution`] for the errors.
     fn attach_credentials(
@@ -2813,6 +2843,46 @@ pub(crate) mod tests {
         assert!(info.preview1 && info.runnable(), "{info:?}");
         assert_eq!(info.wasi, Some("0.2"));
         assert!(matches!(Command::from_bytes(&p1).unwrap().pre, Pre::P2(_)));
+    }
+
+    /// Only commands that can get a credential (allowed, with a network, not
+    /// opted out, and one is for them) have their proxy's password scrubbed.
+    #[test]
+    fn credentialed_names_are_those_a_credential_can_reach() {
+        use crate::net::{ChildNetwork, Credential};
+        let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        let mut commands = Commands::default();
+        for name in ["gh", "git", "cat", "ls"] {
+            commands.insert(name.into(), command.clone());
+        }
+        let names = |allowed: Option<&[String]>,
+                     options: &HashMap<String, CommandOptions>,
+                     credentials: &[&Credential]| {
+            let mut names = commands.credentialed_names(allowed, options, credentials);
+            names.sort();
+            names
+        };
+        let none = HashMap::new();
+        let gh = Credential::bearer("s")
+            .for_hosts(["api.github.com"])
+            .for_commands(["gh"]);
+        let any = Credential::bearer("s").for_hosts(["github.com"]);
+        assert!(names(None, &none, &[]).is_empty());
+        assert_eq!(names(None, &none, &[&gh]), ["gh"]);
+        assert_eq!(names(None, &none, &[&any]), ["cat", "gh", "git", "ls"]);
+        // Not allowed, no network, or opted out: no password to scrub.
+        let allowed = ["gh".to_owned(), "git".to_owned(), "cat".to_owned()];
+        let options = HashMap::from([
+            (
+                "git".to_owned(),
+                CommandOptions::new().with_network(ChildNetwork::None),
+            ),
+            (
+                "cat".to_owned(),
+                CommandOptions::new().without_credentials(),
+            ),
+        ]);
+        assert_eq!(names(Some(&allowed), &options, &[&any]), ["gh"]);
     }
 
     /// Running reuses the command's `CommandPre`: nothing is compiled or

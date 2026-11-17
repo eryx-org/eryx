@@ -166,13 +166,16 @@ impl ChildNetPolicy {
 
     /// The `user:password` the proxy holding credentials for the command
     /// `name` requires from its clients, derived from this execution's key.
+    /// The password is lowercase hex, so a failure message cut short
+    /// (`placeholder_safe_cut`, which keeps runs of letters and digits
+    /// whole) never ends in part of it.
     pub(crate) fn proxy_userinfo(&self, name: &str) -> String {
-        use base64::Engine as _;
+        use std::fmt::Write as _;
         let password = hmac_sha256(&*self.key.0, name.as_bytes());
-        format!(
-            "eryx:{}",
-            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(password)
-        )
+        password.iter().fold(String::from("eryx:"), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
     }
 
     /// What output and traces are scrubbed of for the proxy holding
@@ -1486,7 +1489,15 @@ mod tests {
         let [scrubbed, encoded, password] = net.proxy_sensitive_values("gh");
         assert_eq!(userinfo, scrubbed);
         assert_eq!(format!("eryx:{password}"), userinfo);
-        assert!(password.len() >= 32);
+        // 64 lowercase hex digits: no character a failure message's cut
+        // (`placeholder_safe_cut`) could split it at.
+        assert_eq!(password.len(), 64);
+        assert!(
+            password
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{password}"
+        );
         {
             use base64::Engine as _;
             assert_eq!(encoded, base64::prelude::BASE64_STANDARD.encode(userinfo));

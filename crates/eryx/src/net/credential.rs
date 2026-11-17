@@ -9,7 +9,7 @@
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 
-use super::{host_matches_pattern, is_normalized_path, normalize_host};
+use super::{host_matches_pattern, is_normalized_path};
 
 /// What a masked credential reads as in a response.
 const MASKED: &[u8] = b"[REDACTED]";
@@ -46,12 +46,13 @@ const RESERVED_HEADERS: [&str; 9] = [
 ///
 /// The proxy adds it only to requests it inspects: over TLS it terminated
 /// (not blind tunnels, which can't reach its hosts at all) or, with
-/// [`allow_plaintext`](Self::allow_plaintext), plain HTTP; never to an
-/// `Upgrade` request. Any header of the same name the child sent is
+/// [`allow_plaintext`](Self::allow_plaintext), plain HTTP. A connection to
+/// a host one applies to refuses `Upgrade` and `CONNECT` requests outright,
+/// so its hosts can't be used for WebSockets or other upgrades. Any header of the same name the child sent is
 /// replaced, so a client that needs a token to send requests at all (like
 /// `gh`) can be given a dummy one. Responses on such a connection are asked
-/// for and must come uncompressed, and have the credential masked out; a
-/// request that gets it loses its `Range` and `If-Range` headers.
+/// for and must come uncompressed, and have the credential masked out; every
+/// request on such a connection loses its `Range` and `If-Range` headers.
 ///
 /// Where an execution's credential and the sandbox's both apply to a request
 /// and set the same header, the execution's wins.
@@ -145,8 +146,16 @@ impl Credential {
     /// match `github.com` itself). Required, and narrower than
     /// [`NetConfig::allow_host`](crate::NetConfig::allow_host)'s patterns: a
     /// `*` anywhere else (`*`, `*.*`, `github.com*`, `*github.com`) is
-    /// refused, since it would match hosts the guest can register. Any port
-    /// the network allows on a host gets it: hosts aren't scoped by port.
+    /// refused, since it would match hosts the guest can register, and so is
+    /// `*.` and a single label (`*.com`). Names are ASCII letters, digits,
+    /// hyphens and dots (write internationalized names in punycode,
+    /// `xn--...`), or an IP address; a port, path or space is refused. Any
+    /// port the network allows on a host gets it: hosts aren't scoped by
+    /// port.
+    ///
+    /// A wildcard under a public suffix (`*.co.uk`, `*.github.io`,
+    /// `*.herokuapp.com`) isn't refused, since eryx doesn't carry the public
+    /// suffix list, but it matches names anyone can register: don't use one.
     #[must_use]
     pub fn for_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.hosts = hosts.into_iter().map(Into::into).collect();
@@ -237,8 +246,9 @@ impl Credential {
         for host in &self.hosts {
             if !is_credential_host_pattern(host) {
                 return Err(format!(
-                    "credential host pattern {host:?} must be a host name, or `*.` and one \
-                     (no other `*`, no empty labels)"
+                    "credential host pattern {host:?} must be an IP address, an ASCII host \
+                     name (letters, digits, hyphens and dots; punycode for others), or `*.` and \
+                     a name of two labels or more (no other `*`, no port, path or spaces)"
                 ));
             }
         }
@@ -305,12 +315,28 @@ impl Credential {
     }
 }
 
-/// Whether `pattern` is an exact host name, or a single leading `*.` label
-/// and a name with no `*` (and no empty labels) in it.
+/// Whether `pattern` is an IP literal (bracketed or not, without a zone), an
+/// exact ASCII host name (letters, digits, hyphens and dots, no empty
+/// labels; a trailing dot and case are ignored), or `*.` and such a name of
+/// at least two labels (so not `*.com`). No port, path, space or non-ASCII
+/// character: those would never match, so they're refused as typos.
 fn is_credential_host_pattern(pattern: &str) -> bool {
-    let host = normalize_host(pattern);
-    let name = host.strip_prefix("*.").unwrap_or(&host);
-    !name.contains('*') && name.split('.').all(|label| !label.is_empty())
+    let literal = pattern.strip_circumfix('[', ']').unwrap_or(pattern);
+    if literal.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let host = pattern.strip_suffix('.').unwrap_or(pattern);
+    let (wildcard, name) = match host.strip_prefix("*.") {
+        Some(name) => (true, name),
+        None => (false, host),
+    };
+    let labels: Vec<&str> = name.split('.').collect();
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) && (!wildcard || labels.len() >= 2)
 }
 
 #[cfg(test)]
@@ -388,8 +414,10 @@ mod tests {
         }
     }
 
-    /// Only an exact name or `*.` and a name: no other glob, which could
-    /// match a host the guest controls.
+    /// Only an IP literal, an exact ASCII name, or `*.` and a name of two
+    /// labels or more: no other glob, which could match a host the guest
+    /// controls, and no port, path, space or non-ASCII character, which
+    /// would never match.
     #[test]
     fn host_patterns_are_names_or_one_leading_wildcard_label() {
         for ok in [
@@ -399,6 +427,11 @@ mod tests {
             "localhost",
             "127.0.0.1",
             "[::1]",
+            "::1",
+            "*.github.co.uk",
+            "my-host.example-1.com",
+            "xn--bcher-kva.example",
+            "*.xn--bcher-kva.example",
         ] {
             assert!(is_credential_host_pattern(ok), "{ok}");
             assert!(Credential::bearer("s").for_hosts([ok]).validate().is_ok());
@@ -419,6 +452,21 @@ mod tests {
             ".github.com",
             "github..com",
             "*..github.com",
+            "*.com",
+            "*.localhost",
+            "*.com.",
+            "api.github.com:443",
+            "[::1]:443",
+            "fe80::1%lo",
+            "github.com/org",
+            "api.github.com/",
+            "api github.com",
+            " api.github.com",
+            "bücher.example",
+            "*.bücher.example",
+            "api_x.github.com",
+            "https://api.github.com",
+            "user@github.com",
         ] {
             assert!(!is_credential_host_pattern(bad), "{bad}");
             let err = Credential::bearer("s")

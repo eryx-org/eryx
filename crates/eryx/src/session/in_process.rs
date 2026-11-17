@@ -393,7 +393,12 @@ async fn run_code(
         None => (None, None, None),
     };
 
-    let scrub_secrets = sandbox.scrub_secrets(&[], child_net.as_ref());
+    let scrub_secrets = sandbox.scrub_secrets(
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        child_net.as_ref(),
+    );
     // Create the trace channel and collector only when tracing is enabled.
     let tracing_enabled = sandbox.tracing_enabled();
     let (trace_tx, trace_collector) = if tracing_enabled {

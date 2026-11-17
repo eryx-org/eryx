@@ -263,16 +263,27 @@ rules and limits worth knowing:
   (`SandboxBuilder::with_credential`) where both apply to a request and set
   the same header, so a per-request token overrides a sandbox-wide default.
   Among one level's own, the first given wins.
-- **Hosts:** `for_hosts` takes exact names (`api.github.com`) or `*.` and a
-  name (`*.github.com`, its subdomains only). Any other `*` (`*`, `*.*`,
-  `github.com*`, `*github.com`) is refused, since it could match a host the
-  script controls. Hosts aren't scoped by port: any port the network allows
-  on a credential's host gets it.
+- **Hosts:** `for_hosts` takes exact names (`api.github.com`), IP addresses,
+  or `*.` and a name of two labels or more (`*.github.com`, its subdomains
+  only). Any other `*` (`*`, `*.*`, `github.com*`, `*github.com`) is refused,
+  since it could match a host the script controls, and so is `*.` and a
+  single label (`*.com`). Names are ASCII letters, digits, hyphens and dots:
+  write internationalized names in punycode (`xn--…`); a port, path or space
+  is refused rather than never matching. eryx doesn't carry the public suffix
+  list, so a wildcard under a public suffix (`*.co.uk`, `*.github.io`) is
+  accepted but matches names anyone can register: avoiding those is up to
+  you. Hosts aren't scoped by port: any port the network allows on a
+  credential's host gets it.
+- **No upgrades:** a connection to a host a command's credential applies to
+  refuses `Upgrade` and `CONNECT` requests, so those hosts can't be used for
+  WebSockets (or `h2c` and other upgrades) by that command, and a `101`
+  response ends the connection: what follows one isn't framed, so it
+  couldn't be masked.
 - **Masking only hides whole, verbatim echoes.** A host that echoes request
   headers can hand the credential back in a form masking doesn't see: re-escaped
   (JSON's `\/` for `/`), re-encoded, or in pieces (`Range` and `If-Range` are
-  dropped from requests carrying a credential, but other ways to slice a
-  response remain). Don't give credentials for hosts that echo requests.
+  dropped from every request on a connection carrying a credential, but other
+  ways to slice a response remain). Don't give credentials for hosts that echo requests.
 - **Output scrubbing is defence in depth, not a boundary.** The credential's
   value and the password of the proxy holding it (which a command finds in its
   `HTTPS_PROXY`) are scrubbed from stdout, stderr, traces, failure messages
