@@ -176,12 +176,14 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   (`Command.from_bytes` and `Command.from_precompiled_file` too). The
   `pyeryx-runtime-shell` package (`pip install pyeryx[shell]`) brings
   coreutils, which pyeryx registers by default.
-- **eryx-server:** `--shell-command NAME[,NAME...]=PATH` (repeatable, or
-  `ERYX_SHELL_COMMANDS` separated by `;`) registers a `.wasm` command or one
-  precompiled by `eryx-precompile compile` (`.cwasm`),
+- **eryx-server:** `--shell-command NAME[,NAME...]=PATH[@sha256:<hex>]`
+  (repeatable, or `ERYX_SHELL_COMMANDS` separated by `;`) registers a `.wasm`
+  command or one precompiled by `eryx-precompile compile` (`.cwasm`). A
+  `.wasm` can be pinned to its digest (see
+  [Commands from a registry](./grpc-server.md#commands-from-a-registry)).
   `--no-shell-coreutils` leaves the embedded coreutils out, and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
-  (see **Network**).
+  (see **Network**). An empty `ERYX_SHELL_COMMANDS` means no extra commands.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
   download on first use; `coreutils: false` leaves it out), and `commands`
   adds others by the URL of their `jco transpile --instantiation async`

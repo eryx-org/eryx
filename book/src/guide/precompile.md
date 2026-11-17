@@ -244,7 +244,7 @@ eryx-precompile commands inspect rg.wasm
 eryx-precompile compile rg.wasm --output rg.cwasm
 ```
 
-A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under `$XDG_CACHE_HOME/eryx`). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
+A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under the first usable of `$XDG_CACHE_HOME/eryx`, the platform cache directory (`~/.cache/eryx` on Linux) and `$TMPDIR/eryx-<uid>`; with none usable, it compiles in memory and warns). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
 
 ## Upgrading to a New eryx Version
 
