@@ -499,6 +499,8 @@ pub struct HybridVfsCtx<S: VfsStorage + Clone> {
     max_open_host_files: usize,
     /// Budget shared with every other context in the process.
     process_budget: &'static HostFileBudget,
+    /// VFS files open through descriptors.
+    pub(crate) open_files: crate::wasi_impl::OpenFiles,
 }
 
 /// Default limit on host files and directories one guest can hold open at
@@ -616,6 +618,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
             process_budget: &PROCESS_HOST_FILES,
+            open_files: Default::default(),
         }
     }
 
