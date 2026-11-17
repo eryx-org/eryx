@@ -837,20 +837,19 @@ impl HttpRule {
     }
 }
 
-/// The decoded path of request target `target` (a path, or an absolute
-/// URL's path), without its query; `None` if it has none or is ambiguous:
-/// see [`HttpRule`].
+/// The decoded path of request target `target` (origin-form, a path, or
+/// absolute-form, an absolute URL's path), without its query; `None` if it
+/// has none or is ambiguous: see [`HttpRule`]. Any other target (`*`, an
+/// authority, or something a server might resolve as a relative path, like
+/// `../x?u=http://host/`) has none.
 fn request_path(target: &str) -> Option<String> {
-    let path = if target.starts_with('/') {
-        target
+    let uri = if target.starts_with('/') {
+        parse_target(target)?
     } else {
-        let (_, rest) = target.split_once("://")?;
-        match rest.find(['/', '?', '#']) {
-            Some(i) if rest[i..].starts_with('/') => &rest[i..],
-            _ => "/",
-        }
+        absolute_form(target)?
     };
-    let path = path.split(['?', '#']).next().unwrap_or_default();
+    // The raw path: parse_target checked the parsed target is the text.
+    let path = uri.path();
 
     let mut decoded = Vec::with_capacity(path.len());
     let mut bytes = path.bytes();
@@ -1704,6 +1703,16 @@ impl ConnectionManager {
                 "HTTP request names more than one host".into(),
             ));
         }
+        // A host with rules only gets requests naming itself: a server may
+        // route by, or decode into the path, an authority the rules weren't
+        // checked against (`http://..%2fsecret/public`, `Host: other`).
+        if self.config.has_http_rules(host) && !named.iter().all(|a| same_host(strip_port(a), host))
+        {
+            return Err(TcpError::NotPermitted(
+                "HTTP request names a host other than the connection's, which has HTTP rules"
+                    .into(),
+            ));
+        }
         for host in std::iter::once(host.as_str()).chain(named.into_iter().map(strip_port)) {
             self.config
                 .check_http_request(host, method, target)
@@ -2422,12 +2431,11 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     let (_, target) = request_line(headers)?;
     let lines = headers.lines().skip(1);
     let mut hosts = Vec::new();
-    if let Some((_, rest)) = is_absolute_form(target)
-        .then(|| target.split_once("://"))
-        .flatten()
-    {
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        if authority.is_empty() || authority.contains('@') {
+    if let Some(uri) = absolute_form(target) {
+        // As it's written in `target` (see parse_target), borrowed from it.
+        let start = uri.scheme_str()?.len() + "://".len();
+        let authority = target.get(start..start + uri.authority()?.as_str().len())?;
+        if authority.contains('@') {
             return None;
         }
         hosts.push(authority);
@@ -2441,15 +2449,74 @@ fn request_authorities(headers: &str) -> Option<Vec<&str>> {
     Some(hosts)
 }
 
-/// Whether request target `target` is absolute-form (`scheme://host/...`),
-/// rather than a path that may contain `://` in its query.
+/// Whether request target `target` is absolute-form (`scheme://host/...`).
 fn is_absolute_form(target: &str) -> bool {
-    !target.starts_with('/') && target.contains("://")
+    absolute_form(target).is_some()
+}
+
+/// `target` parsed as a request target (RFC 9112's origin-, absolute- or
+/// authority-form, or `*`), if the parse reads back as exactly `target`.
+/// What HTTP rules check has to be what the server gets, so a target the
+/// parser reads differently from its text is refused: one with a fragment
+/// (dropped) or an upper-case scheme (lowered). The one difference allowed
+/// is the `/` the parser gives an absolute URL with an empty path
+/// (`http://host`, `http://host?q`), which is what an empty path means
+/// (RFC 9112 section 3.2.2), so it's checked as `/`.
+fn parse_target(target: &str) -> Option<http::Uri> {
+    let uri: http::Uri = target.parse().ok()?;
+    // Not `uri == target`, which ignores case in the scheme and authority.
+    let read_back = uri.to_string();
+    if read_back == target {
+        return Some(uri);
+    }
+    let prefix = format!("{}://{}", uri.scheme_str()?, uri.authority()?);
+    let rest = target.strip_prefix(&prefix)?;
+    (rest.is_empty() || rest.starts_with('?'))
+        .then(|| format!("{prefix}/{rest}"))
+        .filter(|with_slash| *with_slash == read_back)
+        .map(|_| uri)
+}
+
+/// `target` parsed, if it's absolute-form: a scheme at its very start (a
+/// letter, then letters, digits, `+`, `-` or `.`; the parser takes any
+/// scheme characters), `://` and an authority. A target with `://` anywhere
+/// else (`../x?u=http://host/`, which a server may read as a relative path)
+/// isn't.
+fn absolute_form(target: &str) -> Option<http::Uri> {
+    let uri = parse_target(target)?;
+    let mut scheme = uri.scheme_str()?.chars();
+    let scheme_ok = scheme.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    (scheme_ok && uri.authority().is_some_and(plain_authority)).then_some(uri)
+}
+
+/// Whether `authority` is a plain `host[:port]`: a host name of letters,
+/// digits, `-`, `.` and `_`, or a bracketed IPv6 address, and a port of
+/// 0-65535. The parser takes more (`%` escapes, which a server may decode
+/// into a path, like `..%2fsecret`; other sub-delims; zones).
+fn plain_authority(authority: &http::uri::Authority) -> bool {
+    let host = authority.host();
+    let host_ok = match host.strip_circumfix('[', ']') {
+        Some(v6) => v6.parse::<Ipv6Addr>().is_ok(),
+        None => {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+        }
+    };
+    let port_ok = match &authority.as_str()[host.len()..] {
+        "" => true,
+        port => port.strip_prefix(':').is_some_and(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+        }),
+    };
+    host_ok && port_ok
 }
 
 /// The method and target of a request whose request line is exactly
 /// `METHOD SP target SP HTTP/1.x`, and whose target contains no whitespace or
-/// `\`.
+/// `\` and is in a request-target form ([`request_target_form`]).
 fn request_line(headers: &str) -> Option<(&str, &str)> {
     let mut parts = headers.lines().next()?.split(' ');
     let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
@@ -2458,10 +2525,33 @@ fn request_line(headers: &str) -> Option<(&str, &str)> {
         || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         || target.is_empty()
         || target.contains(|c: char| c.is_whitespace() || c == '\\')
+        || !request_target_form(method, target)
     {
         return None;
     }
     Some((method, target))
+}
+
+/// Whether `target` is in one of RFC 9112's four request-target forms for
+/// `method`: origin-form (`/path?query`), absolute-form (see
+/// [`absolute_form`]), authority-form (`host:port`) for a CONNECT, or `*` for
+/// an OPTIONS. Anything else is refused, since a server may resolve it in
+/// ways the rules don't see: `../x?u=http://host/` looks absolute to a naive
+/// check but is a relative path to a lenient server.
+fn request_target_form(method: &str, target: &str) -> bool {
+    let Some(uri) = parse_target(target) else {
+        return false;
+    };
+    let path = uri.path_and_query().map(http::uri::PathAndQuery::as_str);
+    match (uri.scheme(), uri.authority(), path) {
+        (None, None, Some("*")) => method.eq_ignore_ascii_case("OPTIONS"),
+        (None, None, Some(_)) => true,
+        (None, Some(authority), None) => {
+            method.eq_ignore_ascii_case("CONNECT") && plain_authority(authority)
+        }
+        (Some(_), Some(_), Some(_)) => absolute_form(target).is_some(),
+        _ => false,
+    }
 }
 
 /// `authority` without a trailing `:port`.
@@ -4456,6 +4546,49 @@ mod tests {
     /// Paths match on segment boundaries after decoding, and anything a
     /// server could resolve elsewhere is refused.
     #[test]
+    fn request_targets_must_be_in_a_request_target_form() {
+        for (method, target) in [
+            ("GET", "/x?y=http://z/"),
+            ("GET", "http://host/x"),
+            ("GET", "https://host/"),
+            // An empty path is `/` (RFC 9112 section 3.2.2); proxy clients send it.
+            ("GET", "http://example.com"),
+            ("GET", "http://host?x"),
+            ("GET", "http://[::1]:8080/x"),
+            ("GET", "http://h_o-s.t:80/"),
+            ("CONNECT", "host:443"),
+            ("connect", "[::1]:443"),
+            ("OPTIONS", "*"),
+        ] {
+            let line = format!("{method} {target} HTTP/1.1\r\n\r\n");
+            assert_eq!(request_line(&line), Some((method, target)), "{line}");
+        }
+        for (method, target) in [
+            ("GET", "../x?y=http://host/"),
+            ("GET", "x"),
+            ("GET", "*"),
+            ("GET", "host:443"),
+            ("GET", "http:///x"),
+            ("GET", "HTTPS://host/"),
+            ("GET", "HTTPS://host"),
+            ("GET", "/x#y"),
+            // Authorities must be a plain host[:port].
+            ("GET", "http://..%2fsecret/x"),
+            ("GET", "http://ho!st/"),
+            ("GET", "http://host:99999/"),
+            ("GET", "http://host:/x"),
+            ("GET", "http://[fe80::1%25lo]/"),
+            ("CONNECT", "..%2fx:443"),
+            ("GET", "1http://host/"),
+            ("CONNECT", "host:443/x"),
+            ("OPTIONS", "*x"),
+        ] {
+            let line = format!("{method} {target} HTTP/1.1\r\n\r\n");
+            assert_eq!(request_line(&line), None, "{line}");
+        }
+    }
+
+    #[test]
     fn http_rules_match_methods_and_paths() {
         let config = github_rules();
         let check = |method, target| config.check_http_request("api.github.com", method, target);
@@ -4465,7 +4598,8 @@ mod tests {
             "/repos/org/repo/issues?state=open",
             "/repos/org/%72epo/pulls",
             "/user/keys",
-            "https://api.github.com/repos/org/repo#x",
+            "http://api.github.com/user/keys?x=1",
+            "svn+ssh://api.github.com/user/keys",
         ] {
             assert!(check("GET", target).is_ok(), "{target}");
         }
@@ -4488,6 +4622,21 @@ mod tests {
             "*",
             "api.github.com:443",
             "https://api.github.com",
+            // `://` that isn't right after a scheme at the start: a lenient
+            // server can resolve these as relative paths (`/other`).
+            "../other?x=https://api.github.com/repos/org/repo",
+            "other?x=https://api.github.com/repos/org/repo",
+            "1https://api.github.com/repos/org/repo",
+            "-x://api.github.com/repos/org/repo",
+            "https:///repos/org/repo",
+            "://api.github.com/repos/org/repo",
+            // Targets the parser reads differently from their text: what's
+            // checked has to be what's sent.
+            "https://api.github.com/repos/org/repo#x",
+            "/repos/org/repo#x",
+            "HTTPS://api.github.com/repos/org/repo",
+            // An empty path is `/`, whatever the query says.
+            "https://api.github.com?x=/repos/org/repo",
         ] {
             assert!(check("GET", target).is_err(), "{target}");
         }
@@ -4692,6 +4841,32 @@ mod tests {
             (2, b"GET https://www.github.com/ HTTP/1.1\r\nHost: other.github.com\r\n\r\n"),
         ] {
             assert!(m.process_write_data(handle, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        // A target that only contains `://` isn't absolute-form, so its
+        // "path" after it isn't what the rules check.
+        let relative = b"GET ../other?x=http://api.github.com/repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
+        assert!(m.process_write_data(1, relative).is_err());
+        m.http_states.clear();
+        // An authority a server may decode into a path, or any host other
+        // than the connection's, isn't sent to a host with rules.
+        for request in [
+            &b"GET http://..%2fsecret/repos/org/repo HTTP/1.1\r\nHost: ..%2fsecret\r\n\r\n"[..],
+            b"GET http://..%2fsecret/repos/org/repo HTTP/1.1\r\n\r\n",
+            b"GET http://%2e%2e%2fsecret/repos/org/repo HTTP/1.1\r\n\r\n",
+            b"GET /repos/org/repo HTTP/1.1\r\nHost: ..%2fsecret\r\n\r\n",
+            b"GET /repos/org/repo HTTP/1.1\r\nHost: other.example\r\n\r\n",
+        ] {
+            assert!(m.process_write_data(1, request).is_err(), "{request:?}");
+            m.http_states.clear();
+        }
+        // An absolute URL with an empty path, as proxy clients send it, goes
+        // to a host without rules.
+        for request in [
+            &b"GET http://www.github.com HTTP/1.1\r\nHost: www.github.com\r\n\r\n"[..],
+            b"GET http://www.github.com?x HTTP/1.1\r\nHost: www.github.com\r\n\r\n",
+        ] {
+            assert!(m.process_write_data(2, request).is_ok(), "{request:?}");
             m.http_states.clear();
         }
         let absolute = b"GET https://api.github.com:443/repos/org/repo HTTP/1.1\r\nHost: API.github.com\r\n\r\n";

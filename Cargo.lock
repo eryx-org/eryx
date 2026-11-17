@@ -1156,6 +1156,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "http",
  "ipnet",
  "rand 0.10.4",
  "rcgen",
