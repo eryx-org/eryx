@@ -44,7 +44,11 @@ const GUESTS: [(&str, &[&str]); 3] = [
         "ERYX_GUEST_HASH_SHELL",
         &[
             "crates/eryx-guest-shell/src",
-            "crates/eryx-guest-shell/wit",
+            // Not the whole wit/ dir: its other deps are symlinks into
+            // eryx-runtime/wit, below, which a Windows checkout makes text
+            // files with other contents.
+            "crates/eryx-guest-shell/wit/shell.wit",
+            "crates/eryx-guest-shell/wit/deps/process.wit",
             "crates/eryx-guest-shell/Cargo.toml",
             "crates/eryx-guest-shell/Cargo.lock",
             "crates/eryx-runtime/wit",
@@ -93,7 +97,18 @@ fn hash(root: &Path, files: &[PathBuf]) -> u64 {
 }
 
 /// Push `path` if it is a file, or every file under it if it is a directory.
+///
+/// Panics at a symlink: a Windows checkout makes one a text file holding its
+/// target, so the hash would differ there and refuse runtimes built on Linux.
+/// List the target instead.
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_symlink() {
+        panic!(
+            "{} is a symlink, which hashes differently on Windows: \
+             list what it points to in build/guest_sources.rs instead",
+            path.display()
+        );
+    }
     if path.is_dir() {
         for entry in std::fs::read_dir(path).expect("failed to read guest source dir") {
             collect_files(&entry.expect("failed to read dir entry").path(), files);

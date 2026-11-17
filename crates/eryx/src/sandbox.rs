@@ -1292,6 +1292,9 @@ struct MappedComponent {
     /// even if its path is later replaced.
     file: Mutex<std::fs::File>,
     len: u64,
+    /// What [`Executor::stamp_language`] stamped it with, read once when
+    /// mapped.
+    stamp: Option<crate::wasm::LanguageStamp>,
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -1456,11 +1459,14 @@ impl PrecompiledArtifact {
             let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
             // SAFETY: The caller guarantees the file is trusted and unmodified.
             let component = unsafe { Executor::deserialize_component_file(fd_path.as_ref())? };
+            let mut file = file;
+            let stamp = crate::wasm::file_language_stamp(&mut file, len);
             return Ok(Self {
                 component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
                     component,
                     file: Mutex::new(file),
                     len,
+                    stamp,
                 })),
                 cache_key,
             });
@@ -1482,10 +1488,7 @@ impl PrecompiledArtifact {
     fn language_stamp(&self) -> Option<crate::wasm::LanguageStamp> {
         match &self.component {
             ArtifactComponent::Bytes(bytes) => crate::wasm::language_stamp(bytes),
-            ArtifactComponent::Mapped(mapped) => {
-                let mut file = mapped.file.lock().ok()?;
-                crate::wasm::file_language_stamp(&mut file, mapped.len)
-            }
+            ArtifactComponent::Mapped(mapped) => mapped.stamp,
         }
     }
 
