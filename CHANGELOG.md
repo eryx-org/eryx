@@ -14,14 +14,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx` - [0.15.2](https://github.com/eryx-org/eryx/compare/eryx-v0.15.1...eryx-v0.15.2) - 2026-11-17
 
+### Security
+- **Upgrade recommended for anyone using secrets.** Sandboxed code could recover real secret values through the timing of response masking. To catch a value split across reads, eryx held back the end of a read only when it looked like the start of a real value, and released it after 100 ms. So a script that got a server to echo bytes back could see whether its guess was a prefix of the secret, and recover it byte by byte. Before this release, masking applied to every connection in a sandbox with secrets, so the echoing server could be any reachable host, including one the attacker runs under `allow_all_hosts` (pyeryx's default).
+  - Responses are now framed as HTTP on connections where secrets are substituted: headers, `Content-Length` and chunked bodies, and bodiless responses. A value is masked wherever the guest's HTTP client sees it whole, including across chunks.
+  - Bytes are held back by length, never by content. They're released at framing boundaries, or, between chunks and on other protocols, after 100 ms of quiet; the guest's read timeout can't shorten that wait.
+  - Connections where nothing is substituted aren't masked at all.
+
+  Tracked in [GHSA-3q46-3v9q-3cj9](https://github.com/eryx-org/eryx/security/advisories/GHSA-3q46-3v9q-3cj9). Affected: `eryx` and `pyeryx` 0.12.0 to 0.15.1, and the `sd2k/eryx-server` images.
+- **Secret substitution could place a real value in a request body.** Without HTTP rules, a write that didn't look like the start of a request was passed through without marking the connection raw. That covered a write starting with an empty line or using an unknown method. The next write was then framed as a new request and got real values substituted into its headers, while the server could read it as the earlier request's body. A script could use this to deliver a real value into a body stored on one of the secret's allowed hosts, for example a paste, upload or comment endpoint.
+  - Requests are now framed the same way with and without rules.
+  - A leading empty line or a malformed request line is refused.
+  - Bytes that aren't a request mark the connection raw for good, as does a `CONNECT` or an `Upgrade` once it ends.
+  - Chunked bodies and header names are parsed strictly.
+
+  Tracked in [GHSA-mgvc-8rhh-f88q](https://github.com/eryx-org/eryx/security/advisories/GHSA-mgvc-8rhh-f88q). Affected: sandboxes with secrets and no HTTP rules, over TLS or with `allow_plaintext_secrets`, in `eryx` 0.4.0 to 0.15.1, every `pyeryx` up to 0.15.1, and the `sd2k/eryx-server` images.
+- **Other spellings of a host or IP address got past `blocked_hosts`.** Patterns were compared as written, so the following didn't match:
+  - a trailing dot (`pastebin.com.`);
+  - other IPv4 forms the resolver accepts (`2130706433`, `0x7f.1`, `0177.0.0.1`, `127.1`);
+  - other IPv6 forms (`::1` against `[::1]`, `0:0:0:0:0:0:0:1`, IPv4-mapped addresses);
+  - zone suffixes.
+
+  Before 0.11.0 this affected the default configuration: loopback, private addresses and the cloud metadata address were reachable. From 0.11.0, the default `blocked_networks` refuse those addresses whatever the spelling, so only `blocked_hosts` entries that operators added are affected. Hosts and patterns are now normalised before every check, numeric hosts are written in canonical form, and empty or degenerate patterns (`.`, `*.`) are refused. Tracked in [GHSA-48hr-336w-96h9](https://github.com/eryx-org/eryx/security/advisories/GHSA-48hr-336w-96h9). Affected: `eryx` 0.4.0 to 0.15.1, every `pyeryx` up to 0.15.1, and the `sd2k/eryx-server` images.
+- **HTTP path rules could be bypassed with a request target that only contained `://`.** To find the path that rules check, eryx treated any request target that didn't start with `/` but contained `://` as an absolute URL, and took the path after the `://`. So `GET ../secret?x=http://api.example/public` passed a rule allowing only `/public`, and was sent unchanged. A lenient server, such as Python's `http.server`, then served `/secret`, with any secret allowed for the host substituted into the headers. Escapes in an absolute URL's authority did the same (`GET http://..%2fsecret/public/f`), without secrets. The host checks weren't affected. Request targets must now be in one of HTTP/1.1's four forms (see **Changed**). Tracked in [GHSA-5w5h-22vj-44vp](https://github.com/eryx-org/eryx/security/advisories/GHSA-5w5h-22vj-44vp). Affected: `eryx` and `pyeryx` 0.15.1 and the `sd2k/eryx-server` 0.15.1 image, with HTTP rules configured.
+
+Rotate any secret that was available to untrusted code in an affected version.
+
+### Upgrade notes
+- **Give each secret explicit `allowed_hosts`.** A secret without them applies to every host the sandbox may reach. Every TLS connection then gets HTTP-only response handling (see below), and every host is one the value can be sent to.
+- **Other protocols on a secret's host get best-effort masking only.** This covers a connection whose first write isn't an HTTP request, or whose server speaks first: Postgres, Redis, SMTP or IMAP after STARTTLS, MQTT. Nothing is ever substituted on such a connection. Its replies are still masked, but released after 100 ms of quiet, so a value the server splits with a longer pause isn't masked. The same goes for traffic after a `101` or a `CONNECT`. Don't allow a secret for a host that hands back what it was sent, such as a request-inspection or audit-log endpoint.
+- **Block addresses with `blocked_networks`**, not IP patterns in `blocked_hosts`, and prefer an allow list over `allow_all_hosts` plus a block list.
+
+### Changed
+- **Unframeable responses fail closed.** On a connection that sent an HTTP request with secrets substituted, the following make the read fail, and every later read too:
+  - a reply that isn't an HTTP/1.x response to a request it sent;
+  - malformed or ambiguous framing: bad chunks, conflicting lengths, a bare CR, oversized headers.
+
+  An unsolicited response on an idle keep-alive connection (a `408` before the server closes) ends the stream cleanly.
+- **Stricter request framing with secrets.** These are refused, and so is every later write on the connection:
+  - a write that starts with an empty line (one empty line between requests is still accepted);
+  - a malformed request line;
+  - chunked bodies or header names that don't follow RFC 9112.
+
+  Requests with methods outside the common list (`PROPFIND`, `REPORT`, …) are now framed and Host-checked like any other. Nothing after a `CONNECT` or an `Upgrade` is substituted.
+- **Request targets must be in an HTTP/1.1 form** (RFC 9112) on connections with HTTP rules or secrets, or the write is refused: a path starting with `/`, an absolute URL with a scheme at its start and a plain `host[:port]`, a plain `host:port` for a `CONNECT`, or `*` for an `OPTIONS`. A target is also refused if it doesn't parse back to exactly its own text, such as one with a fragment or an upper-case scheme. An absolute URL with an empty path (`http://host`) is checked as `/`. On a connection to a host with HTTP rules, a request may only name that host, in its target or `Host` header.
+- **Chunked responses are re-chunked:** the body is the server's, masked, but the chunk sizes are eryx's. Masking a value inside a `Content-Length` body still changes the body's length, as before.
+- **Host patterns:** `.` and `*.` are no longer valid patterns. `NetConfig::validate` refuses them in `allowed_hosts`, `blocked_hosts`, `internal_hosts` and HTTP rules.
+
 ### Fixed
 - *(net)* byte limit accounting on timed-out writes ([#1020](https://github.com/eryx-org/eryx/pull/1020))
-
-### Other
-- Merge commit from fork
-- Merge commit from fork
-- Merge commit from fork
-- Merge commit from fork
 
 ## `eryx-precompile` - [0.15.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.0...eryx-precompile-v0.15.1) - 2026-11-15
 
