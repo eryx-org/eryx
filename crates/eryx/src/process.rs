@@ -1298,6 +1298,11 @@ impl Commands {
                 ))
                 .into());
             }
+            if let Some(ChildNetwork::Narrow(config)) = &option.network {
+                config.validate().map_err(|e| {
+                    ErrorKind::Initialization(format!("command {name}'s network: {e}"))
+                })?;
+            }
             let registered = Arc::make_mut(&mut commands.registered);
             if let Some(command) = registered.get_mut(name) {
                 command.tunnels &= !option.no_tunnels;

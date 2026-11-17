@@ -3253,6 +3253,11 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
 
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
+        if let crate::net::ChildNetwork::Narrow(config) = &self.child_network {
+            config
+                .validate()
+                .map_err(|e| ErrorKind::Initialization(format!("child network: {e}")))?;
+        }
         if !matches!(self.child_network, crate::net::ChildNetwork::None)
             && self.net_config.is_none()
             && !self.network_per_request
