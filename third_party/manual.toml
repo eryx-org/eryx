@@ -440,8 +440,9 @@ url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
 # asset of the wasmtime eryx links, so a wasmtime bump fails this check until
 # the adapter is replaced with the new release's. `mise run
 # update-preview1-adapter` does that (and updates version, url,
-# crate_version and sha256 here), and checks wasmtime's LICENSE and the
-# wit-component-wasmtime and wasmtime-environ pins; CI runs it on PRs into
+# crate_version and sha256 here, and mise.toml's wasmtime CLI pin), and
+# checks wasmtime's LICENSE and the wit-component-wasmtime and
+# wasmtime-environ pins; CI runs it on PRs into
 # multi-guest that change Cargo.lock (.github/workflows/preview1-adapter.yml).
 files = ["third_party/licenses/wasmtime-LICENSE"]
 artifacts = ["host"]

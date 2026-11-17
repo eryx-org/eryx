@@ -12,6 +12,8 @@ third_party/manual.toml. For the wasmtime version in Cargo.lock, this:
   vendored one isn't it, checks it against the release's sha256 (GitHub's
   asset digest), and updates the manual.toml entry's version, URL,
   crate_version and sha256;
+- sets mise.toml's wasmtime CLI (`[tools."aqua:bytecodealliance/wasmtime"]`)
+  to that version, since a cwasm it builds only loads in that wasmtime;
 - fails if wasmtime's LICENSE changed (third_party/licenses/wasmtime-LICENSE
   is updated by hand, after reading what changed);
 - fails if the `wit-component-wasmtime` pin no longer matches wasmtime's own
@@ -37,6 +39,8 @@ ADAPTER = ROOT / "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm"
 ASSET = ADAPTER.name
 MANUAL = ROOT / "third_party/manual.toml"
 LICENSE = ROOT / "third_party/licenses/wasmtime-LICENSE"
+MISE = ROOT / "mise.toml"
+MISE_TOOL = 'aqua:bytecodealliance/wasmtime'
 ENTRY = "wasi_snapshot_preview1 command adapter (Wasmtime)"
 REPO = "bytecodealliance/wasmtime"
 
@@ -90,6 +94,15 @@ def update_entry(text: str, version: str, sha256: str) -> str:
     return text[:start] + block + text[end:]
 
 
+def update_mise_pin(text: str, version: str) -> str:
+    """mise.toml's text with the wasmtime CLI pinned to `version`."""
+    pattern = r'(^\[tools\."' + re.escape(MISE_TOOL) + r'"\]\nversion = ")[^"]*(")'
+    updated, count = re.subn(pattern, rf"\g<1>{version}\g<2>", text, count=1, flags=re.M)
+    if count != 1:
+        raise Error(f'no [tools."{MISE_TOOL}"] version in {MISE.relative_to(ROOT)}')
+    return updated
+
+
 def check_pins(cargo: dict, wasmtime: str, upstream: dict) -> list[str]:
     """Problems with the pins that must follow wasmtime."""
     problems = []
@@ -131,11 +144,15 @@ def main() -> int:
             raise Error(f"the downloaded {ASSET} doesn't match {tag}'s sha256 {sha256}")
         ADAPTER.write_bytes(data)
         changed.append(str(ADAPTER.relative_to(ROOT)))
-    text = MANUAL.read_text()
-    updated = update_entry(text, wasmtime, sha256)
-    if updated != text:
-        MANUAL.write_text(updated)
-        changed.append(str(MANUAL.relative_to(ROOT)))
+    for path, update in [
+        (MANUAL, lambda text: update_entry(text, wasmtime, sha256)),
+        (MISE, lambda text: update_mise_pin(text, wasmtime)),
+    ]:
+        text = path.read_text()
+        updated = update(text)
+        if updated != text:
+            path.write_text(updated)
+            changed.append(str(path.relative_to(ROOT)))
 
     license_text = fetch(f"https://raw.githubusercontent.com/{REPO}/{tag}/LICENSE")
     if license_text != LICENSE.read_bytes():
@@ -151,7 +168,7 @@ def main() -> int:
     for path in changed:
         print(f"updated {path} for wasmtime {wasmtime}")
     if not changed:
-        print(f"the preview1 adapter is in step with wasmtime {wasmtime}")
+        print(f"the preview1 adapter and the wasmtime CLI pin are in step with wasmtime {wasmtime}")
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     return 1 if problems else 0

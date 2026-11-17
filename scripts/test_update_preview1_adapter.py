@@ -43,6 +43,28 @@ class UpdateEntry(unittest.TestCase):
             u.update_entry(MANUAL.replace("command adapter", "other"), "51.0.0", "bb22")
 
 
+class MisePin(unittest.TestCase):
+    MISE = '''[tools]
+rust = "1.100.0"
+
+[tools."aqua:bytecodealliance/wasmtime"]
+version = "50.0.1"
+
+[tools."github:bytecodealliance/wit-bindgen"]
+version = "0.63.0"
+'''
+
+    def test_sets_only_the_wasmtime_cli(self):
+        got = u.update_mise_pin(self.MISE, "50.0.2")
+        self.assertIn('[tools."aqua:bytecodealliance/wasmtime"]\nversion = "50.0.2"', got)
+        self.assertIn('[tools."github:bytecodealliance/wit-bindgen"]\nversion = "0.63.0"', got)
+        self.assertEqual(u.update_mise_pin(got, "50.0.2"), got)
+
+    def test_a_missing_pin_fails(self):
+        with self.assertRaises(u.Error):
+            u.update_mise_pin('[tools]\nrust = "1.100.0"\n', "50.0.2")
+
+
 class Pins(unittest.TestCase):
     CARGO = {"workspace": {"dependencies": {
         "wit-component-wasmtime": {"package": "wit-component", "version": "=0.261.0"},

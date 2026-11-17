@@ -2,8 +2,8 @@
 # PR into multi-guest that changes Cargo.lock (a main -> multi-guest merge
 # bringing a wasmtime bump, or a Renovate bump), run
 # `scripts/update_preview1_adapter.py` (what `mise run update-preview1-adapter`
-# runs) and push its changes (the adapter and its third_party/manual.toml
-# entry) back to the PR branch.
+# runs) and push its changes (the adapter, its third_party/manual.toml entry
+# and mise.toml's wasmtime CLI pin) back to the PR branch.
 #
 # - The adapter only exists on multi-guest, and Renovate targets main, so the
 #   mismatch shows up when main is merged in. Once multi-guest is main, change
