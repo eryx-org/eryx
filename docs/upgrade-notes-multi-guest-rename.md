@@ -27,9 +27,10 @@ builder methods keeps compiling unchanged.
   `with_package`, `with_package_bytes`, `with_native_extension`, `with_cache`
   and `with_cache_dir`.
 - `build()` works for any language and returns the same untyped `Sandbox`.
-  Only Python has an embedded runtime: for JavaScript or the shell, supply the
-  runtime with `with_wasm_file()` or a precompiled equivalent, or `build()`
-  fails with `ErrorKind::MissingRuntime`. Python-only options set before
+  With `embedded`, JavaScript and the shell use their embedded runtimes when
+  their features (`javascript`, `shell`) are on; otherwise supply the runtime
+  with `with_wasm_file()` or a precompiled equivalent, or `build()` fails
+  with `ErrorKind::MissingRuntime`. Python-only options set before
   switching languages make `build()` fail with `ErrorKind::Initialization`.
 - The marker types `Python`, `JavaScript` and `Shell` and their sealed
   `GuestLanguage` trait live in the new `eryx::language` module, next to the
@@ -51,6 +52,22 @@ Code that uses the old names still compiles, with deprecation warnings.
 
 ### Breaking changes
 
+- **`ErrorKind::PythonException { traceback, stdout, stderr }` is now
+  `ErrorKind::ScriptFailed { message, exit_code, stdout, stderr }`, with no
+  deprecated alias** (an enum variant can't have one). It is the variant to
+  match to tell "the script failed" from "the sandbox failed", so code that
+  matches it stops compiling. For Python, `message` is the traceback, exactly
+  what `traceback` held. `exit_code` is the script's exit status for guests
+  that have one (a shell); it is `None` for Python. The variant is
+  `#[non_exhaustive]`, so match it with `..`:
+
+  ```rust
+  // Before
+  if let ErrorKind::PythonException { traceback, .. } = err.kind() { /* ... */ }
+  // After
+  if let ErrorKind::ScriptFailed { message, .. } = err.kind() { /* ... */ }
+  ```
+
 - **`SandboxBuilder`'s type parameters changed.** It was
   `SandboxBuilder<Runtime, Stdlib>`. It is now `SandboxBuilder<Lang, Runtime>`,
   and the stdlib is no longer tracked in the type. Code that names the type,
@@ -63,6 +80,14 @@ Code that uses the old names still compiles, with deprecation warnings.
   fn builder() -> SandboxBuilder<eryx::language::Python, state::Has> { /* ... */ }
   ```
 
+  A type alias written for 0.15, such as
+  `type Ready = SandboxBuilder<state::Has, state::Has>;`, still compiles where
+  it is defined (Rust doesn't check an alias's bounds there), but its first use
+  fails with "`Has` is not a guest language". The marker types are
+  `eryx::language::{Python, JavaScript, Shell}`; `eryx::Language::Python` is
+  the runtime enum's variant, a value rather than a type. Code generic over
+  the builder needs the bound too: `impl<L: eryx::language::GuestLanguage, R>`.
+
   `SandboxPool::new` is now generic over the language and takes any
   `SandboxBuilder<L, state::Has>`.
 
@@ -71,20 +96,9 @@ Code that uses the old names still compiles, with deprecation warnings.
   `embedded` feature), or else searches for one the way `with_auto_stdlib()`
   does, and fails with `ErrorKind::MissingStdlib` if none is found. Before,
   leaving out the stdlib was a compile error. `with_auto_stdlib()` and
-  `with_embedded_stdlib()` now return `Result<Self, Error>`.
-
-- **`ErrorKind::PythonException { traceback, stdout, stderr }` is now
-  `ErrorKind::ScriptFailed { message, exit_code, stdout, stderr }`.** `message`
-  holds what `traceback` did (the Python traceback). `exit_code` is the
-  script's exit status for guests that have one (a shell); it is `None` for
-  Python. The variant is `#[non_exhaustive]`, so match it with `..`:
-
-  ```rust
-  // Before
-  if let ErrorKind::PythonException { traceback, .. } = err.kind() { /* ... */ }
-  // After
-  if let ErrorKind::ScriptFailed { message, .. } = err.kind() { /* ... */ }
-  ```
+  `with_embedded_stdlib()` now return `Result<Self, Error>`. With `embedded`,
+  `with_embedded_stdlib()` is now redundant: the embedded stdlib is the
+  default. It is still needed with `embedded-stdlib` alone.
 
 - **`ErrorKind::MissingPythonStdlib` is now `ErrorKind::MissingStdlib { language }`.**
   Match it with `ErrorKind::MissingStdlib { .. }`.

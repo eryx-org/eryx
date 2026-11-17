@@ -11,8 +11,9 @@
 /// API. Select one with [`SandboxBuilder::javascript`](crate::SandboxBuilder::javascript)
 /// or [`SandboxBuilder::shell`](crate::SandboxBuilder::shell); the default is Python.
 ///
-/// Only [`Language::Python`] ships an embedded runtime today. The other
-/// languages need their runtime supplied explicitly (for example with
+/// With the `embedded` feature, each language whose feature is enabled
+/// (`python`, the default, `javascript` and `shell`) has an embedded runtime.
+/// Otherwise supply the runtime explicitly (for example with
 /// [`SandboxBuilder::with_wasm_file`](crate::SandboxBuilder::with_wasm_file)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -61,6 +62,12 @@ impl Language {
 /// [`SandboxBuilder`](crate::SandboxBuilder).
 ///
 /// Sealed: eryx defines the languages.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a guest language",
+    label = "the first parameter of `SandboxBuilder` is the language",
+    note = "use `eryx::language::Python`, `JavaScript` or `Shell`: \
+            0.15's `SandboxBuilder<state::Has, state::Has>` is now `SandboxBuilder<Python, state::Has>`"
+)]
 pub trait GuestLanguage: sealed::Sealed + Send + Sync + 'static {
     /// The language this marker stands for.
     const LANGUAGE: Language;

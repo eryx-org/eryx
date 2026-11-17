@@ -132,12 +132,7 @@ pub struct StateSnapshot {
     skipped: Vec<String>,
 }
 
-/// Deprecated name for [`StateSnapshot`].
-#[deprecated(
-    since = "0.16.0",
-    note = "renamed to `StateSnapshot` now that eryx runs more than one guest language"
-)]
-pub type PythonStateSnapshot = StateSnapshot;
+pub use super::renamed::*;
 
 /// Metadata about a state snapshot.
 #[derive(Debug, Clone)]

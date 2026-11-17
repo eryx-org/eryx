@@ -1706,7 +1706,9 @@ impl std::fmt::Debug for PrecompiledFileSource {
 /// Builder for constructing a [`Sandbox`].
 ///
 /// Type parameters track configuration state at compile time:
-/// - `Lang`: The guest language ([`Python`] by default; switch with
+/// - `Lang`: The guest language, one of the marker types
+///   [`eryx::language::{Python, JavaScript, Shell}`](crate::language)
+///   ([`Python`] by default; switch with
 ///   [`javascript()`](SandboxBuilder::javascript) or [`shell()`](SandboxBuilder::shell)).
 ///   Language-specific options, such as the Python stdlib, are only available
 ///   for their language.
@@ -1730,7 +1732,7 @@ impl std::fmt::Debug for PrecompiledFileSource {
 ///     .with_python_stdlib("/path/to/stdlib")
 ///     .build()?;
 /// ```
-pub struct SandboxBuilder<Lang = Python, Runtime = state::Needs> {
+pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> {
     wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
@@ -1807,7 +1809,7 @@ impl Default for SandboxBuilder<Python, state::Needs> {
     }
 }
 
-impl<L, R> std::fmt::Debug for SandboxBuilder<L, R> {
+impl<L: GuestLanguage, R> std::fmt::Debug for SandboxBuilder<L, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SandboxBuilder")
             .field(
@@ -1915,9 +1917,9 @@ impl SandboxBuilder<Python, state::Needs> {
 }
 
 // Helper for state transitions
-impl<L, R> SandboxBuilder<L, R> {
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Internal: transition to new state while preserving all fields.
-    fn transition<L2, R2>(self) -> SandboxBuilder<L2, R2> {
+    fn transition<L2: GuestLanguage, R2>(self) -> SandboxBuilder<L2, R2> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
@@ -1958,7 +1960,7 @@ impl<L, R> SandboxBuilder<L, R> {
 }
 
 // The embedded runtime
-impl<L> SandboxBuilder<L, state::Needs> {
+impl<L: GuestLanguage> SandboxBuilder<L, state::Needs> {
     /// Explicitly use the embedded pre-compiled runtime.
     ///
     /// **Note:** You usually don't need to call this. When the `embedded`
@@ -2001,7 +2003,7 @@ impl<L> SandboxBuilder<L, state::Needs> {
 }
 
 // Runtime transitions (Needs -> Has)
-impl<L> SandboxBuilder<L, state::Needs> {
+impl<L: GuestLanguage> SandboxBuilder<L, state::Needs> {
     /// Set the WASM component from bytes.
     ///
     /// Use this to embed the WASM component in your binary.
@@ -2205,6 +2207,9 @@ impl<R> SandboxBuilder<Python, R> {
     /// but still wanting the convenience of the embedded stdlib.
     ///
     /// Requires the `embedded-stdlib` feature (also enabled by `embedded`).
+    /// With `embedded`, [`build()`](SandboxBuilder::build) already uses the
+    /// embedded stdlib when none is set, so this call is only needed with
+    /// `embedded-stdlib` alone.
     ///
     /// # Errors
     ///
@@ -2512,14 +2517,14 @@ impl<R> SandboxBuilder<Python, R> {
 }
 
 // Language transitions
-impl<L, R> SandboxBuilder<L, R> {
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Run JavaScript instead.
     ///
     /// The language-neutral configuration (runtime source, callbacks, limits,
-    /// network, secrets, ...) carries over. Only Python has an embedded
-    /// runtime, so supply one with
-    /// [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a precompiled
-    /// equivalent, or [`build()`](SandboxBuilder::build) fails with
+    /// network, secrets, ...) carries over. With the `embedded` and
+    /// `javascript` features, the embedded JavaScript runtime is used; otherwise
+    /// supply one with [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a
+    /// precompiled equivalent, or [`build()`](SandboxBuilder::build) fails with
     /// [`ErrorKind::MissingRuntime`]. Python-only options set earlier make
     /// `build()` fail.
     #[must_use]
@@ -2528,7 +2533,8 @@ impl<L, R> SandboxBuilder<L, R> {
     }
 
     /// Run the shell instead. See [`javascript()`](SandboxBuilder::javascript)
-    /// for what carries over.
+    /// for what carries over; the embedded shell runtime needs the `embedded`
+    /// and `shell` features.
     ///
     /// Each callback is a shell command: `weather London --days 3`,
     /// `weather --json '{"city": "London"}'` or `invoke weather '{...}'`.
@@ -2627,7 +2633,7 @@ impl<R> SandboxBuilder<Shell, R> {
 }
 
 // Methods available in ANY state
-impl<L, R> SandboxBuilder<L, R> {
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
     ///
     /// A library's callbacks work in every guest language. Its preamble and
