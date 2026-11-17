@@ -108,7 +108,7 @@ for target in ['/etc/passwd', '../outside', 'inside']:
 /// Grows `path` past an 8-byte limit and prints whether the write went through.
 fn grow_file(path: &str) -> String {
     // The guest's libc reports a refused stream write as EIO rather than
-    // EFBIG, so only check that it fails.
+    // EFBIG (eryx-org/eryx#762), so only check that it fails.
     format!(
         r#"
 with open('{path}', 'wb', buffering=0) as f:
