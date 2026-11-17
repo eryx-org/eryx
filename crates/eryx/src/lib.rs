@@ -182,12 +182,7 @@ pub use wasm::{
 )]
 pub type PythonExecutor = Executor;
 
-/// Deprecated name for [`StateSnapshot`].
-#[deprecated(
-    since = "0.16.0",
-    note = "renamed to `StateSnapshot` now that eryx runs more than one guest language"
-)]
-pub type PythonStateSnapshot = StateSnapshot;
+pub use session::renamed::*;
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};

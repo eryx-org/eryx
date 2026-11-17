@@ -61,6 +61,12 @@ impl Language {
 /// [`SandboxBuilder`](crate::SandboxBuilder).
 ///
 /// Sealed: eryx defines the languages.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a guest language",
+    label = "the first parameter of `SandboxBuilder` is the language",
+    note = "use `eryx::language::Python`, `JavaScript` or `Shell`: \
+            0.15's `SandboxBuilder<state::Has, state::Has>` is now `SandboxBuilder<Python, state::Has>`"
+)]
 pub trait GuestLanguage: sealed::Sealed + Send + Sync + 'static {
     /// The language this marker stands for.
     const LANGUAGE: Language;

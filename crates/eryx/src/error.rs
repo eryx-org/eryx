@@ -304,12 +304,11 @@ pub enum ErrorKind {
 
     /// The language's stdlib was not found during auto-detection.
     ///
-    /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
+    /// Only Python has a separate stdlib. Use
+    /// [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
     /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
     /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
-    #[error(
-        "{language} stdlib not found. Set ERYX_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
-    )]
+    #[error("{language} stdlib not found{}", missing_stdlib_hint(*language))]
     #[non_exhaustive]
     MissingStdlib {
         /// The language whose stdlib is missing.
@@ -380,6 +379,18 @@ pub enum ErrorKind {
     Io(#[from] std::io::Error),
 }
 
+/// How to supply `language`'s stdlib, for [`ErrorKind::MissingStdlib`].
+fn missing_stdlib_hint(language: crate::Language) -> &'static str {
+    match language {
+        crate::Language::Python => {
+            ". Set ERYX_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
+        }
+        // Only Python has a stdlib apart from its runtime, so only Python
+        // raises this; the Python hints would mislead for anything else.
+        _ => "",
+    }
+}
+
 impl Error {
     /// The stdout the script wrote before it failed, or `None` if the guest
     /// did not get as far as running it (and for a timeout, fuel limit or
@@ -436,4 +447,21 @@ pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_stdlib_hints_are_per_language() {
+        let python = Error::from(ErrorKind::MissingStdlib {
+            language: crate::Language::Python,
+        });
+        assert!(python.to_string().contains("with_python_stdlib()"));
+        let shell = Error::from(ErrorKind::MissingStdlib {
+            language: crate::Language::Shell,
+        });
+        assert_eq!(shell.to_string(), "shell stdlib not found");
+    }
 }

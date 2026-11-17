@@ -642,7 +642,7 @@ pub(crate) fn parse_language(language: Option<&str>) -> PyResult<eryx::Language>
     })
 }
 
-pub(crate) fn apply_secrets<L, R>(
+pub(crate) fn apply_secrets<L: eryx::language::GuestLanguage, R>(
     mut builder: eryx::SandboxBuilder<L, R>,
     secrets_dict: &Bound<'_, PyDict>,
 ) -> PyResult<eryx::SandboxBuilder<L, R>> {
