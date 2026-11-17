@@ -523,7 +523,10 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         .connect(host, port, shared.connect_timeout)
         .await?
         .into_stream();
-    let framer = shared.policy.request_framer(host, false).http_only();
+    let framer = shared
+        .policy
+        .request_framer(host, false)
+        .http_only(authority);
     let mut first = head;
     first.extend_from_slice(&rest);
     pump(shared, client, upstream, framer, first).await
@@ -609,7 +612,12 @@ async fn connect(
             "TLS server name {name} is not the CONNECT host {host}"
         ))));
     }
-    let framer = policy.request_framer(host, true).http_only();
+    let authority = if port == 443 {
+        host.to_owned()
+    } else {
+        format!("{host}:{port}")
+    };
+    let framer = policy.request_framer(host, true).http_only(authority);
     pump(shared, child, upstream, framer, Vec::new()).await
 }
 
