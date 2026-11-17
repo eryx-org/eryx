@@ -752,6 +752,16 @@ impl RequestFramer {
         loop {
             match &mut state.body {
                 Body::None if state.raw => {
+                    // The read side marks a connection raw when the server
+                    // speaks first; a host with HTTP rules, or the child
+                    // proxy's, still gets nothing it can't check (as in
+                    // `classify`).
+                    if pos < input.len() && (http_only || policy.has_http_rules(host)) {
+                        return Err(TcpError::NotPermitted(format!(
+                            "only HTTP/1.1 requests may be sent on this connection to {host}, \
+                             which spoke first"
+                        )));
+                    }
                     out.extend_from_slice(&input[pos..]);
                     break;
                 }

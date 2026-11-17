@@ -1781,4 +1781,58 @@ mod tests {
         let (_, status) = connect_to(&proxy, &format!("api.test.:{port}")).await;
         assert!(status.contains(" 200 "), "{status}");
     }
+
+    /// An upstream that speaks first doesn't turn the connection raw for the
+    /// child: what it writes next is still framed and checked (here, it
+    /// names another host and isn't allowed by the rules), and none of it
+    /// reaches the upstream.
+    #[tokio::test]
+    async fn a_server_speaking_first_doesnt_unframe_the_child() {
+        let cert = rcgen::generate_simple_self_signed(vec!["api.test".into()]).unwrap();
+        let der = cert.cert.der().to_vec();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let acceptor = TlsAcceptor::from(Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.cert.der().clone()], key)
+                .unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Received::default();
+        let upstream_seen = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            stream.write_all(b"hello\r\n").await.unwrap();
+            stream.flush().await.unwrap();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => upstream_seen.lock().unwrap().extend_from_slice(&buf[..n]),
+                }
+            }
+        });
+        let config =
+            config(&der).allow_http(crate::net::HttpRule::new("api.test").with_paths(["/public"]));
+        let proxy = proxy(config, ChildNetwork::Inherit, false);
+        let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        // The greeting reaches the child, so the read side has run first.
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(5), tls.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n > 0);
+        let _ = tls
+            .write_all(b"GET /secret HTTP/1.1\r\nHost: other.test\r\n\r\nnot http at all\r\n")
+            .await;
+        let _ = tls.flush().await;
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut rest)).await;
+        assert_eq!(received(&seen), "");
+    }
 }
