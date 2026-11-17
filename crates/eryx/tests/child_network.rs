@@ -770,3 +770,308 @@ async fn command_options_can_only_take_away() {
     );
     offline.execute_with("true", &none).await.unwrap();
 }
+
+/// The git tests' repositories: a bare `repo.git` under `<dir>/repos` with
+/// two commits on `main` and one more on `feature`, made with the host's git.
+fn git_repos(dir: &std::path::Path) -> PathBuf {
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+            .args(["-c", "init.defaultBranch=main"])
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    let repos = dir.join("repos");
+    let work = dir.join("work");
+    std::fs::create_dir_all(&repos).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    git(&repos, &["init", "-q", "--bare", "repo.git"]);
+    git(
+        &repos.join("repo.git"),
+        &["config", "http.receivepack", "true"],
+    );
+    git(&work, &["init", "-q"]);
+    for (i, branch) in [(1, "main"), (2, "main"), (3, "feature")] {
+        if i == 3 {
+            git(&work, &["checkout", "-q", "-b", branch]);
+        }
+        std::fs::write(work.join("f.txt"), format!("line {i}\n")).unwrap();
+        git(&work, &["add", "f.txt"]);
+        let message = if i == 3 {
+            "feature commit".to_owned()
+        } else {
+            format!("commit {i}")
+        };
+        git(&work, &["commit", "-q", "-m", &message]);
+    }
+    let bare = repos.join("repo.git");
+    let bare = bare.to_str().unwrap();
+    git(&work, &["push", "-q", bare, "main", "feature"]);
+    repos
+}
+
+/// Whether a request's `Authorization` carries the real secret, as a bearer
+/// token or `x-access-token:<secret>` Basic credentials (the proxy puts it
+/// there in place of the placeholder the child sent).
+fn authorized(authorization: Option<&str>) -> bool {
+    use base64::Engine as _;
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{REAL}"));
+    authorization == Some(&format!("Bearer {REAL}"))
+        || authorization == Some(&format!("Basic {basic}"))
+}
+
+/// A smart-HTTP git server on 127.0.0.1: the host's `git http-backend` as
+/// CGI over the bare repositories in `root`. Requests without the real
+/// secret (see [`authorized`]) get a 401 asking for Basic credentials.
+async fn git_server(root: PathBuf) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(serve_git(stream, root.clone()));
+        }
+    });
+    port
+}
+
+/// Serve one connection's requests (keep-alive) for [`git_server`].
+async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
+    let mut buf = Vec::new();
+    loop {
+        // The request's head.
+        let end = loop {
+            if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end;
+            }
+            let mut chunk = [0u8; 8192];
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+        buf.drain(..end + 4);
+        let mut lines = head.split("\r\n");
+        let mut request = lines.next().unwrap_or_default().split(' ');
+        let (method, target) = (
+            request.next().unwrap_or_default(),
+            request.next().unwrap_or_default(),
+        );
+        let headers: Vec<(String, String)> = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+            .collect();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+
+        if header("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
+            let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+        }
+        // Its body: a length, or chunks.
+        let mut more = async |buf: &mut Vec<u8>| {
+            let mut chunk = [0u8; 8192];
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => false,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    true
+                }
+            }
+        };
+        let mut body = Vec::new();
+        if let Some(len) = header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+            while buf.len() < len {
+                if !more(&mut buf).await {
+                    return;
+                }
+            }
+            body = buf.drain(..len).collect();
+        } else if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+            loop {
+                let line_end = loop {
+                    if let Some(i) = buf.windows(2).position(|w| w == b"\r\n") {
+                        break i;
+                    }
+                    if !more(&mut buf).await {
+                        return;
+                    }
+                };
+                let size =
+                    usize::from_str_radix(String::from_utf8_lossy(&buf[..line_end]).trim(), 16)
+                        .unwrap_or(0);
+                buf.drain(..line_end + 2);
+                while buf.len() < size + 2 {
+                    if !more(&mut buf).await {
+                        return;
+                    }
+                }
+                body.extend(buf.drain(..size));
+                buf.drain(..2);
+                if size == 0 {
+                    break;
+                }
+            }
+        }
+
+        if !authorized(header("authorization")) {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
+                      Content-Length: 0\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let mut cgi = std::process::Command::new("git");
+        cgi.arg("http-backend")
+            .env("GIT_PROJECT_ROOT", &root)
+            .env("GIT_HTTP_EXPORT_ALL", "1")
+            .env("REQUEST_METHOD", method)
+            .env("PATH_INFO", path)
+            .env("QUERY_STRING", query)
+            .env("CONTENT_TYPE", header("content-type").unwrap_or_default())
+            .env("CONTENT_LENGTH", body.len().to_string())
+            .env("GIT_PROTOCOL", header("git-protocol").unwrap_or_default())
+            .env(
+                "HTTP_CONTENT_ENCODING",
+                header("content-encoding").unwrap_or_default(),
+            )
+            .env("REMOTE_USER", "test")
+            .env("REMOTE_ADDR", "127.0.0.1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let out = tokio::task::spawn_blocking(move || {
+            let mut child = cgi.spawn().unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), &body).unwrap();
+            child.wait_with_output().unwrap().stdout
+        })
+        .await
+        .unwrap();
+        let split = out
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or(out.len());
+        let (cgi_head, cgi_body) = (&out[..split], out.get(split + 4..).unwrap_or_default());
+        let mut status = "200 OK".to_owned();
+        let mut response = String::new();
+        for line in String::from_utf8_lossy(cgi_head).split("\r\n") {
+            match line.split_once(':') {
+                Some((k, v)) if k.eq_ignore_ascii_case("status") => status = v.trim().to_owned(),
+                Some(_) => response.push_str(&format!("{line}\r\n")),
+                None => {}
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 {status}\r\n{response}Content-Length: {}\r\n\r\n",
+            cgi_body.len()
+        );
+        if stream.write_all(head.as_bytes()).await.is_err()
+            || stream.write_all(cgi_body).await.is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// A shell whose `git` (ERYX_TEST_GIT_WASM: git with HTTPS) may spawn its
+/// helpers, with the secret TOKEN for `host` and a child network allowing
+/// `network`'s hosts.
+fn git_shell(network: NetConfig, host: &str) -> Sandbox {
+    let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
+    Sandbox::embedded()
+        .shell()
+        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .with_network(network)
+        .with_secret("TOKEN", REAL, vec![host.to_string()])
+        .with_child_network(ChildNetwork::Inherit)
+        .with_trace_collection(true)
+        .build()
+        .unwrap()
+}
+
+/// git clones, fetches and pushes over smart HTTP through the child proxy,
+/// authenticating with a secret it only has as a placeholder: as a bearer
+/// token in `http.extraHeader`, and as Basic credentials (which the proxy
+/// substitutes inside the encoding) in the URL and from `credential.helper
+/// store`, a helper git runs as a command. The server accepts only the
+/// real secret, which never appears in the script's output or traces.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the host's git"]
+async fn git_clones_fetches_and_pushes_over_http_with_a_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let repos = git_repos(dir.path());
+    let port = git_server(repos.clone()).await;
+    let network = NetConfig::default()
+        .allow_host("git.test")
+        .allow_internal_host("git.test")
+        .with_resolver(Localhost)
+        .allow_plaintext_secrets(true);
+    let sandbox = git_shell(network, "git.test");
+    let url = format!("http://git.test:{port}/repo.git");
+    let script = format!(
+        r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+cd /tmp
+git config --global http.extraHeader "Authorization: Bearer $TOKEN"
+git clone -q {url} c && git -C c log --format=%s
+git -C c fetch -q origin feature && git -C c log -1 --format=%s FETCH_HEAD
+cd c && git config user.name eryx && git config user.email eryx@example.com
+echo pushed >> f.txt && git commit -qam 'pushed from eryx' && git push -q origin HEAD:refs/heads/pushed && echo pushed
+cd /tmp && git config --global --unset http.extraHeader
+git clone -q http://x-access-token:$TOKEN@git.test:{port}/repo.git b && echo basic-clone
+printf 'http://x-access-token:%s@git.test:{port}\n' "$TOKEN" > /tmp/credentials
+git -c "credential.helper=store --file=/tmp/credentials" clone -q {url} s && echo store-clone
+git ls-remote {url} >/dev/null 2>&1 || echo refused-without-token
+"#
+    );
+    let out = match sandbox.execute(&script).await {
+        Ok(out) => out,
+        Err(e) => panic!("{e}"),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stdout,
+        "commit 2\ncommit 1\nfeature commit\npushed\nbasic-clone\nstore-clone\n\
+         refused-without-token\n",
+        "{stderr}"
+    );
+    let pushed = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s", "pushed"])
+        .current_dir(repos.join("repo.git"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&pushed.stdout),
+        "pushed from eryx\n"
+    );
+    for (what, text) in [
+        ("stdout", stdout.into_owned()),
+        ("stderr", stderr.into_owned()),
+        ("traces", format!("{:?}", out.trace)),
+    ] {
+        assert!(!text.contains(REAL), "the secret is in the {what}");
+    }
+}
+
+/// git clones a public repository from GitHub over HTTPS, through the child
+/// proxy's TLS, trusting its CA from where children find it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ERYX_TEST_GIT_WASM (git with HTTPS) and the network"]
+async fn git_clones_from_github_over_https() {
+    let sandbox = git_shell(NetConfig::default().allow_host("github.com"), "github.com");
+    let out = run(
+        &sandbox,
+        "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; cd /tmp; \
+         git clone -q https://github.com/octocat/Hello-World.git hw && git -C hw log -1 --format=%s",
+    )
+    .await;
+    assert!(out.contains("Merge pull request #6"), "{out}");
+}
