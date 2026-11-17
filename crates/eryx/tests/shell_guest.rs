@@ -134,16 +134,79 @@ async fn nonzero_exit_is_a_script_failure_with_output() {
     assert_eq!(*exit_code, Some(3));
     assert_eq!(err.stdout(), Some(&b"before\n"[..]));
 
-    // A missing command is a script failure too, with bash's status.
-    let err = sandbox.execute("no-such-command").await.unwrap_err();
-    assert!(err.to_string().starts_with("exit status 127"), "{err}");
-    assert!(matches!(
-        err.kind(),
-        ErrorKind::ScriptFailed {
-            exit_code: Some(127),
-            ..
-        }
-    ));
+    // A missing command is a script failure too, with bash's status. The
+    // message quotes the last line of stderr after the status, and the
+    // stderr itself is in `stderr`.
+    let err = sandbox
+        .execute("echo first >&2; no-such-command")
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message,
+        exit_code,
+        stderr,
+        ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    assert_eq!(*exit_code, Some(127));
+    let stderr = String::from_utf8_lossy(stderr);
+    let last = stderr.lines().rfind(|line| !line.is_empty()).unwrap();
+    assert!(last.contains("no-such-command"), "{stderr:?}");
+    assert_eq!(*message, format!("exit status 127: {last}"));
+    assert!(stderr.starts_with("first\n"), "{stderr:?}");
+}
+
+/// The message quotes stderr's last line, so it's scrubbed like stderr: a
+/// secret the script prints (as its placeholder; the real value never
+/// reaches the guest) is `[REDACTED]` in both.
+#[tokio::test]
+async fn a_failure_message_quoting_stderr_is_scrubbed() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder
+        .with_secret("TOKEN", "real-value", vec![])
+        .build()
+        .unwrap();
+
+    let err = sandbox
+        .execute("echo \"token=$TOKEN\" >&2; exit 1")
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message, stderr, ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    let stderr = String::from_utf8_lossy(stderr);
+    assert_eq!(message, "exit status 1: token=[REDACTED]", "{stderr:?}");
+    assert_eq!(stderr, "token=[REDACTED]\n");
+    assert!(!err.to_string().contains("real-value"), "{err}");
+    assert!(!err.to_string().contains("ERYX_SECRET"), "{err}");
+
+    // A placeholder across the message's 1024-character cap isn't split
+    // into an unscrubbable fragment: it's dropped whole from the message
+    // (and scrubbed in stderr, which has it all).
+    let pad = "-".repeat(1000);
+    let err = sandbox
+        .execute(&format!("echo \"{pad} $TOKEN tail\" >&2; exit 1"))
+        .await
+        .unwrap_err();
+    let ErrorKind::ScriptFailed {
+        message, stderr, ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    assert_eq!(*message, format!("exit status 1: {pad} …"));
+    assert_eq!(
+        String::from_utf8_lossy(stderr),
+        format!("{pad} [REDACTED] tail\n")
+    );
+    assert!(!err.to_string().contains("ERYX_SECRET"), "{err}");
 }
 
 #[tokio::test]
