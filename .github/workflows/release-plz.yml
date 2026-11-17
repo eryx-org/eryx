@@ -111,7 +111,7 @@ jobs:
           # The shell's embedded coreutils (the `coreutils` feature, #809).
           : > "$RUNNER_TEMP/coreutils.cwasm"
           echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
-          # The bundler environment builds run (the `packages` feature, #827).
+          # The bundler `env pack` runs (the `env-pack` feature, #827).
           : > "$RUNNER_TEMP/eryx-bundler.cwasm"
           echo "ERYX_BUNDLER_CWASM=$RUNNER_TEMP/eryx-bundler.cwasm" >> "$GITHUB_ENV"
 

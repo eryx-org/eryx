@@ -102,8 +102,9 @@ enum Command {
     #[command(subcommand)]
     Commands(CommandsCommand),
 
-    /// Build and manage environments: package sets built ahead of time for
-    /// sandboxes to mount.
+    /// Pack environments: installed packages turned into a directory for
+    /// sandboxes to mount. Resolving and fetching packages is eryx-run's (or
+    /// `npm ci`'s) job, not eryx's.
     #[cfg(feature = "env")]
     #[command(subcommand)]
     Env(EnvCommand),
@@ -131,12 +132,6 @@ struct InspectArgs {
 #[cfg(feature = "env")]
 #[derive(Subcommand, Debug)]
 enum EnvCommand {
-    /// Build an environment from its definition (a TOML file).
-    ///
-    /// Resolves the packages (reusing the definition's lockfile when it
-    /// matches, otherwise writing it), installs them, and for JavaScript
-    /// bundles them into ES modules, writing the environment to `--out`.
-    Build(EnvBuildArgs),
     /// Pack packages already installed in a directory (`npm ci
     /// --ignore-scripts --omit=dev`, or pnpm) into an environment.
     ///
@@ -188,31 +183,6 @@ struct EnvPackArgs {
     allow_unresolved: Vec<String>,
 }
 
-#[cfg(feature = "env")]
-#[derive(Parser, Debug)]
-struct EnvBuildArgs {
-    /// The environment definition (TOML)
-    definition: PathBuf,
-
-    /// Where to write the environment: replaced if it's one already, filled
-    /// if it's an empty directory (a volume, say), refused otherwise. Not a
-    /// mount point that already holds an environment: mount its parent
-    #[arg(short, long)]
-    out: PathBuf,
-
-    /// Use only the lockfile and the cache; never touch the network
-    #[arg(long)]
-    offline: bool,
-
-    /// Fail if the lockfile is missing or doesn't match the definition
-    #[arg(long)]
-    frozen: bool,
-
-    /// Cache downloads here instead of the eryx cache directory
-    #[arg(long)]
-    cache_dir: Option<PathBuf>,
-}
-
 #[derive(Parser, Debug)]
 struct UpgradeArgs {
     /// Precompiled runtime to rebuild
@@ -253,7 +223,7 @@ struct SetupArgs {
     languages: Vec<eryx::Language>,
 
     /// Also set up the JavaScript bundler (`eryx-bundler.wasm`), which eryx's
-    /// `packages` feature embeds to build environments. On its own (no
+    /// `env-pack` feature embeds to pack environments. On its own (no
     /// `--language`), sets up only the bundler.
     #[arg(long)]
     bundler: bool,
@@ -472,8 +442,6 @@ async fn main() -> Result<()> {
         Command::Upgrade(args) => run_upgrade(args).await,
         Command::Commands(CommandsCommand::Inspect(args)) => run_inspect(&args),
         #[cfg(feature = "env")]
-        Command::Env(EnvCommand::Build(args)) => run_env_build(args).await,
-        #[cfg(feature = "env")]
         Command::Env(EnvCommand::Pack(args)) => run_env_pack(args).await,
     }
 }
@@ -590,7 +558,7 @@ async fn run_env_pack(args: EnvPackArgs) -> Result<()> {
     Ok(())
 }
 
-/// What `env build` and `env pack` print about the environment they wrote.
+/// What `env pack` prints about the environment it wrote.
 #[cfg(feature = "env")]
 fn print_environment(environment: &eryx::environment::Environment, elapsed: Duration) {
     let manifest = environment.manifest();
@@ -605,36 +573,6 @@ fn print_environment(environment: &eryx::environment::Environment, elapsed: Dura
         eprintln!("warning: {warning}");
     }
     println!("Wrote {}", environment.root().display());
-}
-
-#[cfg(feature = "env")]
-async fn run_env_build(args: EnvBuildArgs) -> Result<()> {
-    use eryx::environment::{BuildOptions, EnvironmentDefinition};
-
-    let definition = EnvironmentDefinition::read(&args.definition)?;
-    let base_dir = args
-        .definition
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut options = BuildOptions::new()
-        .out_dir(&args.out)
-        .base_dir(base_dir)
-        .offline(args.offline)
-        .frozen(args.frozen);
-    if let Some(dir) = args.cache_dir {
-        options = options.cache_dir(dir);
-    }
-    println!(
-        "Building {} environment {:?} from {}",
-        definition.language,
-        definition.name,
-        args.definition.display()
-    );
-    let start = Instant::now();
-    let environment = eryx::environment::build(&definition, &options).await?;
-    print_environment(&environment, start.elapsed());
-    Ok(())
 }
 
 /// The cache directory for eryx runtime artifacts: the one eryx reads them
@@ -878,7 +816,7 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .iter()
         .all(|(c, _)| matches!(c, Component::Bundler))
     {
-        "packages"
+        "env-pack"
     } else {
         "embedded"
     };
@@ -927,8 +865,8 @@ enum Component {
     /// The shell's embedded commands, `coreutils.wasm` (eryx's `coreutils`
     /// feature).
     Coreutils,
-    /// The JavaScript bundler environment builds run, `eryx-bundler.wasm`
-    /// (eryx's `packages` feature).
+    /// The JavaScript bundler `env pack` runs, `eryx-bundler.wasm`
+    /// (eryx's `env-pack` feature).
     Bundler,
 }
 

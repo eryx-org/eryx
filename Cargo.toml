@@ -34,8 +34,6 @@ crossterm = "0.29"                                          # terminal control
 dashmap = "6"                                               # concurrent maps
 eryx = { path = "crates/eryx", version = "^0.15.1" }
 eryx-macros = { path = "crates/eryx-macros", version = "^0.15.1" }
-# Without its `npm` client by default: crates that resolve packages enable it.
-eryx-packages = { path = "crates/eryx-packages", version = "^0.15.1", default-features = false }
 eryx-runtime = { path = "crates/eryx-runtime", version = "^0.15.1" } #unified
 eryx-vfs = { path = "crates/eryx-vfs", version = "^0.14.1" } #unified
 flate2 = "1.0"
@@ -45,7 +43,6 @@ hmac = "0.13"
 ipnet = "2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
-nodejs-semver = "7.0"  # npm version ranges (eryx-packages)
 opentelemetry = "0.33"
 opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.33"

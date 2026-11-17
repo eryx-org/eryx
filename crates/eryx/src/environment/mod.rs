@@ -1,72 +1,76 @@
 //! Environments: package sets built ahead of time and mounted by sandboxes.
 //!
-//! An environment is built once, from an [`EnvironmentDefinition`] (a TOML
-//! file naming the language and its packages, or one built in code with
-//! [`EnvironmentDefinition::new`]), into a directory that
-//! sandboxes mount read-only. Sandboxes never see package names or a
-//! registry, and building needs the network only to fetch packages, so it
-//! belongs in CI or a deploy step:
+//! An environment is a directory that sandboxes mount read-only. Sandboxes
+//! never see package names or a registry. eryx doesn't resolve or fetch
+//! packages: something else installs them (`npm ci --ignore-scripts`, pnpm,
+//! or the eryx-run service, which resolves and fetches them from a
+//! definition), and [`pack`] turns the installed tree into an environment,
+//! with the `env-pack` feature:
 //!
 //! ```text
-//! eryx-precompile env build data-tools.toml --out envs/data-tools
+//! eryx-precompile env pack . --name data-tools --out envs/data-tools
 //! ```
 //!
-//! Building one is `environment::build`, or `environment::pack` from packages
-//! already installed (e.g. by `npm ci`), with the `packages` feature; loading and
-//! mounting one ([`Environment::load`], `SandboxBuilder::with_environment`)
-//! only needs `environment`, without the bundler or an HTTP client.
+//! Loading and mounting one ([`Environment::load`],
+//! `SandboxBuilder::with_environment`) only needs `environment`, without the
+//! bundler.
 //!
-//! What a build does depends on the language:
-//!
-//! - **JavaScript** (`[npm]`): resolves and installs the packages (see
-//!   `eryx_packages::npm`), writing or reusing the lockfile, then bundles
-//!   them into ES modules with rolldown. The bundler runs as a WASI command
-//!   inside wasmtime, with only the installed packages and its output
-//!   directory mounted and no network, so the untrusted package source is
-//!   parsed in a sandbox. The environment's `exports` map each importable
-//!   specifier to its module.
+//! - **JavaScript:** [`pack`] bundles the installed packages into ES modules
+//!   with rolldown. The bundler runs as a WASI command inside wasmtime,
+//!   seeing only a mirror of the packages and its output directory, with no
+//!   network, so the untrusted package source is parsed in a sandbox. The
+//!   environment's `exports` map each importable specifier to its module.
 //! - **Python** and the **shell**: not supported yet
 //!   ([`EnvironmentError::Unsupported`]).
 //!
-//! The `packages` feature embeds the bundler if it's there at build time;
+//! The directory format is [`Manifest`]'s (book: Environment Format). The
+//! `env-pack` feature embeds the bundler if it's there at build time;
 //! otherwise (e.g. a crates.io build) it's loaded from the cache
 //! `eryx-precompile setup --bundler` writes ([`crate::cache::setup_bundler`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use eryx_packages::environment::{
-    Builder, Content, EnvironmentDefinition, Inputs, Language, LimitsSection, Manifest, NpmSection,
-    Size,
+mod manifest;
+pub use manifest::{
+    Builder, Content, ContentHash, Inputs, Language, MANIFEST_FILE, MANIFEST_FORMAT,
+    MANIFEST_VERSION, Manifest, content_hash,
 };
 
 use crate::Language as GuestLanguage;
 
-#[cfg(feature = "packages")]
-mod build;
-#[cfg(feature = "packages")]
-pub use build::{BuildOptions, build};
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
+mod bundler;
+#[cfg(feature = "env-pack")]
 mod pack;
-#[cfg(feature = "packages")]
+#[cfg(feature = "env-pack")]
 pub use pack::{PackOptions, pack};
 
 /// Where a sandbox sees the environment it was given with
 /// `SandboxBuilder::with_environment`, read-only.
 pub const MOUNT_PATH: &str = "/eryx/environment";
 
-/// Why building or loading an environment failed.
+/// Why packing or loading an environment failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EnvironmentError {
-    /// Environments for this language can't be built yet.
+    /// Environments for this language can't be packed or loaded yet.
     #[error("{0} environments aren't supported yet")]
     Unsupported(Language),
-    /// Resolving, fetching or installing the packages failed, or the
-    /// definition or manifest is invalid.
-    #[error(transparent)]
-    Packages(#[from] eryx_packages::Error),
-    /// The language's build step (e.g. the bundler) failed.
+    /// The manifest is invalid, or describes something this eryx can't
+    /// load (another format version, paths outside the environment).
+    #[error("environment: {0}")]
+    Manifest(String),
+    /// The environment's files or manifest don't match its hash, or it's
+    /// another environment than the one expected.
+    #[error("{what} doesn't match its integrity hash {expected}")]
+    Integrity {
+        /// What was checked.
+        what: String,
+        /// The hash it should have.
+        expected: String,
+    },
+    /// The language's pack step (e.g. the bundler) failed.
     #[error("{0}")]
     Build(String),
     /// A filesystem operation failed.
@@ -101,7 +105,7 @@ impl Environment {
         let root = dir.as_ref().to_path_buf();
         let manifest = Manifest::read(&root)?;
         manifest.verify(&root)?;
-        let language = guest_language(manifest.language)?;
+        let language = guest_language(manifest.language);
         Ok(Self {
             root,
             manifest,
@@ -121,11 +125,10 @@ impl Environment {
         if environment.manifest.content.hash == hash {
             Ok(environment)
         } else {
-            Err(eryx_packages::Error::Integrity {
+            Err(EnvironmentError::Integrity {
                 what: format!("the environment at {}", dir.as_ref().display()),
                 expected: hash.to_string(),
-            }
-            .into())
+            })
         }
     }
 
@@ -154,11 +157,10 @@ impl Environment {
     }
 }
 
-pub(crate) fn guest_language(language: Language) -> Result<GuestLanguage, EnvironmentError> {
+pub(crate) fn guest_language(language: Language) -> GuestLanguage {
     match language {
-        Language::JavaScript => Ok(GuestLanguage::JavaScript),
-        Language::Python => Ok(GuestLanguage::Python),
-        Language::Shell => Ok(GuestLanguage::Shell),
-        other => Err(EnvironmentError::Unsupported(other)),
+        Language::JavaScript => GuestLanguage::JavaScript,
+        Language::Python => GuestLanguage::Python,
+        Language::Shell => GuestLanguage::Shell,
     }
 }

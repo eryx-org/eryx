@@ -1,6 +1,6 @@
 # Environment Format
 
-An environment is a directory that eryx's `pack` (or `build`) writes and
+An environment is a directory that eryx's `pack` writes and
 `Environment::load` reads. The two may be different eryx versions, for
 example when a service packs environments and servers of another version
 mount them. This page is the contract between them.
@@ -10,7 +10,7 @@ mount them. This page is the contract between them.
 ```text
 <environment>/
   eryx-environment.json   the manifest
-  <lockfile>              optional: what was installed (package-lock.json, eryx-npm.lock)
+  <lockfile>              optional: what was installed (package-lock.json, pnpm-lock.yaml)
   modules/                the content directory: what sandboxes import
 ```
 

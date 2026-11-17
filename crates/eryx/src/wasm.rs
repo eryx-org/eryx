@@ -4534,7 +4534,7 @@ pub(crate) fn language_stamp(tail: &[u8]) -> Option<Language> {
 
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
     // wasmtime only reports these as text. If the wording ever changes,
     // callers just get the raw error again.

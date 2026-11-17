@@ -58,7 +58,7 @@ With `--release-url`, the URL must serve this eryx version's assets: `setup` sta
 
 `--language shell` also sets up the shell's embedded commands: it downloads `coreutils.wasm`, checks it against `coreutils.wasm.sha256`, and caches it as `coreutils-v<version>-<arch>-<os>.cwasm`. The `shell` feature turns on `coreutils`, which embeds them, so a build with `features = ["embedded", "shell"]` needs both. `--sha256` only applies to the runtime; coreutils is always checked against its own checksum file.
 
-`--bundler` sets up the JavaScript bundler that eryx's `packages` feature embeds to build environments: it downloads `eryx-bundler.wasm`, checks it against `eryx-bundler.wasm.sha256`, and caches it as `eryx-bundler-v<version>-<arch>-<os>.cwasm`, so a crates.io build with `packages` doesn't need the bundler built from source. Alone (`eryx-precompile setup --bundler`) it sets up only the bundler; with `--language`, both.
+`--bundler` sets up the JavaScript bundler that eryx's `env-pack` feature embeds to pack environments: it downloads `eryx-bundler.wasm`, checks it against `eryx-bundler.wasm.sha256`, and caches it as `eryx-bundler-v<version>-<arch>-<os>.cwasm`, so a crates.io build with `env-pack` doesn't need the bundler built from source. Alone (`eryx-precompile setup --bundler`) it sets up only the bundler; with `--language`, both.
 
 A precompiled runtime only loads in the eryx version that built it, so `setup` always sets up its own version. To set up another, install the matching binary, for example `cargo binstall eryx-precompile@0.13.0`.
 

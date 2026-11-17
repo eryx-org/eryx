@@ -4,7 +4,7 @@
 # nothing. Two artifacts:
 # - `runtime-assets`: runtime-{python,javascript,shell}.wasm, the shell's
 #   embedded commands coreutils.wasm, the JavaScript bundler
-#   eryx-bundler.wasm (eryx's `packages` feature), their .sha256 and their
+#   eryx-bundler.wasm (eryx's `env-pack` feature), their .sha256 and their
 #   third-party .notices.md (#837): the release assets `eryx-precompile setup`
 #   downloads.
 # - `wasm-runtime`: what the pyeryx wheel jobs need to precompile the Python
@@ -46,7 +46,7 @@ jobs:
           # The shell's embedded commands (the eryx `coreutils` feature),
           # from the pinned clis/coreutils.toml.
           mise run build-coreutils
-          # The bundler environment builds run (the eryx `packages` feature).
+          # The bundler `env pack` runs (the eryx `env-pack` feature).
           mise run build-bundler
         env:
           BUILD_ERYX_RUNTIME: "1"

@@ -43,13 +43,13 @@
 //   that need wasmtime's unsafe deserialization APIs
 // - With `preinit` feature: deny unsafe code, needed for cranelift CPU feature flags
 //   during precompilation (e.g., disabling AVX-512 for portable builds)
-// - With `packages` feature: deny unsafe code, to load the embedded bundler
+// - With `env-pack` feature: deny unsafe code, to load the embedded bundler
 #![cfg_attr(
-    not(any(feature = "embedded", feature = "preinit", feature = "packages")),
+    not(any(feature = "embedded", feature = "preinit", feature = "env-pack")),
     forbid(unsafe_code)
 )]
 #![cfg_attr(
-    any(feature = "embedded", feature = "preinit", feature = "packages"),
+    any(feature = "embedded", feature = "preinit", feature = "env-pack"),
     deny(unsafe_code)
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]

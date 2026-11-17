@@ -105,7 +105,6 @@ base64.workspace = true
 bytes.workspace = true
 blake3 = { workspace = true, optional = true }
 eryx-macros = { workspace = true, optional = true } #unified
-eryx-packages = { workspace = true, optional = true }
 eryx-runtime = { workspace = true, optional = true } #unified
 eryx-vfs = { workspace = true, optional = true } #unified
 flate2.workspace = true
@@ -151,7 +150,7 @@ rustix = { workspace = true, features = ["process"] } #unified
 
 # build.rs hashes what it embeds and checks a cached runtime against its
 # checksum file (build/cached_runtime.rs), only for the features that embed
-# something: embedded-stdlib, embedded and packages.
+# something: embedded-stdlib, embedded and env-pack.
 [build-dependencies]
 hex = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
@@ -208,22 +207,21 @@ unstable-vfs = ["dep:eryx-vfs"]
 # code; this is for hosts that drive the executor themselves, like eryx-server.
 # Outside semver, like `unstable-vfs`.
 unstable-internals = []
-# Environments (`eryx::environment`): package sets built ahead of time, which
-# sandboxes mount with `with_environment`. `environment` loads and mounts
-# them; `packages` also builds them, which embeds the npm client and the
-# JavaScript bundler (eryx-bundler.cwasm: from `eryx-precompile setup
-# --bundler`, or `mise run precompile-bundler` in the workspace;
-# ERYX_BUNDLER_CWASM names another).
-environment = ["dep:eryx-packages"]
-packages = ["environment", "eryx-packages/npm", "dep:blake3", "dep:hex", "dep:sha2", "dep:rustix"]
+# Environments (`eryx::environment`): package sets installed and packed
+# ahead of time, which sandboxes mount with `with_environment`. eryx doesn't
+# resolve or fetch packages (the eryx-run service does, or `npm ci`).
+# `environment` loads and mounts them; `env-pack` also packs an installed
+# node_modules tree into one, which embeds the JavaScript bundler
+# (eryx-bundler.cwasm: from `eryx-precompile setup --bundler`, or `mise run
+# precompile-bundler` in the workspace; ERYX_BUNDLER_CWASM names another).
+environment = []
+env-pack = ["environment", "dep:hex", "dep:sha2", "dep:rustix"]
 
 
 [dev-dependencies]
 # Enables `unstable-internals` for this crate's own tests and examples, which
 # exercise the executor plumbing directly.
 eryx = { path = ".", features = ["unstable-internals"] }
-# The environment tests build package caches and lockfiles by hand.
-eryx-packages = { workspace = true, features = ["npm"] }
 anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true

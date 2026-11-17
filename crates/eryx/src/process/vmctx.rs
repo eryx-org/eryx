@@ -25,7 +25,7 @@ use wasmtime_environ::{HostPtr, VMOffsets, VMOffsetsFields};
 /// needs 1.3 MB across its instances), since there's no wasm left to size it
 /// from. It's charged to the child memory pool, which is what bounds every
 /// child's metadata.
-#[cfg(any(feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 pub(super) const UNSTAMPED: u64 = UNMODELLED_INSTANCE;
 
 /// What each core instance is charged in a component [`estimate`] doesn't
@@ -290,7 +290,7 @@ pub(super) fn stamp(precompiled: &mut Vec<u8>, bytes: u64) {
 }
 
 /// The figure a precompiled command ending in `tail` was stamped with.
-#[cfg(any(test, feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(test, feature = "embedded", feature = "preinit", feature = "env-pack"))]
 pub(super) fn stamped(tail: &[u8]) -> Option<u64> {
     let (rest, magic) = tail.split_last_chunk::<8>()?;
     let (&tag, rest) = rest.split_last()?;
@@ -302,7 +302,7 @@ pub(super) fn stamped(tail: &[u8]) -> Option<u64> {
 }
 
 /// How many bytes at the end of a file [`stamped`] reads.
-#[cfg(any(test, feature = "embedded", feature = "preinit", feature = "packages"))]
+#[cfg(any(test, feature = "embedded", feature = "preinit", feature = "env-pack"))]
 pub(super) const STAMP_LEN: usize = 8 + 1 + 8;
 
 #[cfg(test)]
