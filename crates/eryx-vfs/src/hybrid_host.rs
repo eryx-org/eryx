@@ -1378,7 +1378,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
         };
         let resource = self.table.push(opened)?;
         if let Some((storage, path)) = file {
-            self.ctx.open_files().open(storage, &path);
+            self.ctx.count_open(storage, &path);
         }
         Ok(resource)
     }
@@ -1392,7 +1392,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
         let HybridDescriptor::Vfs(desc) = self.table.delete(fd)? else {
             return Ok(None);
         };
-        if desc.is_dir || !self.ctx.open_files().close(desc.storage, &desc.path) {
+        if desc.is_dir || !self.ctx.count_close(desc.storage, &desc.path) {
             return Ok(None);
         }
         let storage = self.ctx.storage_for(&desc).clone();
@@ -2819,5 +2819,44 @@ mod tests {
         HostDescriptor::drop(&mut c, new).await.unwrap();
         HostDescriptor::drop(&mut p, old).await.unwrap();
         assert_eq!(storage.read("/data/x").await.unwrap(), b"child");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_with_files_open_gives_back_its_counts() {
+        let storage = storage();
+        storage.mkdir("/data").await.unwrap();
+        storage.write("/data/f", b"x").await.unwrap();
+        storage.write("/data/g", b"y").await.unwrap();
+        let mut parent = HybridVfsCtx::new(storage.clone());
+        parent.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+
+        // The child opens both files, unlinks g, and exits without closing
+        // either (its store, and so its context, is dropped).
+        {
+            let mut child = parent.fork();
+            let mut table = ResourceTable::new();
+            let mut c = HybridVfsState::new(&mut child, &mut table);
+            let data = preopen(&mut c, 0);
+            let read = types::DescriptorFlags::READ;
+            for name in ["f", "g"] {
+                open(&mut c, &data, name, types::OpenFlags::empty(), read)
+                    .await
+                    .unwrap();
+            }
+            c.unlink_file_at(borrow(&data), "g".into()).await.unwrap();
+        }
+
+        // The parent's unlink deletes f at once, and g is an ordinary file
+        // again, so it can be removed too.
+        let mut table = ResourceTable::new();
+        let mut p = HybridVfsState::new(&mut parent, &mut table);
+        let data = preopen(&mut p, 0);
+        for name in ["f", "g"] {
+            p.unlink_file_at(borrow(&data), name.into()).await.unwrap();
+            assert!(
+                !storage.exists(&format!("/data/{name}")).await.unwrap(),
+                "{name}"
+            );
+        }
     }
 }
