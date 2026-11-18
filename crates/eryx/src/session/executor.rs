@@ -1027,8 +1027,7 @@ pub(crate) fn build_hybrid_vfs_context(
 /// The filesystem of `executor`'s guest run as a command: `base` (its
 /// parent's, forked) or an empty one, plus the executor's read-only library
 /// mounts (the Python stdlib and site-packages).
-// Only tests run guests as commands until children do (#831).
-#[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 pub(crate) fn command_vfs_context(
     executor: &Executor,
     base: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,

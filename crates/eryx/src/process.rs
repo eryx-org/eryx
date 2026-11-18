@@ -649,6 +649,97 @@ impl Command {
         Self::from_component(&engine, &component, vmctx)
     }
 
+    /// Run `language`'s embedded runtime as a command, as the shell runs
+    /// `python3 -c CODE`, through the runtime's `run-command` export: for
+    /// Python, register it as `python` and `python3` with
+    /// [`SandboxBuilder::with_commands`](crate::SandboxBuilder::with_commands).
+    /// Only Python can run as a command so far.
+    ///
+    /// A guest child is a fresh instance of the runtime (for Python, the
+    /// pre-initialized interpreter with the embedded standard library). It
+    /// sees the shell's filesystem, environment, working directory and
+    /// stdio, burns the execution's fuel and counts against the children's
+    /// memory like any child, and gets no callbacks, no network and no
+    /// commands of its own ([`allow_spawn`](Self::allow_spawn) and
+    /// [`with_network`](Self::with_network) don't apply to it, and a
+    /// [`Credential`](crate::net::Credential) can't be for it).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `language` can't run as a command, or its
+    /// embedded runtime can't be extracted or loaded.
+    #[cfg(all(feature = "embedded", any(feature = "unstable-vfs", feature = "shell")))]
+    pub fn guest(language: crate::Language) -> Result<Self, Error> {
+        let runtime = crate::embedded::runtime_path(language)?
+            .ok_or(ErrorKind::MissingRuntime { language })?;
+        let stdlib = match language {
+            crate::Language::Python => Some(
+                crate::embedded::EmbeddedResources::get()?
+                    .stdlib_path
+                    .clone(),
+            ),
+            _ => None,
+        };
+        // SAFETY: the runtime eryx embedded at build time, extracted and
+        // checked against the embedded bytes.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::guest_from_precompiled_file(language, runtime, stdlib)
+        }
+    }
+
+    /// Run a precompiled `language` runtime as a command, like
+    /// [`guest`](Self::guest) does the embedded one: for Python, with the
+    /// standard library at `stdlib`. The runtime must have been precompiled
+    /// by this eryx version and export `run-command`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`from_precompiled_file`](Self::from_precompiled_file): only a
+    /// file you trust, which mustn't change while the command is loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `language` can't run as a command, the file
+    /// doesn't load, or it's stamped for another language.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    #[allow(unsafe_code)]
+    pub unsafe fn guest_from_precompiled_file(
+        language: crate::Language,
+        path: impl AsRef<Path>,
+        stdlib: Option<std::path::PathBuf>,
+    ) -> Result<Self, Error> {
+        if language != crate::Language::Python {
+            return Err(ErrorKind::Initialization(format!(
+                "{language} can't run as a command yet: only python can"
+            ))
+            .into());
+        }
+        let path = path.as_ref();
+        // SAFETY: the caller vouches for the file.
+        let executor = unsafe { crate::Executor::for_guest_command(language, path, stdlib) }?;
+        Ok(Self {
+            pre: Pre::Guest(Arc::new(executor)),
+            tunnels: false,
+            spawns: false,
+            vmctx: usize::try_from(precompiled_vmctx(&file_tail(path).unwrap_or_default()))
+                .unwrap_or(usize::MAX),
+            network: None,
+            credentials: Vec::new(),
+        })
+    }
+
+    /// Whether it runs a guest runtime (see [`guest`](Self::guest)).
+    fn is_guest(&self) -> bool {
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        return matches!(self.pre, Pre::Guest(_));
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        false
+    }
+
     fn from_component(engine: &Engine, component: &Component, vmctx: u64) -> Result<Self, Error> {
         #[cfg(test)]
         tests::COMPILED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -992,7 +1083,9 @@ impl Spawner {
         }
         // With network, children get the proxy. (Secrets' placeholders come
         // from the shell, which exports them.)
+        // Guest children have no network (yet), so no proxy.
         let network = match &self.net {
+            Some(_) if command.is_guest() => None,
             Some(net) => match net
                 .upgrade()
                 .ok_or_else(|| std::io::Error::other("the execution has ended"))
@@ -1206,11 +1299,15 @@ impl Command {
     }
 }
 
-/// A command pre-instantiated for the WASI version it targets.
+/// A command pre-instantiated for the WASI version it targets, or a guest
+/// runtime run through its `run-command` export (see [`Command::guest`]).
 #[derive(Clone)]
 enum Pre {
     P2(wasmtime_wasi::p2::bindings::CommandPre<ChildState>),
     P3(wasmtime_wasi::p3::bindings::CommandPre<ChildState>),
+    /// Loaded on the child engine.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    Guest(Arc<crate::Executor>),
 }
 
 impl Pre {
@@ -1245,6 +1342,8 @@ impl Pre {
         match self {
             Self::P2(pre) => pre.engine(),
             Self::P3(pre) => pre.engine(),
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            Self::Guest(executor) => executor.engine(),
         }
     }
 
@@ -1252,6 +1351,12 @@ impl Pre {
     /// failed instantiation; the inner one a trap, other than an exit.
     async fn run(&self, store: &mut Store<ChildState>) -> wasmtime::Result<wasmtime::Result<i32>> {
         let ran = match self {
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            Self::Guest(_) => {
+                return Err(wasmtime::Error::msg(
+                    "a guest command runs in a sandbox store, not a child's",
+                ));
+            }
             Self::P2(pre) => {
                 let command = pre.instantiate_async(&mut *store).await?;
                 command.wasi_cli_run().call_run(&mut *store).await
@@ -1434,6 +1539,7 @@ impl Commands {
                     .and_then(|o| o.network.as_ref())
                     .or(command.network.as_ref());
                 !option.is_some_and(|o| o.no_credentials)
+                    && !command.is_guest()
                     && !matches!(network, Some(ChildNetwork::None))
                     && credentials.iter().any(|c| c.for_command(name))
             })
@@ -1480,6 +1586,15 @@ impl Commands {
                     .iter()
                     .any(|c| c.commands().is_some_and(|cs| cs.contains(name)))
             };
+            if command.is_guest() {
+                if named() {
+                    return fail(format!(
+                        "command {name} has a credential but runs a guest runtime, which has \
+                         no network"
+                    ));
+                }
+                continue;
+            }
             if matches!(command.network, Some(ChildNetwork::None)) {
                 if named() {
                     return fail(format!(
@@ -1609,7 +1724,8 @@ pub(crate) struct ChildState {
 
 /// A child's share of `pool`, which may grow to `limit` (its execution's
 /// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
-struct ChildMemory {
+#[derive(Debug)]
+pub(crate) struct ChildMemory {
     pool: Arc<AtomicUsize>,
     held: usize,
     limit: usize,
@@ -1763,10 +1879,39 @@ struct ChildRun {
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
+/// Meter a child's `store`: it may burn `fuel`, and publishes what it has
+/// burned to `fuel_used` on every epoch tick, for `wait` to charge the
+/// parent.
+fn meter_child<T: 'static>(
+    store: &mut Store<T>,
+    fuel: u64,
+    fuel_used: Arc<AtomicU64>,
+) -> Result<(), String> {
+    // Without this, a loop with no calls keeps its fuel count in a
+    // register, and the epoch callback below reads a stale count.
+    crate::wasm::sync_fuel_periodically(store).map_err(|e| e.to_string())?;
+    // Yield on every epoch tick, publishing the fuel burned so far. The
+    // parent's timeout and cancellation race its whole execution, so
+    // yielding also lets them drop a CPU-bound child as they would a guest
+    // blocked in `time.sleep`.
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |store| {
+        let left = store.as_context().get_fuel().unwrap_or(0);
+        fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+        Ok(UpdateDeadline::Yield(1))
+    });
+    store.set_fuel(fuel).map_err(|e| e.to_string())
+}
+
 impl ChildRun {
     /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
     async fn run(self) -> (Result<i32, String>, u64) {
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Pre::Guest(executor) = &self.pre {
+            let executor = Arc::clone(executor);
+            return self.run_guest(&executor).await;
+        }
         // With a proxy, its env vars replace any of the same names the script
         // passed (libc takes a name's first value).
         let env: Vec<(String, String)> = match &self.network {
@@ -1858,26 +2003,11 @@ impl ChildRun {
             },
         );
         store.limiter(|s| &mut s.limits);
-        // Without this, a loop with no calls keeps its fuel count in a
-        // register, and the epoch callback below reads a stale count.
-        if let Err(e) = crate::wasm::sync_fuel_periodically(&mut store) {
-            return (Err(e.to_string()), 0);
+        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
+            return (Err(e), 0);
         }
-        // Yield on every epoch tick, publishing the fuel burned so far for
-        // `wait` to charge the parent. The parent's timeout and cancellation
-        // race its whole execution, so yielding also lets them drop a
-        // CPU-bound child as they would a guest blocked in `time.sleep`.
-        let fuel = self.fuel;
-        let fuel_used = self.fuel_used;
-        store.set_epoch_deadline(1);
-        store.epoch_deadline_callback(move |store| {
-            let left = store.as_context().get_fuel().unwrap_or(0);
-            fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
-            Ok(UpdateDeadline::Yield(1))
-        });
 
         let code = async {
-            store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
             match self.pre.run(&mut store).await {
                 Err(e) => Err(format!("instantiate: {e}")),
                 Ok(Err(e)) => Err(format!("{}: {e}", self.argv[0])),
@@ -1888,6 +2018,53 @@ impl ChildRun {
         let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
         // Dropping the store closes the child's ends of its pipes, which ends
         // its output streams.
+        drop(store);
+        (code, fuel_used)
+    }
+}
+
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+impl ChildRun {
+    /// Run a guest command (see [`Command::guest`]): a fresh instance of
+    /// `executor`'s runtime on the child's pipes and filesystem, plus the
+    /// runtime's own read-only mounts, charging its memory to the
+    /// children's pool.
+    async fn run_guest(self, executor: &crate::Executor) -> (Result<i32, String>, u64) {
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stdin(self.stdin)
+            .stdout(self.stdout)
+            .stderr(self.stderr)
+            .allow_ip_name_lookup(false)
+            .allow_udp(false);
+        let vfs = match crate::session::executor::command_vfs_context(executor, self.vfs) {
+            Ok(vfs) => vfs,
+            Err(e) => return (Err(format!("mounting the runtime's files: {e}")), 0),
+        };
+        let memory = crate::wasm::MemoryTracker::for_child(self.memory);
+        let state = ExecutorState::for_command(wasi.build(), vfs, memory);
+        let mut store = Store::new(executor.engine(), state);
+        store.limiter(|s| &mut s.memory_tracker);
+        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
+            return (Err(e), 0);
+        }
+        // `prepare` put the shell's directory in PWD.
+        let cwd = self
+            .env
+            .iter()
+            .find(|(k, _)| k == "PWD")
+            .map_or_else(|| "/".to_owned(), |(_, pwd)| pwd.clone());
+        let name = self.argv[0].clone();
+        let code = executor
+            .run_command(&mut store, self.argv, self.env, cwd)
+            .await
+            .map_err(|e| format!("{name}: {e}"));
+        tracing::debug!(
+            command = %name,
+            peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes(),
+            "guest command finished"
+        );
+        let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        // Dropping the store closes the child's ends of its pipes.
         drop(store);
         (code, fuel_used)
     }

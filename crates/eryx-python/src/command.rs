@@ -93,6 +93,24 @@ impl Command {
             .map_err(eryx_error_to_py)
     }
 
+    /// Python itself as a command, for a shell sandbox to register as
+    /// `python` and `python3`:
+    /// `commands={"python": py, "python3": py}` with `py = Command.python()`.
+    /// The shell can then run `python3 -c CODE`, `python3 script.py` and
+    /// `... | python3`. Each run is a fresh interpreter (pyeryx's embedded
+    /// one, with the standard library) on the shell's files, environment,
+    /// working directory and stdio, within the execution's limits, with no
+    /// callbacks and no network.
+    ///
+    /// Raises:
+    ///     InitializationError: If the embedded runtime can't be loaded.
+    #[staticmethod]
+    fn python() -> PyResult<Self> {
+        eryx::Command::guest(eryx::Language::Python)
+            .map(|inner| Self { inner })
+            .map_err(eryx_error_to_py)
+    }
+
     fn __repr__(&self) -> &'static str {
         "Command(...)"
     }
