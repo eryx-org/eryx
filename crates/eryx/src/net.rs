@@ -19,9 +19,11 @@ use std::time::Duration;
 
 pub use ipnet::IpNet;
 
+mod credential;
 mod policy;
 mod proxy;
 mod response;
+pub use credential::Credential;
 use ipnet::{Ipv4Net, Ipv6Net};
 use policy::{CheckedTcp, NetPolicy, RequestFramer, ResponseMasker};
 pub use proxy::{ChildNetPolicy, ChildNetwork, ChildProxy};
@@ -818,7 +820,7 @@ impl HttpRule {
 
     fn validate(&self) -> Result<(), String> {
         for path in &self.paths {
-            if request_path(path).as_deref() != Some(path) || path.contains(['?', '#']) {
+            if !is_normalized_path(path) {
                 return Err(format!(
                     "HTTP rule path {path:?} for {} must be a normalized absolute path",
                     self.host
@@ -832,14 +834,22 @@ impl HttpRule {
     fn allows(&self, method: &str, path: &str) -> bool {
         let method_ok =
             self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
-        let path_ok = self.paths.is_empty()
-            || self.paths.iter().any(|prefix| {
-                path.strip_prefix(prefix.as_str()).is_some_and(|rest| {
-                    prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/')
-                })
-            });
+        let path_ok = self.paths.is_empty() || self.paths.iter().any(|p| path_is_under(path, p));
         method_ok && path_ok
     }
+}
+
+/// Whether the decoded `path` is `prefix` or under it: `/a` covers `/a` and
+/// `/a/b` but not `/ab`; `/a/` covers everything below `/a/`.
+fn path_is_under(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Whether `path` is a path prefix [`request_path`] leaves as it is: a
+/// normalized absolute path with no query or fragment.
+fn is_normalized_path(path: &str) -> bool {
+    request_path(path).as_deref() == Some(path) && !path.contains(['?', '#'])
 }
 
 /// The decoded path of request target `target` (origin-form, a path, or

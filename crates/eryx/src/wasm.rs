@@ -2225,6 +2225,7 @@ pub struct ExecuteBuilder<'a> {
     child_net: Option<crate::process::ChildNet>,
     allowed_commands: Option<Vec<String>>,
     command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<Arc<crate::net::Credential>>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
@@ -2277,6 +2278,7 @@ impl<'a> ExecuteBuilder<'a> {
             child_net: None,
             allowed_commands: None,
             command_options: HashMap::new(),
+            credentials: Vec::new(),
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
@@ -2471,6 +2473,14 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Give this execution's children `credential` too (shell only); see
+    /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2493,6 +2503,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.child_net,
                 self.allowed_commands.as_deref(),
                 &self.command_options,
+                &self.credentials,
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
@@ -2586,6 +2597,9 @@ pub struct Executor {
     commands: crate::process::Commands,
     /// How the commands' children reach the network.
     child_network: crate::net::ChildNetwork,
+    /// Credentials every execution's children get (see
+    /// [`Credential`](crate::net::Credential)).
+    credentials: Vec<Arc<crate::net::Credential>>,
 }
 
 impl std::fmt::Debug for Executor {
@@ -2769,6 +2783,20 @@ impl Executor {
         &self.child_network
     }
 
+    /// Credentials every execution's children get.
+    pub(crate) fn with_credentials(
+        mut self,
+        credentials: Vec<Arc<crate::net::Credential>>,
+    ) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// Credentials every execution's children get.
+    pub(crate) fn credentials(&self) -> &[Arc<crate::net::Credential>] {
+        &self.credentials
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `Executor`
@@ -2853,6 +2881,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2887,6 +2916,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2940,6 +2970,7 @@ impl Executor {
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
                 child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             })
         }
@@ -3001,6 +3032,7 @@ impl Executor {
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
                 child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
@@ -3029,6 +3061,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -3107,6 +3140,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -3161,6 +3195,7 @@ impl Executor {
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
                 child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             })
         }
@@ -3222,6 +3257,7 @@ impl Executor {
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
                 child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
@@ -3250,6 +3286,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -3309,6 +3346,7 @@ impl Executor {
                 result_variable: "result".to_string(),
                 commands: crate::process::Commands::default(),
                 child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
@@ -3351,6 +3389,7 @@ impl Executor {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -4026,6 +4065,7 @@ impl Executor {
         child_net: Option<crate::process::ChildNet>,
         allowed_commands: Option<&[String]>,
         command_options: &HashMap<String, crate::process::CommandOptions>,
+        credentials: &[Arc<crate::net::Credential>],
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
@@ -4033,9 +4073,19 @@ impl Executor {
         vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
-        let commands =
-            self.commands
-                .for_execution(allowed_commands, command_options, child_net.is_some())?;
+        // The execution's first: for a header both set on a request, the
+        // first match wins (`inject_credentials`), so the execution's does.
+        let credentials: Vec<_> = credentials
+            .iter()
+            .chain(&self.credentials)
+            .cloned()
+            .collect();
+        let commands = self.commands.for_execution(
+            allowed_commands,
+            command_options,
+            child_net.is_some(),
+            &credentials,
+        )?;
 
         // Avoid making an already-cancelled request wait for the first epoch
         // tick. Cancellation that races this check is still observed by the

@@ -140,8 +140,8 @@ pub use error::{Error, ErrorKind};
 pub use language::Language;
 pub use library::RuntimeLibrary;
 pub use net::{
-    ChildNetwork, ChildProxy, ConnectionManager, DEFAULT_BLOCKED_NETWORKS, HttpRule, IpNet,
-    NetConfig, NetTraffic, Resolver, TcpError, TlsError,
+    ChildNetwork, ChildProxy, ConnectionManager, Credential, DEFAULT_BLOCKED_NETWORKS, HttpRule,
+    IpNet, NetConfig, NetTraffic, Resolver, TcpError, TlsError,
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};

@@ -269,6 +269,62 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   can open blind `CONNECT` tunnels instead, for protocols the proxy can't
   inspect: no secret substitution and no HTTP rules in them, and hosts with
   rules never get one.
+- **Credentials:** a `Credential` is a header the proxy adds to some
+  commands' requests to some hosts, from a secret the sandbox never sees,
+  not even as a placeholder, so `git` and `gh` authenticate with no token in
+  their env or files:
+
+  ```rust,ignore
+  Sandbox::embedded().shell()
+      .with_command("git", git.allow_spawn())
+      .with_network(network)
+      .with_child_network(ChildNetwork::Inherit)
+      .with_credential(
+          Credential::basic("x-access-token", token)
+              .for_hosts(["github.com"])
+              .for_paths(["/my-org/"])
+              .for_commands(["git"]),
+      )
+  ```
+
+  `bearer`, `token` (`Authorization: token …`), `basic(user, …)` and
+  `header(name, template, …)` build the value. `for_hosts` is required, and
+  takes exact names, IP addresses, or `*.` and a name of two labels or more
+  (`*.github.com`, not `*.com`), no other `*`, port, path or non-ASCII
+  character (write punycode); it doesn't scope by port. `for_paths` and `for_commands` narrow it (with
+  no `for_commands`, every child gets it). Give one execution its own with
+  `ExecuteOptions::with_credential` (a hosted service's per-user token): where
+  it and a sandbox's both set a header on a request, the execution's wins.
+  Take them from one command with `CommandOptions::without_credentials()`.
+  - **Where:** only on requests the proxy inspects: over the TLS it
+    terminates, or plain HTTP with `allow_plaintext()`. A connection to a
+    credential's host refuses `Upgrade` and `CONNECT` requests outright, so
+    those hosts can't be used for WebSockets or other upgrades. Any header of the same name the child sent is replaced, so `gh`
+    can run with a dummy `GH_TOKEN`. A command opening blind tunnels can't
+    carry one: naming it fails the execution, and a tunnelling proxy refuses
+    a credential's hosts.
+  - **Confined to its commands:** a command with credentials gets a proxy of
+    its own, which wants a password from its `HTTPS_PROXY` URL (scrubbed
+    from the output like the credential), and no
+    connection, the sandbox's or a child's, may reach a child proxy, even
+    with `allow_localhost`. Other commands and the script's own requests
+    never get the header.
+  - **Responses:** on a connection with a credential, requests ask for
+    `Accept-Encoding: identity` and a compressed or transfer-coded response
+    ends the connection, since the credential can't be found in an encoded
+    body, as does any `101`. `Range` and `If-Range` are dropped from every
+    request on such a connection, whether it gets the credential or not. The
+    value (and for `Basic` its base64 payload, and the secret) is
+    masked out as `[REDACTED]`, as secrets' real values are, and scrubbed
+    from stdout, stderr and traces too in case any reaches them. Masking
+    only hides whole, verbatim echoes: one in another form (its base64
+    alone, hex, JSON's `\/` for `/`) or in pieces isn't masked, so don't give
+    credentials for hosts that echo request headers. Output scrubbing is
+    defence in depth, not a boundary (see
+    [Credentials](./secrets.md#credentials-for-child-processes)).
+  - **Limits:** a command with a credential can do anything with it its hosts
+    and paths allow, whatever the script asks: scope it as narrowly as you
+    can. Credentials are Rust-only for now.
 - **Limits:** children count against the execution's `max_fuel` as they
   run (each may burn at most 10 billion instructions of it), and stop at its
   `execution_timeout` and cancellation, even mid-computation. They're

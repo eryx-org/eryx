@@ -45,6 +45,17 @@ impl SecretConfig {
         }
     }
 
+    /// An entry only output scrubbing uses: `value` is replaced with
+    /// `[REDACTED]` as a placeholder would be, and it's never substituted.
+    pub(crate) fn scrub_only(value: String) -> Self {
+        Self {
+            real_value: String::new(),
+            placeholder: value,
+            allowed_hosts: Vec::new(),
+            header: None,
+        }
+    }
+
     /// Only substitute the real value in the HTTP header `name` (compared
     /// ignoring case). A request with the placeholder in any other header is
     /// refused, as for a host the secret isn't allowed for.
@@ -236,10 +247,19 @@ fn random_placeholder() -> String {
 /// Scrub secret placeholders from text, replacing them with `[REDACTED]`.
 pub fn scrub_placeholders(text: &str, secrets: &HashMap<String, SecretConfig>) -> String {
     let mut result = text.to_string();
-    for secret in secrets.values() {
-        result = result.replace(&secret.placeholder, "[REDACTED]");
+    for placeholder in longest_first(secrets) {
+        result = result.replace(placeholder, "[REDACTED]");
     }
     result
+}
+
+/// The placeholders of `secrets`, longest first: where one contains another
+/// (a credential's header value and its secret, a proxy's `user:password`
+/// and its password), the whole is scrubbed, whatever the map's order.
+fn longest_first(secrets: &HashMap<String, SecretConfig>) -> Vec<&str> {
+    let mut placeholders: Vec<&str> = secrets.values().map(|s| s.placeholder.as_str()).collect();
+    placeholders.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    placeholders
 }
 
 /// Scrub secret placeholders from byte data.
@@ -253,8 +273,8 @@ pub fn scrub_placeholders_bytes(data: &[u8], secrets: &HashMap<String, SecretCon
     } else {
         // Binary file - byte sequence search
         let mut result = data.to_vec();
-        for secret in secrets.values() {
-            result = replace_bytes(&result, secret.placeholder.as_bytes(), b"[REDACTED]");
+        for placeholder in longest_first(secrets) {
+            result = replace_bytes(&result, placeholder.as_bytes(), b"[REDACTED]");
         }
         result
     }
@@ -369,6 +389,27 @@ mod tests {
         let data = b"Hello NEEDLE World NEEDLE!";
         let result = replace_bytes(data, b"NEEDLE", b"REPLACEMENT");
         assert_eq!(result, b"Hello REPLACEMENT World REPLACEMENT!".to_vec());
+    }
+
+    /// Where one scrubbed value contains another, the whole is scrubbed,
+    /// whichever the map yields first.
+    #[test]
+    fn nested_values_are_scrubbed_whole() {
+        for _ in 0..20 {
+            let mut secrets = HashMap::new();
+            secrets.insert("a".into(), SecretConfig::scrub_only("pw".into()));
+            secrets.insert("b".into(), SecretConfig::scrub_only("eryx:pw".into()));
+            secrets.insert("c".into(), SecretConfig::scrub_only("x".into()));
+            let text = "http://eryx:pw@h pw";
+            assert_eq!(
+                scrub_placeholders(text, &secrets),
+                "http://[REDACTED]@h [REDACTED]"
+            );
+            assert_eq!(
+                scrub_placeholders_bytes(b"\xfferyx:pw", &secrets),
+                b"\xff[REDACTED]".to_vec()
+            );
+        }
     }
 
     #[test]

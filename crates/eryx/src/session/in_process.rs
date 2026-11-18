@@ -380,13 +380,32 @@ async fn run_code(
         .await
     }));
 
+    // Spawn the network handler if networking is enabled (first, so the
+    // output can be scrubbed of the child proxies' passwords)
+    let (net_tx, net_handler, child_net) = match sandbox.net_config() {
+        Some(config) => {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone());
+            let child_net = manager.child_network(sandbox.executor().child_network().clone());
+            let handler = AbortOnDrop(tokio::spawn(run_net_handler(rx, manager)));
+            (Some(tx), Some(handler), child_net)
+        }
+        None => (None, None, None),
+    };
+
+    let scrub_secrets = sandbox.scrub_secrets(
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        child_net.as_ref(),
+    );
     // Create the trace channel and collector only when tracing is enabled.
     let tracing_enabled = sandbox.tracing_enabled();
     let (trace_tx, trace_collector) = if tracing_enabled {
         let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
         let trace_handler = sandbox.trace_handler().clone();
         let collect_trace = sandbox.trace_collection_enabled();
-        let trace_secrets = sandbox.secrets().clone();
+        let trace_secrets = scrub_secrets.clone();
         let trace_collector = AbortOnDrop(tokio::spawn(async move {
             run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
         }));
@@ -398,7 +417,7 @@ async fn run_code(
     // Spawn task to handle streaming output
     let (output_tx, output_rx) = mpsc::unbounded_channel::<OutputRequest>();
     let output_handler_ref = sandbox.output_handler().clone();
-    let output_secrets = sandbox.secrets().clone();
+    let output_secrets = scrub_secrets.clone();
     let scrub_stdout = sandbox.scrub_stdout();
     let scrub_stderr = sandbox.scrub_stderr();
     let mut output_collector = AbortOnDrop(tokio::spawn(async move {
@@ -411,18 +430,6 @@ async fn run_code(
         )
         .await
     }));
-
-    // Spawn the network handler if networking is enabled
-    let (net_tx, net_handler, child_net) = match sandbox.net_config() {
-        Some(config) => {
-            let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone());
-            let child_net = manager.child_network(sandbox.executor().child_network().clone());
-            let handler = AbortOnDrop(tokio::spawn(run_net_handler(rx, manager)));
-            (Some(tx), Some(handler), child_net)
-        }
-        None => (None, None, None),
-    };
 
     // Execute using the session executor (keeps instance alive!)
     // Timeout is handled via epoch-based interruption inside the executor
@@ -475,7 +482,7 @@ async fn run_code(
                 "Session execution completed"
             );
 
-            let output = sandbox.scrub_output(output);
+            let output = sandbox.scrub_output(output, &scrub_secrets);
 
             Ok(ExecuteResult {
                 stdout: output.stdout,
@@ -504,7 +511,7 @@ async fn run_code(
                 }),
                 None => error,
             };
-            Err(sandbox.scrub_error(error))
+            Err(sandbox.scrub_error(error, &scrub_secrets))
         }
     }
 }

@@ -51,6 +51,8 @@ pub(super) enum RequestKind {
     Head,
     /// `CONNECT`: a `2xx` response turns the connection into a tunnel.
     Connect,
+    /// With an `Upgrade` header: a `101` response switches protocols.
+    Upgrade,
     /// Anything else.
     Other,
 }
@@ -63,6 +65,8 @@ impl RequestKind {
             Self::Head
         } else if method.eq_ignore_ascii_case(b"CONNECT") {
             Self::Connect
+        } else if super::switches_protocols(headers) {
+            Self::Upgrade
         } else {
             Self::Other
         }
@@ -116,6 +120,9 @@ pub(super) struct ResponseMasker {
     carry: Vec<u8>,
     /// Bytes ready for the guest.
     pub(super) out: Vec<u8>,
+    /// Whether the connection carries a credential, so an encoded response
+    /// or a protocol switch fails it (see [`Self::carrying_credential`]).
+    credential: bool,
 }
 
 impl ResponseMasker {
@@ -132,7 +139,20 @@ impl ResponseMasker {
             pending: Vec::new(),
             carry: Vec::new(),
             out: Vec::new(),
+            credential: false,
         })
+    }
+
+    /// For connections carrying a child proxy credential, which the guest
+    /// must never get back: fail the connection on a response with a
+    /// `Content-Encoding` other than `identity` or a transfer coding other
+    /// than `chunked`, rather than pass through a body that may hold a value
+    /// in a form it can't see, and on any `101` (or `CONNECT` `2xx`), rather
+    /// than pass what follows through unframed: such connections never send
+    /// an `Upgrade` or `CONNECT` request (the framer refuses them).
+    pub(super) fn carrying_credential(mut self, credential: bool) -> Self {
+        self.credential = credential;
+        self
     }
 
     #[cfg(test)]
@@ -327,6 +347,19 @@ impl ResponseMasker {
         let Some(body) = response_body(head) else {
             return self.fail("ambiguous or malformed framing in a response");
         };
+        // ponytail: fail closed on encoded bodies; decode, mask and send them
+        // on uncompressed instead if servers that ignore `identity` matter.
+        if self.credential && is_encoded(head) {
+            return self.fail("an encoded response on a connection carrying a credential");
+        }
+        // The framer refuses `Upgrade` and `CONNECT` requests on these
+        // connections, so a switch can only be unasked-for (or follow a
+        // credentialed request): never pass what follows through unframed.
+        if self.credential
+            && (status == 101 || (request == RequestKind::Connect && (200..300).contains(&status)))
+        {
+            return self.fail("a protocol switch on a connection carrying a credential");
+        }
         let masked = self.mask(head);
         self.out.extend(masked);
         if (100..200).contains(&status) && status != 101 {
@@ -503,6 +536,32 @@ fn response_body(head: &[u8]) -> Option<Body> {
         (Some(_), None) | (None, None) => Some(Body::UntilClose),
         (None, Some(len)) => Some(Body::Length(len)),
     }
+}
+
+/// Whether the response with header block `head` has a content coding other
+/// than `identity`, or a transfer coding other than `chunked`.
+fn is_encoded(head: &[u8]) -> bool {
+    let Some(lines) = head_lines(head) else {
+        return true;
+    };
+    lines.iter().skip(1).any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        let codings = || {
+            value
+                .split(',')
+                .map(|c| c.trim_matches([' ', '\t']).to_ascii_lowercase())
+                .filter(|c| !c.is_empty())
+        };
+        if name.eq_ignore_ascii_case("content-encoding") {
+            codings().any(|c| c != "identity")
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            codings().any(|c| c != "chunked")
+        } else {
+            false
+        }
+    })
 }
 
 /// The size on a chunk-size line (ending in `\r\n`), parsed as RFC 9112
@@ -748,6 +807,79 @@ mod tests {
             );
             assert!(!m.out.ends_with(b"more"));
         }
+    }
+
+    /// With encodings refused (a connection carrying a credential), a
+    /// compressed or transfer-coded response fails the connection, and an
+    /// `identity` or chunked one is framed as usual.
+    #[test]
+    fn encoded_responses_fail_closed_when_refused() {
+        for wire in [
+            &b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 11\r\n\r\nSECRETVALUE"[..],
+            b"HTTP/1.1 200 OK\r\ncontent-encoding: identity, br\r\nContent-Length: 11\r\n\r\nSECRETVALUE",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
+        ] {
+            let mut m = masker().carrying_credential(true);
+            let mut requests = VecDeque::from([RequestKind::Other]);
+            m.feed(wire, &mut requests);
+            m.finish();
+            assert!(m.failure().is_some(), "{:?}", String::from_utf8_lossy(wire));
+            assert!(!m.out.windows(5).any(|w| w == b"SECRE"));
+        }
+        for wire in [
+            &b"HTTP/1.1 200 OK\r\nContent-Encoding: identity\r\nContent-Length: 11\r\n\r\nSECRETVALUE"[..],
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\nSECRETVALUE\r\n0\r\n\r\n",
+        ] {
+            let mut m = masker().carrying_credential(true);
+            let mut requests = VecDeque::from([RequestKind::Other]);
+            let got = run(&mut m, &mut requests, &[wire]);
+            assert!(m.failure().is_none(), "{:?}", String::from_utf8_lossy(wire));
+            assert!(got.windows(2).any(|w| w == b"PH"));
+        }
+        // Without the refusal, an encoded response is framed as before.
+        let mut m = masker();
+        let mut requests = VecDeque::from([RequestKind::Other]);
+        run(
+            &mut m,
+            &mut requests,
+            &[b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\nhi"],
+        );
+        assert!(m.failure().is_none());
+    }
+
+    /// On a connection carrying a credential, any `101` (or a `CONNECT`'s
+    /// `2xx`) fails the connection instead of switching it to pass-through,
+    /// even for a request that asked for one (which the framer refuses).
+    #[test]
+    fn protocol_switches_fail_closed_when_carrying_a_credential() {
+        let wire = &b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\nSECRETVALUE"[..];
+        let tunnel = &b"HTTP/1.1 200 OK\r\n\r\nSECRETVALUE"[..];
+        for (request, wire) in [
+            (RequestKind::Other, wire),
+            (RequestKind::Upgrade, wire),
+            (RequestKind::Connect, tunnel),
+        ] {
+            let mut m = masker().carrying_credential(true);
+            let mut requests = VecDeque::from([request]);
+            m.feed(wire, &mut requests);
+            m.finish();
+            assert!(m.failure().is_some(), "{request:?}");
+            assert!(!m.out.windows(5).any(|w| w == b"SECRE"), "{request:?}");
+        }
+        // Without a credential, the switch is taken.
+        let mut m = masker();
+        let mut requests = VecDeque::from([RequestKind::Upgrade]);
+        m.feed(wire, &mut requests);
+        assert!(m.failure().is_none());
+        assert!(m.may_release_on_quiet());
+        assert_eq!(
+            RequestKind::of(b"GET / HTTP/1.1\r\nupgrade: websocket\r\n\r\n"),
+            RequestKind::Upgrade
+        );
+        assert_eq!(
+            RequestKind::of(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+            RequestKind::Other
+        );
     }
 
     /// Bare-LF line endings in a response head are accepted, as clients do.

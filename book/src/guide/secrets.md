@@ -251,12 +251,54 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
 
 Alternatively, turn file scrubbing off for that sandbox (`scrub_files=False`, `.scrub_files(false)`), accepting that placeholders then persist in its files.
 
+## Credentials for Child Processes
+
+A shell's commands can instead be given a
+[credential](./sandboxes.md#external-commands): a header the child proxy adds
+to their requests itself, so the sandbox never holds the secret at all. A few
+rules and limits worth knowing:
+
+- **Precedence:** a credential given to one execution
+  (`ExecuteOptions::with_credential`) wins over the sandbox's
+  (`SandboxBuilder::with_credential`) where both apply to a request and set
+  the same header, so a per-request token overrides a sandbox-wide default.
+  Among one level's own, the first given wins.
+- **Hosts:** `for_hosts` takes exact names (`api.github.com`), IP addresses,
+  or `*.` and a name of two labels or more (`*.github.com`, its subdomains
+  only). Any other `*` (`*`, `*.*`, `github.com*`, `*github.com`) is refused,
+  since it could match a host the script controls, and so is `*.` and a
+  single label (`*.com`). Names are ASCII letters, digits, hyphens and dots:
+  write internationalized names in punycode (`xn--…`); a port, path or space
+  is refused rather than never matching. eryx doesn't carry the public suffix
+  list, so a wildcard under a public suffix (`*.co.uk`, `*.github.io`) is
+  accepted but matches names anyone can register: avoiding those is up to
+  you. Hosts aren't scoped by port: any port the network allows on a
+  credential's host gets it.
+- **No upgrades:** a connection to a host a command's credential applies to
+  refuses `Upgrade` and `CONNECT` requests, so those hosts can't be used for
+  WebSockets (or `h2c` and other upgrades) by that command, and a `101`
+  response ends the connection: what follows one isn't framed, so it
+  couldn't be masked.
+- **Masking only hides whole, verbatim echoes.** A host that echoes request
+  headers can hand the credential back in a form masking doesn't see: re-escaped
+  (JSON's `\/` for `/`), re-encoded, or in pieces (`Range` and `If-Range` are
+  dropped from every request on a connection carrying a credential, but other
+  ways to slice a response remain). Don't give credentials for hosts that echo requests.
+- **Output scrubbing is defence in depth, not a boundary.** The credential's
+  value and the password of the proxy holding it (which a command finds in its
+  `HTTPS_PROXY`) are scrubbed from stdout, stderr, traces, failure messages
+  and (with `scrub_result`) results, but only verbatim: a script that gets a
+  value can transform it, write it to a file, or split it across streamed
+  writes. Masking the responses, and keeping the secret out of the sandbox,
+  is the control.
+
 ## Best Practices
 
 1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret falls back to the network config's allowed hosts, which could be broader than intended.
 2. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
 3. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
 4. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
+5. **For child processes, prefer credentials** — a shell's commands (git, gh, curl) can authenticate with a [credential](./sandboxes.md#external-commands) the child proxy adds itself, so the sandbox never holds even the placeholder.
 
 ## Security Model
 

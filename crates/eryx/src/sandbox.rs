@@ -383,13 +383,33 @@ impl Sandbox {
             .await
         });
 
+        // Spawn network handler if networking is enabled (first, so the
+        // output can be scrubbed of the child proxies' passwords)
+        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
+            // Children draw on the guest's budget.
+            let child_net = manager.child_network(self.executor.child_network().clone());
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler), child_net)
+        } else {
+            (None, None, None)
+        };
+
+        let scrub_secrets = self.scrub_secrets(
+            &options.credentials,
+            options.allowed_commands.as_deref(),
+            &options.command_options,
+            child_net.as_ref(),
+        );
+        let child_net = child_net.map(crate::process::ChildNet::new);
         // Create the trace channel and collector only when tracing is enabled.
         let tracing_enabled = self.tracing_enabled();
         let (trace_tx, trace_collector) = if tracing_enabled {
             let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
             let trace_handler = self.trace_handler.clone();
             let collect_trace = self.collect_trace;
-            let trace_secrets = self.secrets.clone();
+            let trace_secrets = scrub_secrets.clone();
             let trace_collector = tokio::spawn(async move {
                 run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
             });
@@ -398,25 +418,11 @@ impl Sandbox {
             (None, None)
         };
 
-        // Spawn network handler if networking is enabled
-        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
-            let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
-            // Children draw on the guest's budget.
-            let child_net = manager
-                .child_network(self.executor.child_network().clone())
-                .map(crate::process::ChildNet::new);
-            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler), child_net)
-        } else {
-            (None, None, None)
-        };
-
         // Spawn output collector for real-time streaming if handler is configured
         let (output_tx, output_handler_task) = if self.output_handler.is_some() {
             let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
             let handler = self.output_handler.clone();
-            let output_secrets = self.secrets.clone();
+            let output_secrets = scrub_secrets.clone();
             let scrub_stdout = matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All);
             let scrub_stderr = matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All);
             let task = tokio::spawn(async move {
@@ -439,6 +445,9 @@ impl Sandbox {
         }
         for (name, command_options) in &options.command_options {
             execute_builder = execute_builder.with_command_options(name, command_options.clone());
+        }
+        for credential in &options.credentials {
+            execute_builder = execute_builder.with_credential(credential.clone());
         }
         if let Some(names) = &options.allowed_commands {
             execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
@@ -568,7 +577,7 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                let output = self.scrub_output(output);
+                let output = self.scrub_output(output, &scrub_secrets);
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -607,7 +616,7 @@ impl Sandbox {
                     }),
                     None => error,
                 };
-                Err(self.scrub_error(error))
+                Err(self.scrub_error(error, &scrub_secrets))
             }
         }
     }
@@ -694,24 +703,72 @@ impl Sandbox {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
     }
 
-    /// Scrub secret placeholders from an execution's output per the
-    /// configured policies.
-    pub(crate) fn scrub_output(&self, mut output: ExecutionOutput) -> ExecutionOutput {
+    /// What an execution's output and traces are scrubbed of: the secrets'
+    /// placeholders, the values of the credentials its children get (the
+    /// sandbox's and `extra`, the execution's own), in case one gets there
+    /// some way the proxy's response masking misses, and the passwords of
+    /// the proxies holding them (from `child_net`, the execution's): just
+    /// those of the commands the execution (`allowed`, `command_options`)
+    /// may give a credential to.
+    pub(crate) fn scrub_secrets(
+        &self,
+        extra: &[crate::net::Credential],
+        allowed: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        child_net: Option<&crate::net::ChildNetPolicy>,
+    ) -> HashMap<String, crate::secrets::SecretConfig> {
+        let mut secrets = self.secrets.clone();
+        let credentials: Vec<&crate::net::Credential> = self
+            .executor
+            .credentials()
+            .iter()
+            .map(|c| &**c)
+            .chain(extra)
+            .collect();
+        // The commands that may get a proxy of their own with a password.
+        let names =
+            self.executor
+                .commands()
+                .credentialed_names(allowed, command_options, &credentials);
+        let passwords = child_net.into_iter().flat_map(|net| {
+            names
+                .iter()
+                .flat_map(move |name| net.proxy_sensitive_values(name))
+        });
+        let values = credentials
+            .iter()
+            .flat_map(|c| c.sensitive_values())
+            .chain(passwords);
+        for (i, value) in values.enumerate() {
+            // Not a name a secret can have (names are env var names).
+            secrets.insert(
+                format!("eryx credential {i}"),
+                crate::secrets::SecretConfig::scrub_only(value),
+            );
+        }
+        secrets
+    }
+
+    /// Scrub `secrets` (from [`Self::scrub_secrets`]) from an execution's
+    /// output per the configured policies.
+    pub(crate) fn scrub_output(
+        &self,
+        mut output: ExecutionOutput,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> ExecutionOutput {
         use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
         if self.scrub_stdout() {
-            output.stdout = scrub_placeholders_bytes(&output.stdout, &self.secrets);
+            output.stdout = scrub_placeholders_bytes(&output.stdout, secrets);
         }
         if self.scrub_stderr() {
-            output.stderr = scrub_placeholders_bytes(&output.stderr, &self.secrets);
+            output.stderr = scrub_placeholders_bytes(&output.stderr, secrets);
         }
         // The structured result is an output channel too, but scrubbing is
         // opt-in (it's a programmatic side channel). When enabled, scrub both
         // the result and its error message.
         if self.scrub_result {
-            output.result = output.result.map(|r| scrub_placeholders(&r, &self.secrets));
-            output.result_error = output
-                .result_error
-                .map(|e| scrub_placeholders(&e, &self.secrets));
+            output.result = output.result.map(|r| scrub_placeholders(&r, secrets));
+            output.result_error = output.result_error.map(|e| scrub_placeholders(&e, secrets));
         }
         output
     }
@@ -719,7 +776,11 @@ impl Sandbox {
     /// Scrub secret placeholders from a script failure's message (for Python,
     /// the traceback the guest would otherwise print to stderr), and from the
     /// output captured with it.
-    pub(crate) fn scrub_error(&self, mut error: Error) -> Error {
+    pub(crate) fn scrub_error(
+        &self,
+        mut error: Error,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Error {
         if let ErrorKind::ScriptFailed {
             message,
             stdout,
@@ -729,11 +790,11 @@ impl Sandbox {
         {
             use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
             if self.scrub_stderr() {
-                *message = scrub_placeholders(message, &self.secrets);
-                *stderr = scrub_placeholders_bytes(stderr, &self.secrets);
+                *message = scrub_placeholders(message, secrets);
+                *stderr = scrub_placeholders_bytes(stderr, secrets);
             }
             if self.scrub_stdout() {
-                *stdout = scrub_placeholders_bytes(stdout, &self.secrets);
+                *stdout = scrub_placeholders_bytes(stdout, secrets);
             }
         }
         error
@@ -1131,6 +1192,7 @@ pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) ->
 pub struct ExecuteOptions {
     allowed_commands: Option<Vec<String>>,
     command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<crate::net::Credential>,
     cancellation: Option<CancellationToken>,
 }
 
@@ -1173,6 +1235,26 @@ impl ExecuteOptions {
         options: crate::process::CommandOptions,
     ) -> Self {
         self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's child processes `credential` (shell only), as
+    /// well as the sandbox's own
+    /// ([`SandboxBuilder::with_credential`](crate::SandboxBuilder::with_credential)):
+    /// the child proxy adds it to their requests to its hosts, and the
+    /// sandbox never sees the secret. Hosted services can give each request
+    /// its own token this way. The execution fails to start if the credential
+    /// is invalid, names a command that isn't registered, has no network or
+    /// opens blind tunnels, or if the sandbox gives children no network.
+    /// Sessions take the same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    ///
+    /// Where it and one of the sandbox's both apply to a request and set the
+    /// same header, this one wins: the request carries its value, not the
+    /// sandbox's. Between an execution's own, the one given first wins.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(credential);
         self
     }
 
@@ -1739,6 +1821,8 @@ pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> 
     commands: crate::process::Commands,
     /// How the commands' children reach the network (shell only).
     child_network: crate::net::ChildNetwork,
+    /// Credentials every execution's children get (shell only).
+    credentials: Vec<Arc<crate::net::Credential>>,
     /// Whether the network policy is set per request (a pool's sandboxes),
     /// so a child network needn't have one at build time.
     network_per_request: bool,
@@ -1837,6 +1921,7 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             network_per_request: false,
             embedded_commands: true,
             stdlib_path: None,
@@ -1880,6 +1965,7 @@ impl SandboxBuilder<Python, state::Needs> {
             result_variable: "result".to_string(),
             commands: crate::process::Commands::default(),
             child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             network_per_request: false,
             embedded_commands: true,
             stdlib_path: None, // Will use embedded stdlib
@@ -1923,6 +2009,7 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
             result_variable: self.result_variable,
             commands: self.commands,
             child_network: self.child_network,
+            credentials: self.credentials,
             network_per_request: self.network_per_request,
             embedded_commands: self.embedded_commands,
             stdlib_path: self.stdlib_path,
@@ -2639,6 +2726,24 @@ impl<R> SandboxBuilder<Shell, R> {
         self
     }
 
+    /// Give every execution's child processes `credential`: the child proxy
+    /// adds it to their requests to its hosts, so they authenticate without
+    /// the sandbox ever seeing the secret (see
+    /// [`Credential`](crate::net::Credential)). For one execution, use
+    /// [`ExecuteOptions::with_credential`]. Needs a child network; an
+    /// execution fails to start if the credential is invalid or names a
+    /// command that isn't registered, has no network or opens blind tunnels.
+    ///
+    /// Where it and an execution's own both apply to a request and set the
+    /// same header, the execution's wins, so a per-request token overrides
+    /// a sandbox-wide default. Between the sandbox's own, the one given
+    /// first wins.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
     /// Leave out the embedded shell's default commands (uutils coreutils,
     /// with the `coreutils` feature), so only commands registered with
     /// [`with_command`](Self::with_command) run.
@@ -3053,6 +3158,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let commands = self.commands;
         let embedded_commands = self.embedded_commands;
         let child_network = self.child_network;
+        let credentials = self.credentials;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -3070,6 +3176,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             // Each lease sets the network (PooledSandbox::with_network);
             // without one, children stay offline.
             builder.child_network = child_network.clone();
+            builder.credentials = credentials.clone();
             builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
@@ -3303,6 +3410,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             .with_result_variable(self.result_variable)
             .with_commands(commands)
             .with_child_network(self.child_network)
+            .with_credentials(self.credentials)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {
