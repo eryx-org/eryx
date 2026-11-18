@@ -1285,7 +1285,14 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
                 println!("Step 4: Skipping verification: it runs Python code");
             } else {
                 println!("Step 4: Verifying...");
-                verify_cwasm(&output, &stdlib, &args.imports, args.verify_code.as_deref()).await?;
+                verify_cwasm(
+                    &output,
+                    &stdlib,
+                    packages.as_ref().and_then(|p| p.site_packages.as_deref()),
+                    &args.imports,
+                    args.verify_code.as_deref(),
+                )
+                .await?;
                 println!("  Verification passed!");
             }
         }
@@ -1489,7 +1496,14 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
             println!("Step 4: Skipping verification: {reason}");
         } else {
             println!("Step 4: Verifying...");
-            verify_cwasm(&args.output, &stdlib, &inputs.imports, None).await?;
+            verify_cwasm(
+                &args.output,
+                &stdlib,
+                packages.site_packages.as_deref(),
+                &inputs.imports,
+                None,
+            )
+            .await?;
             println!("  Verification passed!");
         }
     }
@@ -1754,22 +1768,32 @@ fn missing_host_features(_level: CpuFeatureLevel) -> Vec<&'static str> {
 }
 
 /// Verify that the compiled cwasm file works correctly.
+///
+/// `site_packages` is the directory pre-initialization mounted, if any. It's
+/// mounted again here, as a sandbox using the artifact would, so modules the
+/// snapshot didn't import (lazy imports such as `numpy.ma`) still resolve.
 async fn verify_cwasm(
     cwasm_path: &Path,
     stdlib_path: &Path,
+    site_packages: Option<&Path>,
     imports: &[String],
     verify_code: Option<&str>,
 ) -> Result<()> {
     // Create a sandbox using the compiled cwasm
     // SAFETY: We just created this file from Executor::precompile()
     #[allow(unsafe_code)]
-    let sandbox = unsafe {
+    let builder = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(cwasm_path)
             .with_python_stdlib(stdlib_path)
-            .build()
-            .context("Failed to create sandbox from compiled cwasm")?
     };
+    let builder = match site_packages {
+        Some(path) => builder.with_site_packages(path),
+        None => builder,
+    };
+    let sandbox = builder
+        .build()
+        .context("Failed to create sandbox from compiled cwasm")?;
 
     // Create a session and run a simple test
     let mut session = eryx::InProcessSession::new(&sandbox)

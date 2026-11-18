@@ -198,7 +198,7 @@ eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
 
 ### Verification
 
-By default, `compile` verifies the output: a runtime by creating a test sandbox, and a command (no `--language`, a component exporting `wasi:cli/run`) by loading it as a shell sandbox would, which checks its version stamp and that it links. Verification is skipped for a target this machine can't run. For a runtime you can add custom verification (`--verify-code` is Python, so a command refuses it):
+By default, `compile` verifies the output: a runtime by creating a test sandbox (with the same `--site-packages` or `--package` contents mounted, as a sandbox using it would have, so `--verify-code` can reach modules the snapshot didn't import), and a command (no `--language`, a component exporting `wasi:cli/run`) by loading it as a shell sandbox would, which checks its version stamp and that it links. Verification is skipped for a target this machine can't run. For a runtime you can add custom verification (`--verify-code` is Python, so a command refuses it):
 
 ```bash
 # Verify that numpy actually works, not just imports
