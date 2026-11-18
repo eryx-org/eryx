@@ -72,6 +72,10 @@ struct Task {
     /// The script's synchronous run is over: invokes started from now on
     /// keep the execute running.
     past_sync_run: bool,
+    /// Rejected promises with no handler yet, with their reasons, in the
+    /// order they were rejected. Whatever is left when the event loop
+    /// drains fails the execute; each execute starts with none.
+    unhandled: Vec<(Persistent<Value<'static>>, Persistent<Value<'static>>)>,
 }
 
 struct PendingInvoke {
@@ -96,6 +100,7 @@ thread_local! {
 impl Engine {
     fn new() -> Self {
         let runtime = Runtime::new().expect("failed to create QuickJS runtime");
+        runtime.set_host_promise_rejection_tracker(Some(Box::new(track_rejection)));
         // Imports resolve against the sandbox's environment (src/modules.rs).
         runtime.set_loader(crate::modules::EnvResolver, crate::modules::EnvLoader);
         let context = Context::full(&runtime).expect("failed to create QuickJS context");
@@ -210,6 +215,50 @@ fn native_eval_script(ctx: Ctx<'_>, source: String) -> rquickjs::Result<()> {
     ctx.eval::<(), _>(source)
 }
 
+/// QuickJS's host promise rejection tracker: a promise was rejected with no
+/// handler (`is_handled` false), or one got its first handler afterwards.
+/// Outside an execute (or while the task is borrowed) there is nothing to
+/// track: a rejection left over from an earlier execute never fails a
+/// later one.
+fn track_rejection<'js>(ctx: Ctx<'js>, promise: Value<'js>, reason: Value<'js>, is_handled: bool) {
+    TASK.with(|task| {
+        let Ok(mut task) = task.try_borrow_mut() else {
+            return;
+        };
+        let Some(task) = task.as_mut() else { return };
+        if is_handled {
+            task.unhandled
+                .retain(|(p, _)| p.clone().restore(&ctx).ok().as_ref() != Some(&promise));
+        } else {
+            task.unhandled.push((
+                Persistent::save(&ctx, promise),
+                Persistent::save(&ctx, reason),
+            ));
+        }
+    });
+}
+
+/// The `execute` error for rejections nobody handled, as Node reports the
+/// first one: `Uncaught (in promise) Error: msg` and its stack.
+fn unhandled_rejection<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> Option<String> {
+    let unhandled = with_task(|task| std::mem::take(&mut task.unhandled)).unwrap_or_default();
+    let (_, reason) = unhandled.first()?;
+    let reason = match reason.clone().restore(ctx) {
+        Ok(reason) => format_value(ctx, hooks, reason),
+        Err(e) => format!("unknown reason ({e})"),
+    };
+    // `formatError` already says "Uncaught" for a non-Error reason.
+    let reason = reason.strip_prefix("Uncaught ").unwrap_or(&reason);
+    let mut msg = format!("Uncaught (in promise) {reason}");
+    if unhandled.len() > 1 {
+        msg.push_str(&format!(
+            "\n({} more unhandled promise rejections)",
+            unhandled.len() - 1
+        ));
+    }
+    Some(msg)
+}
+
 fn settle<'js>(
     ctx: &Ctx<'js>,
     resolve: &Function<'js>,
@@ -238,6 +287,7 @@ impl Task {
             imports: Vec::new(),
             sleep: None,
             past_sync_run: false,
+            unhandled: Vec::new(),
         }
     }
 
@@ -593,8 +643,12 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
         // the invokes it waits for. Unref'd timers only fire while
         // something else does.
         match promise.state() {
+            // The loop drained: a rejection still unhandled now fails the
+            // execute, as an uncaught error does. One handled in any earlier
+            // tick doesn't.
             PromiseState::Resolved if !referenced && !alive_invokes => {
-                return finish(hooks, Ok(()));
+                let outcome = unhandled_rejection(ctx, hooks).map_or(Ok(()), Err);
+                return finish(hooks, outcome);
             }
             PromiseState::Resolved => {}
             PromiseState::Rejected => {
