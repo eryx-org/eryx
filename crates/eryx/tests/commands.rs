@@ -517,7 +517,8 @@ for i in 1 2 3; do printf '%100000s' a | tc; done | wc -c
 /// Children in a pipeline run at once but share the parent's fuel: two
 /// stages that each fit the limit alone end the execution with
 /// `FuelExhausted` together, having done at most about one epoch tick of
-/// work each past it.
+/// work each past it. A child spinning with no calls is charged as it runs
+/// too (`process::tests::a_spinning_child_publishes_its_fuel_as_it_runs`).
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn concurrent_children_share_the_fuel_limit() {
@@ -568,33 +569,6 @@ async fn concurrent_children_share_the_fuel_limit() {
     // round past the limit; without sharing, both would finish all 20.
     assert!(done <= 30 + 2, "{done} rounds done under a 30-round limit");
     assert!(done >= 20, "{done} rounds done under a 30-round limit");
-}
-
-/// Children whose work has no calls in it, which keep their fuel count in a
-/// register, are charged as they run too: two spinning stages under a fuel
-/// limit take about as long as one.
-#[tokio::test]
-async fn spinning_children_share_the_fuel_limit() {
-    let sandbox = shell()
-        .with_command("tc", test_cmd())
-        .with_resource_limits(ResourceLimits::default().with_max_fuel(2_000_000_000))
-        .build()
-        .unwrap();
-    let time = async |script: &str| {
-        let start = Instant::now();
-        let err = sandbox.execute(script).await.unwrap_err();
-        assert!(
-            matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
-            "{err:?}"
-        );
-        start.elapsed()
-    };
-    let one = time("tc spin").await;
-    let two = time("tc spin | tc spin").await;
-    let four = time("tc spin | tc spin | tc spin | tc spin").await;
-    // Charged only at exit, each stage would burn the whole limit itself.
-    assert!(two < one * 3 / 2, "one: {one:?}, two: {two:?}");
-    assert!(four < one * 3 / 2, "one: {one:?}, four: {four:?}");
 }
 
 /// A child counts against the live-child limit until it finishes, not just
