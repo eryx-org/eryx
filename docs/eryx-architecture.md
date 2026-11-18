@@ -79,6 +79,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  │    • restore-state(state: list<u8>)                             │    │
 │  │    • clear-state()                                              │    │
 │  │    • finalize-preinit()  [for pre-initialization]               │    │
+│  │    • run-command(args, env, cwd) -> s32  [async]                │    │
 │  │                                                                  │    │
 │  │  Imports (from host):                                           │    │
 │  │    • invoke(name, args) -> result<string, string>  [async]      │    │

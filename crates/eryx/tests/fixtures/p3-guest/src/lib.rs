@@ -77,6 +77,10 @@ impl Guest for Sandbox {
     fn finalize_preinit() {}
 
     async fn set_result_variable(_name: String) {}
+
+    async fn run_command(_args: Vec<String>, _env: Vec<(String, String)>, _cwd: String) -> i32 {
+        127
+    }
 }
 
 export!(Sandbox);

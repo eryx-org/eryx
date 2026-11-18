@@ -1024,6 +1024,24 @@ pub(crate) fn build_hybrid_vfs_context(
     Ok(ctx)
 }
 
+/// The filesystem of `executor`'s guest run as a command: `base` (its
+/// parent's, forked) or an empty one, plus the executor's read-only library
+/// mounts (the Python stdlib and site-packages).
+// Only tests run guests as commands until children do (#831).
+#[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+pub(crate) fn command_vfs_context(
+    executor: &Executor,
+    base: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    let mut ctx = base.unwrap_or_else(|| {
+        eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(Arc::new(
+            eryx_vfs::InMemoryStorage::new(),
+        )))
+    });
+    add_library_preopens(&mut ctx, executor)?;
+    Ok(ctx)
+}
+
 /// Mount the Python stdlib, site-packages and the environment read-only
 /// from the host, as the plain WASI context does.
 #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
