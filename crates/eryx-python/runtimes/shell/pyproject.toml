@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pyeryx-runtime-shell"
 # Locked to pyeryx's version: a precompiled runtime only loads in the eryx
 # version that built it. Install it with `pip install pyeryx[shell]`.
-version = "0.15.1"
+version = "0.15.2"
 description = "The precompiled shell runtime and its coreutils for pyeryx, for one platform"
 readme = "README.md"
 requires-python = ">=3.10"
