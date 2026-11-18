@@ -77,10 +77,39 @@ const SHELL_RUNTIME: EmbeddedRuntime = EmbeddedRuntime {
 /// from `eryx-precompile setup --language shell` under. Must match the
 /// `--features` in `clis/coreutils.toml`, which the multicall binary is built
 /// from.
-pub const COREUTILS_TOOLS: [&str; 26] = [
-    "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort", "seq", "cut",
-    "tr", "uniq", "basename", "dirname", "tee", "sleep", "paste", "comm", "date", "base64",
-    "realpath", "readlink", "rmdir",
+pub const COREUTILS_TOOLS: [&str; 32] = [
+    "cat",
+    "head",
+    "tail",
+    "ls",
+    "wc",
+    "cp",
+    "mv",
+    "rm",
+    "mkdir",
+    "touch",
+    "sort",
+    "seq",
+    "cut",
+    "tr",
+    "uniq",
+    "basename",
+    "dirname",
+    "tee",
+    "sleep",
+    "paste",
+    "comm",
+    "date",
+    "base64",
+    "realpath",
+    "readlink",
+    "rmdir",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "sha512sum",
+    "b2sum",
+    "printenv",
 ];
 
 /// The embedded coreutils multicall command, loaded on first use.

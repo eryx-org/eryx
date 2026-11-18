@@ -169,7 +169,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   runs uutils coreutils (`cat`, `head`, `tail`, `ls`, `wc`, `cp`, `mv`, `rm`,
   `mkdir`, `touch`, `sort`, `seq`, `cut`, `tr`, `uniq`, `basename`, `dirname`,
   `tee`, `sleep`, `paste`, `comm`, `date`, `base64`, `realpath`, `readlink`,
-  `rmdir`; `eryx::embedded::COREUTILS_TOOLS`). A registered command replaces
+  `rmdir`, `md5sum`, `sha1sum`, `sha256sum`, `sha512sum`, `b2sum`,
+  `printenv`; `eryx::embedded::COREUTILS_TOOLS`). A registered command replaces
   the tool of the same name, and `without_embedded_commands()` leaves them out.
 - **Python:** pass commands by name, e.g.
   `eryx.Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`
