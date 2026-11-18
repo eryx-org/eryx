@@ -107,6 +107,13 @@ timeout.
   finished callbacks in, so timers that are always due (a `setImmediate`
   loop) don't starve callback results.
 - An exception thrown in a timer callback fails the execute.
+- **A promise rejection still unhandled when the event loop drains fails the
+  execute** as a script failure, with `Uncaught (in promise) Error: ...` and
+  its stack as the message (the first one, with a count of any others). So
+  does an async function called without `await` that throws. A rejection
+  that gets a handler later, in a later microtask or timer, doesn't: this is
+  more lenient than Node, which fails at the end of the tick. A rejection
+  left over from a failed execute never fails a session's next one.
 - `fetch` is synchronous inside the guest: it blocks until the response has
   been read, so timers don't fire during a fetch, only after it returns.
 

@@ -316,6 +316,109 @@ async fn awaiting_a_promise_that_never_settles_is_an_error() {
     assert!(err.to_string().contains("never completed"), "{err}");
 }
 
+fn script_failure(err: &eryx::Error) -> (&str, &[u8]) {
+    let ErrorKind::ScriptFailed {
+        message,
+        exit_code: None,
+        stdout,
+        ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    (message, stdout)
+}
+
+/// A rejection still unhandled when the event loop drains fails the
+/// execute (#1079), as an uncaught error does, keeping the stdout before it.
+#[tokio::test]
+async fn unhandled_rejections_are_script_failures() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    for (code, expected) in [
+        (
+            "Promise.reject(new Error('never handled')); console.log('done')",
+            "Uncaught (in promise) Error: never handled\n",
+        ),
+        // A forgotten `await` on an async function that throws.
+        (
+            "async function f() { throw new TypeError('not awaited'); }
+             f(); console.log('done')",
+            "Uncaught (in promise) TypeError: not awaited\n",
+        ),
+        // Rejected in a timer, after the script's own code finished.
+        (
+            "setTimeout(() => Promise.reject(new Error('late')), 5); console.log('done')",
+            "Uncaught (in promise) Error: late\n",
+        ),
+        // Only the first is reported, with a count of the rest.
+        (
+            "Promise.reject(42); Promise.reject(new Error('second')); console.log('done')",
+            "Uncaught (in promise) 42\n(1 more unhandled promise rejections)",
+        ),
+    ] {
+        let err = sandbox.execute(code).await.unwrap_err();
+        let (msg, stdout) = script_failure(&err);
+        assert!(msg.starts_with(expected), "{code}: {msg}");
+        assert_eq!(stdout, b"done\n", "{code}");
+    }
+    // An Error's stack comes with it, as for an uncaught throw.
+    let err = sandbox
+        .execute("Promise.reject(new Error('x'))")
+        .await
+        .unwrap_err();
+    assert!(script_failure(&err).0.contains("    at "), "{err}");
+}
+
+/// A rejection that gets a handler before the loop drains, in a later
+/// microtask or a later tick, isn't reported.
+#[tokio::test]
+async fn rejections_handled_later_pass() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(
+            "const p = Promise.reject(new Error('handled later'));
+             await new Promise((r) => setTimeout(r, 20));
+             p.catch((e) => console.log('caught:', e.message));
+             const q = Promise.reject(new Error('next microtask'));
+             await null;
+             try { await q } catch (e) { console.log('caught:', e.message) }",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "caught: handled later\ncaught: next microtask\n"
+    );
+}
+
+/// An unhandled rejection fails only the execute it happened in, and
+/// handling it in a later execute doesn't disturb that one.
+#[tokio::test]
+async fn unhandled_rejections_do_not_leak_into_the_next_execute() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+
+    let err = session
+        .execute("var p = Promise.reject(new Error('first'))")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(script_failure(&err).0.contains("first"), "{err}");
+    let out = session.execute("console.log('next')").run().await.unwrap();
+    assert_eq!(out.stdout, b"next\n");
+    let out = session
+        .execute("await p.catch((e) => console.log('caught:', e.message))")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"caught: first\n");
+}
+
 #[tokio::test]
 async fn session_state_persists_across_executes() {
     let Some(mut session) = js_session().await else {
