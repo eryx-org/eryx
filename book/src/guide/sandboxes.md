@@ -259,7 +259,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command can have less from registration on, with
   `Command::with_network(ChildNetwork::None | Inherit | Narrow(config))`
   (the same narrowing, in every execution and session call); an execution's
-  `CommandOptions::with_network` replaces it for that execution. `build`
+  `CommandOptions::with_network` replaces it for that execution. A command
+  run by another (`allow_spawn`) gets only what both its own network and
+  its caller's allow, so narrowing a command holds everything it runs too.
+  `build`
   fails if a command is registered with network when the sandbox gives
   children none, or with an invalid narrowing config. Children get `HTTPS_PROXY`/`HTTP_PROXY`
   and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
