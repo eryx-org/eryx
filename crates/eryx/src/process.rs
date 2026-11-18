@@ -108,7 +108,8 @@ const CHILD_FUEL: u64 = 10_000_000_000;
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
-/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
+/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`),
+/// counting each string's header as well as its text.
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 /// How deep children may spawn children: the shell's are depth 1, so a
 /// command it runs may start commands three levels down (git running `git`
@@ -116,6 +117,10 @@ const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SPAWN_DEPTH: usize = 4;
 /// Most of each of stdout and stderr a nested `run` keeps.
 const MAX_RUN_OUTPUT: usize = 16 * 1024 * 1024;
+/// Resource handles (streams, pollables, files, sockets and the like) one
+/// child may hold at once, well above what real commands use: the host keeps
+/// each, outside the child's memory limit.
+const MAX_CHILD_HANDLES: usize = 16 * 1024;
 /// TCP sockets one child may hold open at once. Creating one opens a host
 /// socket before any address is checked, so this, with
 /// [`MAX_EXECUTION_SOCKETS`] and the process-wide limit, keeps a script from
@@ -901,7 +906,8 @@ impl Command {
     /// away, [`Inherit`](crate::ChildNetwork::Inherit) keeps the sandbox's,
     /// and [`Narrow`](crate::ChildNetwork::Narrow) allows only what both it
     /// and the sandbox's allow, with its limits counted per name the command
-    /// is registered under, on top of the execution's.
+    /// is registered under, on top of the execution's. Commands its children
+    /// run (see [`allow_spawn`](Self::allow_spawn)) are held within it too.
     ///
     /// An execution's [`CommandOptions::with_network`] replaces it for that
     /// execution, within the sandbox's child network too.
@@ -924,12 +930,16 @@ impl Command {
     /// or `eryx:process/pipe`, with live pipes, as git runs its
     /// `remote-https` helper.
     ///
-    /// They resolve names against the same commands, see the same filesystem
-    /// and get the same child network as the shell's children, and share
-    /// their execution's limits: its fuel, child memory, live children and
-    /// host memory. Children nest at most 4 deep (the shell's are the
-    /// first), and each nested run's stdout and stderr are capped at 16 MiB
-    /// (a piped command's flow through pipes instead).
+    /// They resolve names against the same commands and see the same
+    /// filesystem as the shell's children, and share their execution's
+    /// limits: its fuel, child memory, live children and host memory. Their
+    /// network is held within this command's: each gets only what both this
+    /// command's network and its own command's allow (none at all if this
+    /// command has none, and tunnels only if both may), and credentials for
+    /// its command only where this command's network reaches. Children nest
+    /// at most 4 deep (the shell's are the first), and each nested run's
+    /// stdout and stderr are capped at 16 MiB (a piped command's flow
+    /// through pipes instead).
     /// A command spawns only if it was registered with this too.
     #[must_use]
     pub fn allow_spawn(mut self) -> Self {
@@ -961,19 +971,43 @@ fn file_tail(path: &Path) -> std::io::Result<Vec<u8>> {
 /// An execution's network for its children: the sandbox's policy, secrets
 /// and budget (shared with the guest's connections), and the proxies started
 /// for them, one inspecting and one tunnelling per network (the execution's,
-/// and each command's narrowed one). Nested children use the same one. They
-/// live as long as the execution (see [`ExecutorState::disconnect`]), well
-/// inside their CAs' validity.
+/// and each command's narrowed one). Nested children use the same one,
+/// within their parent's network (see [`NetScope`]). They live as long as
+/// the execution (see [`ExecutorState::disconnect`]), well inside their CAs'
+/// validity.
 pub(crate) struct ChildNet {
     net: crate::net::ChildNetPolicy,
     /// Commands' narrowed networks (see [`CommandOptions::with_network`]),
-    /// by command name, made on first use.
-    narrowed: HashMap<String, crate::net::ChildNetPolicy>,
-    /// Started proxies, by the command whose narrowed network or credentials
-    /// they serve (`None` for the execution's) and whether they tunnel.
-    proxies: HashMap<(Option<String>, bool), ProxyLink>,
+    /// by [`NetScope::narrowed`], made on first use.
+    narrowed: HashMap<Vec<String>, crate::net::ChildNetPolicy>,
+    /// Started proxies, by the network they serve ([`NetScope::narrowed`]),
+    /// the command whose credentials they hold, if any, and whether they
+    /// tunnel.
+    proxies: HashMap<(Vec<String>, Option<String>, bool), ProxyLink>,
     /// TCP sockets its children hold, together.
     sockets: Arc<AtomicUsize>,
+}
+
+/// The network a child has, which any children it spawns are held within:
+/// a nested child gets only what both its parent's network and its own
+/// command's allow.
+#[derive(Clone, Debug)]
+struct NetScope {
+    /// The commands whose narrowed networks it's within, outermost first
+    /// (none: the execution's).
+    narrowed: Vec<String>,
+    /// Whether it may open blind tunnels.
+    tunnels: bool,
+}
+
+impl NetScope {
+    /// The shell's: its children get their commands' own networks.
+    fn execution() -> Self {
+        Self {
+            narrowed: Vec::new(),
+            tunnels: true,
+        }
+    }
 }
 
 /// A started proxy, and the host directory holding its CA certificate for
@@ -994,50 +1028,77 @@ impl ChildNet {
         }
     }
 
-    /// The proxy for a child of the command `name` (`command`) that may or
-    /// may not open blind tunnels, started on first use; `None` if the
-    /// command's network is [`ChildNetwork::None`](crate::ChildNetwork::None).
-    fn link(&mut self, name: &str, command: &Command) -> std::io::Result<Option<ChildLink>> {
+    /// The proxy for a child of the command `name` (`command`) spawned by a
+    /// child with the network `within`, started on first use, and the
+    /// child's own network; `None` if the command's network is
+    /// [`ChildNetwork::None`](crate::ChildNetwork::None).
+    fn link(
+        &mut self,
+        within: &NetScope,
+        name: &str,
+        command: &Command,
+    ) -> std::io::Result<Option<(ChildLink, NetScope)>> {
         use crate::net::ChildNetwork;
-        // A command with credentials gets a proxy of its own, so no other
-        // command's children can use them.
-        let own = (!command.credentials.is_empty()).then(|| name.to_owned());
-        let (key, policy) = match &command.network {
-            None | Some(ChildNetwork::Inherit) => (own, &self.net),
+        let mut scope = NetScope {
+            narrowed: within.narrowed.clone(),
+            tunnels: within.tunnels && command.tunnels,
+        };
+        /// The network `path` names, made by an earlier spawn's `link`.
+        fn policy<'a>(
+            net: &'a crate::net::ChildNetPolicy,
+            narrowed: &'a HashMap<Vec<String>, crate::net::ChildNetPolicy>,
+            path: &[String],
+        ) -> std::io::Result<&'a crate::net::ChildNetPolicy> {
+            if path.is_empty() {
+                return Ok(net);
+            }
+            narrowed
+                .get(path)
+                .ok_or_else(|| std::io::Error::other("a parent's network is missing"))
+        }
+        match &command.network {
+            None | Some(ChildNetwork::Inherit) => {}
             Some(ChildNetwork::None) => return Ok(None),
             Some(ChildNetwork::Narrow(config)) => {
-                let policy = match self.narrowed.entry(name.to_owned()) {
-                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        // Checked at build and per execution already, so
-                        // this is only the policy's own guarantee.
-                        let narrowed = self.net.narrowed((**config).clone()).map_err(|e| {
+                scope.narrowed.push(name.to_owned());
+                if !self.narrowed.contains_key(&scope.narrowed) {
+                    // Checked at build and per execution already, so this
+                    // is only the policy's own guarantee.
+                    let narrowed = policy(&self.net, &self.narrowed, &within.narrowed)?
+                        .narrowed((**config).clone())
+                        .map_err(|e| {
                             std::io::Error::new(
                                 std::io::ErrorKind::InvalidInput,
                                 format!("command {name}'s network: {e}"),
                             )
                         })?;
-                        entry.insert(narrowed)
-                    }
-                };
-                (Some(name.to_owned()), &*policy)
+                    self.narrowed.insert(scope.narrowed.clone(), narrowed);
+                }
             }
-        };
-        let link = match self.proxies.entry((key, command.tunnels)) {
+        }
+        let policy = policy(&self.net, &self.narrowed, &scope.narrowed)?;
+        // A command with credentials gets a proxy of its own, so no other
+        // command's children can use them.
+        let own = (!command.credentials.is_empty()).then(|| name.to_owned());
+        let key = (scope.narrowed.clone(), own, scope.tunnels);
+        let link = match self.proxies.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let proxy = policy.start_proxy_with(command.tunnels, &command.credentials, name)?;
+                let proxy = policy.start_proxy_with(scope.tunnels, &command.credentials, name)?;
                 let ca_dir = tempfile::tempdir()?;
                 std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
                 entry.insert(ProxyLink { proxy, ca_dir })
             }
         };
-        Ok(Some(ChildLink {
-            proxy: link.proxy.addr(),
-            proxy_auth: link.proxy.userinfo().map(str::to_owned),
-            ca_dir: link.ca_dir.path().to_path_buf(),
-            sockets: Arc::clone(&self.sockets),
-        }))
+        Ok(Some((
+            ChildLink {
+                proxy: link.proxy.addr(),
+                proxy_auth: link.proxy.userinfo().map(str::to_owned),
+                ca_dir: link.ca_dir.path().to_path_buf(),
+                sockets: Arc::clone(&self.sockets),
+            },
+            scope,
+        )))
     }
 }
 
@@ -1078,6 +1139,9 @@ struct Spawner {
     /// Weak, so a child left unwaited can't keep the execution's proxies
     /// (and its secrets) alive after it ends.
     net: Option<std::sync::Weak<std::sync::Mutex<ChildNet>>>,
+    /// The network of the child it spawns for, which its children are held
+    /// within: `None` if that child has none, so they get none either.
+    within: Option<NetScope>,
     /// How deep the children it spawns are (the shell's are 1).
     depth: usize,
     /// Where its children's process events go, for the shell's `wait` to
@@ -1201,18 +1265,19 @@ impl Spawner {
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
         }
-        // With network, children get the proxy. (Secrets' placeholders come
-        // from the shell, which exports them.)
-        // Guest children have no network (yet), so no proxy.
-        let network = match &self.net {
-            Some(_) if command.is_guest() => None,
-            Some(net) => match net
+        // With network, children get the proxy, a nested one no more than
+        // the child spawning it. (Secrets' placeholders come from the shell,
+        // which exports them.) Guest children have no network (yet), so no
+        // proxy.
+        let network = match (&self.net, &self.within) {
+            (Some(_), _) if command.is_guest() => None,
+            (Some(net), Some(within)) => match net
                 .upgrade()
                 .ok_or_else(|| std::io::Error::other("the execution has ended"))
                 .and_then(|net| {
                     net.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .link(&cmd, &command)
+                        .link(within, &cmd, &command)
                 }) {
                 Ok(link) => link,
                 Err(e) => {
@@ -1220,21 +1285,34 @@ impl Spawner {
                     return Err(ProcessError::SpawnFailed);
                 }
             },
-            None => None,
+            _ => None,
         };
+        let (network, scope) = network.unzip();
         // Python's and JavaScript's wording, naming the command.
         let offline = network.is_none().then(|| {
-            let scope = if self.net.is_some() {
+            let whose = if self.net.is_some() {
                 "this command"
             } else {
                 "commands in this sandbox"
             };
-            format!("eryx: networking not enabled for {scope} ({cmd} has no network)\n")
+            format!(
+                "eryx: networking not enabled for {whose} ({cmd} has no network)
+"
+            )
         });
         let mut argv = vec![cmd];
         argv.extend(args);
-        let args_bytes = argv.iter().map(String::len).sum::<usize>()
-            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        // What the host holds, not just the text: each string's header too,
+        // so many empty or short entries cost what they take.
+        let argv_bytes = argv
+            .iter()
+            .map(|a| a.len() + size_of::<String>())
+            .sum::<usize>();
+        let args_bytes = argv_bytes
+            + env
+                .iter()
+                .map(|(k, v)| k.len() + v.len() + 2 * size_of::<String>())
+                .sum::<usize>();
         let live = (args_bytes <= MAX_ARGS_BYTES)
             .then(|| LiveSlot::take(&self.budget.live))
             .flatten();
@@ -1263,6 +1341,10 @@ impl Spawner {
             bytes: 0,
         };
         args.charge(args_bytes as u64)?;
+        // A nested child's trace keeps a copy of its argv (see `NestedTrace`).
+        if self.traces.is_some() {
+            args.charge(argv_bytes as u64)?;
+        }
 
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
@@ -1282,6 +1364,7 @@ impl Spawner {
             network,
             offline,
             spawner: command.spawns.then(|| Spawner {
+                within: scope,
                 depth: self.depth + 1,
                 traces: Some(self.traces.clone().unwrap_or_default()),
                 ..self.clone()
@@ -1390,7 +1473,7 @@ impl Command {
             engine,
             ChildState {
                 wasi: wasi.build(),
-                table: ResourceTable::new(),
+                table: child_table(),
                 // A pool of its own: an isolated run shares no execution's.
                 limits: ChildMemory::reserve(Arc::default(), limits.memory, self.vmctx)
                     .ok_or_else(|| fail(format!("{} needs more memory than its limit", argv[0])))?,
@@ -1984,6 +2067,13 @@ impl WasiView for ChildState {
     }
 }
 
+/// A child's resource table, holding at most [`MAX_CHILD_HANDLES`].
+fn child_table() -> ResourceTable {
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(MAX_CHILD_HANDLES);
+    table
+}
+
 /// A spawned child, until `wait` runs it.
 pub struct ChildProcess {
     /// What `wait` runs, until it does.
@@ -2130,7 +2220,7 @@ impl ChildRun {
             self.pre.engine(),
             ChildState {
                 wasi,
-                table: ResourceTable::new(),
+                table: child_table(),
                 limits: self.memory,
                 sockets: ChildSockets::new(
                     self.network
@@ -2291,6 +2381,7 @@ impl ExecutorState {
             commands: self.commands.clone(),
             budget: self.child_budget.clone(),
             net: self.child_net.as_ref().map(Arc::downgrade),
+            within: Some(NetScope::execution()),
             depth: 1,
             traces: None,
         }

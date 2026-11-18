@@ -693,6 +693,41 @@ async fn nested_children_get_the_same_network() {
     assert!(out.starts_with("held 32 error:"), "{out}");
 }
 
+/// A nested child's network is held within its parent's: a command with
+/// no network, or a narrower one, can't hand more to the commands it runs,
+/// though a sibling registered with the full network still has it.
+#[tokio::test]
+async fn nested_children_stay_within_their_parents_network() {
+    let (port, _) = upstream(None).await;
+    let elsewhere = NetConfig::default()
+        .allow_host("other.test")
+        .allow_internal_host("other.test")
+        .with_resolver(Localhost);
+    let sandbox = shell(network())
+        .with_command(
+            "off",
+            test_cmd().allow_spawn().with_network(ChildNetwork::None),
+        )
+        .with_command(
+            "narrow",
+            test_cmd()
+                .allow_spawn()
+                .with_network(ChildNetwork::Narrow(Box::new(elsewhere))),
+        )
+        .with_command("wide", test_cmd().allow_spawn())
+        .build()
+        .unwrap();
+    let get = format!("tc proxy-get http://api.test:{port}/x");
+    for parent in ["off", "narrow"] {
+        let out = run(&sandbox, &format!("{parent} spawn {get}")).await;
+        assert!(!out.contains(" 200 OK"), "{parent}: {out}");
+    }
+    let out = run(&sandbox, "off spawn tc env HTTP_PROXY").await;
+    assert!(!out.contains("http://"), "{out}");
+    let out = run(&sandbox, &format!("wide spawn {get}")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
+}
+
 /// The script's stdout and stderr under `options`, whether or not it failed.
 async fn run_with(sandbox: &Sandbox, script: &str, options: &eryx::ExecuteOptions) -> String {
     let (stdout, stderr) = match sandbox.execute_with(script, options).await {

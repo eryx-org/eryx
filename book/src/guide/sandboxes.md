@@ -317,7 +317,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command can have less from registration on, with
   `Command::with_network(ChildNetwork::None | Inherit | Narrow(config))`
   (the same narrowing, in every execution and session call); an execution's
-  `CommandOptions::with_network` replaces it for that execution. `build`
+  `CommandOptions::with_network` replaces it for that execution. A command
+  run by another (`allow_spawn`) gets only what both its own network and
+  its caller's allow, so narrowing a command holds everything it runs too.
+  `build`
   fails if a command is registered with network when the sandbox gives
   children none, or with an invalid narrowing config. Children get `HTTPS_PROXY`/`HTTP_PROXY`
   and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
@@ -389,14 +392,16 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).
   The running children share 256 MiB of memory, outside `max_memory_bytes`;
-  a child that can't grow fails like one out of memory. Children run on an
+  a child that can't grow fails like one out of memory. A child holds at
+  most 16,384 resource handles (open files, streams, sockets) at once. Children run on an
   engine of their own that allocates on demand, so they take none of the
   pooling allocator's slots (`ERYX_POOL_INSTANCES`).
   The host memory children's arguments and environment hold is capped per
   execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
   children spawned but not yet finished and 2 MiB of arguments and
-  environment per spawn. Past a limit the spawn fails and the shell reports
+  environment per spawn. Each argument and variable counts its host
+  overhead as well as its text (24 bytes per string on 64-bit hosts). Past a limit the spawn fails and the shell reports
   `<command>: limit-exceeded`.
 - **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
   so pipeline stages run together and a full pipe makes its writer wait:
