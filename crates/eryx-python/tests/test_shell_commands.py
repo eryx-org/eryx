@@ -233,3 +233,12 @@ def test_allowed_commands_narrow_an_async_sandbox_call(monkeypatch):
 def test_sandbox_allowed_commands_are_only_for_the_shell():
     with pytest.raises(ValueError, match="only for"):
         eryx.Sandbox().execute("pass", allowed_commands=[])
+
+
+def test_python_runs_as_a_command():
+    py = eryx.Command.python()
+    sandbox = eryx.Sandbox(language="shell", commands={"python": py, "python3": py})
+    result = sandbox.execute(
+        "echo 'print(6 * 7)' | python3; python -c 'import sys; sys.exit(3)'; echo $?"
+    )
+    assert result.stdout == b"42\n3\n"

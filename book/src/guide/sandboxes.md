@@ -182,9 +182,35 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command or one precompiled by `eryx-precompile compile` (`.cwasm`). A
   `.wasm` can be pinned to its digest (see
   [Commands from a registry](./grpc-server.md#commands-from-a-registry)).
-  `--no-shell-coreutils` leaves the embedded coreutils out, and
+  `--no-shell-embedded-commands` leaves the embedded coreutils out,
+  `--shell-python` adds `python`/`python3` (see **Python as a command**), and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**). An empty `ERYX_SHELL_COMMANDS` means no extra commands.
+- **Python as a command:** `Command::guest(Language::Python)` (Rust, with
+  `embedded`; `Command::guest_from_precompiled_file` for your own runtime),
+  `eryx.Command.python()` (pyeryx) and `--shell-python` (eryx-server) run
+  Python as a command. It isn't registered by default; register it as
+  `python` and `python3`:
+
+  ```rust,ignore
+  let sandbox = Sandbox::embedded()
+      .shell()
+      .with_commands(["python", "python3"], Command::guest(Language::Python)?)
+      .build()?;
+  sandbox.execute("seq 3 | python3 -c 'import sys; print(sum(map(int, sys.stdin)))'").await?;
+  ```
+
+  It takes `-c CODE`, `-m MODULE`, a script, `-` or no argument (the program
+  from stdin), `-V`, and ignores `-u`, `-B`, `-I`, `-E`, `-s` and `-q`;
+  anything else exits 2. `sys.exit(n)` is its exit status, and an uncaught
+  exception prints its traceback and exits 1. Each run is a fresh
+  interpreter, with the embedded standard library, on the shell's files
+  (`/tmp` and volumes), environment, working directory and stdio. It burns
+  the execution's fuel, stops at its timeout, and its memory (about 17 MB
+  per run, more as it allocates) counts against the children's shared
+  256 MiB. It gets no callbacks and no network (yet), so a credential can't
+  be for it. A script's top-level `asyncio.run(main())` works as in
+  `execute`.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
   download on first use; `coreutils: false` leaves it out), and `commands`
   adds others by the URL of their `jco transpile --instantiation async`

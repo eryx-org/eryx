@@ -928,3 +928,152 @@ async fn replay_ignores_flag_order_and_resumes_after_suspending() {
     assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
     assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
 }
+
+/// A shell sandbox where `python` and `python3` run the embedded Python
+/// runtime as a command (#831).
+fn python_shell() -> Option<SandboxBuilder<Shell, state::Has>> {
+    let python = eryx::Command::guest(Language::Python).unwrap();
+    Some(shell_sandbox()?.with_commands(["python", "python3"], python))
+}
+
+#[tokio::test]
+async fn python3_is_opt_in() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let err = sandbox.execute("python3 -c 1").await.unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::ScriptFailed {
+                exit_code: Some(127),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn python3_streams_through_a_pipeline() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "echo 'print(1 + 1)' | python3\n\
+             seq 1 1000 | python3 -c 'import sys; print(len(sys.stdin.read()))' | head -1\n\
+             python -c 'import sys; print(sys.argv)' a b",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "2\n3893\n['-c', 'a', 'b']\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn python3_shares_the_shells_files_env_and_cwd() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "echo from-sh > /tmp/x\n\
+             python3 -c \"print(open('/tmp/x').read().strip()); open('/tmp/y', 'w').write('from-py')\"\n\
+             cat /tmp/y; echo\n\
+             FOO=1 python3 -c 'import os; print(os.environ[\"FOO\"])'\n\
+             cd /tmp && python3 -c 'import os; print(os.getcwd())'",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "from-sh\nfrom-py\n1\n/tmp\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn python3_exit_status_and_traceback_reach_the_shell() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "python3 -c 'import sys; sys.exit(3)'; echo $?\n\
+             python3 -c 'raise ValueError(\"boom\")' 2>/tmp/err; echo $?\n\
+             tail -1 /tmp/err",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "3\n1\nValueError: boom\n");
+}
+
+#[tokio::test]
+async fn python3_burns_the_executions_fuel() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(builder.build().unwrap().executor(), &[])
+        .await
+        .unwrap();
+    let err = session
+        .execute("python3 -c 'while True: pass'")
+        .with_fuel_limit(500_000_000)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "expected FuelExhausted, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn python3_memory_counts_against_the_child_pool() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    // More than the children's 256 MiB pool.
+    let out = sandbox
+        .execute(
+            "python3 -c 'b = bytearray(300 * 1024 * 1024)' 2>/tmp/err; echo $?\n\
+             tail -1 /tmp/err\n\
+             echo 'import sys; sys.stdin.read(); print(\"ok\")' > /tmp/s.py\n\
+             python3 /tmp/s.py < /tmp/s.py | python3 /tmp/s.py | python3 /tmp/s.py | python3 /tmp/s.py",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "1\nMemoryError\nok\n");
+}
+
+#[tokio::test]
+async fn guest_commands_cant_have_credentials() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let result = builder
+        .with_network(eryx::NetConfig::default())
+        .with_child_network(eryx::ChildNetwork::Inherit)
+        .with_credential(
+            eryx::net::Credential::bearer("token")
+                .for_hosts(["example.com"])
+                .for_commands(["python3"]),
+        )
+        .build();
+    let err = match result {
+        Ok(sandbox) => sandbox.execute("true").await.unwrap_err(),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("guest runtime"), "{err}");
+}

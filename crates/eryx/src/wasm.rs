@@ -1067,6 +1067,10 @@ pub struct MemoryTracker {
     peak_memory_bytes: AtomicU64,
     /// Optional memory limit (in bytes). If set, memory growth beyond this limit will fail.
     memory_limit: Option<u64>,
+    /// For a guest command (a child), its share of the children's memory
+    /// pool, which its memory and tables are charged to.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    child: Option<crate::process::ChildMemory>,
 }
 
 impl MemoryTracker {
@@ -1076,6 +1080,18 @@ impl MemoryTracker {
         Self {
             peak_memory_bytes: AtomicU64::new(0),
             memory_limit,
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            child: None,
+        }
+    }
+
+    /// A tracker for a guest command, charging `child`, its share of the
+    /// children's memory pool.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    pub(crate) fn for_child(child: crate::process::ChildMemory) -> Self {
+        Self {
+            child: Some(child),
+            ..Self::new(None)
         }
     }
 
@@ -1094,7 +1110,7 @@ impl MemoryTracker {
 impl ResourceLimiter for MemoryTracker {
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
@@ -1113,17 +1129,34 @@ impl ResourceLimiter for MemoryTracker {
             return Ok(false);
         }
 
+        // A guest command's growth is charged to the children's pool last,
+        // once nothing else refuses it.
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Some(child) = &mut self.child {
+            return child.memory_growing(current, desired, maximum);
+        }
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        let _ = current;
         Ok(true)
     }
 
     fn table_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
         // Allow table growth up to the declared maximum
-        Ok(!maximum.is_some_and(|max| desired > max))
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Some(child) = &mut self.child {
+            return child.table_growing(current, desired, maximum);
+        }
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        let _ = current;
+        Ok(true)
     }
 }
 
@@ -1736,8 +1769,7 @@ impl ExecutorState {
     /// State for running the guest as a command (see
     /// [`Executor::run_command`]): its stdio is `wasi`'s and its filesystem
     /// `vfs`, and it gets no callbacks, tracing, network or commands.
-    // Only tests run guests as commands until children do (#831).
-    #[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     pub(crate) fn for_command(
         wasi: WasiCtx,
         vfs: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
@@ -3402,6 +3434,58 @@ impl Executor {
         Ok(executor)
     }
 
+    /// An executor that runs the `language` runtime precompiled at `path` as
+    /// a guest command (see [`crate::Command::guest`]), loaded on the child
+    /// engine so guest children never take the sandboxes' pooling slots.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::from_precompiled_file`]: a trusted file that doesn't
+    /// change while it's loaded.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn for_guest_command(
+        language: Language,
+        path: &std::path::Path,
+        stdlib_path: Option<PathBuf>,
+    ) -> std::result::Result<Self, Error> {
+        if let Some(stamp) = std::fs::File::open(path).ok().and_then(|mut file| {
+            let len = file.metadata().ok()?.len();
+            file_language_stamp(&mut file, len)
+        }) {
+            if stamp.language != language {
+                return Err(ErrorKind::Initialization(format!(
+                    "this precompiled runtime runs {}, not {language}",
+                    stamp.language
+                ))
+                .into());
+            }
+            stamp.check_guest()?;
+        }
+        let engine = Self::child_engine()?;
+        // SAFETY: the caller vouches for the file.
+        let component =
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(deserialize_error)?;
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+        Ok(Self {
+            engine,
+            instance_pre,
+            stdlib_path,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language,
+            result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
+            packages: Vec::new(),
+        })
+    }
+
     /// Create a new executor from a cached `SandboxPre`.
     ///
     /// This is used internally when an `InstancePreCache` hit occurs.
@@ -4314,8 +4398,7 @@ impl Executor {
     /// `run-command` export; its exit status. The store's state comes from
     /// [`ExecutorState::for_command`], and its fuel and epoch deadline are the
     /// caller's to set.
-    // Only tests run guests as commands until children do (#831).
-    #[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     pub(crate) async fn run_command(
         &self,
         store: &mut Store<ExecutorState>,
