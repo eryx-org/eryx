@@ -959,9 +959,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-          # eryx/gh 2.87.3-r.2
-          GH_REF: ghcr.io/eryx-org/commands/eryx/gh@sha256:4031f058cf6152a3edb5cec837c9b249d78002e3eb96699dd908b0d197bba068
-          GH_LAYER: sha256:71f6649a1602c47903e40ab243812a685097c7900eba601e1d4fc8b748bc27c9
+          # eryx/gh 2.87.3-r.3
+          GH_REF: ghcr.io/eryx-org/commands/eryx/gh@sha256:ba2fa499c0e3129b32d0f2c8079709a32e1a2759943f52aefad266c7d9d2b16a
+          GH_LAYER: sha256:609bd7da3b2c20123b31158fa578aa50bc8d4c0da755f9b160f214611f71c3f0
           # eryx-gpl/git 2.56.1-r.2
           GIT_REF: ghcr.io/eryx-org/commands/eryx-gpl/git@sha256:0bea155f8d28b90676dcbc3efcbc9670e1d604c535a54347f9480d0de4c7bf21
           GIT_LAYER: sha256:387502da2e137c5a47b28f74748063efa163b61f3cda46dd09962f085c5f748b
