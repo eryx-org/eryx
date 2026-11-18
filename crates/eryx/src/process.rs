@@ -2895,6 +2895,66 @@ pub(crate) mod tests {
         assert_eq!(names(Some(&allowed), &options, &[&any]), ["gh"]);
     }
 
+    /// A run of `command` with `argv` on the given pipes, with a child's
+    /// default fuel and memory.
+    fn child_run(
+        command: &Command,
+        argv: &[&str],
+        stdin: pipe::Reader,
+        stdout: pipe::Writer,
+        stderr: pipe::Writer,
+    ) -> ChildRun {
+        ChildRun {
+            pre: command.pre.clone(),
+            argv: argv.iter().map(|&a| a.to_owned()).collect(),
+            env: vec![],
+            stdin,
+            stdout,
+            stderr,
+            fuel: CHILD_FUEL,
+            fuel_used: Arc::default(),
+            memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
+            _live: LiveSlot::take(&Arc::default()),
+            _args: Held {
+                budget: ChildBudget::default(),
+                bytes: 0,
+            },
+            network: None,
+            spawner: None,
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            vfs: None,
+        }
+    }
+
+    /// A child spinning in a loop with no calls in it, which keeps its fuel
+    /// count in a register, publishes what it burns as it runs, so `wait`
+    /// can charge the parent before the child exits.
+    ///
+    /// This only needs the child to get some CPU, not to get it at a
+    /// particular rate, so it holds on a loaded machine.
+    #[tokio::test]
+    async fn a_spinning_child_publishes_its_fuel_as_it_runs() {
+        let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        crate::wasm::ensure_epoch_ticker(command.pre.engine()).unwrap();
+        let (_stdin_tx, stdin) = pipe::pipe(PIPE_CAPACITY);
+        let (stdout, _stdout_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stderr, _stderr_rx) = pipe::pipe(PIPE_CAPACITY);
+        let run = child_run(&command, &["tc", "spin"], stdin, stdout, stderr);
+        let fuel_used = Arc::clone(&run.fuel_used);
+        // Far more than starting the command burns, which a stale count
+        // could still show.
+        const SPUN: u64 = 1_000_000_000;
+        let charged = async {
+            while fuel_used.load(Ordering::Relaxed) < SPUN {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            (code, _) = run.run() => panic!("`tc spin` exited: {code:?}"),
+            () = charged => {}
+        }
+    }
+
     /// Running reuses the command's `CommandPre`: nothing is compiled or
     /// linked after `Command::from_bytes`, however many children run.
     #[tokio::test]
@@ -2909,26 +2969,7 @@ pub(crate) mod tests {
             let (stderr, _stderr_rx) = pipe::pipe(PIPE_CAPACITY);
             stdin_tx.write_all(input.as_bytes()).await.unwrap();
             drop(stdin_tx);
-            let run = ChildRun {
-                pre: command.pre.clone(),
-                argv: vec!["upper".into()],
-                env: vec![],
-                stdin,
-                stdout,
-                stderr,
-                fuel: CHILD_FUEL,
-                fuel_used: Arc::default(),
-                memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
-                _live: LiveSlot::take(&Arc::default()),
-                _args: Held {
-                    budget: ChildBudget::default(),
-                    bytes: 0,
-                },
-                network: None,
-                spawner: None,
-                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
-                vfs: None,
-            };
+            let run = child_run(&command, &["upper"], stdin, stdout, stderr);
             let (code, fuel_used) = run.run().await;
             assert_eq!(code.unwrap(), 0);
             assert!(fuel_used > 0);
