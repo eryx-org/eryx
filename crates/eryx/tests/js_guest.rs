@@ -371,6 +371,22 @@ async fn unhandled_rejections_are_script_failures() {
     assert!(script_failure(&err).0.contains("    at "), "{err}");
 }
 
+/// A failed `require` throws synchronously: the import promise under it
+/// isn't left behind as an unhandled rejection.
+#[tokio::test]
+async fn a_caught_failed_require_passes() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(
+            "let found = true; try { require('nope') } catch { found = false } console.log(found)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "false\n");
+}
+
 /// A rejection that gets a handler before the loop drains, in a later
 /// microtask or a later tick, isn't reported.
 #[tokio::test]

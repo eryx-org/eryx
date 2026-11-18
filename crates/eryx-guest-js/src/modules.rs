@@ -288,6 +288,15 @@ fn require_sync<'js>(ctx: Ctx<'js>, name: String) -> Result<Value<'js>> {
     loop {
         match promise.state() {
             PromiseState::Resolved | PromiseState::Rejected => {
+                // A failure is thrown from here instead, so the promise
+                // isn't an unhandled rejection the execute would report.
+                // SAFETY: `promise` is alive in `ctx`.
+                unsafe {
+                    rquickjs::qjs::JS_PromiseMarkAsHandled(
+                        ctx.as_raw().as_ptr(),
+                        promise.as_value().as_raw(),
+                    );
+                }
                 let namespace = promise.result::<Value<'js>>().unwrap_or_else(|| {
                     Err(Error::new_loading_message(
                         &name,
