@@ -27,7 +27,8 @@ import { insecureSeed, random } from "#preview2/random";
 export const COREUTILS_TOOLS = Object.freeze([
   "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort", "seq", "cut",
   "tr", "uniq", "basename", "dirname", "tee", "sleep", "paste", "comm", "date", "base64",
-  "realpath", "readlink", "rmdir",
+  "realpath", "readlink", "rmdir", "md5sum", "sha1sum", "sha256sum", "sha512sum", "b2sum",
+  "printenv",
 ]);
 
 /** Most bytes a child may write to stdout, and to stderr, as the Rust host's per-stream cap. */
