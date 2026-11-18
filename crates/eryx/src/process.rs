@@ -115,6 +115,10 @@ const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SPAWN_DEPTH: usize = 4;
 /// Most of each of stdout and stderr a nested `run` keeps.
 const MAX_RUN_OUTPUT: usize = 16 * 1024 * 1024;
+/// Resource handles (streams, pollables, files, sockets and the like) one
+/// child may hold at once, well above what real commands use: the host keeps
+/// each, outside the child's memory limit.
+const MAX_CHILD_HANDLES: usize = 16 * 1024;
 /// TCP sockets one child may hold open at once. Creating one opens a host
 /// socket before any address is checked, so this, with
 /// [`MAX_EXECUTION_SOCKETS`] and the process-wide limit, keeps a script from
@@ -1181,7 +1185,7 @@ impl Command {
             engine,
             ChildState {
                 wasi: wasi.build(),
-                table: ResourceTable::new(),
+                table: child_table(),
                 // A pool of its own: an isolated run shares no execution's.
                 limits: ChildMemory::reserve(Arc::default(), limits.memory, self.vmctx)
                     .ok_or_else(|| fail(format!("{} needs more memory than its limit", argv[0])))?,
@@ -1740,6 +1744,13 @@ impl WasiView for ChildState {
     }
 }
 
+/// A child's resource table, holding at most [`MAX_CHILD_HANDLES`].
+fn child_table() -> ResourceTable {
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(MAX_CHILD_HANDLES);
+    table
+}
+
 /// A spawned child, until `wait` runs it.
 pub struct ChildProcess {
     /// What `wait` runs, until it does.
@@ -1854,7 +1865,7 @@ impl ChildRun {
             self.pre.engine(),
             ChildState {
                 wasi,
-                table: ResourceTable::new(),
+                table: child_table(),
                 limits: self.memory,
                 sockets: ChildSockets::new(
                     self.network

@@ -21,6 +21,8 @@
 //! - `hold N`: open up to N connections to `$HTTP_PROXY` and keep them,
 //!   printing `held <count>` and the error that stopped it, if any;
 //! - `listen`: listen on a TCP port and print `listening`;
+//! - `open N PATH`: open `PATH` up to N times and keep every handle,
+//!   printing `opened <count>` and the error that stopped it, if any;
 //! - `spawn CMD ARG...`: run `CMD` through `eryx:process/run` with this
 //!   command's stdin, env and `$PWD`, passing on its output and exit status,
 //!   or printing `error: <run-error>` (e.g. `limit-exceeded`) and exiting 1.
@@ -128,6 +130,20 @@ fn main() {
                 }
             }
             Ok(format!("held {}{error}\n", held.len()))
+        }
+        ["open", n, path] => {
+            let mut held = Vec::new();
+            let mut error = String::new();
+            for _ in 0..n.parse().unwrap_or(0u32) {
+                match std::fs::File::open(path) {
+                    Ok(file) => held.push(file),
+                    Err(e) => {
+                        error = format!(" error: {:?}", e.kind());
+                        break;
+                    }
+                }
+            }
+            Ok(format!("opened {}{error}\n", held.len()))
         }
         ["listen"] => std::net::TcpListener::bind("127.0.0.1:0").map(|_| "listening\n".to_string()),
         ["spawn", cmd, args @ ..] => {

@@ -629,6 +629,21 @@ async fn spinning_children_share_the_fuel_limit() {
     assert!(four < one * 3 / 2, "one: {one:?}, four: {four:?}");
 }
 
+/// A child's resource handles are capped: one that keeps opening files
+/// fails well before wasmtime's default of a million, and the next child
+/// starts with a fresh table.
+#[tokio::test]
+async fn a_child_holds_a_bounded_number_of_handles() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let out = sandbox
+        .execute("tc open 20000 /dev/null; tc open 1000 /dev/null")
+        .await
+        .unwrap();
+    let stdout = out.stdout_utf8().unwrap();
+    assert!(!stdout.contains("opened 20000"), "{out:?}");
+    assert!(stdout.ends_with("opened 1000\n"), "{out:?}");
+}
+
 /// A child counts against the live-child limit until it finishes, not just
 /// until it's waited on: background jobs that are still running hold their
 /// slots, so the ones past the limit are refused.
