@@ -2065,6 +2065,34 @@ async fn allowed_commands_cover_the_grep_builtin() {
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
 }
 
+/// `sh` and `bash` count as commands for `with_allowed_commands`, like
+/// `grep`: left out, they exit 127.
+#[tokio::test]
+async fn allowed_commands_cover_nested_shells() {
+    let executor = shell().build().unwrap().executor();
+    let mut session = SessionExecutor::new_with_limits(executor, &[], &ResourceLimits::default())
+        .await
+        .unwrap();
+    let code = "bash -c 'echo in-bash'; echo \"bash=$?\"; sh -c 'echo in-sh'; echo \"sh=$?\"";
+
+    let only_sh = session
+        .execute(code)
+        .with_allowed_commands(["sh"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&only_sh.stdout),
+        "bash=127\nin-sh\nsh=0\n"
+    );
+
+    let all = session.execute(code).run().await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&all.stdout),
+        "in-bash\nbash=0\nin-sh\nsh=0\n"
+    );
+}
+
 /// A child starts in the shell's directory: after `cd`, the embedded
 /// coreutils (built by eryx-build, which links in the start-in-`$PWD`
 /// constructor) resolve relative paths against it (#978).

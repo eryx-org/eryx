@@ -80,6 +80,15 @@ the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see
 [Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)).
 
+`sh` and `bash` run a nested shell in the same guest: `bash -c 'CMD' [NAME
+[ARG]...]`, `sh FILE [ARG]...`, or commands from stdin (`echo 'echo hi' |
+bash`, `bash -s ARG`), with `-e`, `-u`, `-x`, `-o OPTION` and their `+`
+forms. A nested shell behaves like an external command. It sees only exported
+variables, its own file descriptors and the working directory. Nothing it
+changes (variables, functions, options, `cd`) comes back. Its exit status is
+the command's. It shares the sandbox's filesystem, commands and callbacks.
+Shells nest at most 16 deep; past that `sh`/`bash` exits 126.
+
 ### Timers in JavaScript
 
 JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`
@@ -226,9 +235,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   The guest sees only those, and the others exit 127 as if not installed. An
   empty list allows none, unset allows all, and unknown names are ignored. It
   lasts one execution: a session's next call without it gets every command
-  back. The shell's `grep` builtin counts as a command here (allow `grep` to
-  keep it): left out, it fails as not installed when run, though `type grep`
-  and `command -v grep` still report a builtin. Other builtins and callbacks
+  back. The shell's `grep` builtin and its nested `sh` and `bash` count as
+  commands here (allow `grep`, `sh` or `bash` to keep them): left out, they
+  fail as not installed when run, though `type grep` and `command -v grep`
+  still report a builtin. Other builtins and callbacks
   aren't commands and keep working. In a
   session, a command an earlier call allowed still shows in the shell's
   `hash` table, but running it is refused.

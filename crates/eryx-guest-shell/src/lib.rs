@@ -15,13 +15,16 @@
 //! - `snapshot-state` is brush's own serde form of the `Shell`, after a line
 //!   naming that format; restoring refuses any other format.
 //! - Anything that isn't a builtin, function or callback is spawned through
-//!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils).
+//!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils),
+//!   except `sh` and `bash`, which run as a nested shell in this guest (see
+//!   [`subshell`]).
 
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
 
 mod call;
 mod grep;
 mod input;
+mod subshell;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -396,13 +399,62 @@ impl Guest for Sandbox {
 export!(Sandbox);
 
 /// Launches external commands as eryx child components, streaming the
-/// shell's file descriptors to and from them.
+/// shell's file descriptors to and from them, and `sh`/`bash` as nested
+/// shells.
 #[derive(Clone, Default)]
-struct EryxLauncher;
+struct EryxLauncher {
+    /// How many shells deep the launching shell is; 0 for the top one.
+    depth: usize,
+}
+
+impl EryxLauncher {
+    /// Run the nested shell `name` (`sh` or `bash`) as a child process.
+    fn spawn_shell(&self, name: &str, request: LaunchRequest) -> ChildProcess {
+        let fds = request
+            .open_files
+            .iter_fds()
+            .map(|(fd, file)| (fd, file.clone()))
+            .collect();
+        let name = name.to_owned();
+        let depth = self.depth;
+        let task = tokio::task::spawn_local(async move {
+            subshell::run_shell(
+                &name,
+                &request.args,
+                &request.env,
+                &request.working_dir,
+                fds,
+                depth,
+            )
+            .await
+        });
+        ChildProcess::from_future(async move {
+            Ok(ExecutionResult::new(
+                task.await.map_err(std::io::Error::other)?,
+            ))
+        })
+    }
+}
 
 impl ProcessLauncher for EryxLauncher {
     fn spawn(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
         use eryx::process::process::{Child, ProcessError, Spawned};
+        // `sh`/`bash` are only in the command table under COMMAND_DIR, and
+        // only when this execution allows them; `hash -p` could put them
+        // there anyway, so check again.
+        if let Some(name) = request
+            .program
+            .strip_prefix(COMMAND_DIR)
+            .ok()
+            .and_then(|n| n.to_str())
+            .filter(|n| subshell::NAMES.contains(n))
+            .map(str::to_owned)
+        {
+            if !eryx::process::process::list_commands().contains(&name) {
+                return Err(std::io::ErrorKind::NotFound.into());
+            }
+            return Ok(self.spawn_shell(&name, request));
+        }
         let name = request
             .program
             .file_name()
@@ -653,7 +705,7 @@ mod tests {
         let mut builtins: Vec<String> =
             brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
                 .into_keys()
-                .chain(["invoke".to_string(), "grep".to_string()])
+                .chain(["invoke", "grep", "sh", "bash"].map(String::from))
                 .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
                 .collect();
         builtins.sort();

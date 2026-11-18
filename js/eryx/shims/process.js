@@ -257,9 +257,9 @@ export function createProcessHost(fileTree, commands) {
     }
   }
 
-  // The shell's own `grep` builtin runs only when it's listed; with no
-  // allow-list here, it always is.
-  const listCommands = () => [...commands.keys(), "grep"];
+  // The shell's own `grep` builtin and nested `sh`/`bash` run only when
+  // they're listed; with no allow-list here, they always are.
+  const listCommands = () => [...commands.keys(), "grep", "sh", "bash"];
   return { Child, listCommands, startExecution };
 }
 

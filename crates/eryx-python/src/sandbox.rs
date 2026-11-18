@@ -282,8 +282,8 @@ impl Sandbox {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the sandbox's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
-    ///         The shell's grep builtin counts as a command; other builtins
-    ///         and callbacks aren't affected.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout, timing info, and statistics.
@@ -327,8 +327,8 @@ impl Sandbox {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the sandbox's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
-    ///         The shell's grep builtin counts as a command; other builtins
-    ///         and callbacks aren't affected.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
@@ -367,8 +367,8 @@ impl Sandbox {
     ///     allowed_commands: For the shell only: the commands this call may
     ///         run, out of the sandbox's. None (the default) allows them all,
     ///         [] allows none, and unknown names are ignored. Others exit 127.
-    ///         The shell's grep builtin counts as a command; other builtins
-    ///         and callbacks aren't affected.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     ReplayOutcome with the result or error, the recorded journal, the
