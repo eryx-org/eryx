@@ -76,6 +76,7 @@ const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
 const EXPORT_FINALIZE_PREINIT: usize = 4;
 const EXPORT_SET_RESULT_VARIABLE: usize = 5;
+const EXPORT_RUN_COMMAND: usize = 6;
 
 // =============================================================================
 // Invoke callback mechanism
@@ -572,6 +573,9 @@ struct PendingAsyncState {
     /// The Wit handle needed for subsequent callbacks.
     /// We need to restore this when resuming async execution.
     wit: Wit,
+    /// Which export is pending (`execute` or `run-command`), which decides
+    /// what it returns.
+    export: usize,
 }
 
 // Thread-local storage for pending async state.
@@ -698,6 +702,42 @@ fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExport
             }
             HandleExportResult::Complete
         }
+        EXPORT_RUN_COMMAND => {
+            // run-command(args: list<string>, env: list<tuple<string, string>>,
+            //             cwd: string) -> s32; the last parameter is on top.
+            let cwd = cx.pop_string().to_string();
+            let env = match cx.stack.pop() {
+                Some(Value::GenericList(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::Tuple(pair) => match <[Value; 2]>::try_from(pair) {
+                            Ok([Value::String(k), Value::String(v)]) => (k, v),
+                            other => panic!("expected (string, string) env entry, got {other:?}"),
+                        },
+                        other => panic!("expected tuple env entry, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected list for run-command env, got {other:?}"),
+            };
+            let args = match cx.stack.pop() {
+                Some(Value::GenericList(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::String(s) => s,
+                        other => panic!("expected string arg, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected list for run-command args, got {other:?}"),
+            };
+            // The wit handle is how an asyncio timer reaches the sleep import.
+            match with_wit(wit, || python::run_command(args, env, cwd)) {
+                python::CommandResult::Exited(status) => {
+                    cx.stack.push(Value::S32(status));
+                    HandleExportResult::Complete
+                }
+                python::CommandResult::Pending(code) => HandleExportResult::Pending(code),
+            }
+        }
         _ => {
             panic!("unknown export function index: {}", func_index);
         }
@@ -749,6 +789,7 @@ impl Interpreter for EryxInterpreter {
                         cx,
                         task_return: func.task_return(),
                         wit,
+                        export: func.index(),
                     });
                 });
                 // Return the callback code (WAIT | waitable_set << 4) to the host
@@ -834,51 +875,16 @@ impl Interpreter for EryxInterpreter {
             if let Some(state) = cell.borrow_mut().take() {
                 let mut cx = state.cx;
 
-                // Re-capture stdout now that the async execution is complete
-                // The original teardown ran before we suspended, so it captured nothing
-                python::recapture_stdout();
-
-                // Check if there was an uncaught Python exception during the callback
-                if let Some(error) = python::take_last_callback_error() {
-                    // Consume the result variable so a value set before the exception
-                    // can't leak into a later successful run (mirrors the sync error
-                    // path in execute_python).
-                    unsafe { python::discard_result() };
-                    let stdout = unsafe {
-                        python::get_python_variable_bytes("_eryx_output").unwrap_or_default()
-                    };
-                    let stderr = unsafe {
-                        python::get_python_variable_bytes("_eryx_errors").unwrap_or_default()
-                    };
-                    push_execute_error(
-                        &mut cx,
-                        python::ExecuteFailure {
-                            message: error,
-                            stdout,
-                            stderr,
-                        },
-                    );
+                if state.export == EXPORT_RUN_COMMAND {
+                    // The command printed its own errors to stderr; an
+                    // exception that escaped it (a failed background task)
+                    // has been printed there too.
+                    let escaped = python::take_last_callback_error().is_some();
+                    let status = python::command_status();
+                    cx.stack
+                        .push(Value::S32(if escaped && status == 0 { 1 } else { status }));
                 } else {
-                    // Get the output from Python (both stdout and stderr)
-                    let stdout = unsafe {
-                        python::get_python_variable_bytes("_eryx_output").unwrap_or_default()
-                    };
-                    let stderr = unsafe {
-                        python::get_python_variable_bytes("_eryx_errors").unwrap_or_default()
-                    };
-
-                    // Capture the user's result variable now that async execution finished.
-                    let (result, result_error) = unsafe { python::capture_result() };
-
-                    // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
-                    //               result-json: string, result-error: string }
-                    cx.stack.push(Value::Record(vec![
-                        Value::Bytes(stdout),
-                        Value::Bytes(stderr),
-                        Value::String(result),
-                        Value::String(result_error),
-                    ]));
-                    cx.stack.push(Value::ResultDiscriminant(true));
+                    finish_execute(&mut cx);
                 }
 
                 // Call task_return
@@ -897,6 +903,44 @@ impl Interpreter for EryxInterpreter {
 
     fn resource_dtor(_ty: Resource, _handle: usize) {
         // No resources to clean up for now
+    }
+}
+
+/// Push the result of an `execute` that suspended and has now finished.
+fn finish_execute(cx: &mut EryxCall) {
+    // Re-capture stdout now that the async execution is complete
+    // The original teardown ran before we suspended, so it captured nothing
+    python::recapture_stdout();
+
+    let stdout = unsafe { python::get_python_variable_bytes("_eryx_output").unwrap_or_default() };
+    let stderr = unsafe { python::get_python_variable_bytes("_eryx_errors").unwrap_or_default() };
+    // Check if there was an uncaught Python exception during the callback
+    if let Some(error) = python::take_last_callback_error() {
+        // Consume the result variable so a value set before the exception
+        // can't leak into a later successful run (mirrors the sync error
+        // path in execute_python).
+        unsafe { python::discard_result() };
+        push_execute_error(
+            cx,
+            python::ExecuteFailure {
+                message: error,
+                stdout,
+                stderr,
+            },
+        );
+    } else {
+        // Capture the user's result variable now that async execution finished.
+        let (result, result_error) = unsafe { python::capture_result() };
+
+        // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
+        //               result-json: string, result-error: string }
+        cx.stack.push(Value::Record(vec![
+            Value::Bytes(stdout),
+            Value::Bytes(stderr),
+            Value::String(result),
+            Value::String(result_error),
+        ]));
+        cx.stack.push(Value::ResultDiscriminant(true));
     }
 }
 

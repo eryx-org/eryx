@@ -1732,6 +1732,38 @@ pub(crate) async fn instantiate_store(
     Ok((store, bindings))
 }
 
+impl ExecutorState {
+    /// State for running the guest as a command (see
+    /// [`Executor::run_command`]): its stdio is `wasi`'s and its filesystem
+    /// `vfs`, and it gets no callbacks, tracing, network or commands.
+    // Only tests run guests as commands until children do (#831).
+    #[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+    pub(crate) fn for_command(
+        wasi: WasiCtx,
+        vfs: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+        memory_tracker: MemoryTracker,
+    ) -> Self {
+        Self {
+            wasi,
+            table: ResourceTable::new(),
+            callback_tx: None,
+            trace_tx: None,
+            callbacks: Vec::new(),
+            memory_tracker,
+            net_tx: None,
+            output_tx: None,
+            hybrid_vfs_ctx: Some(vfs),
+            suspended: None,
+            reuse_empty_callbacks: true,
+            stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
+            trace_clock: TraceClock::default(),
+        }
+    }
+}
+
 impl WasiView for ExecutorState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
@@ -4277,6 +4309,28 @@ impl Executor {
         result
     }
 
+    /// Instantiate the guest in `store` and run it as a command, with argv
+    /// `args`, environment `env` and working directory `cwd`, through the
+    /// `run-command` export; its exit status. The store's state comes from
+    /// [`ExecutorState::for_command`], and its fuel and epoch deadline are the
+    /// caller's to set.
+    // Only tests run guests as commands until children do (#831).
+    #[cfg(all(test, any(feature = "unstable-vfs", feature = "shell")))]
+    pub(crate) async fn run_command(
+        &self,
+        store: &mut Store<ExecutorState>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: String,
+    ) -> wasmtime::Result<i32> {
+        let bindings = self.instance_pre.instantiate_async(&mut *store).await?;
+        store
+            .run_concurrent(async move |accessor| {
+                bindings.call_run_command(accessor, args, env, cwd).await
+            })
+            .await?
+    }
+
     /// Take a warm store for this component, or instantiate a fresh one.
     ///
     /// A warm store was instantiated with a placeholder state; the real
@@ -5328,6 +5382,188 @@ mod tests {
         assert!(
             bytes.windows(target.len()).any(|w| w == target.as_bytes()),
             "precompiled artifact should record the {target} triple"
+        );
+    }
+}
+
+/// The Python guest's `run-command` export, on the embedded runtime.
+#[cfg(all(
+    test,
+    feature = "embedded",
+    any(feature = "unstable-vfs", feature = "shell")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod run_command_tests {
+    use super::*;
+    use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+
+    struct Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    /// Run `python3 ARGS` with `stdin`, in `cwd`, on a filesystem with a
+    /// writable /tmp in `storage`.
+    async fn run_in(
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
+        let executor = Executor::from_embedded_runtime().unwrap();
+        let stdout = MemoryOutputPipe::new(1 << 20);
+        let stderr = MemoryOutputPipe::new(1 << 20);
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stdin(MemoryInputPipe::new(stdin.to_owned()))
+            .stdout(stdout.clone())
+            .stderr(stderr.clone());
+        let mut base = eryx_vfs::HybridVfsCtx::new(storage.clone());
+        base.add_vfs_preopen(
+            "/tmp",
+            eryx_vfs::DirPerms::all(),
+            eryx_vfs::FilePerms::all(),
+        );
+        let vfs = crate::session::executor::command_vfs_context(&executor, Some(base)).unwrap();
+        let state = ExecutorState::for_command(wasi.build(), vfs, MemoryTracker::new(None));
+        let mut store = Store::new(executor.engine(), state);
+        store.limiter(|s| &mut s.memory_tracker);
+        store.set_fuel(u64::MAX).unwrap();
+        store.set_epoch_deadline(u64::MAX / 2);
+        let args = std::iter::once("python3")
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        let env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let status = executor
+            .run_command(&mut store, args, env, cwd.to_owned())
+            .await
+            .unwrap();
+        drop(store);
+        Ran {
+            status,
+            stdout: String::from_utf8(stdout.contents().to_vec()).unwrap(),
+            stderr: String::from_utf8(stderr.contents().to_vec()).unwrap(),
+        }
+    }
+
+    async fn run(args: &[&str], stdin: &str) -> Ran {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        run_in(&storage, args, &[], "/tmp", stdin).await
+    }
+
+    #[tokio::test]
+    async fn dash_c_sees_its_argv() {
+        let ran = run(&["-c", "import sys; print(sys.argv)", "a", "b"], "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "['-c', 'a', 'b']\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn code_and_data_come_from_stdin() {
+        let ran = run(&[], "print(1 + 1)\n").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "2\n"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-", "x"], "import sys; print(sys.argv)").await;
+        assert_eq!(ran.stdout, "['-', 'x']\n", "{}", ran.stderr);
+        let ran = run(
+            &["-c", "import sys; print(len(sys.stdin.read()))"],
+            &"x".repeat(100_000),
+        )
+        .await;
+        assert_eq!(ran.stdout, "100000\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn exit_status_is_system_exit_or_1_with_a_traceback() {
+        let ran = run(&["-c", "import sys; sys.exit(3)"], "").await;
+        assert_eq!(ran.status, 3);
+        let ran = run(&["-c", "raise SystemExit('bye')"], "").await;
+        assert_eq!((ran.status, ran.stderr.as_str()), (1, "bye\n"));
+        let ran = run(&["-c", "def f():\n    1 / 0\nf()"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(ran.stderr.starts_with("Traceback"), "{}", ran.stderr);
+        assert!(ran.stderr.contains("ZeroDivisionError"), "{}", ran.stderr);
+        assert!(!ran.stderr.contains("_eryx"), "eryx frames: {}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn usage_errors_exit_2() {
+        let ran = run(&["-X", "dev"], "").await;
+        assert_eq!(ran.status, 2, "{}", ran.stderr);
+        assert!(
+            ran.stderr.contains("unsupported option -X"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-c"], "").await;
+        assert_eq!(ran.status, 2, "{}", ran.stderr);
+        let ran = run(&["/nope.py"], "").await;
+        assert_eq!(ran.status, 2);
+        assert!(
+            ran.stderr.contains("can't open file '/nope.py'"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-u", "-B", "-c", "print('flags ignored')"], "").await;
+        assert_eq!(ran.stdout, "flags ignored\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn env_and_cwd_are_the_callers() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let ran = run_in(
+            &storage,
+            &[
+                "-c",
+                "import os; print(os.environ['FOO'], os.getcwd(), 'PATH' in os.environ)",
+            ],
+            &[("FOO", "bar")],
+            "/tmp",
+            "",
+        )
+        .await;
+        assert_eq!(ran.stdout, "bar /tmp False\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn modules_run_with_dash_m() {
+        let ran = run(&["-m", "json.tool", "--compact"], r#"{"a": [1, 2]}"#).await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "{\"a\":[1,2]}\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn scripts_run_as_main_with_their_argv_and_asyncio() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let script = "import asyncio, sys\n\
+                      async def main():\n    await asyncio.sleep(0.01)\n    print(sys.argv, __name__, __file__)\n\
+                      if __name__ == '__main__':\n    asyncio.run(main())\n    sys.exit(4)\n";
+        let write = format!("open('/tmp/s.py', 'w').write({script:?})");
+        let ran = run_in(&storage, &["-c", &write], &[], "/tmp", "").await;
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        let ran = run_in(&storage, &["s.py", "x"], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (4, "['s.py', 'x'] __main__ s.py\n"),
+            "{}",
+            ran.stderr
         );
     }
 }

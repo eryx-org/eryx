@@ -188,4 +188,20 @@ world sandbox {
     /// (a synchronous export cannot be called on wasmtime's async store); the
     /// guest work itself is synchronous and completes immediately.
     export set-result-variable: async func(name: string);
+
+    /// Run the guest as a command-line program, the way a shell runs
+    /// `python3 -c CODE` or `sh script.sh`, and return its exit status.
+    ///
+    /// `args` is the full argv, program name first. `env` replaces the
+    /// guest's environment and `cwd` its working directory: both are passed
+    /// here rather than read from WASI, because a pre-initialized guest has
+    /// already captured its environment, and the guest's libc ignores WASI's
+    /// initial working directory.
+    ///
+    /// The program reads WASI stdin and writes WASI stdout and stderr
+    /// directly; nothing is captured. It is meant for a fresh instance that
+    /// runs one command, so it neither reads nor keeps session state, and
+    /// callbacks aren't installed. A guest that can't run as a command
+    /// writes why to stderr and returns 127.
+    export run-command: async func(args: list<string>, env: list<tuple<string, string>>, cwd: string) -> s32;
 }

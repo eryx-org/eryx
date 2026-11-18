@@ -66,6 +66,7 @@ const EXPORT_RESTORE_STATE: usize = 2;
 const EXPORT_CLEAR_STATE: usize = 3;
 const EXPORT_FINALIZE_PREINIT: usize = 4;
 const EXPORT_SET_RESULT_VARIABLE: usize = 5;
+const EXPORT_RUN_COMMAND: usize = 6;
 
 /// The `wit-dylib` interpreter for the JS guest.
 #[derive(Debug)]
@@ -130,6 +131,12 @@ impl Interpreter for JsInterpreter {
             }
             EXPORT_CLEAR_STATE => js::clear_state(),
             EXPORT_SET_RESULT_VARIABLE => js::set_result_variable(cx.pop_string().to_string()),
+            // run-command(args, env, cwd) -> s32
+            EXPORT_RUN_COMMAND => {
+                cx.stack.clear();
+                eprintln!("node: running JavaScript as a command is not supported yet");
+                cx.stack.push(Value::S32(127));
+            }
             other => panic!("unknown export function index: {other}"),
         }
         func.call_task_return(&mut *cx);

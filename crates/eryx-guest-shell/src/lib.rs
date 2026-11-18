@@ -383,6 +383,14 @@ impl Guest for Sandbox {
     async fn set_result_variable(name: String) {
         *lock(&RESULT_VAR) = name;
     }
+
+    async fn run_command(args: Vec<String>, _env: Vec<(String, String)>, _cwd: String) -> i32 {
+        // ponytail: stub until the nested-shell argument parser (#831 PR 1)
+        // lands; `sh`/`bash` as host commands then go through it.
+        let name = args.first().map_or("sh", String::as_str);
+        eprintln!("{name}: running the shell as a command is not supported yet");
+        127
+    }
 }
 
 export!(Sandbox);
