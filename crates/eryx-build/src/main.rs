@@ -160,20 +160,9 @@ fn check_one(path: &std::path::Path) -> Result<Manifest> {
     for dep in &manifest.deps {
         fetch::pin(&dep.url, dep.commit.as_deref(), dep.sha256.as_deref())?;
     }
-    // Patches and shims are tracked in-repo, so their existence is checkable.
+    // Patches, shims and WIT are tracked in-repo, so their existence is checkable.
     // Source dirs live in the gitignored scratch/, so they aren't.
-    let tracked = manifest
-        .build
-        .vendor_patch
-        .iter()
-        .chain(&manifest.build.shims)
-        .chain(manifest.build.wit.iter().map(|w| &w.path))
-        .chain(
-            manifest
-                .deps
-                .iter()
-                .flat_map(|d| d.config_patch.iter().chain(&d.shims)),
-        );
+    let tracked = manifest.repo_inputs();
     for file in tracked {
         if !file.exists() {
             bail!("{} does not exist", file.display());

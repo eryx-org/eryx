@@ -288,6 +288,22 @@ impl Manifest {
             .with_context(|| format!("parsing manifest {}", path.display()))?;
         Ok(manifest)
     }
+
+    /// The repo files (repo-root-relative) the build applies, compiles or
+    /// links: `build.vendor_patch`, `build.shims`, `build.wit`'s path (a file
+    /// or a directory), and each dep's `config_patch` and `shims`.
+    pub fn repo_inputs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.build
+            .vendor_patch
+            .iter()
+            .chain(&self.build.shims)
+            .chain(self.build.wit.iter().map(|w| &w.path))
+            .chain(
+                self.deps
+                    .iter()
+                    .flat_map(|d| d.config_patch.iter().chain(&d.shims)),
+            )
+    }
 }
 
 #[cfg(test)]
