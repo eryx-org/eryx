@@ -37,7 +37,8 @@ use tokio_rustls::TlsAcceptor;
 use super::credential::Credential;
 use super::policy::{NetPolicy, RequestFramer, ResponseMasker};
 use super::{
-    MAX_HEADER_LEN, NetBudget, NetConfig, TcpError, TlsError, find_header_end, request_line,
+    MAX_HEADER_LEN, NetBudget, NetConfig, TcpError, TlsError, find_header_end, request_body,
+    request_line,
 };
 use crate::secrets::SecretConfig;
 
@@ -670,6 +671,13 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         .map_err(|_| ProxyError::BadRequest("request is not UTF-8".into()))?;
     let (method, target) = request_line(text)
         .ok_or_else(|| ProxyError::BadRequest("malformed request line".into()))?;
+    // The framer checks this again, but a head it would refuse (bad framing,
+    // a `Host` that isn't a plain authority) gets a 400 now, before anything
+    // is dialled.
+    request_body(&head).map_err(|e| match e {
+        TcpError::NotPermitted(m) => ProxyError::BadRequest(m),
+        other => other.into(),
+    })?;
     if let Some(expected) = &shared.proxy_auth
         && !proxy_authorized(text, expected)
     {
@@ -1332,6 +1340,48 @@ mod tests {
             let (stream, _) = connect_to(&proxy, &format!("api.test:{port}")).await;
             let mut tls = tls(&proxy, stream, "api.test").await;
             let response = exchange(&mut tls, request).await;
+            assert!(
+                response.starts_with("HTTP/1.1 403 "),
+                "{request:?}: {response}"
+            );
+        }
+        assert_eq!(received(&seen), "");
+    }
+
+    /// A request head with a `Host` that isn't a plain `host[:port]`, or
+    /// chunked on HTTP/1.0, gets a 400 before anything is dialled; inside a
+    /// CONNECT the framer refuses the same requests.
+    #[tokio::test]
+    async fn malformed_hosts_and_framing_get_a_400() {
+        let (port, cert, seen) = upstream(false).await;
+        let proxy = proxy(config(&cert), ChildNetwork::Inherit, false);
+        for request in [
+            format!("GET http://api.test:{port}/ HTTP/1.1\r\nHost: api.test:x@other.test\r\n\r\n"),
+            format!("GET http://api.test:{port}/ HTTP/1.1\r\nHost: api.test/x\r\n\r\n"),
+            format!(
+                "POST http://api.test:{port}/ HTTP/1.0\r\nHost: api.test:{port}\r\n\
+                 Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            ),
+            format!("CONNECT api.test:{port} HTTP/1.1\r\nHost: api.test:{port}@x\r\n\r\n"),
+        ] {
+            let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+            let response = exchange(&mut stream, request.as_bytes()).await;
+            assert!(
+                response.starts_with("HTTP/1.1 400 "),
+                "{request:?}: {response}"
+            );
+        }
+        assert_eq!(received(&seen), "");
+
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = super::tests::proxy(config(&cert), ChildNetwork::Inherit, false);
+        for request in [
+            "GET / HTTP/1.1\r\nHost: api.test:x@other.test\r\n\r\n",
+            "POST / HTTP/1.0\r\nHost: api.test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        ] {
+            let (stream, _) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            let mut tls = tls(&proxy, stream, "api.test").await;
+            let response = exchange(&mut tls, request.as_bytes()).await;
             assert!(
                 response.starts_with("HTTP/1.1 403 "),
                 "{request:?}: {response}"
