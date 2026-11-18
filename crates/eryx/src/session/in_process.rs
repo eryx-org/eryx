@@ -52,7 +52,7 @@ use crate::callback::Callback;
 use crate::callback_handler::{
     run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
 };
-use crate::error::Error;
+use crate::error::{Error, ErrorKind};
 use crate::net::ConnectionManager;
 use crate::replay::{CallbackJournal, ReplayState, wrap_callbacks};
 use crate::sandbox::{ExecuteResult, ExecuteStats, ReplayOutcome, Sandbox, handler_task_failed};
@@ -385,8 +385,11 @@ async fn run_code(
     let (net_tx, net_handler, child_net) = match sandbox.net_config() {
         Some(config) => {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone());
-            let child_net = manager.child_network(sandbox.executor().child_network().clone());
+            let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone())
+                .map_err(ErrorKind::Initialization)?;
+            let child_net = manager
+                .child_network(sandbox.executor().child_network().clone())
+                .map_err(ErrorKind::Initialization)?;
             let handler = AbortOnDrop(tokio::spawn(run_net_handler(rx, manager)));
             (Some(tx), Some(handler), child_net)
         }

@@ -750,12 +750,17 @@ impl Session {
                 // Spawn network handler if networking is enabled
                 let (net_tx, net_handler, child_net) = if let Some(ref config) = net_config {
                     let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
+                    // `network=` was validated at construction; a narrowed
+                    // `child_network=` is first checked here.
                     let manager = eryx::net::ConnectionManager::new(
                         config.clone(),
                         std::collections::HashMap::new(),
-                    );
+                    )
+                    .map_err(eryx::ErrorKind::Initialization)?;
                     // A shell session's children share its network budget.
-                    let child_net = manager.child_network(child_network);
+                    let child_net = manager
+                        .child_network(child_network)
+                        .map_err(eryx::ErrorKind::Initialization)?;
                     let task = tokio::spawn(async move {
                         eryx::callback_handler::run_net_handler(rx, manager).await;
                     });

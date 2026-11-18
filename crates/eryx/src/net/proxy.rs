@@ -131,37 +131,50 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 impl ChildNetPolicy {
     /// `None` for [`ChildNetwork::None`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if a [`ChildNetwork::Narrow`] config is invalid (see
+    /// [`NetConfig::validate`]), naming it the child network.
     pub(crate) fn new(
         sandbox: Arc<NetPolicy>,
         budget: NetBudget,
         network: ChildNetwork,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, String> {
         let policy = match network {
-            ChildNetwork::None => return None,
+            ChildNetwork::None => return Ok(None),
             ChildNetwork::Inherit => sandbox,
-            ChildNetwork::Narrow(config) => Arc::new(sandbox.narrowed(*config)),
+            ChildNetwork::Narrow(config) => Arc::new(
+                sandbox
+                    .narrowed(*config)
+                    .map_err(|e| format!("child network: {e}"))?,
+            ),
         };
         let children = NetBudget::new(policy.max_connections(), policy.max_bytes());
-        Some(Self {
+        Ok(Some(Self {
             policy,
             budgets: vec![children, budget],
             key: ProxyKey(Arc::new(rand::random())),
-        })
+        }))
     }
 
     /// Only what both this and `config` allow, for some of the children
     /// (one command's): its connections and bytes count against `config`'s
     /// limits and every one of this policy's too.
-    pub(crate) fn narrowed(&self, config: NetConfig) -> Self {
-        let policy = Arc::new(self.policy.narrowed(config));
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`NetConfig::validate`] does, if `config` is invalid.
+    pub(crate) fn narrowed(&self, config: NetConfig) -> Result<Self, String> {
+        let policy = Arc::new(self.policy.narrowed(config)?);
         let own = NetBudget::new(policy.max_connections(), policy.max_bytes());
-        Self {
+        Ok(Self {
             policy,
             budgets: std::iter::once(own)
                 .chain(self.budgets.iter().cloned())
                 .collect(),
             key: self.key.clone(),
-        }
+        })
     }
 
     /// The `user:password` the proxy holding credentials for the command
@@ -284,7 +297,9 @@ impl ChildProxy {
     ///
     /// # Errors
     ///
-    /// Fails if the CA can't be generated or the listener can't be bound.
+    /// Fails if the CA can't be generated or the listener can't be bound, or
+    /// with [`std::io::ErrorKind::InvalidInput`] if `config` or a narrowed
+    /// `network` is invalid (see [`NetConfig::validate`]).
     pub fn start(
         config: NetConfig,
         secrets: HashMap<String, SecretConfig>,
@@ -292,8 +307,10 @@ impl ChildProxy {
         allow_tunnels: bool,
     ) -> std::io::Result<Option<Self>> {
         let budget = NetBudget::new(config.max_connections(), config.max_bytes());
-        let sandbox = Arc::new(NetPolicy::new(config, secrets));
+        let invalid = |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
+        let sandbox = Arc::new(NetPolicy::new(config, secrets).map_err(invalid)?);
         ChildNetPolicy::new(sandbox, budget, network)
+            .map_err(invalid)?
             .map(|policy| policy.start_proxy(allow_tunnels))
             .transpose()
     }
@@ -1011,6 +1028,34 @@ mod tests {
     use rustls::pki_types::ServerName;
     use tokio_rustls::TlsConnector;
 
+    /// A child network, a command's narrower one and a standalone proxy are
+    /// each refused an invalid config, naming it.
+    #[tokio::test]
+    async fn child_networks_refuse_invalid_configs() {
+        let bad = || NetConfig::default().allow_host("*.");
+        let expected = bad().validate().unwrap_err();
+        let sandbox = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
+        let budget = NetBudget::new(0, None);
+        let narrow = ChildNetwork::Narrow(Box::new(bad()));
+
+        let err =
+            ChildNetPolicy::new(Arc::clone(&sandbox), budget.clone(), narrow.clone()).unwrap_err();
+        assert_eq!(err, format!("child network: {expected}"));
+
+        let children = ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit)
+            .unwrap()
+            .unwrap();
+        assert_eq!(children.narrowed(bad()).unwrap_err(), expected);
+
+        let err =
+            ChildProxy::start(bad(), HashMap::new(), ChildNetwork::Inherit, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let err =
+            ChildProxy::start(NetConfig::default(), HashMap::new(), narrow, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().starts_with("child network: "), "{err}");
+    }
+
     #[test]
     fn host_headers_bracket_ipv6_literals() {
         assert_eq!(host_header("::1", 8443, 443), "[::1]:8443");
@@ -1399,9 +1444,10 @@ mod tests {
         tunnels: bool,
     ) -> ChildProxy {
         let budget = NetBudget::new(config.max_connections(), config.max_bytes());
-        let sandbox = Arc::new(NetPolicy::new(config, secrets()));
+        let sandbox = Arc::new(NetPolicy::new(config, secrets()).unwrap());
         let credentials: Vec<_> = credentials.iter().cloned().map(Arc::new).collect();
         ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit)
+            .unwrap()
             .unwrap()
             .start_proxy_with(tunnels, &credentials, "cmd")
             .unwrap()
@@ -1480,8 +1526,9 @@ mod tests {
 
         let config = NetConfig::default().allow_host("api.test");
         let budget = NetBudget::new(config.max_connections(), config.max_bytes());
-        let sandbox = Arc::new(NetPolicy::new(config, secrets()));
+        let sandbox = Arc::new(NetPolicy::new(config, secrets()).unwrap());
         let net = ChildNetPolicy::new(Arc::clone(&sandbox), budget.clone(), ChildNetwork::Inherit)
+            .unwrap()
             .unwrap();
         let credentials = [Arc::new(Credential::bearer(TOKEN).for_hosts(["api.test"]))];
         let proxy = net.start_proxy_with(false, &credentials, "gh").unwrap();
@@ -1503,11 +1550,15 @@ mod tests {
             assert_eq!(encoded, base64::prelude::BASE64_STANDARD.encode(userinfo));
         }
         assert_eq!(
-            net.narrowed(NetConfig::default()).proxy_userinfo("gh"),
+            net.narrowed(NetConfig::default())
+                .unwrap()
+                .proxy_userinfo("gh"),
             userinfo
         );
         assert_ne!(net.proxy_userinfo("git"), userinfo);
-        let other = ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit).unwrap();
+        let other = ChildNetPolicy::new(sandbox, budget, ChildNetwork::Inherit)
+            .unwrap()
+            .unwrap();
         assert_ne!(other.proxy_userinfo("gh"), userinfo);
         assert!(net.start_proxy(false).unwrap().userinfo().is_none());
 
@@ -1608,7 +1659,7 @@ mod tests {
             .allow_all_hosts(true)
             .with_blocked_hosts(Vec::<String>::new())
             .allow_internal_host("*");
-        let policy = NetPolicy::new(open.clone(), HashMap::new());
+        let policy = NetPolicy::new(open.clone(), HashMap::new()).unwrap();
         let err = policy
             .connect("127.0.0.1", port, Duration::from_secs(5))
             .await
@@ -1741,14 +1792,18 @@ mod tests {
     /// is ignored.
     #[tokio::test]
     async fn narrow_takes_the_tighter_limits_and_the_sandbox_resolver() {
-        let sandbox = Arc::new(NetPolicy::new(
-            config(&[])
-                .with_max_connections(1)
-                .with_io_timeout(Duration::from_secs(2)),
-            HashMap::new(),
-        ));
-        let narrow =
-            sandbox.narrowed(NetConfig::permissive().with_connect_timeout(Duration::from_secs(1)));
+        let sandbox = Arc::new(
+            NetPolicy::new(
+                config(&[])
+                    .with_max_connections(1)
+                    .with_io_timeout(Duration::from_secs(2)),
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let narrow = sandbox
+            .narrowed(NetConfig::permissive().with_connect_timeout(Duration::from_secs(1)))
+            .unwrap();
         assert_eq!(narrow.max_connections(), 1);
         assert_eq!(narrow.io_timeout(), Duration::from_secs(2));
         assert_eq!(narrow.connect_timeout(), Duration::from_secs(1));
@@ -1778,8 +1833,9 @@ mod tests {
         let (port, cert, _) = upstream(true).await;
         let target = format!("api.test:{port}");
         let mut guest =
-            crate::net::ConnectionManager::new(config(&cert).with_max_connections(2), secrets());
-        let children = guest.child_network(ChildNetwork::Inherit).unwrap();
+            crate::net::ConnectionManager::new(config(&cert).with_max_connections(2), secrets())
+                .unwrap();
+        let children = guest.child_network(ChildNetwork::Inherit).unwrap().unwrap();
         let inspecting = children.start_proxy(false).unwrap();
         let tunnelling = children.start_proxy(true).unwrap();
 
@@ -1804,12 +1860,13 @@ mod tests {
     async fn narrow_limits_all_the_childrens_proxies_together() {
         let (port, cert, _) = upstream(true).await;
         let target = format!("api.test:{port}");
-        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets()).unwrap();
         let narrow = NetConfig::permissive()
             .allow_internal_host("*.test")
             .with_max_connections(1);
         let children = guest
             .child_network(ChildNetwork::Narrow(Box::new(narrow)))
+            .unwrap()
             .unwrap();
         let inspecting = children.start_proxy(false).unwrap();
         let tunnelling = children.start_proxy(true).unwrap();
@@ -1839,9 +1896,10 @@ mod tests {
         };
 
         // Unlimited: the child's bytes show up in the guest's traffic.
-        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets()).unwrap();
         let proxy = guest
             .child_network(ChildNetwork::Inherit)
+            .unwrap()
             .unwrap()
             .start_proxy(false)
             .unwrap();
@@ -1854,9 +1912,11 @@ mod tests {
         // Room for the request but not the whole echoed response.
         let max = request.len() as u64 + 40;
         let guest =
-            crate::net::ConnectionManager::new(config(&cert).with_max_bytes(max), secrets());
+            crate::net::ConnectionManager::new(config(&cert).with_max_bytes(max), secrets())
+                .unwrap();
         let proxy = guest
             .child_network(ChildNetwork::Inherit)
+            .unwrap()
             .unwrap()
             .start_proxy(false)
             .unwrap();
@@ -1875,9 +1935,11 @@ mod tests {
         let mut guest = crate::net::ConnectionManager::new(
             config(&cert).with_max_bytes(request.len() as u64 + 10),
             secrets(),
-        );
+        )
+        .unwrap();
         let proxy = guest
             .child_network(ChildNetwork::Inherit)
+            .unwrap()
             .unwrap()
             .start_proxy(false)
             .unwrap();
@@ -1904,9 +1966,11 @@ mod tests {
 
         for tunnels in [false, true] {
             let mut guest =
-                crate::net::ConnectionManager::new(config(&cert).with_max_bytes(10), secrets());
+                crate::net::ConnectionManager::new(config(&cert).with_max_bytes(10), secrets())
+                    .unwrap();
             let proxy = guest
                 .child_network(ChildNetwork::Inherit)
+                .unwrap()
                 .unwrap()
                 .start_proxy(tunnels)
                 .unwrap();
@@ -1934,9 +1998,11 @@ mod tests {
     async fn refused_requests_are_refunded() {
         let (port, cert, seen) = upstream(true).await;
         let guest =
-            crate::net::ConnectionManager::new(config(&cert).with_max_bytes(1 << 20), secrets());
+            crate::net::ConnectionManager::new(config(&cert).with_max_bytes(1 << 20), secrets())
+                .unwrap();
         let proxy = guest
             .child_network(ChildNetwork::Inherit)
+            .unwrap()
             .unwrap()
             .start_proxy(false)
             .unwrap();
@@ -1956,12 +2022,13 @@ mod tests {
     #[tokio::test]
     async fn narrow_limits_the_childrens_bytes() {
         let (port, cert, _) = upstream(false).await;
-        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets()).unwrap();
         let narrow = NetConfig::permissive()
             .allow_internal_host("*.test")
             .with_max_bytes(20);
         let proxy = guest
             .child_network(ChildNetwork::Narrow(Box::new(narrow)))
+            .unwrap()
             .unwrap()
             .start_proxy(false)
             .unwrap();
@@ -1986,15 +2053,18 @@ mod tests {
     async fn a_narrowed_childrens_network_counts_against_every_budget() {
         let (port, cert, _) = upstream(true).await;
         let target = format!("api.test:{port}");
-        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets()).unwrap();
         let children = guest
             .child_network(ChildNetwork::Narrow(Box::new(
                 NetConfig::permissive()
                     .allow_internal_host("*.test")
                     .with_max_connections(1),
             )))
+            .unwrap()
             .unwrap();
-        let command = children.narrowed(NetConfig::permissive().allow_internal_host("*.test"));
+        let command = children
+            .narrowed(NetConfig::permissive().allow_internal_host("*.test"))
+            .unwrap();
         let narrowed = command.start_proxy(false).unwrap();
         let others = children.start_proxy(false).unwrap();
         let (_held, status) = connect_to(&narrowed, &target).await;
@@ -2003,13 +2073,15 @@ mod tests {
         assert!(status.contains(" 503 "), "{status}");
 
         let (port, cert, _) = upstream(false).await;
-        let guest = crate::net::ConnectionManager::new(config(&cert), secrets());
-        let children = guest.child_network(ChildNetwork::Inherit).unwrap();
-        let command = children.narrowed(
-            NetConfig::permissive()
-                .allow_internal_host("*.test")
-                .with_max_bytes(20),
-        );
+        let guest = crate::net::ConnectionManager::new(config(&cert), secrets()).unwrap();
+        let children = guest.child_network(ChildNetwork::Inherit).unwrap().unwrap();
+        let command = children
+            .narrowed(
+                NetConfig::permissive()
+                    .allow_internal_host("*.test")
+                    .with_max_bytes(20),
+            )
+            .unwrap();
         let proxy = command.start_proxy(false).unwrap();
         let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
         let request = format!(

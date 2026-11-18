@@ -55,7 +55,17 @@ pub(crate) struct NetPolicy {
 }
 
 impl NetPolicy {
-    pub(crate) fn new(config: NetConfig, secrets: HashMap<String, SecretConfig>) -> Self {
+    /// The policy for `config` and `secrets`.
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`NetConfig::validate`] does, if `config` is invalid: every
+    /// policy is built from a valid config.
+    pub(crate) fn new(
+        config: NetConfig,
+        secrets: HashMap<String, SecretConfig>,
+    ) -> Result<Self, String> {
+        config.validate()?;
         // Build rustls config with system root certs + any custom certs
         let mut root_store =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -72,12 +82,12 @@ impl NetPolicy {
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
-        Self {
+        Ok(Self {
             config,
             secrets,
             tls_config: Arc::new(tls_config),
             parent: None,
-        }
+        })
     }
 
     /// A policy that allows only what both `self` and `config` allow, e.g. a
@@ -88,13 +98,18 @@ impl NetPolicy {
     /// Secrets, their hosts, plaintext substitution, the resolver and the
     /// TLS roots come from `self`, so a narrowed policy can never reach or
     /// reveal more than `self`.
-    pub(crate) fn narrowed(self: &Arc<Self>, config: NetConfig) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`NetConfig::validate`] does, if `config` is invalid.
+    pub(crate) fn narrowed(self: &Arc<Self>, config: NetConfig) -> Result<Self, String> {
+        config.validate()?;
+        Ok(Self {
             config,
             secrets: self.secrets.clone(),
             tls_config: Arc::clone(&self.tls_config),
             parent: Some(Arc::clone(self)),
-        }
+        })
     }
 
     /// The outermost policy, which owns the secrets' settings.
@@ -1199,6 +1214,28 @@ mod tests {
         }
     }
 
+    /// No policy, outer or narrowed, is built from a config that doesn't
+    /// validate, and the error is the config's own.
+    #[test]
+    fn policies_refuse_invalid_configs() {
+        let invalid = [
+            NetConfig::default().allow_host("*."),
+            NetConfig::default().with_connect_timeout(Duration::ZERO),
+            NetConfig::default().with_io_timeout(Duration::ZERO),
+        ];
+        for config in invalid {
+            let expected = config.validate().unwrap_err();
+            let err = NetPolicy::new(config.clone(), HashMap::new()).unwrap_err();
+            assert_eq!(err, expected);
+
+            let outer = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
+            let err = outer.narrowed(config).unwrap_err();
+            assert_eq!(err, expected);
+        }
+        let outer = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
+        assert!(outer.narrowed(NetConfig::default()).is_ok());
+    }
+
     /// A mixed answer is narrowed to the allowed addresses, so the connection
     /// can't land on the internal one.
     #[tokio::test]
@@ -1206,7 +1243,7 @@ mod tests {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         let config =
             NetConfig::default().with_resolver(FixedResolver(vec![ip("127.0.0.1"), ip("8.8.8.8")]));
-        let policy = NetPolicy::new(config, HashMap::new());
+        let policy = NetPolicy::new(config, HashMap::new()).unwrap();
 
         let addrs = policy.resolve_allowed("public.example", 443).await.unwrap();
         assert_eq!(addrs, vec![SocketAddr::new(ip("8.8.8.8"), 443)]);
@@ -1215,7 +1252,7 @@ mod tests {
     /// origin-form, without the headers addressed to the proxy itself.
     #[test]
     fn proxied_requests_reach_the_origin_in_origin_form() {
-        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()));
+        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
         let frame = |data: &[u8]| {
             let mut framer = policy
                 .request_framer("api.test", false)
@@ -1300,7 +1337,7 @@ mod tests {
     /// ever passed through unframed; one without a credential takes them.
     #[test]
     fn credentialed_connections_refuse_upgrades() {
-        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()));
+        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
         let credentials = [Arc::new(
             Credential::bearer("tok")
                 .for_hosts(["api.test"])
