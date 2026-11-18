@@ -4,20 +4,26 @@
 //! runtime of every enabled guest language (the `python`, `javascript` and
 //! `shell` features) into the binary for fast sandbox creation, and with the
 //! `coreutils` feature, the shell's default commands (`coreutils.cwasm`,
-//! located the same way through `ERYX_COREUTILS_CWASM`, the cache as
-//! `coreutils-v<version>-<arch>-<os>.cwasm`, then `../eryx-runtime/`). With
+//! located the same way through `ERYX_COREUTILS_CWASM`, `../eryx-runtime/`,
+//! then the cache as `coreutils-v<version>-<arch>-<os>.cwasm`). With
 //! `env-pack`, it embeds the JavaScript bundler (`eryx-bundler.cwasm`) the
-//! same way: `ERYX_BUNDLER_CWASM`, the cache (`eryx-precompile setup
-//! --bundler`), then the workspace, or, if none has it, an empty placeholder
-//! (with a warning): eryx then loads the bundler from that cache at run time.
+//! same way: `ERYX_BUNDLER_CWASM`, the workspace, then the cache
+//! (`eryx-precompile setup --bundler`), or, if none has it, an empty
+//! placeholder (with a warning): eryx then loads the bundler from that cache
+//! at run time.
 //!
 //! Each `runtime-<language>.cwasm` file is located by checking (in order):
 //! 1. An env var with an explicit path, embedded as is: `ERYX_RUNTIME_CWASM`
 //!    for Python, `ERYX_RUNTIME_CWASM_JAVASCRIPT` and `ERYX_RUNTIME_CWASM_SHELL`
-//! 2. `~/.cache/eryx/runtime-<language>-v<version>-<arch>-<os>.cwasm`
+//! 2. `../eryx-runtime/runtime-<language>.cwasm` (workspace dev workflow)
+//! 3. `~/.cache/eryx/runtime-<language>-v<version>-<arch>-<os>.cwasm`
 //!    (populated by `eryx-precompile setup`), used only if it matches its
 //!    `.sha256` checksum file and, on Unix, is private to the current user
-//! 3. `../eryx-runtime/runtime-<language>.cwasm` (workspace dev workflow)
+//!
+//! The workspace file comes before the cache: it only exists in a checkout,
+//! where it's the runtime built from the sources being tested, while the
+//! cache holds the released runtime for the same version (#749). A crates.io
+//! build has no `../eryx-runtime/` file, so it uses the cache.
 
 // Build scripts should panic on errors, so expect/unwrap are appropriate here.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -249,15 +255,17 @@ mod embedded_runtime {
             };
             let cwasm = cwasm_path.map(read);
 
-            // 2. Cache directory (~/.cache/eryx/)
-            let cwasm = cwasm.or_else(|| self.find_cached());
-
-            // 3. Workspace dev path
+            // 2. Workspace dev path, ahead of the cache: in a checkout the
+            // cache may hold the released runtime of the same version, which
+            // the sources being built have moved past.
             let cwasm = cwasm.or_else(|| {
                 Some(PathBuf::from(&workspace_path))
                     .filter(|p| p.exists())
                     .map(read)
             });
+
+            // 3. Cache directory (~/.cache/eryx/)
+            let cwasm = cwasm.or_else(|| self.find_cached());
 
             match cwasm {
                 Some((path, bytes)) => {

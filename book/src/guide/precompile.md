@@ -28,7 +28,7 @@ This will:
 
 Running `setup` again reuses the cached runtime only if it still matches its checksum, so an interrupted run is repaired by running it again.
 
-After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. The build uses it only if it still matches its checksum file and, on Unix, the file, its checksum file and the cache directory are owned by you and not writable by your group or others. Otherwise it prints a warning, falls back as if no cache existed, and running `setup` again fixes it.
+After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. The build uses it only if it still matches its checksum file and, on Unix, the file, its checksum file and the cache directory are owned by you and not writable by your group or others. Otherwise it prints a warning, falls back as if no cache existed, and running `setup` again fixes it. Inside an eryx checkout, a runtime built in the workspace (`crates/eryx-runtime/runtime-<language>.cwasm`, and likewise `coreutils.cwasm` and `eryx-bundler.cwasm`) comes before the cache, so the build embeds the runtime built from those sources rather than the released one.
 
 You can also point to a specific file:
 
