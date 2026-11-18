@@ -67,15 +67,17 @@ A precompiled runtime only loads in the eryx version that built it, so `setup` a
 For cross-compilation, custom CPU targets, or bundling packages into the runtime, use `compile`:
 
 ```bash
-eryx-precompile compile <input.wasm> [OPTIONS]
+eryx-precompile compile [input.wasm] [OPTIONS]
 ```
+
+The input is the component to compile. With `--preinit` for Python, `compile` builds from the Python runtime built into `eryx-precompile` instead, so it takes no input (one given is ignored) and needs `-o`.
 
 ### Pre-initialization
 
 Pre-initialization runs Python's interpreter startup and captures the memory state, reducing session creation time from ~450ms to ~1-5ms:
 
 ```bash
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib
 ```
 
@@ -84,7 +86,7 @@ eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
 To produce an architecture-independent `.wasm` (for later compilation on different targets):
 
 ```bash
-eryx-precompile compile runtime-python.wasm -o runtime-preinit.wasm \
+eryx-precompile compile -o runtime-preinit.wasm \
   --preinit --stdlib ./python-stdlib --wasm-only
 ```
 
@@ -131,19 +133,19 @@ Bundle Python packages into the pre-compiled runtime so they're instantly availa
 
 ```bash
 # Bundle a single package
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-2.2.3-wasi.tar.gz --import numpy
 
 # Bundle multiple packages
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2-3.1.2-py3-none-any.whl \
   --package markupsafe-2.1.3-py3-none-any.whl \
   --import jinja2
 
 # Use a site-packages directory
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --site-packages ./my-site-packages --import jinja2
 ```
@@ -158,7 +160,7 @@ This is useful when your sandboxes all need the same expensive setup that doesn'
 
 ```bash
 # Bake a Jinja2 SandboxedEnvironment with custom filters into the snapshot
-eryx-precompile compile runtime-python.wasm -o jinja2.cwasm \
+eryx-precompile compile -o jinja2.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2.whl --package markupsafe.whl \
   --import jinja2 --import jinja2.sandbox \
@@ -168,7 +170,7 @@ env = SandboxedEnvironment()
 "
 
 # For longer setup scripts, use --setup-file
-eryx-precompile compile runtime-python.wasm -o jinja2.cwasm \
+eryx-precompile compile -o jinja2.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2.whl --package markupsafe.whl \
   --import jinja2 \
@@ -189,7 +191,7 @@ If the set of callbacks is fixed per deployment, declare it at pre-initializatio
 #   {"name": "get_time", "description": "Current time", "parameters": {"type": "object", "properties": {}}},
 #   {"name": "fetch", "description": "HTTP GET", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
 # ]
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --callbacks callbacks.json
 ```
@@ -202,7 +204,7 @@ By default, `compile` verifies the output: a runtime by creating a test sandbox 
 
 ```bash
 # Verify that numpy actually works, not just imports
-eryx-precompile compile runtime-python.wasm -o numpy.cwasm \
+eryx-precompile compile -o numpy.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-wasi.tar.gz --import numpy \
   --verify-code "import numpy; print(numpy.array([1,2,3]).sum())"
@@ -284,7 +286,7 @@ cargo build --features embedded
 
 ```bash
 # Pre-compile for x86-64-v3 (matches Fly.io hardware)
-eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --target x86-64-v3
 ```
@@ -295,7 +297,7 @@ Create an architecture-independent snapshot, then compile for each target:
 
 ```bash
 # Stage 1: Pre-initialize (architecture-independent)
-eryx-precompile compile runtime-python.wasm -o runtime-preinit.wasm \
+eryx-precompile compile -o runtime-preinit.wasm \
   --preinit --stdlib ./python-stdlib --wasm-only
 
 # Stage 2: AOT compile for each target
@@ -309,7 +311,7 @@ eryx-precompile compile runtime-preinit.wasm -o runtime-arm.cwasm \
 
 ```bash
 # Build a runtime with numpy baked in
-eryx-precompile compile runtime-python.wasm -o numpy-runtime.cwasm \
+eryx-precompile compile -o numpy-runtime.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-2.2.3-wasi.tar.gz \
   --import numpy \
