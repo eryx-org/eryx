@@ -195,11 +195,11 @@ struct Args {
     /// or 0.3 command component or a WASI preview 1 command module (`.wasm`),
     /// or one precompiled by this eryx version's `eryx-precompile compile`
     /// (`.cwasm`, trusted like --runtime-cwasm). A name overrides the embedded
-    /// coreutils tool of the same name.
+    /// coreutils tool of the same name. A `.wasm` is compiled once into
+    /// eryx's cache directory, keyed by its content, so a restart reuses it.
     ///
     /// `@sha256:<hex>` pins a `.wasm` to that digest: startup fails if the
-    /// file differs, and the command is compiled once into eryx's cache
-    /// directory. In the environment, separate entries with `;`; empty
+    /// file differs. In the environment, separate entries with `;`; empty
     /// entries, and an empty ERYX_SHELL_COMMANDS, mean no commands.
     #[arg(
         long = "shell-command",
@@ -334,8 +334,9 @@ fn load_shell_commands(
             // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
             #[allow(unsafe_code)]
             (true, None) => unsafe { eryx::Command::from_precompiled_file(path) },
-            (false, Some(sha256)) => eryx::Command::load_cached(path, Some(sha256)),
-            (false, None) => eryx::Command::from_file(path),
+            // Pinned or not, compiled once into eryx's cache, which is keyed
+            // by the file's content, so a changed file is compiled afresh.
+            (false, sha256) => eryx::Command::load_cached(path, sha256.as_deref()),
         };
         let command = command.map_err(|e| format!("{}: {e}", flag()))?;
         // One registration per combination of grants among its names.
@@ -966,5 +967,55 @@ mod tests {
         assert!(err.contains(&pin), "{err}");
         let err = pinned(&dir.path().join("rg.cwasm"));
         assert!(err.contains("only a .wasm can be pinned"), "{err}");
+    }
+
+    /// An unpinned `.wasm` is compiled into eryx's command cache, as a
+    /// pinned one is, so a restart doesn't compile it again (#1064).
+    #[test]
+    fn unpinned_shell_commands_use_the_compile_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noop.wasm");
+        let mut wasm = wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")))"#,
+        )
+        .unwrap();
+        // A custom section naming this run, so the cache entry is this
+        // test's own and not one an earlier run left behind.
+        let run = format!("{:?}", std::time::SystemTime::now());
+        wasm.extend([0, u8::try_from(run.len() + 2).unwrap(), 1, b'x']);
+        wasm.extend(run.as_bytes());
+        std::fs::write(&path, &wasm).unwrap();
+        let prefix = format!(
+            "sha256-{}-",
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&wasm))
+        );
+
+        load_shell_commands(
+            &[ShellCommand {
+                names: vec!["noop".into()],
+                path,
+                sha256: None,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let commands = eryx::cache::default_cache_root().unwrap().join("commands");
+        let cached: Vec<_> = std::fs::read_dir(&commands)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect();
+        assert_eq!(cached.len(), 1, "no {prefix}* in {}", commands.display());
+        for path in cached {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }
