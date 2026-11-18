@@ -1191,3 +1191,51 @@ bash /tmp/r.sh; echo "status=$?"
         "{stderr}"
     );
 }
+
+/// Any file is runnable: its `#!` line names the interpreter, by its file
+/// name (a shell runs nested), and a file without one is an `sh` script.
+/// A path is never a host command by its file name: `./ls` is a file.
+#[tokio::test]
+async fn files_run_as_scripts() {
+    let (stdout, stderr) = run_shell(
+        r#"
+cd /tmp
+printf '#!/bin/sh\necho "sh $0 $1"\nexit 3\n' > a.sh
+./a.sh x; echo "status=$?"
+printf '#!/usr/bin/env bash\necho "bash $#"\n' > b
+/tmp/b 1 2
+printf 'echo "plain $1"\n' > c
+./c y
+printf '#!/bin/bash -e\nfalse\necho not reached\n' > d
+./d; echo "e=$?"
+printf 'echo on-path\n' > tool
+PATH="/tmp:$PATH" tool
+./ls; echo "ls=$?"
+printf '#!/usr/bin/env nope\n' > e
+./e; echo "nope=$?"
+./; echo "dir=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "sh ./a.sh x\nstatus=3\nbash 2\nplain y\ne=1\non-path\nls=127\nnope=127\ndir=126\n"
+    );
+    assert!(stderr.contains("nope: command not found"), "{stderr}");
+}
+
+/// A `#!` naming another interpreter runs the host command of that name,
+/// with the script's path as an argument.
+#[tokio::test]
+async fn shebangs_run_host_commands() {
+    let (stdout, _) = run_shell(
+        r#"
+printf '#!/usr/bin/cat\nhello\n' > /tmp/s
+/tmp/s
+printf '#!/usr/bin/env head -n1\nfirst\nsecond\n' > /tmp/h
+/tmp/h
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "#!/usr/bin/cat\nhello\n#!/usr/bin/env head -n1\n");
+}

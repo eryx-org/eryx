@@ -89,6 +89,16 @@ changes (variables, functions, options, `cd`) comes back. Its exit status is
 the command's. It shares the sandbox's filesystem, commands and callbacks.
 Shells nest at most 16 deep; past that `sh`/`bash` exits 126.
 
+Any file is runnable (`./script.sh`, or a file in a `$PATH` directory). WASI
+has no execute bit. A file whose first line is `#!/bin/sh`, `#!/bin/bash`,
+`#!/usr/bin/env bash` (or `dash`) runs in a nested shell, with the line's one
+argument if it has one (`#!/bin/bash -e`). Any other `#!` line runs the
+sandbox's command of the interpreter's file name, with the script's path:
+`#!/usr/bin/env python3` runs `python3 ./script`. A command that isn't there
+exits 127. A file without `#!` runs as an `sh` script. A path always
+names a file, never a command: `./ls` runs a file named `ls`, not the `ls`
+command. `env -S` in a `#!` line isn't supported.
+
 ### Timers in JavaScript
 
 JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`
