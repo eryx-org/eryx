@@ -1263,6 +1263,7 @@ fn authorized(authorization: Option<&str>) -> bool {
 /// A smart-HTTP git server on 127.0.0.1: the host's `git http-backend` as
 /// CGI over the bare repositories in `root`. Requests without the real
 /// secret (see [`authorized`]) get a 401 asking for Basic credentials.
+/// Connections are kept alive unless a request asks to close them.
 async fn git_server(root: PathBuf) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1274,7 +1275,9 @@ async fn git_server(root: PathBuf) -> u16 {
     port
 }
 
-/// Serve one connection's requests (keep-alive) for [`git_server`].
+/// Serve one connection's requests (keep-alive) for [`git_server`], closing
+/// it after answering a `Connection: close` request, as HTTP requires
+/// (clients such as `tc proxy-get` read the response to the end).
 async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
     let mut buf = Vec::new();
     loop {
@@ -1307,6 +1310,10 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.as_str())
         };
+        let close = header("connection").is_some_and(|v| {
+            v.split(',')
+                .any(|option| option.trim().eq_ignore_ascii_case("close"))
+        });
 
         if header("expect").is_some_and(|v| v.eq_ignore_ascii_case("100-continue")) {
             let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
@@ -1364,6 +1371,9 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
                       Content-Length: 0\r\n\r\n",
                 )
                 .await;
+            if close {
+                return;
+            }
             continue;
         }
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -1412,6 +1422,7 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
         );
         if stream.write_all(head.as_bytes()).await.is_err()
             || stream.write_all(cgi_body).await.is_err()
+            || close
         {
             return;
         }
