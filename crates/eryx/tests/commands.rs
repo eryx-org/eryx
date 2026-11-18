@@ -314,6 +314,38 @@ async fn a_pipeline_of_large_arguments_fails_the_spawn() {
     assert_eq!(out.stdout_utf8().unwrap(), "OK\n");
 }
 
+/// Empty arguments still take host memory, so they count against the
+/// limits too: 2^16 of them don't fit a 1 MiB budget (though they're under
+/// the 2 MiB per spawn), 2^17 are over the per-spawn limit, and 2^12 run.
+#[tokio::test]
+async fn empty_arguments_count_against_the_child_limits() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_child_host_bytes(1 << 20))
+        .build()
+        .unwrap();
+    let spawn = |doublings: u32| {
+        format!(
+            "s=,; i=0; while [ $i -lt {doublings} ]; do s=$s$s; i=$((i + 1)); done\n\
+             IFS=,; set -- $s; IFS=' '\ntc argv0 \"$@\"; echo \"$#=$?\""
+        )
+    };
+    // 126: refused; 2: it ran (and rejected its arguments).
+    for (doublings, status) in [(16, 126), (17, 126), (12, 2)] {
+        let out = sandbox.execute(&spawn(doublings)).await.unwrap();
+        let stdout = out.stdout_utf8().unwrap();
+        assert!(
+            stdout.ends_with(&format!("{}={status}\n", 1 << doublings)),
+            "{doublings}: {out:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+            status == 126,
+            "{doublings}: {out:?}"
+        );
+    }
+}
+
 /// A pool built from a shell builder keeps its registered commands.
 #[tokio::test]
 async fn pooled_sandboxes_keep_their_commands() {

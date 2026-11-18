@@ -338,7 +338,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
   children spawned but not yet finished and 2 MiB of arguments and
-  environment per spawn. Past a limit the spawn fails and the shell reports
+  environment per spawn. Each argument and variable counts its host
+  overhead as well as its text (24 bytes per string on 64-bit hosts). Past a limit the spawn fails and the shell reports
   `<command>: limit-exceeded`.
 - **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
   so pipeline stages run together and a full pipe makes its writer wait:

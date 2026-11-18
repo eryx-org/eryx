@@ -106,7 +106,8 @@ const CHILD_FUEL: u64 = 10_000_000_000;
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
-/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
+/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`),
+/// counting each string's header as well as its text.
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 /// How deep children may spawn children: the shell's are depth 1, so a
 /// command it runs may start commands three levels down (git running `git`
@@ -1011,8 +1012,17 @@ impl Spawner {
         };
         let mut argv = vec![cmd];
         argv.extend(args);
-        let args_bytes = argv.iter().map(String::len).sum::<usize>()
-            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        // What the host holds, not just the text: each string's header too,
+        // so many empty or short entries cost what they take.
+        let argv_bytes = argv
+            .iter()
+            .map(|a| a.len() + size_of::<String>())
+            .sum::<usize>();
+        let args_bytes = argv_bytes
+            + env
+                .iter()
+                .map(|(k, v)| k.len() + v.len() + 2 * size_of::<String>())
+                .sum::<usize>();
         let live = (args_bytes <= MAX_ARGS_BYTES)
             .then(|| LiveSlot::take(&self.budget.live))
             .flatten();
@@ -1041,6 +1051,10 @@ impl Spawner {
             bytes: 0,
         };
         args.charge(args_bytes as u64)?;
+        // A nested child's trace keeps a copy of its argv (see `NestedTrace`).
+        if self.traces.is_some() {
+            args.charge(argv_bytes as u64)?;
+        }
 
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
