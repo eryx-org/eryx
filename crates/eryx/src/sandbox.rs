@@ -387,9 +387,12 @@ impl Sandbox {
         // output can be scrubbed of the child proxies' passwords)
         let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
+            let manager = ConnectionManager::new(config.clone(), self.secrets.clone())
+                .map_err(ErrorKind::Initialization)?;
             // Children draw on the guest's budget.
-            let child_net = manager.child_network(self.executor.child_network().clone());
+            let child_net = manager
+                .child_network(self.executor.child_network().clone())
+                .map_err(ErrorKind::Initialization)?;
             let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
             (Some(tx), Some(handler), child_net)
         } else {

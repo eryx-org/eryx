@@ -795,10 +795,20 @@ impl ChildNet {
             None | Some(ChildNetwork::Inherit) => (own, &self.net),
             Some(ChildNetwork::None) => return Ok(None),
             Some(ChildNetwork::Narrow(config)) => {
-                let policy = self
-                    .narrowed
-                    .entry(name.to_owned())
-                    .or_insert_with(|| self.net.narrowed((**config).clone()));
+                let policy = match self.narrowed.entry(name.to_owned()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        // Checked at build and per execution already, so
+                        // this is only the policy's own guarantee.
+                        let narrowed = self.net.narrowed((**config).clone()).map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!("command {name}'s network: {e}"),
+                            )
+                        })?;
+                        entry.insert(narrowed)
+                    }
+                };
                 (Some(name.to_owned()), &*policy)
             }
         };

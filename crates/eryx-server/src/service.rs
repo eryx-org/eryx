@@ -1330,9 +1330,26 @@ async fn execute_with_session(
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
         let allowed_hosts = config.allowed_hosts().len();
         let max_connections = config.max_connections();
-        let manager = ConnectionManager::new(config, params.secrets.clone());
-        // The shell's children share the guest's connection and byte budget.
-        let child_net = manager.child_network(params.child_network.clone());
+        // Validated with the request, so this is only the policy's own
+        // guarantee; the handlers spawned above stop once their channels
+        // drop.
+        let net = ConnectionManager::new(config, params.secrets.clone()).and_then(|manager| {
+            // The shell's children share the guest's connection and byte budget.
+            let child_net = manager.child_network(params.child_network.clone())?;
+            Ok((manager, child_net))
+        });
+        let (manager, child_net) = match net {
+            Ok(net) => net,
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid network config");
+                return ExecuteResult {
+                    success: false,
+                    error: format!("invalid network config: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
+                    ..Default::default()
+                };
+            }
+        };
         tracing::info!(allowed_hosts, max_connections, "network handler started");
         let handler = tokio::spawn(async move {
             let result = run_net_handler(rx, manager).await;

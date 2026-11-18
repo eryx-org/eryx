@@ -543,7 +543,7 @@ mod tests {
     async fn close_all_connections_via_channel() {
         use crate::net::{ConnectionManager, NetConfig};
 
-        let manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new()).unwrap();
         let (tx, rx) = mpsc::channel::<NetRequest>(8);
 
         let handler = tokio::spawn(run_net_handler(rx, manager));

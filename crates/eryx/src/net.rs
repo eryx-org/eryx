@@ -546,7 +546,8 @@ impl NetConfig {
     /// must be one a request can match.
     ///
     /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
-    /// check when networking is enabled.
+    /// check when networking is enabled, and every network policy (e.g.
+    /// [`ConnectionManager::new`]) refuses a config that fails it.
     ///
     /// # Errors
     ///
@@ -1368,19 +1369,27 @@ impl ConnectionManager {
     }
 
     /// Create a new connection manager with the given config and secrets.
-    #[must_use]
-    pub fn new(config: NetConfig, secrets: HashMap<String, crate::secrets::SecretConfig>) -> Self {
-        Self {
-            budget: NetBudget::new(config.max_connections, config.max_bytes),
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`NetConfig::validate`] does, if `config` is invalid.
+    pub fn new(
+        config: NetConfig,
+        secrets: HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Result<Self, String> {
+        let budget = NetBudget::new(config.max_connections, config.max_bytes);
+        let policy = Arc::new(NetPolicy::new(config, secrets)?);
+        Ok(Self {
+            budget,
             permits: HashMap::new(),
-            policy: Arc::new(NetPolicy::new(config, secrets)),
+            policy,
             tcp_connections: HashMap::new(),
             tls_connections: HashMap::new(),
             next_handle: 1,
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
             read_states: HashMap::new(),
-        }
+        })
     }
 
     /// The network for this execution's child processes, if `network` gives
@@ -1389,8 +1398,12 @@ impl ConnectionManager {
     /// that the guest and its children together never hold more than
     /// [`NetConfig::max_connections`] connections or move more than
     /// [`NetConfig::max_bytes`] bytes.
-    #[must_use]
-    pub fn child_network(&self, network: ChildNetwork) -> Option<ChildNetPolicy> {
+    ///
+    /// # Errors
+    ///
+    /// Fails if a [`ChildNetwork::Narrow`] config is invalid (see
+    /// [`NetConfig::validate`]), as `"child network: …"`.
+    pub fn child_network(&self, network: ChildNetwork) -> Result<Option<ChildNetPolicy>, String> {
         ChildNetPolicy::new(Arc::clone(&self.policy), self.budget.clone(), network)
     }
 
@@ -2401,7 +2414,7 @@ mod tests {
     #[test]
     fn test_default_config_blocks_everything() {
         let config = NetConfig::default();
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         // Default is allow_all_hosts=false with empty allowed_hosts, so nothing is permitted.
         assert!(manager.policy.check_host("localhost").is_err());
@@ -2417,7 +2430,7 @@ mod tests {
         let config = NetConfig::default()
             .allow_host("*.example.com")
             .allow_host("api.github.com");
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         assert!(manager.policy.check_host("api.example.com").is_ok());
         assert!(manager.policy.check_host("api.github.com").is_ok());
@@ -2430,7 +2443,7 @@ mod tests {
             allow_all_hosts: true,
             ..NetConfig::default()
         };
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         // allow_all_hosts=true permits all non-blocked hosts.
         assert!(manager.policy.check_host("google.com").is_ok());
@@ -2443,7 +2456,7 @@ mod tests {
     #[test]
     fn test_permissive_config() {
         let config = NetConfig::permissive();
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         assert!(manager.policy.check_host("localhost").is_ok());
         assert!(manager.policy.check_host("127.0.0.1").is_ok());
@@ -2518,7 +2531,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Test substitution for allowed host
         let result = manager.policy.substitute_secrets_in_text(
@@ -2550,7 +2563,8 @@ mod tests {
         let manager = ConnectionManager::new(
             NetConfig::permissive(),
             HashMap::from([("KEY".into(), secret)]),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             manager
@@ -2645,7 +2659,7 @@ mod tests {
 
         let permissive = NetConfig::permissive();
         assert!(permissive.check_secret_hosts(&secret(vec![])).is_err());
-        let manager = ConnectionManager::new(permissive, secret(vec![]));
+        let manager = ConnectionManager::new(permissive, secret(vec![])).unwrap();
         assert!(
             manager
                 .policy
@@ -2671,7 +2685,7 @@ mod tests {
                 .check_secret_hosts(&secret(vec!["api.example.com".into()]))
                 .is_ok()
         );
-        let manager = ConnectionManager::new(allowlist, secret(vec![]));
+        let manager = ConnectionManager::new(allowlist, secret(vec![])).unwrap();
         assert_eq!(
             manager
                 .policy
@@ -2714,7 +2728,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // All of these unauthorized hosts must be rejected
         assert!(
@@ -2767,7 +2781,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // OpenAI key for OpenAI host: OK
         assert!(
@@ -2814,7 +2828,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         assert!(
             manager
@@ -2852,7 +2866,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Deceptive domains that look similar but shouldn't match
         assert!(
@@ -2900,7 +2914,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // IP address should NOT match hostname restriction
         assert!(
@@ -2932,7 +2946,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // DNS is case-insensitive, so these should all work
         assert!(
@@ -2964,7 +2978,7 @@ mod tests {
             },
         );
 
-        let manager = ConnectionManager::new(config, secrets);
+        let manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Text without any placeholder should pass through unchanged, for any host
         let result = manager.policy.substitute_secrets_in_text(
@@ -2981,7 +2995,7 @@ mod tests {
     fn test_tls_upgrade_preserves_host_mapping() {
         let config = NetConfig::permissive();
         let secrets = HashMap::new();
-        let mut manager = ConnectionManager::new(config, secrets);
+        let mut manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Simulate a TCP connection with host mapping and HTTP state
         let tcp_handle = 1_u32;
@@ -3026,7 +3040,7 @@ mod tests {
             },
         );
 
-        let mut manager = ConnectionManager::new(config, secrets);
+        let mut manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Simulate a connection to allowed host
         let handle = 1_u32;
@@ -3092,7 +3106,7 @@ mod tests {
             },
         );
 
-        let mut manager = ConnectionManager::new(config, secrets);
+        let mut manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Simulate: TCP connected to evil.com
         let tcp_handle = 1_u32;
@@ -3136,7 +3150,7 @@ mod tests {
             },
         );
 
-        let mut manager = ConnectionManager::new(config, secrets);
+        let mut manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Simulate a connection to UNAUTHORIZED host
         let handle = 1_u32;
@@ -3182,7 +3196,7 @@ mod tests {
             },
         );
 
-        let mut manager = ConnectionManager::new(config, secrets);
+        let mut manager = ConnectionManager::new(config, secrets).unwrap();
 
         // Allocate handles and insert fake per-connection state.
         let h1 = manager.alloc_handle();
@@ -3229,7 +3243,7 @@ mod tests {
     #[tokio::test]
     async fn stale_handles_are_invalid_after_close_all() {
         let config = NetConfig::permissive();
-        let mut manager = ConnectionManager::new(config, HashMap::new());
+        let mut manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         // Create a real connection and store it.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3262,7 +3276,7 @@ mod tests {
 
     #[test]
     fn close_all_on_empty_manager_is_noop() {
-        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new()).unwrap();
         let next_before = manager.next_handle;
 
         manager.close_all_connections();
@@ -3273,7 +3287,7 @@ mod tests {
 
     #[test]
     fn handle_counter_advances_after_close_all() {
-        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new());
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new()).unwrap();
         let h1 = manager.alloc_handle();
         let h2 = manager.alloc_handle();
 
@@ -3306,7 +3320,7 @@ mod tests {
 
     #[test]
     fn test_default_blocked_networks() {
-        let manager = ConnectionManager::new(NetConfig::default(), HashMap::new());
+        let manager = ConnectionManager::new(NetConfig::default(), HashMap::new()).unwrap();
         for blocked in [
             "127.0.0.1",
             "10.1.2.3",
@@ -3355,7 +3369,7 @@ mod tests {
     #[test]
     fn test_allowed_networks_override_blocked() {
         let config = NetConfig::default().allow_network("10.96.0.0/12".parse().unwrap());
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
         assert!(manager.policy.is_ip_allowed(ip("10.96.12.34")));
         assert!(manager.policy.is_ip_allowed(ip("::ffff:10.96.12.34")));
         assert!(!manager.policy.is_ip_allowed(ip("10.0.0.1")));
@@ -3369,7 +3383,7 @@ mod tests {
             blocked_networks: vec!["::ffff:8.8.8.0/120".parse().unwrap()],
             ..NetConfig::default()
         };
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
         assert!(!manager.policy.is_ip_allowed(ip("::ffff:8.8.8.8")));
         assert!(manager.policy.is_ip_allowed(ip("8.8.4.4")));
     }
@@ -3382,7 +3396,7 @@ mod tests {
             blocked_networks: vec!["10.0.0.0/8".parse().unwrap()],
             ..NetConfig::default()
         };
-        let manager = ConnectionManager::new(config, HashMap::new());
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
         assert!(!manager.policy.is_ip_allowed(ip("::10.0.0.1")));
         // Teredo stores the client address inverted: !10.0.0.1 = f5ff:fffe.
         assert!(!manager.policy.is_ip_allowed(ip("2001:0:1:2:3:4:f5ff:fffe")));
@@ -3393,7 +3407,7 @@ mod tests {
     #[test]
     fn test_allow_localhost_unblocks_loopback_networks_only() {
         let manager =
-            ConnectionManager::new(NetConfig::default().allow_localhost(), HashMap::new());
+            ConnectionManager::new(NetConfig::default().allow_localhost(), HashMap::new()).unwrap();
         assert!(manager.policy.is_ip_allowed(ip("127.0.0.1")));
         assert!(manager.policy.is_ip_allowed(ip("::1")));
         assert!(!manager.policy.is_ip_allowed(ip("10.0.0.1")));
@@ -3408,7 +3422,7 @@ mod tests {
             ..NetConfig::default()
         }
         .with_resolver(FixedResolver(vec![ip("169.254.169.254")]));
-        let mut manager = ConnectionManager::new(config, HashMap::new());
+        let mut manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         let err = manager
             .tcp_connect("public.example", 80, 0)
@@ -3432,7 +3446,7 @@ mod tests {
         }
         .allow_internal_host("assistant.example.com")
         .with_resolver(FixedResolver(vec![ip("127.0.0.1")]));
-        let mut manager = ConnectionManager::new(config, HashMap::new());
+        let mut manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         manager
             .tcp_connect("assistant.example.com", port, 0)
@@ -3461,7 +3475,8 @@ mod tests {
         let mut manager = ConnectionManager::new(
             NetConfig::permissive().allow_plaintext_secrets(true),
             secrets,
-        );
+        )
+        .unwrap();
         manager
             .connection_hosts
             .insert(1, "api.example.com".to_string());
@@ -3671,7 +3686,7 @@ mod tests {
             assert_eq!(m.process_write_data(1, &both).unwrap(), both);
         }
 
-        let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+        let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
         m.connection_hosts.insert(2, "www.github.com".into());
         let upgrade = b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\nUpgrade: websocket\r\n\r\n";
         assert!(m.process_write_data(2, upgrade).is_ok());
@@ -3740,7 +3755,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = NetConfig::permissive().with_max_bytes(64 << 20);
-        let mut m = ConnectionManager::new(config, HashMap::new());
+        let mut m = ConnectionManager::new(config, HashMap::new()).unwrap();
         // The peer never reads, so the write stalls once the socket buffers
         // are full.
         let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
@@ -3764,7 +3779,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut m =
-            ConnectionManager::new(NetConfig::permissive().with_max_bytes(4), HashMap::new());
+            ConnectionManager::new(NetConfig::permissive().with_max_bytes(4), HashMap::new())
+                .unwrap();
         let (handle, _server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
             listener.accept().await.unwrap().0
         });
@@ -3856,7 +3872,7 @@ mod tests {
             .block_host("pastebin.com")
             .block_host("*.internal.corp")
             .block_host("Evil.Example.");
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in [
             "pastebin.com",
             "pastebin.com.",
@@ -3872,7 +3888,7 @@ mod tests {
         let config = NetConfig::default()
             .allow_host("api.example.com")
             .allow_host("*.github.com");
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in ["api.example.com.", "API.github.com."] {
             assert!(m.policy.check_host(host).is_ok(), "{host} refused");
         }
@@ -3896,7 +3912,7 @@ mod tests {
             .allow_host("svc.internal")
             .with_internal_hosts(["svc.internal"])
             .with_resolver(Fixed);
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         assert!(m.policy.resolve_allowed("svc.internal.", 443).await.is_ok());
     }
 
@@ -3909,7 +3925,7 @@ mod tests {
             .block_host("10.*")
             .block_host("::1")
             .block_host("[fe80::1]");
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in [
             "127.0.0.1",
             "2130706433",
@@ -4008,7 +4024,7 @@ mod tests {
         let config = NetConfig::permissive()
             .block_host("*.internal.corp.")
             .block_host("api.*.com.");
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in [
             "db.internal.corp",
             "db.internal.corp.",
@@ -4028,7 +4044,7 @@ mod tests {
             .allow_host("other.internal")
             .with_internal_hosts(["svc.internal"])
             .with_resolver(Fixed);
-        let m = ConnectionManager::new(config, HashMap::new());
+        let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in ["other.internal", "other.internal.", "svc.internal.evil"] {
             assert!(m.policy.resolve_allowed(host, 443).await.is_err(), "{host}");
         }
@@ -4277,7 +4293,7 @@ mod tests {
     #[test]
     fn http_rules_see_every_request() {
         let new = || {
-            let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+            let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
             m.connection_hosts.insert(1, "api.github.com".into());
             m.connection_hosts.insert(2, "www.github.com".into());
             m
@@ -4356,7 +4372,7 @@ mod tests {
         // A rule can allow any method token.
         let config = NetConfig::permissive()
             .allow_http(HttpRule::new("dav.example.com").with_methods(["PROPFIND"]));
-        let mut m = ConnectionManager::new(config, HashMap::new());
+        let mut m = ConnectionManager::new(config, HashMap::new()).unwrap();
         m.connection_hosts.insert(1, "dav.example.com".into());
         let propfind = b"PROPFIND /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n";
         assert_eq!(m.process_write_data(1, propfind).unwrap(), propfind);
@@ -4381,7 +4397,7 @@ mod tests {
     /// never sent.
     #[test]
     fn http_rules_are_enforced_on_requests() {
-        let mut m = ConnectionManager::new(github_rules(), HashMap::new());
+        let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
         m.connection_hosts.insert(1, "api.github.com".into());
         m.connection_hosts.insert(2, "www.github.com".into());
 
@@ -4562,7 +4578,8 @@ mod tests {
                 .clone()
                 .allow_http(HttpRule::new("127.0.0.1").with_paths(["/public"])),
             base.policy.secrets.clone(),
-        );
+        )
+        .unwrap();
         let (handle, server) = tokio::join!(m.tcp_connect("127.0.0.1", port, 0), async {
             listener.accept().await.unwrap().0
         });
@@ -4867,10 +4884,8 @@ mod tests {
         assert!(host("echo.example.net").is_empty());
         // Nor on a connection whose requests don't get values substituted:
         // plain TCP without `allow_plaintext_secrets`.
-        let plain = Arc::new(NetPolicy::new(
-            NetConfig::permissive(),
-            m.policy.secrets.clone(),
-        ));
+        let plain =
+            Arc::new(NetPolicy::new(NetConfig::permissive(), m.policy.secrets.clone()).unwrap());
         assert!(
             plain
                 .request_framer("api.example.com", false)
