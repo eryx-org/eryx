@@ -303,6 +303,7 @@ export const RESERVED_CALLBACK_NAMES = Object.freeze({
     "echo",
     "elif",
     "else",
+    "env",
     "esac",
     "eval",
     "exec",
