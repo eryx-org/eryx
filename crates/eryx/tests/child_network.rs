@@ -208,6 +208,52 @@ async fn children_are_offline_by_default() {
     assert!(!out.contains("BEGIN CERTIFICATE"), "{out}");
 }
 
+/// A child without network is told so on its stderr when a name lookup or
+/// socket of its is refused, once per child, rather than only failing like a
+/// DNS error (#1080). Children that never try, or that have network, get
+/// nothing.
+#[tokio::test]
+async fn offline_children_are_told_why() {
+    const NOTICE: &str = "eryx: networking not enabled for";
+    let sandbox = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
+        .build()
+        .unwrap();
+    let out = run(&sandbox, "tc argv0; tc3 argv0").await;
+    assert!(!out.contains(NOTICE), "{out}");
+    // A lookup and a connect by address, over WASI 0.2 and 0.3.
+    for tc in ["tc", "tc3"] {
+        for addr in ["example.test:443", "127.0.0.1:443"] {
+            let out = run(&sandbox, &format!("{tc} connect {addr}")).await;
+            let notice = format!("{NOTICE} commands in this sandbox ({tc} has no network)\n");
+            assert_eq!(out.matches(&notice).count(), 1, "{out}");
+            assert!(out.contains("error:"), "{out}");
+        }
+    }
+
+    // A command whose network is taken away says so.
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd().with_network(ChildNetwork::None))
+        .build()
+        .unwrap();
+    let out = run(&sandbox, "ta connect example.test:443").await;
+    assert!(
+        out.contains("eryx: networking not enabled for this command (ta has no network)\n"),
+        "{out}"
+    );
+    // A child with network that's refused gets the policy's error only.
+    let out = run(
+        &sandbox,
+        &format!("tc connect 127.0.0.1:{port}; tc connect example.test:443; tc proxy-get http://evil.test:{port}/"),
+    )
+    .await;
+    assert!(out.contains(" 403 "), "{out}");
+    assert!(!out.contains(NOTICE), "{out}");
+}
+
 /// `with_child_network` needs the sandbox's network policy.
 #[test]
 fn child_network_needs_a_network() {
@@ -645,6 +691,41 @@ async fn nested_children_get_the_same_network() {
     assert!(!out.contains("connected"), "{out}");
     let out = run(&sandbox, "tc spawn tc hold 100").await;
     assert!(out.starts_with("held 32 error:"), "{out}");
+}
+
+/// A nested child's network is held within its parent's: a command with
+/// no network, or a narrower one, can't hand more to the commands it runs,
+/// though a sibling registered with the full network still has it.
+#[tokio::test]
+async fn nested_children_stay_within_their_parents_network() {
+    let (port, _) = upstream(None).await;
+    let elsewhere = NetConfig::default()
+        .allow_host("other.test")
+        .allow_internal_host("other.test")
+        .with_resolver(Localhost);
+    let sandbox = shell(network())
+        .with_command(
+            "off",
+            test_cmd().allow_spawn().with_network(ChildNetwork::None),
+        )
+        .with_command(
+            "narrow",
+            test_cmd()
+                .allow_spawn()
+                .with_network(ChildNetwork::Narrow(Box::new(elsewhere))),
+        )
+        .with_command("wide", test_cmd().allow_spawn())
+        .build()
+        .unwrap();
+    let get = format!("tc proxy-get http://api.test:{port}/x");
+    for parent in ["off", "narrow"] {
+        let out = run(&sandbox, &format!("{parent} spawn {get}")).await;
+        assert!(!out.contains(" 200 OK"), "{parent}: {out}");
+    }
+    let out = run(&sandbox, "off spawn tc env HTTP_PROXY").await;
+    assert!(!out.contains("http://"), "{out}");
+    let out = run(&sandbox, &format!("wide spawn {get}")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
 }
 
 /// The script's stdout and stderr under `options`, whether or not it failed.

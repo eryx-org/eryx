@@ -80,6 +80,32 @@ the shell has `grep` built in. Patterns are GNU basic regular expressions, as
 in grep (`a\|b`, `\(x\)`), and `-E` and `-F` work as usual. Callbacks are commands (see
 [Callbacks in the Shell](./callbacks.md#callbacks-in-the-shell)).
 
+`sh` and `bash` run a nested shell in the same guest: `bash -c 'CMD' [NAME
+[ARG]...]`, `sh FILE [ARG]...`, or commands from stdin (`echo 'echo hi' |
+bash`, `bash -s ARG`), with `-e`, `-u`, `-x`, `-o OPTION` and their `+`
+forms. A nested shell behaves like an external command. It sees only exported
+variables, its own file descriptors and the working directory. Nothing it
+changes (variables, functions, options, `cd`) comes back. Its exit status is
+the command's. It shares the sandbox's filesystem, commands and callbacks.
+Shells nest at most 16 deep; past that `sh`/`bash` exits 126.
+
+Any file is runnable (`./script.sh`, or a file in a `$PATH` directory). WASI
+has no execute bit. A file whose first line is `#!/bin/sh`, `#!/bin/bash`,
+`#!/usr/bin/env bash` (or `dash`) runs in a nested shell, with the line's one
+argument if it has one (`#!/bin/bash -e`). Any other `#!` line runs the
+sandbox's command of the interpreter's file name, with the script's path:
+`#!/usr/bin/env python3` runs `python3 ./script`. A command that isn't there
+exits 127. A file without `#!` runs as an `sh` script. A path always
+names a file, never a command: `./ls` runs a file named `ls`, not the `ls`
+command. `env -S` in a `#!` line isn't supported.
+
+`env` is a builtin, because uutils' `env` can't run commands on WASI. `env`
+alone prints the exported environment. `env [-i] [-u NAME]... [NAME=VALUE]...
+COMMAND [ARG]...` runs `COMMAND` with those variables added (`NAME=VALUE`),
+removed (`-u`), or as the only ones (`-i`). The command is looked up like any
+other (builtins, commands, `sh`/`bash`, scripts) except functions. A command
+that isn't there exits 127, and any other option exits 125.
+
 ### Timers in JavaScript
 
 JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`
@@ -94,11 +120,13 @@ timeout.
   fails the execute (`ErrorKind::Timeout`). A timed-out execute discards its
   instance, so a session's next execute starts fresh (`state_was_reset`), as
   after running out of fuel.
-- **It waits for callbacks started after the script's synchronous run**: in a
-  promise callback (`Promise.resolve().then(() => tool())`), after an `await`,
-  or in a timer. A callback the script's top-level code starts synchronously
-  and never awaits (`tool(); console.log("done")`) is released when the
-  script ends, as in Python.
+- **It waits for every callback in flight**, awaited or not, wherever it
+  started: at top level, in a promise callback, after an `await`, or in a
+  timer. So a forgotten `await` (`tool(); console.log("done")`) still runs
+  the callback to the end, and if it fails, the execute fails as an unhandled
+  rejection (below). The wait counts towards the execution timeout. Python
+  differs: a coroutine that's never awaited never runs, and tasks still
+  pending when the script ends are dropped.
 - **`timer.unref()`** lets the execute finish without that timer, and an
   unref'd timer alone (like `AbortSignal.timeout()`'s) doesn't keep a script
   that never settles waiting. Timers still pending when the execute finishes
@@ -107,6 +135,13 @@ timeout.
   finished callbacks in, so timers that are always due (a `setImmediate`
   loop) don't starve callback results.
 - An exception thrown in a timer callback fails the execute.
+- **A promise rejection still unhandled when the event loop drains fails the
+  execute** as a script failure, with `Uncaught (in promise) Error: ...` and
+  its stack as the message (the first one, with a count of any others). So
+  does an async function called without `await` that throws. A rejection
+  that gets a handler later, in a later microtask or timer, doesn't: this is
+  more lenient than Node, which fails at the end of the tick. A rejection
+  left over from a failed execute never fails a session's next one.
 - `fetch` is synchronous inside the guest: it blocks until the response has
   been read, so timers don't fire during a fetch, only after it returns.
 
@@ -169,7 +204,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   runs uutils coreutils (`cat`, `head`, `tail`, `ls`, `wc`, `cp`, `mv`, `rm`,
   `mkdir`, `touch`, `sort`, `seq`, `cut`, `tr`, `uniq`, `basename`, `dirname`,
   `tee`, `sleep`, `paste`, `comm`, `date`, `base64`, `realpath`, `readlink`,
-  `rmdir`; `eryx::embedded::COREUTILS_TOOLS`). A registered command replaces
+  `rmdir`, `md5sum`, `sha1sum`, `sha256sum`, `sha512sum`, `b2sum`,
+  `printenv`; `eryx::embedded::COREUTILS_TOOLS`). A registered command replaces
   the tool of the same name, and `without_embedded_commands()` leaves them out.
 - **Python:** pass commands by name, e.g.
   `eryx.Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`
@@ -181,9 +217,35 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command or one precompiled by `eryx-precompile compile` (`.cwasm`). A
   `.wasm` can be pinned to its digest (see
   [Commands from a registry](./grpc-server.md#commands-from-a-registry)).
-  `--no-shell-coreutils` leaves the embedded coreutils out, and
+  `--no-shell-embedded-commands` leaves the embedded coreutils out,
+  `--shell-python` adds `python`/`python3` (see **Python as a command**), and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**). An empty `ERYX_SHELL_COMMANDS` means no extra commands.
+- **Python as a command:** `Command::guest(Language::Python)` (Rust, with
+  `embedded`; `Command::guest_from_precompiled_file` for your own runtime),
+  `eryx.Command.python()` (pyeryx) and `--shell-python` (eryx-server) run
+  Python as a command. It isn't registered by default; register it as
+  `python` and `python3`:
+
+  ```rust,ignore
+  let sandbox = Sandbox::embedded()
+      .shell()
+      .with_commands(["python", "python3"], Command::guest(Language::Python)?)
+      .build()?;
+  sandbox.execute("seq 3 | python3 -c 'import sys; print(sum(map(int, sys.stdin)))'").await?;
+  ```
+
+  It takes `-c CODE`, `-m MODULE`, a script, `-` or no argument (the program
+  from stdin), `-V`, and ignores `-u`, `-B`, `-I`, `-E`, `-s` and `-q`;
+  anything else exits 2. `sys.exit(n)` is its exit status, and an uncaught
+  exception prints its traceback and exits 1. Each run is a fresh
+  interpreter, with the embedded standard library, on the shell's files
+  (`/tmp` and volumes), environment, working directory and stdio. It burns
+  the execution's fuel, stops at its timeout, and its memory (about 17 MB
+  per run, more as it allocates) counts against the children's shared
+  256 MiB. It gets no callbacks and no network (yet), so a credential can't
+  be for it. A script's top-level `asyncio.run(main())` works as in
+  `execute`.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
   download on first use; `coreutils: false` leaves it out), and `commands`
   adds others by the URL of their `jco transpile --instantiation async`
@@ -199,9 +261,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   The guest sees only those, and the others exit 127 as if not installed. An
   empty list allows none, unset allows all, and unknown names are ignored. It
   lasts one execution: a session's next call without it gets every command
-  back. The shell's `grep` builtin counts as a command here (allow `grep` to
-  keep it): left out, it fails as not installed when run, though `type grep`
-  and `command -v grep` still report a builtin. Other builtins and callbacks
+  back. The shell's `grep` builtin and its nested `sh` and `bash` count as
+  commands here (allow `grep`, `sh` or `bash` to keep them): left out, they
+  fail as not installed when run, though `type grep` and `command -v grep`
+  still report a builtin. Other builtins and callbacks
   aren't commands and keep working. In a
   session, a command an earlier call allowed still shows in the shell's
   `hash` table, but running it is refused.
@@ -248,7 +311,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
   nothing else of the host. Files a child writes are the shell's, and last as
   long as the shell's own.
-- **Network:** none by default. With the sandbox's network, children can
+- **Network:** none by default. A child without network that tries to
+  resolve a name or open a socket gets `eryx: networking not enabled for
+  commands in this sandbox (curl has no network)` on its stderr (`for this
+  command` when only its command's network is taken away), once, before
+  its own error. With the sandbox's network, children can
   get some through a proxy on the host, and never more than the sandbox's
   policy allows: in Rust `with_child_network(ChildNetwork::Inherit)` (that
   policy) or `ChildNetwork::Narrow(config)` (only what both allow); in
@@ -259,7 +326,10 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command can have less from registration on, with
   `Command::with_network(ChildNetwork::None | Inherit | Narrow(config))`
   (the same narrowing, in every execution and session call); an execution's
-  `CommandOptions::with_network` replaces it for that execution. `build`
+  `CommandOptions::with_network` replaces it for that execution. A command
+  run by another (`allow_spawn`) gets only what both its own network and
+  its caller's allow, so narrowing a command holds everything it runs too.
+  `build`
   fails if a command is registered with network when the sandbox gives
   children none, or with an invalid narrowing config. Children get `HTTPS_PROXY`/`HTTP_PROXY`
   and the proxy's CA at `/etc/ssl/certs/ca-certificates.crt`, and see
@@ -331,14 +401,16 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).
   The running children share 256 MiB of memory, outside `max_memory_bytes`;
-  a child that can't grow fails like one out of memory. Children run on an
+  a child that can't grow fails like one out of memory. A child holds at
+  most 16,384 resource handles (open files, streams, sockets) at once. Children run on an
   engine of their own that allocates on demand, so they take none of the
   pooling allocator's slots (`ERYX_POOL_INSTANCES`).
   The host memory children's arguments and environment hold is capped per
   execution by
   `ResourceLimits::max_child_host_bytes` (default 64 MiB), with at most 64
   children spawned but not yet finished and 2 MiB of arguments and
-  environment per spawn. Past a limit the spawn fails and the shell reports
+  environment per spawn. Each argument and variable counts its host
+  overhead as well as its text (24 bytes per string on 64-bit hosts). Past a limit the spawn fails and the shell reports
   `<command>: limit-exceeded`.
 - **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
   so pipeline stages run together and a full pipe makes its writer wait:

@@ -15,13 +15,17 @@
 //! - `snapshot-state` is brush's own serde form of the `Shell`, after a line
 //!   naming that format; restoring refuses any other format.
 //! - Anything that isn't a builtin, function or callback is spawned through
-//!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils).
+//!   `eryx:process` (host-registered WASI commands, e.g. uutils coreutils),
+//!   except `sh` and `bash`, which run as a nested shell in this guest (see
+//!   [`subshell`]). Any other path is a script, run by its `#!` interpreter.
 
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
 
 mod call;
+mod env;
 mod grep;
 mod input;
+mod subshell;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -189,6 +193,9 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("invoke", builtins::Registration::of::<InvokeCommand>());
+    shell
+        .builtins_mut()
+        .register("env", builtins::Registration::of::<env::EnvCommand>());
     // The host lists `grep` when this execution's allowed commands include
     // it (or there's no allow-list), so it can be narrowed like a command.
     let commands = eryx::process::process::list_commands();
@@ -383,59 +390,199 @@ impl Guest for Sandbox {
     async fn set_result_variable(name: String) {
         *lock(&RESULT_VAR) = name;
     }
+
+    async fn run_command(args: Vec<String>, _env: Vec<(String, String)>, _cwd: String) -> i32 {
+        // ponytail: stub until the nested-shell argument parser (#831 PR 1)
+        // lands; `sh`/`bash` as host commands then go through it.
+        let name = args.first().map_or("sh", String::as_str);
+        eprintln!("{name}: running the shell as a command is not supported yet");
+        127
+    }
 }
 
 export!(Sandbox);
 
 /// Launches external commands as eryx child components, streaming the
-/// shell's file descriptors to and from them.
+/// shell's file descriptors to and from them, and `sh`/`bash` as nested
+/// shells.
 #[derive(Clone, Default)]
-struct EryxLauncher;
+struct EryxLauncher {
+    /// How many shells deep the launching shell is; 0 for the top one.
+    depth: usize,
+}
+
+impl EryxLauncher {
+    /// Run `name` with `args`: a nested shell for `sh`/`bash`, otherwise
+    /// the host command of that name.
+    fn run(
+        &self,
+        name: &str,
+        args: Vec<String>,
+        request: LaunchRequest,
+    ) -> std::io::Result<ChildProcess> {
+        if !subshell::NAMES.contains(&name) {
+            return spawn_child(name, &args, request);
+        }
+        // `sh`/`bash` are only in the command table when this execution
+        // allows them; `hash -p` or a shebang could reach them anyway, so
+        // check again.
+        if !eryx::process::process::list_commands()
+            .iter()
+            .any(|c| c == name)
+        {
+            return Err(std::io::ErrorKind::NotFound.into());
+        }
+        let fds = request
+            .open_files
+            .iter_fds()
+            .map(|(fd, file)| (fd, file.clone()))
+            .collect();
+        let name = name.to_owned();
+        let depth = self.depth;
+        let task = tokio::task::spawn_local(async move {
+            subshell::run_shell(&name, &args, &request.env, &request.working_dir, fds, depth).await
+        });
+        Ok(ChildProcess::from_future(async move {
+            Ok(ExecutionResult::new(
+                task.await.map_err(std::io::Error::other)?,
+            ))
+        }))
+    }
+
+    /// Run the file `request.program` as a script. WASI has no exec bit, so
+    /// any regular file is runnable, as brush already treats it: a `#!`
+    /// line names its interpreter, and without one it's an `sh` script, as
+    /// bash runs a file `execve` refuses.
+    fn run_script(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
+        let path = request.working_dir.join(&request.program);
+        if std::fs::metadata(&path)?.is_dir() {
+            return Err(std::io::ErrorKind::IsADirectory.into());
+        }
+        let script = request.program.to_string_lossy().into_owned();
+        let (name, mut args) = match shebang(&path)? {
+            // Run as a nested shell, whichever shell it names.
+            Some((name, arg)) if matches!(name.as_str(), "sh" | "bash" | "dash") => {
+                let name = if name == "bash" { "bash" } else { "sh" };
+                (name.to_owned(), arg.into_iter().collect::<Vec<_>>())
+            }
+            Some((name, arg)) => (name, arg.into_iter().collect()),
+            None => ("sh".to_owned(), vec![]),
+        };
+        args.push(script);
+        args.extend(request.args.iter().cloned());
+        let stderr = request.open_files.try_fd(OpenFiles::STDERR_FD).cloned();
+        match self.run(&name, args, request) {
+            // Name the missing interpreter, not the script, which is there.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(mut stderr) = stderr {
+                    let _ = writeln!(stderr, "{name}: command not found");
+                }
+                Ok(ChildProcess::from_future(std::future::ready(Ok(
+                    ExecutionResult::new(127),
+                ))))
+            }
+            other => other,
+        }
+    }
+}
+
+/// The interpreter a script's `#!` line names, by its file name, and the
+/// one argument the line may give it: `#!/bin/bash -e` is `bash` and `-e`,
+/// and `#!/usr/bin/env python3` is `python3`. `None` without a `#!` line.
+fn shebang(path: &std::path::Path) -> std::io::Result<Option<(String, Option<String>)>> {
+    use std::io::Read as _;
+    // As Linux, only the start of the first line counts.
+    let mut head = Vec::with_capacity(256);
+    std::fs::File::open(path)?
+        .take(256)
+        .read_to_end(&mut head)?;
+    Ok(parse_shebang(&head))
+}
+
+fn parse_shebang(head: &[u8]) -> Option<(String, Option<String>)> {
+    let line = head.strip_prefix(b"#!")?;
+    let line = line.split(|&b| b == b'\n').next().unwrap_or(line);
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim();
+    let (interpreter, arg) = match line.split_once([' ', '\t']) {
+        Some((interpreter, arg)) => (interpreter, Some(arg.trim())),
+        None => (line, None),
+    };
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
+    match (name(interpreter).as_str(), arg) {
+        // `env NAME`: the name is the command. `env -S` (several
+        // arguments) isn't supported.
+        ("env", Some(arg)) => {
+            let (command, rest) = match arg.split_once([' ', '\t']) {
+                Some((command, rest)) => (command, Some(rest.trim().to_owned())),
+                None => (arg, None),
+            };
+            Some((name(command), rest))
+        }
+        ("", _) => None,
+        (interpreter, arg) => Some((interpreter.to_owned(), arg.map(str::to_owned))),
+    }
+}
 
 impl ProcessLauncher for EryxLauncher {
     fn spawn(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
-        use eryx::process::process::{Child, ProcessError, Spawned};
-        let name = request
-            .program
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&request.argv0)
-            .to_owned();
-        let cwd = request.working_dir.to_string_lossy().into_owned();
-        let (stdin_tx, stdin_rx) = wit_stream::new::<u8>();
-        let Spawned {
-            child,
-            stdout,
-            stderr,
-        } = match Child::spawn(&name, &request.args, &request.env, &cwd, stdin_rx) {
-            Ok(spawned) => spawned,
-            Err(ProcessError::CommandNotFound) => return Err(std::io::ErrorKind::NotFound.into()),
-            Err(e) => return Err(std::io::Error::other(format!("{name}: {}", e.name()))),
-        };
-        let mut files = request.open_files;
-        // The pumps and the wait run as tasks of their own, concurrently with
-        // each other and the rest of the pipeline.
-        let feed = tokio::task::spawn_local(feed(files.remove_fd(OpenFiles::STDIN_FD), stdin_tx));
-        let out = tokio::task::spawn_local(drain(stdout, files.remove_fd(OpenFiles::STDOUT_FD)));
-        let err = tokio::task::spawn_local(drain(stderr, files.remove_fd(OpenFiles::STDERR_FD)));
-        let wait = tokio::task::spawn_local(async move { child.wait().await });
-        Ok(ChildProcess::from_future(async move {
-            let code = match wait.await.map_err(std::io::Error::other)? {
-                Ok(code) => u8::try_from(code & 0xff).unwrap_or(1),
-                // It crashed (e.g. trapped, or failed to grow its memory):
-                // a failed command, as a process killed by SIGABRT would be.
-                Err(e) => {
-                    eprintln!("{name}: {}", e.name());
-                    134
-                }
-            };
-            // Its stdin is no use once it has exited.
-            feed.abort();
-            out.await.map_err(std::io::Error::other)??;
-            err.await.map_err(std::io::Error::other)??;
-            Ok(ExecutionResult::new(code))
-        }))
+        // Host commands, and `sh`/`bash`, are in the command table under
+        // COMMAND_DIR. Any other path is a file, never a host command by its
+        // file name: `./ls` is a script, not the host's `ls`.
+        match request.program.strip_prefix(COMMAND_DIR) {
+            Ok(name) => {
+                let name = name.to_string_lossy().into_owned();
+                let args = request.args.clone();
+                self.run(&name, args, request)
+            }
+            Err(_) => self.run_script(request),
+        }
     }
+}
+
+/// Spawn the host command `name` with `args` as an eryx child component,
+/// streaming `request`'s file descriptors to and from it.
+fn spawn_child(
+    name: &str,
+    args: &[String],
+    request: LaunchRequest,
+) -> std::io::Result<ChildProcess> {
+    use eryx::process::process::{Child, ProcessError, Spawned};
+    let name = name.to_owned();
+    let cwd = request.working_dir.to_string_lossy().into_owned();
+    let (stdin_tx, stdin_rx) = wit_stream::new::<u8>();
+    let Spawned {
+        child,
+        stdout,
+        stderr,
+    } = match Child::spawn(&name, args, &request.env, &cwd, stdin_rx) {
+        Ok(spawned) => spawned,
+        Err(ProcessError::CommandNotFound) => return Err(std::io::ErrorKind::NotFound.into()),
+        Err(e) => return Err(std::io::Error::other(format!("{name}: {}", e.name()))),
+    };
+    let mut files = request.open_files;
+    // The pumps and the wait run as tasks of their own, concurrently with
+    // each other and the rest of the pipeline.
+    let feed = tokio::task::spawn_local(feed(files.remove_fd(OpenFiles::STDIN_FD), stdin_tx));
+    let out = tokio::task::spawn_local(drain(stdout, files.remove_fd(OpenFiles::STDOUT_FD)));
+    let err = tokio::task::spawn_local(drain(stderr, files.remove_fd(OpenFiles::STDERR_FD)));
+    let wait = tokio::task::spawn_local(async move { child.wait().await });
+    Ok(ChildProcess::from_future(async move {
+        let code = match wait.await.map_err(std::io::Error::other)? {
+            Ok(code) => u8::try_from(code & 0xff).unwrap_or(1),
+            // It crashed (e.g. trapped, or failed to grow its memory):
+            // a failed command, as a process killed by SIGABRT would be.
+            Err(e) => {
+                eprintln!("{name}: {}", e.name());
+                134
+            }
+        };
+        // Its stdin is no use once it has exited.
+        feed.abort();
+        out.await.map_err(std::io::Error::other)??;
+        err.await.map_err(std::io::Error::other)??;
+        Ok(ExecutionResult::new(code))
+    }))
 }
 
 /// Copy `file` into a child's stdin until either ends.
@@ -641,11 +788,24 @@ mod tests {
     /// words (#962), from its own copy of the list; this keeps it in step
     /// with what the guest registers.
     #[test]
+    fn shebangs_name_the_interpreter() {
+        let parse = |line: &str| super::parse_shebang(line.as_bytes());
+        let some = |name: &str, arg: Option<&str>| Some((name.to_owned(), arg.map(str::to_owned)));
+        assert_eq!(parse("#!/bin/sh\necho"), some("sh", None));
+        assert_eq!(parse("#! /bin/bash -e \n"), some("bash", Some("-e")));
+        assert_eq!(parse("#!/usr/bin/env python3\n"), some("python3", None));
+        assert_eq!(parse("#!/usr/bin/env bash -x"), some("bash", Some("-x")));
+        assert_eq!(parse("#!/usr/bin/env\n"), some("env", None));
+        assert_eq!(parse("#!\n"), None);
+        assert_eq!(parse("echo hi\n"), None);
+    }
+
+    #[test]
     fn builtins_match_the_host_list() {
         let mut builtins: Vec<String> =
             brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
                 .into_keys()
-                .chain(["invoke".to_string(), "grep".to_string()])
+                .chain(["invoke", "grep", "env", "sh", "bash"].map(String::from))
                 .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
                 .collect();
         builtins.sort();

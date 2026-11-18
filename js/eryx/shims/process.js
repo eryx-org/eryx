@@ -27,7 +27,8 @@ import { insecureSeed, random } from "#preview2/random";
 export const COREUTILS_TOOLS = Object.freeze([
   "cat", "head", "tail", "ls", "wc", "cp", "mv", "rm", "mkdir", "touch", "sort", "seq", "cut",
   "tr", "uniq", "basename", "dirname", "tee", "sleep", "paste", "comm", "date", "base64",
-  "realpath", "readlink", "rmdir",
+  "realpath", "readlink", "rmdir", "md5sum", "sha1sum", "sha256sum", "sha512sum", "b2sum",
+  "printenv",
 ]);
 
 /** Most bytes a child may write to stdout, and to stderr, as the Rust host's per-stream cap. */
@@ -256,9 +257,9 @@ export function createProcessHost(fileTree, commands) {
     }
   }
 
-  // The shell's own `grep` builtin runs only when it's listed; with no
-  // allow-list here, it always is.
-  const listCommands = () => [...commands.keys(), "grep"];
+  // The shell's own `grep` builtin and nested `sh`/`bash` run only when
+  // they're listed; with no allow-list here, they always are.
+  const listCommands = () => [...commands.keys(), "grep", "sh", "bash"];
   return { Child, listCommands, startExecution };
 }
 

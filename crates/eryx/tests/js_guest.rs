@@ -316,6 +316,125 @@ async fn awaiting_a_promise_that_never_settles_is_an_error() {
     assert!(err.to_string().contains("never completed"), "{err}");
 }
 
+fn script_failure(err: &eryx::Error) -> (&str, &[u8]) {
+    let ErrorKind::ScriptFailed {
+        message,
+        exit_code: None,
+        stdout,
+        ..
+    } = err.kind()
+    else {
+        panic!("expected a script failure, got {err:?}");
+    };
+    (message, stdout)
+}
+
+/// A rejection still unhandled when the event loop drains fails the
+/// execute (#1079), as an uncaught error does, keeping the stdout before it.
+#[tokio::test]
+async fn unhandled_rejections_are_script_failures() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    for (code, expected) in [
+        (
+            "Promise.reject(new Error('never handled')); console.log('done')",
+            "Uncaught (in promise) Error: never handled\n",
+        ),
+        // A forgotten `await` on an async function that throws.
+        (
+            "async function f() { throw new TypeError('not awaited'); }
+             f(); console.log('done')",
+            "Uncaught (in promise) TypeError: not awaited\n",
+        ),
+        // Rejected in a timer, after the script's own code finished.
+        (
+            "setTimeout(() => Promise.reject(new Error('late')), 5); console.log('done')",
+            "Uncaught (in promise) Error: late\n",
+        ),
+        // Only the first is reported, with a count of the rest.
+        (
+            "Promise.reject(42); Promise.reject(new Error('second')); console.log('done')",
+            "Uncaught (in promise) 42\n(1 more unhandled promise rejections)",
+        ),
+    ] {
+        let err = sandbox.execute(code).await.unwrap_err();
+        let (msg, stdout) = script_failure(&err);
+        assert!(msg.starts_with(expected), "{code}: {msg}");
+        assert_eq!(stdout, b"done\n", "{code}");
+    }
+    // An Error's stack comes with it, as for an uncaught throw.
+    let err = sandbox
+        .execute("Promise.reject(new Error('x'))")
+        .await
+        .unwrap_err();
+    assert!(script_failure(&err).0.contains("    at "), "{err}");
+}
+
+/// A failed `require` throws synchronously: the import promise under it
+/// isn't left behind as an unhandled rejection.
+#[tokio::test]
+async fn a_caught_failed_require_passes() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(
+            "let found = true; try { require('nope') } catch { found = false } console.log(found)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "false\n");
+}
+
+/// A rejection that gets a handler before the loop drains, in a later
+/// microtask or a later tick, isn't reported.
+#[tokio::test]
+async fn rejections_handled_later_pass() {
+    let Some(builder) = js_sandbox() else { return };
+    let sandbox = builder.build().unwrap();
+
+    let out = sandbox
+        .execute(
+            "const p = Promise.reject(new Error('handled later'));
+             await new Promise((r) => setTimeout(r, 20));
+             p.catch((e) => console.log('caught:', e.message));
+             const q = Promise.reject(new Error('next microtask'));
+             await null;
+             try { await q } catch (e) { console.log('caught:', e.message) }",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "caught: handled later\ncaught: next microtask\n"
+    );
+}
+
+/// An unhandled rejection fails only the execute it happened in, and
+/// handling it in a later execute doesn't disturb that one.
+#[tokio::test]
+async fn unhandled_rejections_do_not_leak_into_the_next_execute() {
+    let Some(mut session) = js_session().await else {
+        return;
+    };
+
+    let err = session
+        .execute("var p = Promise.reject(new Error('first'))")
+        .run()
+        .await
+        .unwrap_err();
+    assert!(script_failure(&err).0.contains("first"), "{err}");
+    let out = session.execute("console.log('next')").run().await.unwrap();
+    assert_eq!(out.stdout, b"next\n");
+    let out = session
+        .execute("await p.catch((e) => console.log('caught:', e.message))")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"caught: first\n");
+}
+
 #[tokio::test]
 async fn session_state_persists_across_executes() {
     let Some(mut session) = js_session().await else {
@@ -482,17 +601,21 @@ async fn suspending_callback_halts_the_guest() {
         .build()
         .unwrap();
 
-    let outcome = sandbox
-        .execute_with_journal("try { await approve() } catch {} await marker()", None)
-        .await;
+    // Awaited, or never awaited: the execute waits for it either way.
+    for code in [
+        "try { await approve() } catch {} await marker()",
+        "approve(); console.log('script end')",
+    ] {
+        let outcome = sandbox.execute_with_journal(code, None).await;
 
-    assert_eq!(marker_calls.load(Ordering::SeqCst), 0);
-    let suspended = outcome.suspended.expect("execution should suspend");
-    assert_eq!(suspended.name, "approve");
-    assert!(matches!(
-        outcome.result.unwrap_err().kind(),
-        ErrorKind::Suspended(_)
-    ));
+        assert_eq!(marker_calls.load(Ordering::SeqCst), 0, "{code}");
+        let suspended = outcome.suspended.expect("execution should suspend");
+        assert_eq!(suspended.name, "approve");
+        assert!(
+            matches!(outcome.result.unwrap_err().kind(), ErrorKind::Suspended(_)),
+            "{code}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -909,16 +1032,15 @@ async fn callbacks_report_trace_events() {
     assert_eq!(contexts[1], None);
 }
 
-/// An `invoke` still in flight when the script ends (here never awaited) is
-/// cancelled and released by the guest: the execute returns, the session's
-/// next execute (and callback) works, and, as in the CPython guest, the host
-/// still runs the callback to the end, exactly once, and journals it, so a
-/// replay serves it from the journal.
+/// An `invoke` the script never awaits still keeps the execute running, as
+/// pending work keeps a Node process alive (#1079): its result arrives,
+/// the session's next execute (and callback) works, the host runs it
+/// exactly once and journals it, and a replay serves it from the journal.
 #[tokio::test]
-async fn abandoned_invokes_are_released() {
+async fn unawaited_invokes_finish_before_the_execute() {
     use eryx::Session as _;
 
-    const NEVER_AWAITED: &str = "slow(); console.log('script end')";
+    const NEVER_AWAITED: &str = "slow().then(console.log); console.log('script end')";
     const HANG: Duration = Duration::from_secs(8);
     let slow = || {
         let mut slow = TestCallback::new("slow", |_| Ok(json!("slept")));
@@ -934,7 +1056,7 @@ async fn abandoned_invokes_are_released() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(out.stdout, b"script end\n");
+        assert_eq!(out.stdout, b"script end\nslept\n");
         let out = tokio::time::timeout(HANG, session.execute("console.log(await slow())"))
             .await
             .unwrap()
@@ -952,7 +1074,7 @@ async fn abandoned_invokes_are_released() {
     let first = tokio::time::timeout(HANG, sandbox.execute_with_journal(NEVER_AWAITED, None))
         .await
         .unwrap();
-    first.result.unwrap();
+    assert_eq!(first.result.unwrap().stdout, b"script end\nslept\n");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         first.journal.entries.len(),
@@ -966,13 +1088,58 @@ async fn abandoned_invokes_are_released() {
     )
     .await
     .unwrap();
-    second.result.unwrap();
+    assert_eq!(second.result.unwrap().stdout, b"script end\nslept\n");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
         "the replay re-ran the callback"
     );
     assert_eq!(second.replayed_callbacks, 1);
+}
+
+/// A callback the script forgot to `await` that fails fails the execute,
+/// as an unhandled rejection (#1079), after the output before it.
+#[tokio::test]
+async fn an_unawaited_failing_callback_fails_the_execute() {
+    let Some(builder) = js_sandbox() else { return };
+    let mut fail = TestCallback::new("fail", |_| {
+        Err(CallbackError::ExecutionFailed("nope".to_string()))
+    });
+    fail.delay_ms = 50;
+    let sandbox = builder.with_callback(fail).build().unwrap();
+
+    let err = sandbox
+        .execute("fail(); console.log('script end')")
+        .await
+        .unwrap_err();
+    let (msg, stdout) = script_failure(&err);
+    assert!(msg.starts_with("Uncaught (in promise) Error: "), "{msg}");
+    assert!(msg.contains("nope"), "{msg}");
+    assert_eq!(stdout, b"script end\n");
+}
+
+/// Waiting for an un-awaited callback still ends at the execution timeout:
+/// without it, this would succeed once the callback returns. (The host
+/// still lets the callback run on, up to the callback timeout, before
+/// `execute` returns, as for an awaited one.)
+#[tokio::test]
+async fn an_unawaited_callback_respects_the_timeout() {
+    let Some(builder) = js_sandbox() else { return };
+    let mut slow = TestCallback::new("slow", |_| Ok(json!("slept")));
+    slow.delay_ms = 2_000;
+    let sandbox = builder
+        .with_callback(slow)
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+
+    let err = sandbox
+        .execute("slow(); console.log('script end')")
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
 }
 
 /// Callback replay matches calls on their arguments' text, which the guest

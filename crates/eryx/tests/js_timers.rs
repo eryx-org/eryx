@@ -343,16 +343,19 @@ async fn a_timed_out_session_starts_again() {
     }
 }
 
-/// Which invokes the execute waits for: any started after the script's
-/// synchronous run (in a promise callback, after an `await`, in a timer),
-/// but not one its top-level code started and never awaited.
+/// The execute waits for every invoke in flight, wherever it was started:
+/// at top level and never awaited (#1079), in a promise callback, after an
+/// `await`, or in a timer. An unref'd timer alone doesn't add to the wait.
 #[tokio::test]
 async fn which_invokes_keep_the_execute_running() {
     for (code, expected) in [
-        ("slow().then(console.log); console.log('end')", "end\n"),
+        (
+            "slow().then(console.log); console.log('end')",
+            "end\nslept\n",
+        ),
         (
             "AbortSignal.timeout(10000); slow().then(console.log); console.log('end')",
-            "end\n",
+            "end\nslept\n",
         ),
         (
             "Promise.resolve().then(() => slow().then(console.log))",

@@ -195,11 +195,11 @@ struct Args {
     /// or 0.3 command component or a WASI preview 1 command module (`.wasm`),
     /// or one precompiled by this eryx version's `eryx-precompile compile`
     /// (`.cwasm`, trusted like --runtime-cwasm). A name overrides the embedded
-    /// coreutils tool of the same name.
+    /// coreutils tool of the same name. A `.wasm` is compiled once into
+    /// eryx's cache directory, keyed by its content, so a restart reuses it.
     ///
     /// `@sha256:<hex>` pins a `.wasm` to that digest: startup fails if the
-    /// file differs, and the command is compiled once into eryx's cache
-    /// directory. In the environment, separate entries with `;`; empty
+    /// file differs. In the environment, separate entries with `;`; empty
     /// entries, and an empty ERYX_SHELL_COMMANDS, mean no commands.
     #[arg(
         long = "shell-command",
@@ -236,10 +236,19 @@ struct Args {
     )]
     shell_command_spawn: Vec<String>,
 
-    /// Leave out the shell's embedded coreutils (cat, head, ls, ...), so it
-    /// runs only the --shell-command commands.
-    #[arg(long, env = "ERYX_NO_SHELL_COREUTILS")]
-    no_shell_coreutils: bool,
+    /// Leave out the shell's embedded commands (coreutils: cat, head, ls,
+    /// ...), so it runs only the --shell-command commands (and python, with
+    /// --shell-python).
+    #[arg(long, env = "ERYX_NO_SHELL_EMBEDDED_COMMANDS")]
+    no_shell_embedded_commands: bool,
+
+    /// Let the shell run Python as `python` and `python3` (`python3 -c ...`,
+    /// `python3 script.py`, `... | python3`): a fresh interpreter per run,
+    /// from the server's Python runtime (--runtime-cwasm and --stdlib, or the
+    /// embedded one), sharing the script's files, env and limits. It has no
+    /// callbacks or network.
+    #[arg(long, env = "ERYX_SHELL_PYTHON")]
+    shell_python: bool,
 }
 
 /// One `--shell-command`: the names to register, the component's path, and
@@ -334,8 +343,9 @@ fn load_shell_commands(
             // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
             #[allow(unsafe_code)]
             (true, None) => unsafe { eryx::Command::from_precompiled_file(path) },
-            (false, Some(sha256)) => eryx::Command::load_cached(path, Some(sha256)),
-            (false, None) => eryx::Command::from_file(path),
+            // Pinned or not, compiled once into eryx's cache, which is keyed
+            // by the file's content, so a changed file is compiled afresh.
+            (false, sha256) => eryx::Command::load_cached(path, sha256.as_deref()),
         };
         let command = command.map_err(|e| format!("{}: {e}", flag()))?;
         // One registration per combination of grants among its names.
@@ -390,12 +400,43 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
     Ok(Some(tls))
 }
 
-/// The shell's external commands: the --shell-command ones, and whether to
-/// keep the embedded coreutils.
+/// The shell's external commands: the --shell-command ones (and python),
+/// and whether to keep the embedded ones.
 #[derive(Clone)]
 struct ShellCommands {
     commands: Vec<(Vec<String>, eryx::Command)>,
-    coreutils: bool,
+    embedded: bool,
+}
+
+/// `python`/`python3` for the shell (--shell-python): the server's Python
+/// runtime, `runtime_cwasm` with `stdlib` (the embedded stdlib if `None`), or
+/// the embedded one.
+fn python_command(
+    runtime_cwasm: Option<&std::path::Path>,
+    stdlib: Option<&std::path::Path>,
+) -> Result<eryx::Command, String> {
+    let fail = |e: eryx::Error| format!("--shell-python: {e}");
+    match runtime_cwasm {
+        Some(path) => {
+            let stdlib = match stdlib {
+                Some(stdlib) => stdlib.to_path_buf(),
+                None => eryx::embedded::EmbeddedResources::get()
+                    .map_err(fail)?
+                    .stdlib()
+                    .to_path_buf(),
+            };
+            // SAFETY: --runtime-cwasm is trusted, as for the Python pool.
+            unsafe {
+                eryx::Command::guest_from_precompiled_file(
+                    eryx::Language::Python,
+                    path,
+                    Some(stdlib),
+                )
+            }
+            .map_err(fail)
+        }
+        None => eryx::Command::guest(eryx::Language::Python).map_err(fail),
+    }
 }
 
 /// Build the sandbox pool for a language other than Python, from its
@@ -413,7 +454,7 @@ async fn create_language_pool(
         #[cfg(feature = "shell")]
         eryx::Language::Shell => {
             let mut builder = Sandbox::embedded().shell();
-            if !shell.coreutils {
+            if !shell.embedded {
                 builder = builder.without_embedded_commands();
             }
             for (names, command) in shell.commands {
@@ -608,13 +649,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
     spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
 
+    let mut commands = load_shell_commands(
+        &parse_shell_commands(&args.shell_commands)?,
+        &args.shell_command_tunnels,
+        &args.shell_command_spawn,
+    )?;
+    if args.shell_python {
+        commands.push((
+            vec!["python".to_owned(), "python3".to_owned()],
+            python_command(args.runtime_cwasm.as_deref(), args.stdlib.as_deref())?,
+        ));
+    }
     let shell = ShellCommands {
-        commands: load_shell_commands(
-            &parse_shell_commands(&args.shell_commands)?,
-            &args.shell_command_tunnels,
-            &args.shell_command_spawn,
-        )?,
-        coreutils: !args.no_shell_coreutils,
+        commands,
+        embedded: !args.no_shell_embedded_commands,
     };
     // What requests' ExecuteRequest.commands may name.
     let shell_command_names: Vec<String> = shell
@@ -623,22 +671,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flat_map(|(names, _)| names.iter().cloned())
         .chain(
             shell
-                .coreutils
+                .embedded
                 .then_some(eryx::embedded::COREUTILS_TOOLS)
                 .into_iter()
                 .flatten()
                 .map(|tool| (*tool).to_owned()),
         )
         .collect();
-    let shell_configured = !shell.commands.is_empty() || !shell.coreutils;
+    let shell_configured = !shell.commands.is_empty() || !shell.embedded;
     if shell_configured && !cfg!(feature = "shell") {
         return Err(
-            "--shell-command and --no-shell-coreutils need the `shell` cargo feature".into(),
+            "--shell-command, --shell-python and --no-shell-embedded-commands need the `shell` \
+             cargo feature"
+                .into(),
         );
     }
     if shell_configured && !args.languages.contains(&eryx::Language::Shell) {
         return Err(
-            "--shell-command and --no-shell-coreutils need the shell in --languages".into(),
+            "--shell-command, --shell-python and --no-shell-embedded-commands need the shell in \
+             --languages"
+                .into(),
         );
     }
     let mut lazy_pools = Vec::new();
@@ -812,15 +864,18 @@ mod tests {
             "rg=/opt/rg.wasm",
             "--shell-command",
             "cat,head=/opt/coreutils.cwasm",
-            "--no-shell-coreutils",
+            "--no-shell-embedded-commands",
+            "--shell-python",
         ])
         .unwrap();
         assert_eq!(parse_shell_commands(&args.shell_commands).unwrap().len(), 2);
-        assert!(args.no_shell_coreutils);
+        assert!(args.no_shell_embedded_commands);
+        assert!(args.shell_python);
     }
 
     /// `--shell-command` registers a command (here coreutils' multicall
-    /// binary, as `cat` only) and `--no-shell-coreutils` drops the rest.
+    /// binary, as `cat` only) and `--no-shell-embedded-commands` drops the
+    /// rest; `--shell-python` adds python.
     #[cfg(feature = "shell")]
     #[tokio::test]
     async fn shell_command_flags_shape_the_shell_pool() {
@@ -837,7 +892,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            coreutils: false,
+            embedded: false,
         };
         let pool = create_language_pool(
             eryx::Language::Shell,
@@ -856,7 +911,7 @@ mod tests {
         // With the default flags, the embedded coreutils are all there.
         let shell = ShellCommands {
             commands: Vec::new(),
-            coreutils: true,
+            embedded: true,
         };
         let pool = create_language_pool(
             eryx::Language::Shell,
@@ -868,6 +923,33 @@ mod tests {
         let sandbox = pool.acquire().await.unwrap();
         let out = sandbox.execute("printf 'b\\na\\n' | sort").await.unwrap();
         assert_eq!(out.stdout_utf8().unwrap(), "a\nb\n");
+    }
+
+    /// `--shell-python` registers the embedded Python as `python` and
+    /// `python3`.
+    #[cfg(feature = "shell")]
+    #[tokio::test]
+    async fn shell_python_runs_python_in_the_shell() {
+        let shell = ShellCommands {
+            commands: vec![(
+                vec!["python".into(), "python3".into()],
+                python_command(None, None).unwrap(),
+            )],
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("seq 3 | python3 -c 'import sys; print(sum(map(int, sys.stdin)))'")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "6\n");
     }
 
     /// `--shell-command-tunnels` splits a multicall entry by name, and must
@@ -966,5 +1048,55 @@ mod tests {
         assert!(err.contains(&pin), "{err}");
         let err = pinned(&dir.path().join("rg.cwasm"));
         assert!(err.contains("only a .wasm can be pinned"), "{err}");
+    }
+
+    /// An unpinned `.wasm` is compiled into eryx's command cache, as a
+    /// pinned one is, so a restart doesn't compile it again (#1064).
+    #[test]
+    fn unpinned_shell_commands_use_the_compile_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noop.wasm");
+        let mut wasm = wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")))"#,
+        )
+        .unwrap();
+        // A custom section naming this run, so the cache entry is this
+        // test's own and not one an earlier run left behind.
+        let run = format!("{:?}", std::time::SystemTime::now());
+        wasm.extend([0, u8::try_from(run.len() + 2).unwrap(), 1, b'x']);
+        wasm.extend(run.as_bytes());
+        std::fs::write(&path, &wasm).unwrap();
+        let prefix = format!(
+            "sha256-{}-",
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&wasm))
+        );
+
+        load_shell_commands(
+            &[ShellCommand {
+                names: vec!["noop".into()],
+                path,
+                sha256: None,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let commands = eryx::cache::default_cache_root().unwrap().join("commands");
+        let cached: Vec<_> = std::fs::read_dir(&commands)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect();
+        assert_eq!(cached.len(), 1, "no {prefix}* in {}", commands.display());
+        for path in cached {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }

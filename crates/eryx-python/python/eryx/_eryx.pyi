@@ -773,6 +773,23 @@ class Command:
         """
         ...
 
+    @staticmethod
+    def python() -> Command:
+        """Python itself as a command, to register as ``python`` and ``python3``.
+
+        ``py = Command.python()``, then
+        ``Sandbox(language="shell", commands={"python": py, "python3": py})``
+        runs ``python3 -c CODE``, ``python3 script.py`` and ``... | python3``.
+        Each run is a fresh interpreter (pyeryx's embedded one, with the
+        standard library) on the shell's files, environment, working directory
+        and stdio, within the execution's limits, with no callbacks and no
+        network.
+
+        Raises:
+            InitializationError: If the embedded runtime can't be loaded.
+        """
+        ...
+
 
 @final
 class Sandbox:

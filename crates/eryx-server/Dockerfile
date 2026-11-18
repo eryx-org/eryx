@@ -12,6 +12,10 @@ ARG ERYX_LANGUAGES=python,javascript,shell
 # ---------- Stage 1: Precompile WASM runtime (only when RUNTIME_SOURCE=default) ----------
 FROM rust:1.100-bookworm AS precompile
 
+# bash, so that ERYX_LANGUAGES splits without a pipe, and pipefail for any
+# pipe added later.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   protobuf-compiler \
   zstd \
@@ -67,7 +71,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
-  for lang in $(echo "$ERYX_LANGUAGES" | tr , ' '); do \
+  for lang in ${ERYX_LANGUAGES//,/ }; do \
   [ "$lang" = python ] && continue; \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
@@ -102,6 +106,8 @@ FROM runtime-${RUNTIME_SOURCE} AS runtime
 # ---------- Stage 2: Build the server binary ----------
 FROM rust:1.100-bookworm AS builder
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
   protobuf-compiler \
   zstd \
@@ -128,9 +134,11 @@ ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,id=eryx-server-target,sharing=locked,target=/build/target \
   find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
-  && features=$(echo "$ERYX_LANGUAGES" | tr , '\n' | grep -v '^python$' | sed 's|^|eryx-server/|' | paste -sd, -) \
+  && features= && for lang in ${ERYX_LANGUAGES//,/ }; do \
+  [ "$lang" = python ] || features+=",eryx-server/$lang"; \
+  done \
   && cargo build --release -p eryx-server --no-default-features \
-  --features "eryx/embedded,eryx/preinit${features:+,$features}" \
+  --features "eryx/embedded,eryx/preinit$features" \
   && cp target/release/eryx-server /usr/local/bin/eryx-server
 
 # ---------- Stage 3: Runtime image ----------

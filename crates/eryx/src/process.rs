@@ -49,6 +49,8 @@ use wasmtime::component::{
 use wasmtime::{
     AsContext, AsContextMut, Engine, ResourceLimiter, Store, StoreContextMut, UpdateDeadline,
 };
+use wasmtime_wasi::p2::bindings::sockets::ip_name_lookup as p2_lookup;
+use wasmtime_wasi::p3::bindings::sockets::ip_name_lookup as p3_lookup;
 use wasmtime_wasi::p3::bindings::sockets::types as p3_sockets;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -106,7 +108,8 @@ const CHILD_FUEL: u64 = 10_000_000_000;
 const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
-/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`).
+/// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`),
+/// counting each string's header as well as its text.
 const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 /// How deep children may spawn children: the shell's are depth 1, so a
 /// command it runs may start commands three levels down (git running `git`
@@ -114,6 +117,10 @@ const MAX_ARGS_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SPAWN_DEPTH: usize = 4;
 /// Most of each of stdout and stderr a nested `run` keeps.
 const MAX_RUN_OUTPUT: usize = 16 * 1024 * 1024;
+/// Resource handles (streams, pollables, files, sockets and the like) one
+/// child may hold at once, well above what real commands use: the host keeps
+/// each, outside the child's memory limit.
+const MAX_CHILD_HANDLES: usize = 16 * 1024;
 /// TCP sockets one child may hold open at once. Creating one opens a host
 /// socket before any address is checked, so this, with
 /// [`MAX_EXECUTION_SOCKETS`] and the process-wide limit, keeps a script from
@@ -149,13 +156,37 @@ struct ChildSockets {
     live: Vec<(u32, bool)>,
     /// Sockets its execution's children hold.
     execution: Arc<AtomicUsize>,
+    /// What to tell it, if it has no network, the first time it tries to
+    /// use some (see [`OfflineNotice`]).
+    offline: Option<OfflineNotice>,
+}
+
+/// The line a child without network gets on its stderr the first time a
+/// name lookup or socket of its is refused, since its own error ("Could not
+/// resolve host") reads like a DNS problem (#1080).
+struct OfflineNotice {
+    line: String,
+    stderr: pipe::Writer,
 }
 
 impl ChildSockets {
-    fn new(execution: Arc<AtomicUsize>) -> Self {
+    fn new(execution: Arc<AtomicUsize>, offline: Option<OfflineNotice>) -> Self {
         Self {
             live: Vec::new(),
             execution,
+            offline,
+        }
+    }
+
+    /// A name lookup or socket was refused: tell an offline child why, once.
+    /// Best effort: dropped if its stderr is closed or full.
+    fn refused(&mut self) {
+        use wasmtime_wasi::p2::OutputStream;
+        let Some(OfflineNotice { line, mut stderr }) = self.offline.take() else {
+            return;
+        };
+        if stderr.check_write().is_ok_and(|room| room >= line.len()) {
+            let _ = stderr.write(line.into());
         }
     }
 
@@ -206,8 +237,9 @@ impl Drop for ChildSockets {
     }
 }
 
-/// `wasi:sockets/tcp-create-socket` for children: wasmtime-wasi's, counted
-/// against [`ChildSockets`].
+/// `wasi:sockets/tcp-create-socket` and `ip-name-lookup` for children:
+/// wasmtime-wasi's, with sockets counted against [`ChildSockets`] and
+/// refusals reported to offline children (see [`OfflineNotice`]).
 struct CountedSockets;
 
 impl wasmtime::component::HasData for CountedSockets {
@@ -268,9 +300,49 @@ impl wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host for CountedSo
             }
             Err(e) => {
                 self.budget.release(1);
+                self.budget.refused();
                 Err(e)
             }
         }
+    }
+}
+
+// Name lookups, as wasmtime-wasi's. Children never resolve names themselves
+// (the proxy does), so every lookup fails; an offline child is told why.
+impl p2_lookup::Host for CountedSocketsView<'_> {
+    fn resolve_addresses(
+        &mut self,
+        network: Resource<wasmtime_wasi::p2::Network>,
+        name: String,
+    ) -> wasmtime_wasi::p2::SocketResult<Resource<p2_lookup::ResolveAddressStream>> {
+        let resolved = p2_lookup::Host::resolve_addresses(&mut self.sockets, network, name);
+        if resolved.is_err() {
+            self.budget.refused();
+        }
+        resolved
+    }
+}
+
+impl p2_lookup::HostResolveAddressStream for CountedSocketsView<'_> {
+    fn resolve_next_address(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime_wasi::p2::SocketResult<Option<p2_lookup::IpAddress>> {
+        p2_lookup::HostResolveAddressStream::resolve_next_address(&mut self.sockets, stream)
+    }
+
+    fn subscribe(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime::Result<Resource<wasmtime_wasi::p2::DynPollable>> {
+        p2_lookup::HostResolveAddressStream::subscribe(&mut self.sockets, stream)
+    }
+
+    async fn drop(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime::Result<()> {
+        p2_lookup::HostResolveAddressStream::drop(&mut self.sockets, stream).await
     }
 }
 
@@ -300,9 +372,39 @@ fn create_p3_tcp_socket(
         }
         Err(e) => {
             state.sockets.release(1);
+            state.sockets.refused();
             Ok((Err(e.downcast()?),))
         }
     }
+}
+
+/// What WASI 0.3's `resolve-addresses` returns.
+type Resolved = Result<Vec<p3_sockets::IpAddress>, p3_lookup::ErrorCode>;
+
+/// WASI 0.3's `resolve-addresses`, as wasmtime-wasi's, telling an offline
+/// child why it failed (see [`OfflineNotice`]).
+fn resolve_p3_addresses(
+    accessor: &wasmtime::component::Accessor<ChildState>,
+    (name,): (String,),
+) -> std::pin::Pin<Box<dyn Future<Output = wasmtime::Result<(Resolved,)>> + Send + '_>> {
+    use p3_lookup::HostWithStore;
+    Box::pin(async move {
+        let sockets = accessor.with_getter::<wasmtime_wasi::sockets::WasiSockets>(|state| {
+            wasmtime_wasi::sockets::WasiSocketsCtxView {
+                ctx: state.wasi.sockets(),
+                table: &mut state.table,
+            }
+        });
+        let resolved =
+            <wasmtime_wasi::sockets::WasiSockets as HostWithStore<ChildState>>::resolve_addresses(
+                &sockets, name,
+            )
+            .await?;
+        if resolved.is_err() {
+            accessor.with(|mut access| access.get().sockets.refused());
+        }
+        Ok((resolved,))
+    })
 }
 
 /// The interface holding WASI 0.3's `tcp-socket.create`, as wasmtime-wasi
@@ -310,6 +412,11 @@ fn create_p3_tcp_socket(
 const P3_SOCKETS: &str = "wasi:sockets/types@0.3.0";
 /// That function's name in it.
 const P3_TCP_CREATE: &str = "[static]tcp-socket.create";
+/// The interface holding WASI 0.3's `resolve-addresses`, as wasmtime-wasi
+/// links it.
+const P3_NAME_LOOKUP: &str = "wasi:sockets/ip-name-lookup@0.3.0";
+/// That function's name in it.
+const P3_RESOLVE: &str = "resolve-addresses";
 
 /// Replace wasmtime-wasi's WASI 0.3 `tcp-socket.create` in `linker` with
 /// [`create_p3_tcp_socket`].
@@ -330,6 +437,24 @@ fn count_p3_sockets(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
     linker
         .instance(P3_SOCKETS)?
         .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
+}
+
+/// Replace wasmtime-wasi's WASI 0.3 `resolve-addresses` in `linker` with
+/// [`resolve_p3_addresses`], failing unless wasmtime-wasi defined it under
+/// [`P3_NAME_LOOKUP`] (as [`count_p3_sockets`] does).
+fn notice_p3_lookups(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
+    linker.allow_shadowing(false);
+    let defined = linker
+        .instance(P3_NAME_LOOKUP)?
+        .func_wrap_concurrent(P3_RESOLVE, resolve_p3_addresses)
+        .is_err();
+    linker.allow_shadowing(true);
+    if !defined {
+        wasmtime::bail!("wasmtime-wasi no longer links `{P3_RESOLVE}` in `{P3_NAME_LOOKUP}`");
+    }
+    linker
+        .instance(P3_NAME_LOOKUP)?
+        .func_wrap_concurrent(P3_RESOLVE, resolve_p3_addresses)
 }
 
 /// Where a child finds the proxy's CA certificate (see [`ChildNet`]).
@@ -649,6 +774,97 @@ impl Command {
         Self::from_component(&engine, &component, vmctx)
     }
 
+    /// Run `language`'s embedded runtime as a command, as the shell runs
+    /// `python3 -c CODE`, through the runtime's `run-command` export: for
+    /// Python, register it as `python` and `python3` with
+    /// [`SandboxBuilder::with_commands`](crate::SandboxBuilder::with_commands).
+    /// Only Python can run as a command so far.
+    ///
+    /// A guest child is a fresh instance of the runtime (for Python, the
+    /// pre-initialized interpreter with the embedded standard library). It
+    /// sees the shell's filesystem, environment, working directory and
+    /// stdio, burns the execution's fuel and counts against the children's
+    /// memory like any child, and gets no callbacks, no network and no
+    /// commands of its own ([`allow_spawn`](Self::allow_spawn) and
+    /// [`with_network`](Self::with_network) don't apply to it, and a
+    /// [`Credential`](crate::net::Credential) can't be for it).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `language` can't run as a command, or its
+    /// embedded runtime can't be extracted or loaded.
+    #[cfg(all(feature = "embedded", any(feature = "unstable-vfs", feature = "shell")))]
+    pub fn guest(language: crate::Language) -> Result<Self, Error> {
+        let runtime = crate::embedded::runtime_path(language)?
+            .ok_or(ErrorKind::MissingRuntime { language })?;
+        let stdlib = match language {
+            crate::Language::Python => Some(
+                crate::embedded::EmbeddedResources::get()?
+                    .stdlib_path
+                    .clone(),
+            ),
+            _ => None,
+        };
+        // SAFETY: the runtime eryx embedded at build time, extracted and
+        // checked against the embedded bytes.
+        #[allow(unsafe_code)]
+        unsafe {
+            Self::guest_from_precompiled_file(language, runtime, stdlib)
+        }
+    }
+
+    /// Run a precompiled `language` runtime as a command, like
+    /// [`guest`](Self::guest) does the embedded one: for Python, with the
+    /// standard library at `stdlib`. The runtime must have been precompiled
+    /// by this eryx version and export `run-command`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`from_precompiled_file`](Self::from_precompiled_file): only a
+    /// file you trust, which mustn't change while the command is loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `language` can't run as a command, the file
+    /// doesn't load, or it's stamped for another language.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    #[allow(unsafe_code)]
+    pub unsafe fn guest_from_precompiled_file(
+        language: crate::Language,
+        path: impl AsRef<Path>,
+        stdlib: Option<std::path::PathBuf>,
+    ) -> Result<Self, Error> {
+        if language != crate::Language::Python {
+            return Err(ErrorKind::Initialization(format!(
+                "{language} can't run as a command yet: only python can"
+            ))
+            .into());
+        }
+        let path = path.as_ref();
+        // SAFETY: the caller vouches for the file.
+        let executor = unsafe { crate::Executor::for_guest_command(language, path, stdlib) }?;
+        Ok(Self {
+            pre: Pre::Guest(Arc::new(executor)),
+            tunnels: false,
+            spawns: false,
+            vmctx: usize::try_from(precompiled_vmctx(&file_tail(path).unwrap_or_default()))
+                .unwrap_or(usize::MAX),
+            network: None,
+            credentials: Vec::new(),
+        })
+    }
+
+    /// Whether it runs a guest runtime (see [`guest`](Self::guest)).
+    fn is_guest(&self) -> bool {
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        return matches!(self.pre, Pre::Guest(_));
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        false
+    }
+
     fn from_component(engine: &Engine, component: &Component, vmctx: u64) -> Result<Self, Error> {
         #[cfg(test)]
         tests::COMPILED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -690,7 +906,8 @@ impl Command {
     /// away, [`Inherit`](crate::ChildNetwork::Inherit) keeps the sandbox's,
     /// and [`Narrow`](crate::ChildNetwork::Narrow) allows only what both it
     /// and the sandbox's allow, with its limits counted per name the command
-    /// is registered under, on top of the execution's.
+    /// is registered under, on top of the execution's. Commands its children
+    /// run (see [`allow_spawn`](Self::allow_spawn)) are held within it too.
     ///
     /// An execution's [`CommandOptions::with_network`] replaces it for that
     /// execution, within the sandbox's child network too.
@@ -713,12 +930,16 @@ impl Command {
     /// or `eryx:process/pipe`, with live pipes, as git runs its
     /// `remote-https` helper.
     ///
-    /// They resolve names against the same commands, see the same filesystem
-    /// and get the same child network as the shell's children, and share
-    /// their execution's limits: its fuel, child memory, live children and
-    /// host memory. Children nest at most 4 deep (the shell's are the
-    /// first), and each nested run's stdout and stderr are capped at 16 MiB
-    /// (a piped command's flow through pipes instead).
+    /// They resolve names against the same commands and see the same
+    /// filesystem as the shell's children, and share their execution's
+    /// limits: its fuel, child memory, live children and host memory. Their
+    /// network is held within this command's: each gets only what both this
+    /// command's network and its own command's allow (none at all if this
+    /// command has none, and tunnels only if both may), and credentials for
+    /// its command only where this command's network reaches. Children nest
+    /// at most 4 deep (the shell's are the first), and each nested run's
+    /// stdout and stderr are capped at 16 MiB (a piped command's flow
+    /// through pipes instead).
     /// A command spawns only if it was registered with this too.
     #[must_use]
     pub fn allow_spawn(mut self) -> Self {
@@ -750,19 +971,43 @@ fn file_tail(path: &Path) -> std::io::Result<Vec<u8>> {
 /// An execution's network for its children: the sandbox's policy, secrets
 /// and budget (shared with the guest's connections), and the proxies started
 /// for them, one inspecting and one tunnelling per network (the execution's,
-/// and each command's narrowed one). Nested children use the same one. They
-/// live as long as the execution (see [`ExecutorState::disconnect`]), well
-/// inside their CAs' validity.
+/// and each command's narrowed one). Nested children use the same one,
+/// within their parent's network (see [`NetScope`]). They live as long as
+/// the execution (see [`ExecutorState::disconnect`]), well inside their CAs'
+/// validity.
 pub(crate) struct ChildNet {
     net: crate::net::ChildNetPolicy,
     /// Commands' narrowed networks (see [`CommandOptions::with_network`]),
-    /// by command name, made on first use.
-    narrowed: HashMap<String, crate::net::ChildNetPolicy>,
-    /// Started proxies, by the command whose narrowed network or credentials
-    /// they serve (`None` for the execution's) and whether they tunnel.
-    proxies: HashMap<(Option<String>, bool), ProxyLink>,
+    /// by [`NetScope::narrowed`], made on first use.
+    narrowed: HashMap<Vec<String>, crate::net::ChildNetPolicy>,
+    /// Started proxies, by the network they serve ([`NetScope::narrowed`]),
+    /// the command whose credentials they hold, if any, and whether they
+    /// tunnel.
+    proxies: HashMap<(Vec<String>, Option<String>, bool), ProxyLink>,
     /// TCP sockets its children hold, together.
     sockets: Arc<AtomicUsize>,
+}
+
+/// The network a child has, which any children it spawns are held within:
+/// a nested child gets only what both its parent's network and its own
+/// command's allow.
+#[derive(Clone, Debug)]
+struct NetScope {
+    /// The commands whose narrowed networks it's within, outermost first
+    /// (none: the execution's).
+    narrowed: Vec<String>,
+    /// Whether it may open blind tunnels.
+    tunnels: bool,
+}
+
+impl NetScope {
+    /// The shell's: its children get their commands' own networks.
+    fn execution() -> Self {
+        Self {
+            narrowed: Vec::new(),
+            tunnels: true,
+        }
+    }
 }
 
 /// A started proxy, and the host directory holding its CA certificate for
@@ -783,50 +1028,77 @@ impl ChildNet {
         }
     }
 
-    /// The proxy for a child of the command `name` (`command`) that may or
-    /// may not open blind tunnels, started on first use; `None` if the
-    /// command's network is [`ChildNetwork::None`](crate::ChildNetwork::None).
-    fn link(&mut self, name: &str, command: &Command) -> std::io::Result<Option<ChildLink>> {
+    /// The proxy for a child of the command `name` (`command`) spawned by a
+    /// child with the network `within`, started on first use, and the
+    /// child's own network; `None` if the command's network is
+    /// [`ChildNetwork::None`](crate::ChildNetwork::None).
+    fn link(
+        &mut self,
+        within: &NetScope,
+        name: &str,
+        command: &Command,
+    ) -> std::io::Result<Option<(ChildLink, NetScope)>> {
         use crate::net::ChildNetwork;
-        // A command with credentials gets a proxy of its own, so no other
-        // command's children can use them.
-        let own = (!command.credentials.is_empty()).then(|| name.to_owned());
-        let (key, policy) = match &command.network {
-            None | Some(ChildNetwork::Inherit) => (own, &self.net),
+        let mut scope = NetScope {
+            narrowed: within.narrowed.clone(),
+            tunnels: within.tunnels && command.tunnels,
+        };
+        /// The network `path` names, made by an earlier spawn's `link`.
+        fn policy<'a>(
+            net: &'a crate::net::ChildNetPolicy,
+            narrowed: &'a HashMap<Vec<String>, crate::net::ChildNetPolicy>,
+            path: &[String],
+        ) -> std::io::Result<&'a crate::net::ChildNetPolicy> {
+            if path.is_empty() {
+                return Ok(net);
+            }
+            narrowed
+                .get(path)
+                .ok_or_else(|| std::io::Error::other("a parent's network is missing"))
+        }
+        match &command.network {
+            None | Some(ChildNetwork::Inherit) => {}
             Some(ChildNetwork::None) => return Ok(None),
             Some(ChildNetwork::Narrow(config)) => {
-                let policy = match self.narrowed.entry(name.to_owned()) {
-                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        // Checked at build and per execution already, so
-                        // this is only the policy's own guarantee.
-                        let narrowed = self.net.narrowed((**config).clone()).map_err(|e| {
+                scope.narrowed.push(name.to_owned());
+                if !self.narrowed.contains_key(&scope.narrowed) {
+                    // Checked at build and per execution already, so this
+                    // is only the policy's own guarantee.
+                    let narrowed = policy(&self.net, &self.narrowed, &within.narrowed)?
+                        .narrowed((**config).clone())
+                        .map_err(|e| {
                             std::io::Error::new(
                                 std::io::ErrorKind::InvalidInput,
                                 format!("command {name}'s network: {e}"),
                             )
                         })?;
-                        entry.insert(narrowed)
-                    }
-                };
-                (Some(name.to_owned()), &*policy)
+                    self.narrowed.insert(scope.narrowed.clone(), narrowed);
+                }
             }
-        };
-        let link = match self.proxies.entry((key, command.tunnels)) {
+        }
+        let policy = policy(&self.net, &self.narrowed, &scope.narrowed)?;
+        // A command with credentials gets a proxy of its own, so no other
+        // command's children can use them.
+        let own = (!command.credentials.is_empty()).then(|| name.to_owned());
+        let key = (scope.narrowed.clone(), own, scope.tunnels);
+        let link = match self.proxies.entry(key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                let proxy = policy.start_proxy_with(command.tunnels, &command.credentials, name)?;
+                let proxy = policy.start_proxy_with(scope.tunnels, &command.credentials, name)?;
                 let ca_dir = tempfile::tempdir()?;
                 std::fs::write(ca_dir.path().join(CA_FILE), proxy.ca_pem())?;
                 entry.insert(ProxyLink { proxy, ca_dir })
             }
         };
-        Ok(Some(ChildLink {
-            proxy: link.proxy.addr(),
-            proxy_auth: link.proxy.userinfo().map(str::to_owned),
-            ca_dir: link.ca_dir.path().to_path_buf(),
-            sockets: Arc::clone(&self.sockets),
-        }))
+        Ok(Some((
+            ChildLink {
+                proxy: link.proxy.addr(),
+                proxy_auth: link.proxy.userinfo().map(str::to_owned),
+                ca_dir: link.ca_dir.path().to_path_buf(),
+                sockets: Arc::clone(&self.sockets),
+            },
+            scope,
+        )))
     }
 }
 
@@ -867,6 +1139,9 @@ struct Spawner {
     /// Weak, so a child left unwaited can't keep the execution's proxies
     /// (and its secrets) alive after it ends.
     net: Option<std::sync::Weak<std::sync::Mutex<ChildNet>>>,
+    /// The network of the child it spawns for, which its children are held
+    /// within: `None` if that child has none, so they get none either.
+    within: Option<NetScope>,
     /// How deep the children it spawns are (the shell's are 1).
     depth: usize,
     /// Where its children's process events go, for the shell's `wait` to
@@ -990,16 +1265,19 @@ impl Spawner {
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
         }
-        // With network, children get the proxy. (Secrets' placeholders come
-        // from the shell, which exports them.)
-        let network = match &self.net {
-            Some(net) => match net
+        // With network, children get the proxy, a nested one no more than
+        // the child spawning it. (Secrets' placeholders come from the shell,
+        // which exports them.) Guest children have no network (yet), so no
+        // proxy.
+        let network = match (&self.net, &self.within) {
+            (Some(_), _) if command.is_guest() => None,
+            (Some(net), Some(within)) => match net
                 .upgrade()
                 .ok_or_else(|| std::io::Error::other("the execution has ended"))
                 .and_then(|net| {
                     net.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .link(&cmd, &command)
+                        .link(within, &cmd, &command)
                 }) {
                 Ok(link) => link,
                 Err(e) => {
@@ -1007,12 +1285,34 @@ impl Spawner {
                     return Err(ProcessError::SpawnFailed);
                 }
             },
-            None => None,
+            _ => None,
         };
+        let (network, scope) = network.unzip();
+        // Python's and JavaScript's wording, naming the command.
+        let offline = network.is_none().then(|| {
+            let whose = if self.net.is_some() {
+                "this command"
+            } else {
+                "commands in this sandbox"
+            };
+            format!(
+                "eryx: networking not enabled for {whose} ({cmd} has no network)
+"
+            )
+        });
         let mut argv = vec![cmd];
         argv.extend(args);
-        let args_bytes = argv.iter().map(String::len).sum::<usize>()
-            + env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>();
+        // What the host holds, not just the text: each string's header too,
+        // so many empty or short entries cost what they take.
+        let argv_bytes = argv
+            .iter()
+            .map(|a| a.len() + size_of::<String>())
+            .sum::<usize>();
+        let args_bytes = argv_bytes
+            + env
+                .iter()
+                .map(|(k, v)| k.len() + v.len() + 2 * size_of::<String>())
+                .sum::<usize>();
         let live = (args_bytes <= MAX_ARGS_BYTES)
             .then(|| LiveSlot::take(&self.budget.live))
             .flatten();
@@ -1041,6 +1341,10 @@ impl Spawner {
             bytes: 0,
         };
         args.charge(args_bytes as u64)?;
+        // A nested child's trace keeps a copy of its argv (see `NestedTrace`).
+        if self.traces.is_some() {
+            args.charge(argv_bytes as u64)?;
+        }
 
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
@@ -1058,7 +1362,9 @@ impl Spawner {
             _live: Some(live),
             _args: args,
             network,
+            offline,
             spawner: command.spawns.then(|| Spawner {
+                within: scope,
                 depth: self.depth + 1,
                 traces: Some(self.traces.clone().unwrap_or_default()),
                 ..self.clone()
@@ -1167,7 +1473,7 @@ impl Command {
             engine,
             ChildState {
                 wasi: wasi.build(),
-                table: ResourceTable::new(),
+                table: child_table(),
                 // A pool of its own: an isolated run shares no execution's.
                 limits: ChildMemory::reserve(Arc::default(), limits.memory, self.vmctx)
                     .ok_or_else(|| fail(format!("{} needs more memory than its limit", argv[0])))?,
@@ -1206,11 +1512,15 @@ impl Command {
     }
 }
 
-/// A command pre-instantiated for the WASI version it targets.
+/// A command pre-instantiated for the WASI version it targets, or a guest
+/// runtime run through its `run-command` export (see [`Command::guest`]).
 #[derive(Clone)]
 enum Pre {
     P2(wasmtime_wasi::p2::bindings::CommandPre<ChildState>),
     P3(wasmtime_wasi::p3::bindings::CommandPre<ChildState>),
+    /// Loaded on the child engine.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    Guest(Arc<crate::Executor>),
 }
 
 impl Pre {
@@ -1245,6 +1555,8 @@ impl Pre {
         match self {
             Self::P2(pre) => pre.engine(),
             Self::P3(pre) => pre.engine(),
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            Self::Guest(executor) => executor.engine(),
         }
     }
 
@@ -1252,6 +1564,12 @@ impl Pre {
     /// failed instantiation; the inner one a trap, other than an exit.
     async fn run(&self, store: &mut Store<ChildState>) -> wasmtime::Result<wasmtime::Result<i32>> {
         let ran = match self {
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            Self::Guest(_) => {
+                return Err(wasmtime::Error::msg(
+                    "a guest command runs in a sandbox store, not a child's",
+                ));
+            }
             Self::P2(pre) => {
                 let command = pre.instantiate_async(&mut *store).await?;
                 command.wasi_cli_run().call_run(&mut *store).await
@@ -1277,10 +1595,11 @@ impl Pre {
     }
 }
 
-/// In-guest builtins that count as commands for an execution's
-/// allow-list: the shell's own `grep`. `list-commands` names each one the
-/// execution allows, and the guest refuses those it doesn't list.
-const GUEST_COMMANDS: [&str; 1] = ["grep"];
+/// In-guest commands that count as commands for an execution's
+/// allow-list: the shell's own `grep`, and `sh`/`bash` (nested shells).
+/// `list-commands` names each one the execution allows, and the guest
+/// refuses those it doesn't list.
+const GUEST_COMMANDS: [&str; 3] = ["grep", "sh", "bash"];
 
 /// The commands a sandbox can spawn, by name.
 #[derive(Debug, Clone, Default)]
@@ -1434,6 +1753,7 @@ impl Commands {
                     .and_then(|o| o.network.as_ref())
                     .or(command.network.as_ref());
                 !option.is_some_and(|o| o.no_credentials)
+                    && !command.is_guest()
                     && !matches!(network, Some(ChildNetwork::None))
                     && credentials.iter().any(|c| c.for_command(name))
             })
@@ -1480,6 +1800,15 @@ impl Commands {
                     .iter()
                     .any(|c| c.commands().is_some_and(|cs| cs.contains(name)))
             };
+            if command.is_guest() {
+                if named() {
+                    return fail(format!(
+                        "command {name} has a credential but runs a guest runtime, which has \
+                         no network"
+                    ));
+                }
+                continue;
+            }
             if matches!(command.network, Some(ChildNetwork::None)) {
                 if named() {
                     return fail(format!(
@@ -1559,7 +1888,18 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
         },
     )
     .map_err(wasm_err)?;
+    p2_lookup::add_to_linker::<_, CountedSockets>(&mut linker, |state: &mut ChildState| {
+        CountedSocketsView {
+            sockets: wasmtime_wasi::sockets::WasiSocketsCtxView {
+                ctx: state.wasi.sockets(),
+                table: &mut state.table,
+            },
+            budget: &mut state.sockets,
+        }
+    })
+    .map_err(wasm_err)?;
     count_p3_sockets(&mut linker).map_err(wasm_err)?;
+    notice_p3_lookups(&mut linker).map_err(wasm_err)?;
     add_run_to_linker(&mut linker).map_err(wasm_err)?;
     piped::add_to_linker(&mut linker).map_err(wasm_err)?;
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -1609,7 +1949,8 @@ pub(crate) struct ChildState {
 
 /// A child's share of `pool`, which may grow to `limit` (its execution's
 /// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
-struct ChildMemory {
+#[derive(Debug)]
+pub(crate) struct ChildMemory {
     pool: Arc<AtomicUsize>,
     held: usize,
     limit: usize,
@@ -1726,6 +2067,13 @@ impl WasiView for ChildState {
     }
 }
 
+/// A child's resource table, holding at most [`MAX_CHILD_HANDLES`].
+pub(crate) fn child_table() -> ResourceTable {
+    let mut table = ResourceTable::new();
+    table.set_max_capacity(MAX_CHILD_HANDLES);
+    table
+}
+
 /// A spawned child, until `wait` runs it.
 pub struct ChildProcess {
     /// What `wait` runs, until it does.
@@ -1757,16 +2105,48 @@ struct ChildRun {
     _args: Held,
     /// Its proxy, if children have network.
     network: Option<ChildLink>,
+    /// Without one, the line it gets when it tries the network (see
+    /// [`OfflineNotice`]).
+    offline: Option<String>,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
+/// Meter a child's `store`: it may burn `fuel`, and publishes what it has
+/// burned to `fuel_used` on every epoch tick, for `wait` to charge the
+/// parent.
+fn meter_child<T: 'static>(
+    store: &mut Store<T>,
+    fuel: u64,
+    fuel_used: Arc<AtomicU64>,
+) -> Result<(), String> {
+    // Without this, a loop with no calls keeps its fuel count in a
+    // register, and the epoch callback below reads a stale count.
+    crate::wasm::sync_fuel_periodically(store).map_err(|e| e.to_string())?;
+    // Yield on every epoch tick, publishing the fuel burned so far. The
+    // parent's timeout and cancellation race its whole execution, so
+    // yielding also lets them drop a CPU-bound child as they would a guest
+    // blocked in `time.sleep`.
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |store| {
+        let left = store.as_context().get_fuel().unwrap_or(0);
+        fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+        Ok(UpdateDeadline::Yield(1))
+    });
+    store.set_fuel(fuel).map_err(|e| e.to_string())
+}
+
 impl ChildRun {
     /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
     async fn run(self) -> (Result<i32, String>, u64) {
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Pre::Guest(executor) = &self.pre {
+            let executor = Arc::clone(executor);
+            return self.run_guest(&executor).await;
+        }
         // With a proxy, its env vars replace any of the same names the script
         // passed (libc takes a name's first value).
         let env: Vec<(String, String)> = match &self.network {
@@ -1840,13 +2220,17 @@ impl ChildRun {
             self.pre.engine(),
             ChildState {
                 wasi,
-                table: ResourceTable::new(),
+                table: child_table(),
                 limits: self.memory,
                 sockets: ChildSockets::new(
                     self.network
                         .as_ref()
                         .map(|link| Arc::clone(&link.sockets))
                         .unwrap_or_default(),
+                    self.offline.map(|line| OfflineNotice {
+                        line,
+                        stderr: self.stderr.clone(),
+                    }),
                 ),
                 fuel: self.fuel,
                 fuel_used: Arc::clone(&self.fuel_used),
@@ -1858,26 +2242,11 @@ impl ChildRun {
             },
         );
         store.limiter(|s| &mut s.limits);
-        // Without this, a loop with no calls keeps its fuel count in a
-        // register, and the epoch callback below reads a stale count.
-        if let Err(e) = crate::wasm::sync_fuel_periodically(&mut store) {
-            return (Err(e.to_string()), 0);
+        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
+            return (Err(e), 0);
         }
-        // Yield on every epoch tick, publishing the fuel burned so far for
-        // `wait` to charge the parent. The parent's timeout and cancellation
-        // race its whole execution, so yielding also lets them drop a
-        // CPU-bound child as they would a guest blocked in `time.sleep`.
-        let fuel = self.fuel;
-        let fuel_used = self.fuel_used;
-        store.set_epoch_deadline(1);
-        store.epoch_deadline_callback(move |store| {
-            let left = store.as_context().get_fuel().unwrap_or(0);
-            fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
-            Ok(UpdateDeadline::Yield(1))
-        });
 
         let code = async {
-            store.set_fuel(self.fuel).map_err(|e| e.to_string())?;
             match self.pre.run(&mut store).await {
                 Err(e) => Err(format!("instantiate: {e}")),
                 Ok(Err(e)) => Err(format!("{}: {e}", self.argv[0])),
@@ -1888,6 +2257,53 @@ impl ChildRun {
         let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
         // Dropping the store closes the child's ends of its pipes, which ends
         // its output streams.
+        drop(store);
+        (code, fuel_used)
+    }
+}
+
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+impl ChildRun {
+    /// Run a guest command (see [`Command::guest`]): a fresh instance of
+    /// `executor`'s runtime on the child's pipes and filesystem, plus the
+    /// runtime's own read-only mounts, charging its memory to the
+    /// children's pool.
+    async fn run_guest(self, executor: &crate::Executor) -> (Result<i32, String>, u64) {
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stdin(self.stdin)
+            .stdout(self.stdout)
+            .stderr(self.stderr)
+            .allow_ip_name_lookup(false)
+            .allow_udp(false);
+        let vfs = match crate::session::executor::command_vfs_context(executor, self.vfs) {
+            Ok(vfs) => vfs,
+            Err(e) => return (Err(format!("mounting the runtime's files: {e}")), 0),
+        };
+        let memory = crate::wasm::MemoryTracker::for_child(self.memory);
+        let state = ExecutorState::for_command(wasi.build(), vfs, memory);
+        let mut store = Store::new(executor.engine(), state);
+        store.limiter(|s| &mut s.memory_tracker);
+        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
+            return (Err(e), 0);
+        }
+        // `prepare` put the shell's directory in PWD.
+        let cwd = self
+            .env
+            .iter()
+            .find(|(k, _)| k == "PWD")
+            .map_or_else(|| "/".to_owned(), |(_, pwd)| pwd.clone());
+        let name = self.argv[0].clone();
+        let code = executor
+            .run_command(&mut store, self.argv, self.env, cwd)
+            .await
+            .map_err(|e| format!("{name}: {e}"));
+        tracing::debug!(
+            command = %name,
+            peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes(),
+            "guest command finished"
+        );
+        let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        // Dropping the store closes the child's ends of its pipes.
         drop(store);
         (code, fuel_used)
     }
@@ -1965,6 +2381,7 @@ impl ExecutorState {
             commands: self.commands.clone(),
             budget: self.child_budget.clone(),
             net: self.child_net.as_ref().map(Arc::downgrade),
+            within: Some(NetScope::execution()),
             depth: 1,
             traces: None,
         }
@@ -2895,6 +3312,67 @@ pub(crate) mod tests {
         assert_eq!(names(Some(&allowed), &options, &[&any]), ["gh"]);
     }
 
+    /// A run of `command` with `argv` on the given pipes, with a child's
+    /// default fuel and memory.
+    fn child_run(
+        command: &Command,
+        argv: &[&str],
+        stdin: pipe::Reader,
+        stdout: pipe::Writer,
+        stderr: pipe::Writer,
+    ) -> ChildRun {
+        ChildRun {
+            pre: command.pre.clone(),
+            argv: argv.iter().map(|&a| a.to_owned()).collect(),
+            env: vec![],
+            stdin,
+            stdout,
+            stderr,
+            fuel: CHILD_FUEL,
+            fuel_used: Arc::default(),
+            memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
+            _live: LiveSlot::take(&Arc::default()),
+            _args: Held {
+                budget: ChildBudget::default(),
+                bytes: 0,
+            },
+            network: None,
+            offline: None,
+            spawner: None,
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            vfs: None,
+        }
+    }
+
+    /// A child spinning in a loop with no calls in it, which keeps its fuel
+    /// count in a register, publishes what it burns as it runs, so `wait`
+    /// can charge the parent before the child exits.
+    ///
+    /// This only needs the child to get some CPU, not to get it at a
+    /// particular rate, so it holds on a loaded machine.
+    #[tokio::test]
+    async fn a_spinning_child_publishes_its_fuel_as_it_runs() {
+        let command = Command::from_bytes(&test_cmd_wasm()).unwrap();
+        crate::wasm::ensure_epoch_ticker(command.pre.engine()).unwrap();
+        let (_stdin_tx, stdin) = pipe::pipe(PIPE_CAPACITY);
+        let (stdout, _stdout_rx) = pipe::pipe(PIPE_CAPACITY);
+        let (stderr, _stderr_rx) = pipe::pipe(PIPE_CAPACITY);
+        let run = child_run(&command, &["tc", "spin"], stdin, stdout, stderr);
+        let fuel_used = Arc::clone(&run.fuel_used);
+        // Far more than starting the command burns, which a stale count
+        // could still show.
+        const SPUN: u64 = 1_000_000_000;
+        let charged = async {
+            while fuel_used.load(Ordering::Relaxed) < SPUN {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            (code, _) = run.run() => panic!("`tc spin` exited: {code:?}"),
+            () = charged => {}
+        }
+    }
+
     /// Running reuses the command's `CommandPre`: nothing is compiled or
     /// linked after `Command::from_bytes`, however many children run.
     #[tokio::test]
@@ -2909,26 +3387,7 @@ pub(crate) mod tests {
             let (stderr, _stderr_rx) = pipe::pipe(PIPE_CAPACITY);
             stdin_tx.write_all(input.as_bytes()).await.unwrap();
             drop(stdin_tx);
-            let run = ChildRun {
-                pre: command.pre.clone(),
-                argv: vec!["upper".into()],
-                env: vec![],
-                stdin,
-                stdout,
-                stderr,
-                fuel: CHILD_FUEL,
-                fuel_used: Arc::default(),
-                memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
-                _live: LiveSlot::take(&Arc::default()),
-                _args: Held {
-                    budget: ChildBudget::default(),
-                    bytes: 0,
-                },
-                network: None,
-                spawner: None,
-                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
-                vfs: None,
-            };
+            let run = child_run(&command, &["upper"], stdin, stdout, stderr);
             let (code, fuel_used) = run.run().await;
             assert_eq!(code.unwrap(), 0);
             assert!(fuel_used > 0);

@@ -56,7 +56,7 @@ The manifest's `[output] dir` gets:
 | `eryx_build` | The eryx-build version that made the component. |
 | `name`, `description`, `license`, `lang` | From the manifest. `license` is the upstream's SPDX expression. |
 | `source`, `deps` | Each upstream's URL, ref, pinned commit or sha256, and licence. |
-| `patches` | The patches and shims applied, with their sha256. |
+| `patches` | The repo files the build applies, compiles or links (`build.vendor_patch`, `build.shims`, the `build.wit` file or every file in that directory, each dep's `config_patch` and `shims`), with their sha256. |
 | `artifacts` | The built files, with their sha256. |
 | `imports` | The WIT packages `component.wasm` imports, with versions, sorted: `wasi:cli@0.2.12`, `eryx:process@0.1.0`, `wasi:cli@0.3.0-rc-…`. This is what a host must provide to run it, and tells a WASI 0.2 command from a 0.3 one. |
 

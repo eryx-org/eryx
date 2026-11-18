@@ -314,6 +314,38 @@ async fn a_pipeline_of_large_arguments_fails_the_spawn() {
     assert_eq!(out.stdout_utf8().unwrap(), "OK\n");
 }
 
+/// Empty arguments still take host memory, so they count against the
+/// limits too: 2^16 of them don't fit a 1 MiB budget (though they're under
+/// the 2 MiB per spawn), 2^17 are over the per-spawn limit, and 2^12 run.
+#[tokio::test]
+async fn empty_arguments_count_against_the_child_limits() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_child_host_bytes(1 << 20))
+        .build()
+        .unwrap();
+    let spawn = |doublings: u32| {
+        format!(
+            "s=,; i=0; while [ $i -lt {doublings} ]; do s=$s$s; i=$((i + 1)); done\n\
+             IFS=,; set -- $s; IFS=' '\ntc argv0 \"$@\"; echo \"$#=$?\""
+        )
+    };
+    // 126: refused; 2: it ran (and rejected its arguments).
+    for (doublings, status) in [(16, 126), (17, 126), (12, 2)] {
+        let out = sandbox.execute(&spawn(doublings)).await.unwrap();
+        let stdout = out.stdout_utf8().unwrap();
+        assert!(
+            stdout.ends_with(&format!("{}={status}\n", 1 << doublings)),
+            "{doublings}: {out:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+            status == 126,
+            "{doublings}: {out:?}"
+        );
+    }
+}
+
 /// A pool built from a shell builder keeps its registered commands.
 #[tokio::test]
 async fn pooled_sandboxes_keep_their_commands() {
@@ -517,7 +549,8 @@ for i in 1 2 3; do printf '%100000s' a | tc; done | wc -c
 /// Children in a pipeline run at once but share the parent's fuel: two
 /// stages that each fit the limit alone end the execution with
 /// `FuelExhausted` together, having done at most about one epoch tick of
-/// work each past it.
+/// work each past it. A child spinning with no calls is charged as it runs
+/// too (`process::tests::a_spinning_child_publishes_its_fuel_as_it_runs`).
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn concurrent_children_share_the_fuel_limit() {
@@ -570,31 +603,19 @@ async fn concurrent_children_share_the_fuel_limit() {
     assert!(done >= 20, "{done} rounds done under a 30-round limit");
 }
 
-/// Children whose work has no calls in it, which keep their fuel count in a
-/// register, are charged as they run too: two spinning stages under a fuel
-/// limit take about as long as one.
+/// A child's resource handles are capped: one that keeps opening files
+/// fails well before wasmtime's default of a million, and the next child
+/// starts with a fresh table.
 #[tokio::test]
-async fn spinning_children_share_the_fuel_limit() {
-    let sandbox = shell()
-        .with_command("tc", test_cmd())
-        .with_resource_limits(ResourceLimits::default().with_max_fuel(2_000_000_000))
-        .build()
+async fn a_child_holds_a_bounded_number_of_handles() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let out = sandbox
+        .execute("tc open 20000 /dev/null; tc open 1000 /dev/null")
+        .await
         .unwrap();
-    let time = async |script: &str| {
-        let start = Instant::now();
-        let err = sandbox.execute(script).await.unwrap_err();
-        assert!(
-            matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
-            "{err:?}"
-        );
-        start.elapsed()
-    };
-    let one = time("tc spin").await;
-    let two = time("tc spin | tc spin").await;
-    let four = time("tc spin | tc spin | tc spin | tc spin").await;
-    // Charged only at exit, each stage would burn the whole limit itself.
-    assert!(two < one * 3 / 2, "one: {one:?}, two: {two:?}");
-    assert!(four < one * 3 / 2, "one: {one:?}, four: {four:?}");
+    let stdout = out.stdout_utf8().unwrap();
+    assert!(!stdout.contains("opened 20000"), "{out:?}");
+    assert!(stdout.ends_with("opened 1000\n"), "{out:?}");
 }
 
 /// A child counts against the live-child limit until it finishes, not just
@@ -716,6 +737,42 @@ async fn the_embedded_shell_runs_common_script_tools() {
         // Only the lexical forms; coreutils_see_the_root_and_dev canonicalizes.
         ("realpath -m /a/../b", "/b\n"),
         ("readlink -m /a/../b/c", "/b/c\n"),
+    ])
+    .await;
+}
+
+/// Checksums, for checking downloads, and `printenv` (#1081).
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn the_embedded_shell_runs_checksum_tools() {
+    assert_script_outputs(&[
+        (
+            "printf abc | md5sum",
+            "900150983cd24fb0d6963f7d28e17f72  -\n",
+        ),
+        (
+            "printf abc | sha1sum",
+            "a9993e364706816aba3e25717850c26c9cd0d89d  -\n",
+        ),
+        (
+            "printf abc | sha256sum",
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -\n",
+        ),
+        (
+            "printf abc | sha512sum",
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f  -\n",
+        ),
+        (
+            "printf abc | b2sum",
+            "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1\
+             7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923  -\n",
+        ),
+        (
+            "printf abc > /tmp/f && sha256sum /tmp/f > /tmp/sums && sha256sum -c /tmp/sums",
+            "/tmp/f: OK\n",
+        ),
+        ("FOO=bar printenv FOO", "bar\n"),
     ])
     .await;
 }
@@ -2053,6 +2110,34 @@ async fn allowed_commands_cover_the_grep_builtin() {
 
     let all = session.execute(code).run().await.unwrap();
     assert_eq!(String::from_utf8_lossy(&all.stdout), "hit\ngrep=0\n");
+}
+
+/// `sh` and `bash` count as commands for `with_allowed_commands`, like
+/// `grep`: left out, they exit 127.
+#[tokio::test]
+async fn allowed_commands_cover_nested_shells() {
+    let executor = shell().build().unwrap().executor();
+    let mut session = SessionExecutor::new_with_limits(executor, &[], &ResourceLimits::default())
+        .await
+        .unwrap();
+    let code = "bash -c 'echo in-bash'; echo \"bash=$?\"; sh -c 'echo in-sh'; echo \"sh=$?\"";
+
+    let only_sh = session
+        .execute(code)
+        .with_allowed_commands(["sh"])
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&only_sh.stdout),
+        "bash=127\nin-sh\nsh=0\n"
+    );
+
+    let all = session.execute(code).run().await.unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&all.stdout),
+        "in-bash\nbash=0\nin-sh\nsh=0\n"
+    );
 }
 
 /// A child starts in the shell's directory: after `cd`, the embedded

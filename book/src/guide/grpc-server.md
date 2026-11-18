@@ -89,7 +89,7 @@ containers:
 
 ### Shell requests
 
-A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-coreutils` is set, and any `--shell-command`s.
+A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-embedded-commands` is set, any `--shell-command`s, and `python`/`python3` with `--shell-python` (from the server's Python runtime: `--runtime-cwasm` and `--stdlib`, or the embedded one).
 - **Which commands:** `allowed_commands` narrows a request to some of them.
 - **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.
@@ -158,7 +158,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid` and `exit_code`). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |
-| `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. The shell's `grep` builtin counts as a command; other builtins and callbacks aren't restricted. Setting it for another language is `INVALID_ARGUMENT`. |
+| `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. The shell's `grep` builtin and its nested `sh`/`bash` count as commands; other builtins and callbacks aren't restricted. Setting it for another language is `INVALID_ARGUMENT`. |
 | `commands` | Shell only: per-command options for this request, by the server's command names (`CommandOptions`). `network` gives that command's children `MODE_NONE`, `MODE_INHERIT` (the request's `child_network`) or `MODE_NARROW` (only what both `narrow` and the request's allow, counted against both's limits); `no_tunnels` and `no_spawn` turn off what the server's `--shell-command-tunnels` and `--shell-command-spawn` grant. A command spawned by another gets its own options, not its caller's, so pair a `MODE_NONE` or `MODE_NARROW` network with `no_spawn` to stop it reaching a command with more network. Options can only take away: a name the server doesn't have, network for a command when `child_network` gives children none, or `commands` on another language is `INVALID_ARGUMENT`. |
 
 ## Reading the result

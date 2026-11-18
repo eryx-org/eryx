@@ -40,6 +40,21 @@ result = { ok: true };
     expect(error.stdout).toBe("before\n");
     expect(error.exitCode).toBeUndefined();
   });
+
+  it("rejects a promise rejection left unhandled, not one handled later", async () => {
+    using sandbox = new Sandbox({ language: "javascript" });
+    const error = await sandbox
+      .execute('async function f() { throw new Error("boom"); } f(); console.log("before")')
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(PythonExceptionError);
+    expect(error.message).toMatch(/^Uncaught \(in promise\) Error: boom/);
+    expect(error.stdout).toBe("before\n");
+
+    const result = await sandbox.execute(
+      'const p = Promise.reject(new Error("x")); await new Promise((r) => setTimeout(r, 10)); p.catch(() => console.log("caught"))',
+    );
+    expect(result.stdout).toBe("caught\n");
+  });
 });
 
 describe("language: shell", () => {

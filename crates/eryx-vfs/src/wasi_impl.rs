@@ -362,18 +362,18 @@ pub(crate) fn vfs_identity(path: &str) -> String {
     crate::InMemoryStorage::normalize_path(path).unwrap_or_else(|_| path.to_string())
 }
 
-/// Metadata hash for a VFS object: stable for the same object, and changes
-/// when a file's size or modification time does.
+/// Metadata hash for a VFS object, which wasi-libc reports as its inode
+/// number: stable while the object exists at `path`, so writing a file
+/// leaves it unchanged (#974). A file's creation time is mixed in, so a new
+/// file in a deleted one's place gets a new identity. A directory hashes its
+/// path alone, as it always has.
 pub(crate) fn vfs_metadata_hash(path: &str, meta: &Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     vfs_identity(path).hash(&mut hasher);
     meta.is_dir.hash(&mut hasher);
-    // Leave out a directory's mtime, which changes whenever an entry is
-    // added or removed: wasi-libc uses this hash as the inode number.
     if !meta.is_dir {
-        meta.size.hash(&mut hasher);
-        meta.modified.hash(&mut hasher);
+        meta.created.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_hash_tracks_identity_and_modification() {
+    fn metadata_hash_is_stable_across_writes() {
         let meta = Metadata {
             size: 3,
             ..Metadata::default()
@@ -441,14 +441,31 @@ mod tests {
             vfs_metadata_hash("/a/b", &meta)
         );
 
-        // Same size, later modification: the hash must change.
-        let touched = Metadata {
+        // Writing the file changes its size and mtime, not its identity:
+        // wasi-libc uses the hash as the inode number (#974).
+        let written = Metadata {
+            size: 4,
             modified: meta.modified + std::time::Duration::from_secs(1),
+            ..meta.clone()
+        };
+        assert_eq!(
+            vfs_metadata_hash("/a/b", &meta),
+            vfs_metadata_hash("/a/b", &written)
+        );
+
+        // A different path, or a new file at the same path, is a different
+        // object.
+        assert_ne!(
+            vfs_metadata_hash("/a/b", &meta),
+            vfs_metadata_hash("/a/c", &meta)
+        );
+        let replaced = Metadata {
+            created: meta.created + std::time::Duration::from_secs(1),
             ..meta.clone()
         };
         assert_ne!(
             vfs_metadata_hash("/a/b", &meta),
-            vfs_metadata_hash("/a/b", &touched)
+            vfs_metadata_hash("/a/b", &replaced)
         );
     }
 }

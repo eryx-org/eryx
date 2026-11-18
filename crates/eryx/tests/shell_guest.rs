@@ -928,3 +928,342 @@ async fn replay_ignores_flag_order_and_resumes_after_suspending() {
     assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
     assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
 }
+
+/// A shell sandbox where `python` and `python3` run the embedded Python
+/// runtime as a command (#831).
+fn python_shell() -> Option<SandboxBuilder<Shell, state::Has>> {
+    let python = eryx::Command::guest(Language::Python).unwrap();
+    Some(shell_sandbox()?.with_commands(["python", "python3"], python))
+}
+
+#[tokio::test]
+async fn python3_is_opt_in() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let err = sandbox.execute("python3 -c 1").await.unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::ScriptFailed {
+                exit_code: Some(127),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn python3_streams_through_a_pipeline() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "echo 'print(1 + 1)' | python3\n\
+             seq 1 1000 | python3 -c 'import sys; print(len(sys.stdin.read()))' | head -1\n\
+             python -c 'import sys; print(sys.argv)' a b",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "2\n3893\n['-c', 'a', 'b']\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn python3_shares_the_shells_files_env_and_cwd() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "echo from-sh > /tmp/x\n\
+             python3 -c \"print(open('/tmp/x').read().strip()); open('/tmp/y', 'w').write('from-py')\"\n\
+             cat /tmp/y; echo\n\
+             FOO=1 python3 -c 'import os; print(os.environ[\"FOO\"])'\n\
+             cd /tmp && python3 -c 'import os; print(os.getcwd())'",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "from-sh\nfrom-py\n1\n/tmp\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn python3_exit_status_and_traceback_reach_the_shell() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "python3 -c 'import sys; sys.exit(3)'; echo $?\n\
+             python3 -c 'raise ValueError(\"boom\")' 2>/tmp/err; echo $?\n\
+             tail -1 /tmp/err",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "3\n1\nValueError: boom\n");
+}
+
+#[tokio::test]
+async fn python3_burns_the_executions_fuel() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(builder.build().unwrap().executor(), &[])
+        .await
+        .unwrap();
+    let err = session
+        .execute("python3 -c 'while True: pass'")
+        .with_fuel_limit(500_000_000)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "expected FuelExhausted, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn python3_memory_counts_against_the_child_pool() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    // More than the children's 256 MiB pool.
+    let out = sandbox
+        .execute(
+            "python3 -c 'b = bytearray(300 * 1024 * 1024)' 2>/tmp/err; echo $?\n\
+             tail -1 /tmp/err\n\
+             echo 'import sys; sys.stdin.read(); print(\"ok\")' > /tmp/s.py\n\
+             python3 /tmp/s.py < /tmp/s.py | python3 /tmp/s.py | python3 /tmp/s.py | python3 /tmp/s.py",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "1\nMemoryError\nok\n");
+}
+
+#[tokio::test]
+async fn guest_commands_cant_have_credentials() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let result = builder
+        .with_network(eryx::NetConfig::default())
+        .with_child_network(eryx::ChildNetwork::Inherit)
+        .with_credential(
+            eryx::net::Credential::bearer("token")
+                .for_hosts(["example.com"])
+                .for_commands(["python3"]),
+        )
+        .build();
+    let err = match result {
+        Ok(sandbox) => sandbox.execute("true").await.unwrap_err(),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("guest runtime"), "{err}");
+}
+
+/// Run `code` in a fresh shell sandbox, and return its stdout and stderr.
+async fn run_shell(code: &str) -> (String, String) {
+    let sandbox = shell_sandbox().unwrap().build().unwrap();
+    let out = sandbox.execute(code).await.unwrap();
+    (
+        out.stdout_utf8().unwrap().to_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `sh` and `bash` run a nested shell, like an external command: it sees
+/// only exported variables, nothing it changes comes back, and its exit
+/// status is the command's.
+#[tokio::test]
+async fn sh_and_bash_run_nested_shells() {
+    let (stdout, stderr) = run_shell(
+        r#"
+bash -c 'echo $((1+2))'
+sh -c 'exit 7'; echo "status=$?"
+X=1; export Y=2; bash -c 'echo "[$X$Y]"'
+bash -c 'echo $0 $1 $2' me a b
+echo 'echo from stdin' | bash
+echo 'echo "$1"' | bash -s arg
+cd /tmp; bash -c 'cd /; Z=1'; echo "$PWD [$Z]"
+bash -ec 'false; echo not reached'; echo "e=$?"
+bash -o pipefail -c 'false | true'; echo "pipefail=$?"
+bash -c 'echo nested >&2'
+bash -c 'bash -c "sh -c \"echo deep\""'
+bash --login; echo "bad=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "3\nstatus=7\n[2]\nme a b\nfrom stdin\narg\n/tmp []\ne=1\npipefail=1\ndeep\nbad=2\n"
+    );
+    assert!(
+        stderr.starts_with("nested\nbash: --login: invalid option\n"),
+        "{stderr}"
+    );
+}
+
+/// `sh FILE` and `bash FILE` run a script with its arguments.
+#[tokio::test]
+async fn sh_runs_a_script_file() {
+    let (stdout, stderr) = run_shell(
+        r#"
+printf 'echo "$0 $# $1 $2"\nexit 4\n' > /tmp/f.sh
+sh /tmp/f.sh a b; echo "status=$?"
+cd /tmp && bash f.sh x; echo "status=$?"
+bash /tmp/missing.sh; echo "missing=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "/tmp/f.sh 2 a b\nstatus=4\nf.sh 1 x \nstatus=4\nmissing=127\n"
+    );
+    assert!(stderr.contains("missing.sh"), "{stderr}");
+}
+
+/// A nested shell is a pipeline stage like any other: its stdin and stdout
+/// are the pipes, a writer that wouldn't end for minutes stops once a
+/// nested `head` is done (and the other way round), and nested children's
+/// output reaches the outer pipe.
+#[tokio::test]
+async fn nested_shells_stream_through_pipelines() {
+    let (stdout, _) = run_shell(
+        r#"
+seq 1 1000000000 | bash -c 'head -n1'
+bash -c 'seq 1 1000000000' | head -n1
+seq 1 1000000000 | bash -c 'read x; echo "read $x"'
+echo hi | bash -c cat | cat
+seq 1 100000 | bash -c 'wc -l'
+bash -c 'seq 1 1000000000 | sh -c "head -n2"' | tail -n1
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "1\n1\nread 1\nhi\n100000\n2\n");
+}
+
+/// Callbacks are commands in a nested shell too.
+#[tokio::test]
+async fn callbacks_reach_nested_shells() {
+    let sandbox = shell_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute("bash -c 'add 2 3'; sh -c 'invoke add \"{\\\"a\\\": 1, \\\"b\\\": 1}\"'")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "5\n2\n");
+}
+
+/// Shells nested past the cap exit 126 with a message, rather than recurse
+/// until the guest runs out of memory.
+#[tokio::test]
+async fn nesting_shells_too_deep_fails_cleanly() {
+    let (stdout, stderr) = run_shell(
+        r#"
+printf 'bash /tmp/r.sh\n' > /tmp/r.sh
+bash /tmp/r.sh; echo "status=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "status=126\n");
+    assert!(
+        stderr.contains("bash: shells nested more than 16 deep"),
+        "{stderr}"
+    );
+}
+
+/// Any file is runnable: its `#!` line names the interpreter, by its file
+/// name (a shell runs nested), and a file without one is an `sh` script.
+/// A path is never a host command by its file name: `./ls` is a file.
+#[tokio::test]
+async fn files_run_as_scripts() {
+    let (stdout, stderr) = run_shell(
+        r#"
+cd /tmp
+printf '#!/bin/sh\necho "sh $0 $1"\nexit 3\n' > a.sh
+./a.sh x; echo "status=$?"
+printf '#!/usr/bin/env bash\necho "bash $#"\n' > b
+/tmp/b 1 2
+printf 'echo "plain $1"\n' > c
+./c y
+printf '#!/bin/bash -e\nfalse\necho not reached\n' > d
+./d; echo "e=$?"
+printf 'echo on-path\n' > tool
+PATH="/tmp:$PATH" tool
+./ls; echo "ls=$?"
+printf '#!/usr/bin/env nope\n' > e
+./e; echo "nope=$?"
+./; echo "dir=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "sh ./a.sh x\nstatus=3\nbash 2\nplain y\ne=1\non-path\nls=127\nnope=127\ndir=126\n"
+    );
+    assert!(stderr.contains("nope: command not found"), "{stderr}");
+}
+
+/// A `#!` naming another interpreter runs the host command of that name,
+/// with the script's path as an argument.
+#[tokio::test]
+async fn shebangs_run_host_commands() {
+    let (stdout, _) = run_shell(
+        r#"
+printf '#!/usr/bin/cat\nhello\n' > /tmp/s
+/tmp/s
+printf '#!/usr/bin/env head -n1\nfirst\nsecond\n' > /tmp/h
+/tmp/h
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "#!/usr/bin/cat\nhello\n#!/usr/bin/env head -n1\n");
+}
+
+/// `env` is a builtin (uutils' can't run commands on WASI): it prints the
+/// exported environment, or runs a command, found as any other is, with
+/// variables added (`NAME=VALUE`), removed (`-u`) or only those (`-i`).
+#[tokio::test]
+async fn env_runs_commands_in_a_changed_environment() {
+    let (stdout, stderr) = run_shell(
+        r#"
+export A=1; B=2
+env | grep -E '^(A|B)='
+env C=3 D=4 bash -c 'echo "$A $C $D"'
+env -i E=5 sh -c 'echo "[$A] $E"'
+env -i | wc -l
+env -u A sh -c 'echo "[$A]"'
+printf 'echo "$A"\n' > /tmp/s; env A=x /tmp/s
+echo "A=$A"
+env sh -c 'exit 9'; echo "status=$?"
+env nope; echo "missing=$?"
+env -S 'a b'; echo "bad=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "A=1\n1 3 4\n[] 5\n0\n[]\nx\nA=1\nstatus=9\nmissing=127\nbad=125\n"
+    );
+    assert!(stderr.contains("env: invalid option"), "{stderr}");
+}

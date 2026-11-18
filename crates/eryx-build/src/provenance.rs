@@ -31,7 +31,9 @@ struct Provenance<'a> {
     source: Upstream<'a>,
     /// Libraries linked into the component (C lane `[[deps]]`).
     deps: Vec<Upstream<'a>>,
-    /// Patches and shims applied, repo-root-relative, with their sha256.
+    /// The repo files the build applies, compiles or links (patches, shims,
+    /// WIT; see [`Manifest::repo_inputs`]), repo-root-relative, with their
+    /// sha256. A WIT directory is listed file by file.
     patches: Vec<File>,
     /// Built artifacts in the output dir, with their sha256.
     artifacts: Vec<File>,
@@ -69,18 +71,7 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
     std::fs::copy(manifest_path, output_dir.join("manifest.toml"))
         .with_context(|| format!("copying {}", manifest_path.display()))?;
 
-    let patches = manifest
-        .build
-        .vendor_patch
-        .iter()
-        .chain(
-            manifest
-                .deps
-                .iter()
-                .flat_map(|d| d.config_patch.iter().chain(&d.shims)),
-        )
-        .map(|p| file(&repo_root, p))
-        .collect::<Result<_>>()?;
+    let patches = patches(manifest, &repo_root)?;
 
     let mut names = vec!["component.wasm".to_string()];
     if manifest.cwasm.enabled {
@@ -127,6 +118,35 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(&provenance)?;
     std::fs::write(&out, json + "\n").with_context(|| format!("writing {}", out.display()))?;
     eprintln!("  → {}", out.display());
+    Ok(())
+}
+
+/// The `patches` entries: every [`Manifest::repo_inputs`] file, hashed.
+fn patches(manifest: &Manifest, repo_root: &Path) -> Result<Vec<File>> {
+    let mut out = Vec::new();
+    for rel in manifest.repo_inputs() {
+        files(repo_root, rel, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Hash `base/rel` into `out`: the file itself, or every file under it,
+/// sorted, when it's a directory.
+fn files(base: &Path, rel: &Path, out: &mut Vec<File>) -> Result<()> {
+    let path = base.join(rel);
+    if !path.is_dir() {
+        out.push(file(base, rel)?);
+        return Ok(());
+    }
+    let mut entries = std::fs::read_dir(&path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .map(|e| Ok(rel.join(e?.file_name())))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("reading {}", path.display()))?;
+    entries.sort();
+    for entry in entries {
+        files(base, &entry, out)?;
+    }
     Ok(())
 }
 
@@ -192,8 +212,72 @@ fn imported_packages(wit: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// `patches` records the build's own shims and WIT (a directory, file by
+    /// file) alongside the vendor patch and the deps' patches and shims.
+    #[test]
+    fn patches_cover_every_repo_input() {
+        let root = std::env::temp_dir().join(format!("eryx-build-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, body) in [
+            ("patch.sh", "p"),
+            ("shims/stubs.c", "s"),
+            ("wit/process.wit", "w"),
+            ("wit/deps/io.wit", "d"),
+            ("dep-patch.sh", "dp"),
+            ("dep-shim.c", "ds"),
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let manifest: Manifest = toml::from_str(
+            r#"
+            name = "git"
+            license = "GPL-2.0-only"
+            lang = "c"
+            [source]
+            repo = "https://example.com/git.git"
+            ref = "v2"
+            commit = "0000000000000000000000000000000000000000"
+            dir = "scratch/git"
+            [output]
+            dir = "out/git"
+            [build]
+            vendor_patch = "patch.sh"
+            shims = ["shims/stubs.c"]
+            wit = { path = "wit", world = "eryx:process/child" }
+            [[deps]]
+            name = "zlib"
+            url = "https://example.com/zlib.tar.gz"
+            ref = "1"
+            sha256 = "00"
+            license = "Zlib"
+            dir = "scratch/zlib"
+            config_patch = "dep-patch.sh"
+            shims = ["dep-shim.c"]
+            "#,
+        )
+        .unwrap();
+        let got = patches(&manifest, &root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        let paths: Vec<_> = got.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "patch.sh",
+                "shims/stubs.c",
+                "wit/deps/io.wit",
+                "wit/process.wit",
+                "dep-patch.sh",
+                "dep-shim.c",
+            ]
+        );
+        assert_eq!(got[1].sha256, hex::encode(Sha256::digest(b"s")));
+    }
 
     #[test]
     fn imported_packages_come_from_the_component_world() {

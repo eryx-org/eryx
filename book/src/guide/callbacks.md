@@ -121,7 +121,7 @@ Callback names must be unique: building a sandbox with two callbacks of the same
 A guest installs each callback under its name (for a dotted name like `http.get`, under its first part, `http`), and keeps what it already has, so a callback named like something of the guest's could only be called through `invoke("name")`. Building such a sandbox fails instead, naming the callback and what it collides with:
 
 - **JavaScript:** the guest's globals (`fetch`, `crypto`, `URL`, `setTimeout`, `console`, `require`, `invoke`, the built-ins like `JSON` and `Map`, ...), including as a dotted name's first part (`fetch.get`, `crypto.*`).
-- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke` and `grep`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
+- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke`, `grep`, `env`, `sh` and `bash`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
 - **Python:** the builtins (`print`, `list`, `open`, ...) and the names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`, ...), including as a dotted name's first part (`json.dumps`).
 
 In JavaScript, `process` is reserved even in a sandbox without secrets, where the guest only defines it when there are some.

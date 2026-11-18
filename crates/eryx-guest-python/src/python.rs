@@ -1632,6 +1632,150 @@ def _eryx_exec(code, trace_enabled, preamble):
         if trace_enabled:
             _sys.settrace(None)
 
+# The run-command export: `python3 ARGS...` on a fresh instance, reading and
+# writing the real fds 0/1/2. Its exit status, read by the export once the
+# command finishes (which may be after it suspends on an asyncio timer).
+_eryx_command_status = 0
+_eryx_infra_globals = globals()
+
+class _EryxUsage(Exception):
+    '''A command line python3 can't run: exits 2 with the message.'''
+
+# Flags with no effect here: unbuffered (the command flushes on exit), no
+# bytecode, quiet, and the isolation flags (there's nothing to isolate from).
+_ERYX_IGNORED_FLAGS = frozenset('uBIEsq')
+
+def _eryx_parse_command(argv):
+    '''Split python3's argv into (mode, target, sys.argv).
+
+    mode is 'c' (target is the code), 'm' (the module), 'file' (the path),
+    'stdin', or 'version'. Only what scripts and agents actually type.
+    '''
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ('-c', '-m'):
+            if i + 1 == len(argv):
+                raise _EryxUsage('Argument expected for the %s option' % arg)
+            return arg[1], argv[i + 1], [arg] + argv[i + 2:]
+        if arg in ('-V', '--version'):
+            return 'version', None, None
+        if arg == '-':
+            return 'stdin', None, argv[i:]
+        if arg == '--':
+            i += 1
+            break
+        if not arg.startswith('-'):
+            break
+        if len(arg) > 1 and arg[1] != '-' and set(arg[1:]) <= _ERYX_IGNORED_FLAGS:
+            i += 1
+            continue
+        raise _EryxUsage('unsupported option %s (supported: -c, -m, -, a script, -V and -u, -B, -I, -E, -s, -q)' % arg)
+    if i < len(argv):
+        return 'file', argv[i], argv[i:]
+    return 'stdin', None, ['']
+
+def _eryx_exit_status(code):
+    '''The exit status `SystemExit(code)` ends a process with, as CPython does.'''
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code & 0xff
+    print(code, file=_sys.stderr)
+    return 1
+
+def _eryx_print_command_error(e):
+    '''Print an uncaught exception's traceback, minus the eryx frames above the user's.'''
+    import traceback
+    tb = e.__traceback__
+    while tb is not None and tb.tb_frame.f_globals is _eryx_infra_globals:
+        tb = tb.tb_next
+    traceback.print_exception(type(e), e, tb, file=_sys.stderr)
+
+def _eryx_command_source(mode, target):
+    '''The (source, filename, globals) a command other than -m runs.'''
+    user_globals = {'__builtins__': __builtins__, '__name__': '__main__',
+                    '__package__': None, '__spec__': None}
+    if mode == 'c':
+        return target, '<string>', user_globals
+    if mode == 'stdin':
+        return _sys.stdin.read(), '<stdin>', user_globals
+    import tokenize
+    try:
+        with tokenize.open(target) as f:
+            source = f.read()
+    except OSError as e:
+        raise _EryxUsage("can't open file %r: [Errno %s] %s" % (target, e.errno, e.strerror)) from None
+    user_globals['__file__'] = target
+    return source, target, user_globals
+
+async def _eryx_command_main(argv):
+    '''Run python3's command line, leaving its exit status in _eryx_command_status.'''
+    global _eryx_command_status
+    status = 0
+    try:
+        mode, target, new_argv = _eryx_parse_command(argv)
+        if mode == 'version':
+            print('Python ' + _sys.version.split()[0])
+        elif mode == 'm':
+            import runpy
+            _sys.argv = new_argv
+            _sys.path.insert(0, '')
+            runpy.run_module(target, run_name='__main__', alter_sys=True)
+        else:
+            source, filename, user_globals = _eryx_command_source(mode, target)
+            _sys.argv = new_argv
+            if mode == 'file':
+                import os
+                _sys.path.insert(0, os.path.dirname(os.path.abspath(target)))
+            else:
+                _sys.path.insert(0, '')
+            # The execute export's compile, so a top-level `asyncio.run(main())`
+            # (or await) runs on the guest's own event loop.
+            compiled = _eryx_compile(source, filename)
+            if compiled.co_flags & 0x80:  # CO_COROUTINE
+                await _types.FunctionType(compiled, user_globals)()
+            else:
+                exec(compiled, user_globals)
+    except _EryxUsage as e:
+        print('python3: %s' % e, file=_sys.stderr)
+        status = 2
+    except SystemExit as e:
+        status = _eryx_exit_status(e.code)
+    except BaseException as e:
+        _eryx_print_command_error(e)
+        status = 1
+    for stream in (_sys.stdout, _sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    _eryx_command_status = status
+
+def _eryx_run_command(argv, env, cwd):
+    '''Start python3's command line (the run-command export).
+
+    Sets _eryx_callback_code like _eryx_exec: WAIT while an asyncio timer is
+    pending. The exit status is in _eryx_command_status once it's done.
+    '''
+    global _eryx_callback_code, _eryx_command_status
+    import os
+    if not _eryx_site_packages_added:
+        _eryx_add_site_packages()
+    # Commands write straight to the real fds, not the execute capture.
+    _sys.stdout, _sys.stderr = _eryx_old_stdout, _eryx_old_stderr
+    os.environ.clear()
+    os.environ.update(env)
+    _eryx_callback_code = 0
+    _eryx_command_status = 0
+    try:
+        os.chdir(cwd)
+    except OSError as e:
+        print("python3: can't change to %r: %s" % (cwd, e.strerror), file=_sys.stderr)
+        _eryx_command_status = 1
+        return
+    _eryx_callback_code = _eryx_async.run_async(_eryx_command_main(list(argv)))
+
 def _eryx_get_output():
     '''Get captured stdout and restore original streams.'''
     _sys.stdout = _eryx_old_stdout
@@ -3576,6 +3720,53 @@ pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
     };
     // SAFETY: Python is initialized (checked above).
     unsafe { execute_python_direct(helpers, code, trace_enabled) }
+}
+
+/// How a `run-command` call went.
+#[derive(Debug)]
+pub enum CommandResult {
+    /// The command finished with this exit status.
+    Exited(i32),
+    /// The command is waiting on an asyncio timer; resume it with the
+    /// callback code (WAIT | waitable_set << 4).
+    Pending(u32),
+}
+
+/// Run `python3 ARGS...` with `env` as the environment and `cwd` as the
+/// working directory, reading and writing the real fds 0/1/2.
+///
+/// Backs the `run-command` WIT export.
+pub fn run_command(args: Vec<String>, env: Vec<(String, String)>, cwd: String) -> CommandResult {
+    if !is_python_initialized() {
+        eprintln!("python3: the interpreter isn't initialized");
+        return CommandResult::Exited(127);
+    }
+    let started = Python::attach(|py| -> PyResult<()> {
+        py.import("__main__")?
+            .getattr("_eryx_run_command")?
+            .call1((args, env, cwd))?;
+        Ok(())
+    });
+    if let Err(e) = started {
+        Python::attach(|py| e.print(py));
+        return CommandResult::Exited(1);
+    }
+    let code = get_python_callback_code();
+    if callback_code::get_code(code) == callback_code::WAIT {
+        CommandResult::Pending(code)
+    } else {
+        CommandResult::Exited(command_status())
+    }
+}
+
+/// The exit status the last `run-command` left, once it has finished.
+pub fn command_status() -> i32 {
+    Python::attach(|py| {
+        py.import("__main__")
+            .and_then(|main| main.getattr("_eryx_command_status"))
+            .and_then(|status| status.extract())
+            .unwrap_or(1)
+    })
 }
 
 /// Set the name of the user variable captured as the structured result.

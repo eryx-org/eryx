@@ -2026,7 +2026,11 @@ fn plain_authority(authority: &http::uri::Authority) -> bool {
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
         }
     };
-    let port_ok = match &authority.as_str()[host.len()..] {
+    // `host()` leaves out any userinfo (`user@`), which has to be refused.
+    let Some(rest) = authority.as_str().strip_prefix(host) else {
+        return false;
+    };
+    let port_ok = match rest {
         "" => true,
         port => port.strip_prefix(':').is_some_and(|p| {
             !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
@@ -2104,7 +2108,11 @@ fn is_http2(data: &[u8]) -> bool {
 /// Framing a server could read differently from this is refused, so that
 /// every request it sees is one the host checked: a CR or LF outside a
 /// CRLF, a folded or malformed header line, a `Transfer-Encoding` other
-/// than `chunked`, both that and `Content-Length`, or more than one length.
+/// than `chunked`, any `Transfer-Encoding` on an HTTP/1.0 request (RFC 9112
+/// section 6.1), both that and `Content-Length`, or more than one length.
+/// So is a `Host` that isn't a plain `host[:port]` ([`plain_authority`]),
+/// since the host checks read it as a host and a port, and a server might
+/// read anything else differently.
 fn request_body(headers: &[u8]) -> Result<Body, TcpError> {
     let ambiguous = |what: &str| TcpError::NotPermitted(format!("ambiguous HTTP request: {what}"));
     let text = std::str::from_utf8(headers).map_err(|_| ambiguous("headers are not UTF-8"))?;
@@ -2112,20 +2120,33 @@ fn request_body(headers: &[u8]) -> Result<Body, TcpError> {
         .strip_suffix("\r\n\r\n")
         .ok_or_else(|| ambiguous("unterminated headers"))?
         .split("\r\n");
-    let (mut length, mut chunked) = (None, false);
+    let (mut length, mut chunked, mut http_1_0) = (None, false, false);
     for (i, line) in lines.enumerate() {
         if line.contains(['\r', '\n']) {
             return Err(ambiguous("bare CR or LF"));
         }
         if i == 0 {
-            continue; // The request line.
+            // The request line, which callers have checked with
+            // `request_line`, so it ends in the version.
+            http_1_0 = line.ends_with(" HTTP/1.0");
+            continue;
         }
         let (name, value) = line
             .split_once(':')
             .filter(|(name, _)| !name.is_empty() && name.bytes().all(is_tchar))
             .ok_or_else(|| ambiguous("malformed header line"))?;
         let value = value.trim_matches([' ', '\t']);
-        if name.eq_ignore_ascii_case("transfer-encoding") {
+        if name.eq_ignore_ascii_case("host") {
+            let plain = value
+                .parse::<http::uri::Authority>()
+                .is_ok_and(|a| a.as_str() == value && plain_authority(&a));
+            if !plain {
+                return Err(ambiguous("Host is not a plain host[:port]"));
+            }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if http_1_0 {
+                return Err(ambiguous("Transfer-Encoding on an HTTP/1.0 request"));
+            }
             if chunked || !value.eq_ignore_ascii_case("chunked") {
                 return Err(ambiguous("unsupported Transfer-Encoding"));
             }
@@ -2498,7 +2519,50 @@ mod tests {
             body("GET / HTTP/1.1\r\nX-Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"),
             Ok(Body::None)
         ));
+        for host in [
+            "example.com",
+            "Example.COM.",
+            "example.com:8080",
+            "127.0.0.1:80",
+            "[::1]",
+            "[2001:db8::1]:443",
+            "under_score.example",
+        ] {
+            let headers = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            assert!(matches!(body(&headers), Ok(Body::None)), "{host}");
+        }
+        for host in [
+            "",
+            "allowed.example:x@other.example",
+            "user@example.com",
+            "example.com/path",
+            "example.com?q",
+            "example.com:http",
+            "example.com:99999",
+            "example.com:",
+            "::1",
+            "[::1",
+            "[not-v6]",
+            "[fe80::1%25eth0]",
+            "ex%61mple.com",
+            "a b",
+        ] {
+            let headers = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            assert!(body(&headers).is_err(), "{host:?}");
+        }
+        // RFC 9112 section 6.1: Transfer-Encoding on HTTP/1.0 is faulty
+        // framing, whether or not Content-Length is there too.
+        assert!(matches!(
+            body("POST / HTTP/1.0\r\nContent-Length: 5\r\n\r\n"),
+            Ok(Body::Length(5))
+        ));
         for headers in [
+            "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.0\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nContent-Length: 5, 5\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n",
+            "POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n",
             "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
             "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
             "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -2514,6 +2578,32 @@ mod tests {
             "POST / HTTP/1.1\r\nX(A): b\r\n\r\n",
         ] {
             assert!(body(headers).is_err(), "{headers:?}");
+        }
+    }
+
+    /// The guest's own connections (`eryx:net`) refuse the same heads as
+    /// the child proxy: a `Host` that isn't a plain authority, and chunked
+    /// on HTTP/1.0.
+    #[test]
+    fn guest_requests_need_plain_hosts_and_1_1_chunking() {
+        let mut manager = ConnectionManager::new(NetConfig::permissive(), HashMap::new()).unwrap();
+        let mut write = |request: &str| {
+            let handle = manager.alloc_handle();
+            manager
+                .connection_hosts
+                .insert(handle, "api.example.com".to_string());
+            manager.process_write_data(handle, request.as_bytes())
+        };
+        let request = "GET / HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n";
+        assert_eq!(write(request).unwrap(), request.as_bytes());
+        for request in [
+            "GET / HTTP/1.1\r\nHost: api.example.com:x@other.example\r\n\r\n",
+            "POST / HTTP/1.0\r\nHost: api.example.com\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            assert!(
+                matches!(write(request), Err(TcpError::NotPermitted(_))),
+                "{request:?}"
+            );
         }
     }
 
@@ -4813,7 +4903,12 @@ mod tests {
                 let non_matching = [&pad[..], &other[..]].concat();
                 let a = read_pattern(&[long, short], &matching, len).await;
                 let b = read_pattern(&[long, short], &non_matching, len).await;
-                assert_eq!(a, b, "{secret}[..{k}], trial {trial}");
+                assert_eq!(
+                    a,
+                    b,
+                    "{k} bytes of the {}-byte secret, trial {trial}",
+                    secret.len()
+                );
             }
         }
     }

@@ -50,6 +50,7 @@ tonic-prost-build.workspace = true
 [dev-dependencies]
 rcgen.workspace = true
 tempfile.workspace = true
+wat.workspace = true
 
 [lints]
 workspace = true

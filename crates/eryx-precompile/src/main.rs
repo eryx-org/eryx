@@ -14,11 +14,11 @@
 //! eryx-precompile setup --language python --language javascript --language shell
 //!
 //! # Pre-init + compile for Fly.io (x86-64-v3, no AVX-512)
-//! eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
 //!   --cpu-features x86-64-v3
 //!
 //! # Pre-init only (output pre-initialized .wasm for later compilation)
-//! eryx-precompile compile runtime-python.wasm -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
+//! eryx-precompile compile -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
 //!
 //! # AOT compile only (no pre-init, for already pre-initialized .wasm)
 //! eryx-precompile compile runtime-preinit.wasm -o runtime-python.cwasm --cpu-features x86-64-v3
@@ -27,18 +27,18 @@
 //! eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target aarch64-unknown-linux-gnu
 //!
 //! # Pre-init with packages (wheels, tar.gz, or directories)
-//! eryx-precompile compile runtime-python.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-2.2.3-wasi.tar.gz --import numpy
 //!
 //! # Pre-init with site-packages directory
-//! eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
 //!   --site-packages ./my-site-packages --import jinja2
 //!
 //! # Check a WASI CLI before registering it as a shell command
 //! eryx-precompile commands inspect rg.wasm
 //!
 //! # Verify packages work (not just import)
-//! eryx-precompile compile runtime-python.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-wasi.tar.gz --import numpy \
 //!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
@@ -263,8 +263,10 @@ struct SetupArgs {
 #[derive(Parser, Debug)]
 struct CompileArgs {
     /// Input WASM file (.wasm or pre-initialized .wasm)
-    #[arg(required = true)]
-    input: PathBuf,
+    ///
+    /// Not needed with `--preinit` for Python, which builds from the
+    /// runtime built into this binary; an input given then is ignored.
+    input: Option<PathBuf>,
 
     /// The guest language the component runs (python, javascript or shell).
     /// Stamped into the output, so loading it for another language fails
@@ -273,7 +275,8 @@ struct CompileArgs {
     #[arg(long, value_parser = parse_language)]
     language: Option<eryx::Language>,
 
-    /// Output path (default: input with .cwasm extension, or .wasm for --wasm-only)
+    /// Output path (default: input with .cwasm extension, or .preinit.wasm
+    /// for --wasm-only; required without an input)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -1029,22 +1032,14 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     // Set up tracing
     init_tracing(args.verbose);
 
-    // Determine output path
-    let output = args.output.unwrap_or_else(|| {
-        let mut out = args.input.clone();
-        if args.wasm_only {
-            out.set_extension("preinit.wasm");
-        } else {
-            out.set_extension("cwasm");
-        }
-        out
-    });
-
     let python = args.language.is_none_or(|l| l == eryx::Language::Python);
     let javascript = args.language == Some(eryx::Language::JavaScript);
     if args.preinit && !python && !javascript {
         anyhow::bail!("--preinit only works for Python and JavaScript runtimes");
     }
+
+    let python_preinit = args.preinit && python;
+    let (input, output) = resolve_input_and_output(&args, python_preinit)?;
     if javascript
         && (args.site_packages.is_some()
             || !args.packages.is_empty()
@@ -1078,7 +1073,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!("eryx-precompile");
     println!("===============");
     println!();
-    println!("Input:   {}", args.input.display());
+    if let Some(input) = &input {
+        println!("Input:   {}", input.display());
+    }
     println!("Output:  {}", output.display());
     if !args.wasm_only {
         if let Some(ref triple) = target_triple {
@@ -1144,39 +1141,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
 
     // Read input WASM
-    let mut wasm_bytes = std::fs::read(&args.input)
-        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
-    // A WASI preview 1 command module becomes a 0.2 command component, as
-    // Command::from_bytes would adapt it.
-    if args.language.is_none() {
-        let adapted = match eryx::Command::to_component(&wasm_bytes)? {
-            std::borrow::Cow::Owned(component) => Some(component),
-            std::borrow::Cow::Borrowed(_) => None,
-        };
-        if let Some(component) = adapted {
-            println!("Adapted the WASI preview 1 module into a command component");
-            wasm_bytes = component;
-        }
-    }
-    println!(
-        "Input size: {} bytes ({:.1} MB)",
-        wasm_bytes.len(),
-        wasm_bytes.len() as f64 / 1_000_000.0
-    );
-
-    // A command is a component exporting wasi:cli/run. One that imports what
-    // children don't get would only fail once registered: refuse it now.
-    let command = match eryx::Command::inspect(&wasm_bytes) {
-        Ok(info) if args.language.is_none() && info.wasi.is_some() => {
-            if let Some(problem) = info.problem {
-                anyhow::bail!(
-                    "{} can't run as a shell command: {problem}",
-                    args.input.display()
-                );
-            }
-            true
-        }
-        _ => false,
+    let (wasm_bytes, command) = match &input {
+        Some(input) => read_input(input, args.language)?,
+        None => (Vec::new(), false),
     };
     if command && args.verify_code.is_some() {
         anyhow::bail!(
@@ -1194,7 +1161,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         .with_cpu_features(Some(cpu_features));
 
     // Step 1: Pre-initialize if requested
-    let packages = if args.preinit && python {
+    let packages = if python_preinit {
         Some(process_packages(
             args.site_packages.as_ref(),
             &args.packages,
@@ -1285,7 +1252,14 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
                 println!("Step 4: Skipping verification: it runs Python code");
             } else {
                 println!("Step 4: Verifying...");
-                verify_cwasm(&output, &stdlib, &args.imports, args.verify_code.as_deref()).await?;
+                verify_cwasm(
+                    &output,
+                    &stdlib,
+                    packages.as_ref().and_then(|p| p.site_packages.as_deref()),
+                    &args.imports,
+                    args.verify_code.as_deref(),
+                )
+                .await?;
                 println!("  Verification passed!");
             }
         }
@@ -1294,6 +1268,86 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
     println!("Success!");
     Ok(())
+}
+
+/// The input `compile` reads, if any, and the output path.
+///
+/// Python pre-initialization builds from this binary's own runtime, so it
+/// reads no input; everything else compiles the input.
+fn resolve_input_and_output(
+    args: &CompileArgs,
+    python_preinit: bool,
+) -> Result<(Option<PathBuf>, PathBuf)> {
+    let input = match &args.input {
+        Some(input) if python_preinit => {
+            println!(
+                "note: --preinit builds from the Python runtime built into this binary, \
+                 so {} is ignored",
+                input.display()
+            );
+            None
+        }
+        Some(input) => Some(input.clone()),
+        None if python_preinit => None,
+        None => anyhow::bail!(
+            "an input .wasm is required, except with --preinit for Python, which builds \
+             from the runtime built into this binary"
+        ),
+    };
+    let output = match (&args.output, &args.input) {
+        (Some(output), _) => output.clone(),
+        (None, Some(input)) => {
+            let mut out = input.clone();
+            if args.wasm_only {
+                out.set_extension("preinit.wasm");
+            } else {
+                out.set_extension("cwasm");
+            }
+            out
+        }
+        (None, None) => anyhow::bail!("--output is required without an input .wasm"),
+    };
+    Ok((input, output))
+}
+
+/// Read `compile`'s input, and say whether it's a command (a component
+/// exporting `wasi:cli/run`, compiled without `--language`).
+fn read_input(input: &Path, language: Option<eryx::Language>) -> Result<(Vec<u8>, bool)> {
+    let mut wasm_bytes = std::fs::read(input)
+        .with_context(|| format!("Failed to read input file: {}", input.display()))?;
+    // A WASI preview 1 command module becomes a 0.2 command component, as
+    // Command::from_bytes would adapt it.
+    if language.is_none() {
+        let adapted = match eryx::Command::to_component(&wasm_bytes)? {
+            std::borrow::Cow::Owned(component) => Some(component),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        if let Some(component) = adapted {
+            println!("Adapted the WASI preview 1 module into a command component");
+            wasm_bytes = component;
+        }
+    }
+    println!(
+        "Input size: {} bytes ({:.1} MB)",
+        wasm_bytes.len(),
+        wasm_bytes.len() as f64 / 1_000_000.0
+    );
+
+    // A command is a component exporting wasi:cli/run. One that imports what
+    // children don't get would only fail once registered: refuse it now.
+    let command = match eryx::Command::inspect(&wasm_bytes) {
+        Ok(info) if language.is_none() && info.wasi.is_some() => {
+            if let Some(problem) = info.problem {
+                anyhow::bail!(
+                    "{} can't run as a shell command: {problem}",
+                    input.display()
+                );
+            }
+            true
+        }
+        _ => false,
+    };
+    Ok((wasm_bytes, command))
 }
 
 /// The stdlib to pre-initialize and verify with: `stdlib`, or the one
@@ -1489,7 +1543,14 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
             println!("Step 4: Skipping verification: {reason}");
         } else {
             println!("Step 4: Verifying...");
-            verify_cwasm(&args.output, &stdlib, &inputs.imports, None).await?;
+            verify_cwasm(
+                &args.output,
+                &stdlib,
+                packages.site_packages.as_deref(),
+                &inputs.imports,
+                None,
+            )
+            .await?;
             println!("  Verification passed!");
         }
     }
@@ -1754,22 +1815,32 @@ fn missing_host_features(_level: CpuFeatureLevel) -> Vec<&'static str> {
 }
 
 /// Verify that the compiled cwasm file works correctly.
+///
+/// `site_packages` is the directory pre-initialization mounted, if any. It's
+/// mounted again here, as a sandbox using the artifact would, so modules the
+/// snapshot didn't import (lazy imports such as `numpy.ma`) still resolve.
 async fn verify_cwasm(
     cwasm_path: &Path,
     stdlib_path: &Path,
+    site_packages: Option<&Path>,
     imports: &[String],
     verify_code: Option<&str>,
 ) -> Result<()> {
     // Create a sandbox using the compiled cwasm
     // SAFETY: We just created this file from Executor::precompile()
     #[allow(unsafe_code)]
-    let sandbox = unsafe {
+    let builder = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(cwasm_path)
             .with_python_stdlib(stdlib_path)
-            .build()
-            .context("Failed to create sandbox from compiled cwasm")?
     };
+    let builder = match site_packages {
+        Some(path) => builder.with_site_packages(path),
+        None => builder,
+    };
+    let sandbox = builder
+        .build()
+        .context("Failed to create sandbox from compiled cwasm")?;
 
     // Create a session and run a simple test
     let mut session = eryx::InProcessSession::new(&sandbox)
@@ -2113,6 +2184,39 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn python_preinit_needs_no_input() -> Result<()> {
+        let resolve = |args: &[&str]| -> Result<(Option<PathBuf>, PathBuf)> {
+            let Command::Compile(args) =
+                Cli::try_parse_from(["eryx-precompile", "compile"].iter().chain(args))?.command
+            else {
+                anyhow::bail!("not a compile command");
+            };
+            let python_preinit =
+                args.preinit && args.language.is_none_or(|l| l == eryx::Language::Python);
+            resolve_input_and_output(&args, python_preinit)
+        };
+
+        assert_eq!(
+            resolve(&["--preinit", "-o", "out.cwasm"])?,
+            (None, PathBuf::from("out.cwasm"))
+        );
+        // eryx-run passes /dev/null, which is ignored.
+        assert_eq!(
+            resolve(&["/dev/null", "--preinit", "-o", "out.cwasm"])?,
+            (None, PathBuf::from("out.cwasm"))
+        );
+        assert_eq!(
+            resolve(&["rg.wasm"])?,
+            (Some(PathBuf::from("rg.wasm")), PathBuf::from("rg.cwasm"))
+        );
+        assert!(resolve(&["--preinit"]).is_err());
+        assert!(resolve(&["-o", "out.cwasm"]).is_err());
+        // JavaScript pre-initialization starts from the input.
+        assert!(resolve(&["--language", "javascript", "--preinit", "-o", "out.cwasm"]).is_err());
+        Ok(())
     }
 
     #[test]

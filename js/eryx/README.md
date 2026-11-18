@@ -38,7 +38,7 @@ Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the f
 
 #### Shell commands
 
-A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 6.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js). A command that waits (`sleep`, polling) also needs `--async-mode jspi --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' --async-exports 'wasi:cli/run#run'`, as the bundled coreutils has; without them its waits return at once:
+A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 7.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js). A command that waits (`sleep`, polling) also needs `--async-mode jspi --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' --async-exports 'wasi:cli/run#run'`, as the bundled coreutils has; without them its waits return at once:
 
 ```js
 const sh = new Sandbox({
