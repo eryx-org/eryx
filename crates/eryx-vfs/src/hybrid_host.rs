@@ -137,8 +137,9 @@ fn file_times(
     times
 }
 
-/// Metadata hash for a real file or directory: stable for the same object,
-/// and changes when its size or modification time does.
+/// Metadata hash for a real file or directory, which wasi-libc reports as
+/// its inode number: the host's device and inode, like wasmtime-wasi, so it
+/// survives writes and renames (#974).
 fn real_metadata_hash(guest_path: &str, meta: &capfs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -149,9 +150,10 @@ fn real_metadata_hash(guest_path: &str, meta: &capfs::Metadata) -> u64 {
         capfs::MetadataExt::ino(meta).hash(&mut hasher);
     }
     #[cfg(not(unix))]
-    guest_path.hash(&mut hasher);
-    meta.len().hash(&mut hasher);
-    meta.modified().ok().map(|t| t.into_std()).hash(&mut hasher);
+    {
+        let _ = meta;
+        guest_path.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -2491,6 +2493,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((data.len(), eof), (10, true));
+    }
+
+    /// wasi-libc reports the metadata hash as `st_ino`, so writing a file
+    /// must leave it alone, and so must renaming a host file (#974).
+    #[tokio::test]
+    async fn metadata_hash_survives_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut vfs = HybridVfsCtx::new(storage());
+        vfs.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        for (mut ctx, host) in [(vfs, false), (real_ctx(temp.path(), |d| d), true)] {
+            let mut table = ResourceTable::new();
+            let mut state = HybridVfsState::new(&mut ctx, &mut table);
+            let dir = preopen(&mut state, 0);
+            let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+            let file = open(&mut state, &dir, "f", types::OpenFlags::CREATE, rw)
+                .await
+                .unwrap();
+            let hash = |s: types::MetadataHashValue| (s.lower, s.upper);
+            let before = hash(state.metadata_hash(borrow(&file)).await.unwrap());
+
+            state.write(borrow(&file), b"x".to_vec(), 0).await.unwrap();
+            state.write(borrow(&file), b"yz".to_vec(), 1).await.unwrap();
+            assert_eq!(
+                hash(state.metadata_hash(borrow(&file)).await.unwrap()),
+                before,
+                "host: {host}"
+            );
+            let flags = types::PathFlags::empty();
+            assert_eq!(
+                hash(
+                    state
+                        .metadata_hash_at(borrow(&dir), flags, "f".into())
+                        .await
+                        .unwrap()
+                ),
+                before,
+                "host: {host}"
+            );
+            if host {
+                state
+                    .rename_at(borrow(&dir), "f".into(), borrow(&dir), "g".into())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    hash(
+                        state
+                            .metadata_hash_at(borrow(&dir), flags, "g".into())
+                            .await
+                            .unwrap()
+                    ),
+                    before
+                );
+            }
+        }
     }
 
     #[tokio::test]
