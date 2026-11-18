@@ -69,9 +69,6 @@ struct Task {
     /// The host `sleep` waiting for the next timer, if one is armed, and
     /// when (on `fresh::now`'s clock) it ends.
     sleep: Option<(wit::PendingSleep, f64)>,
-    /// The script's synchronous run is over: invokes started from now on
-    /// keep the execute running.
-    past_sync_run: bool,
     /// Rejected promises with no handler yet, with their reasons, in the
     /// order they were rejected. Whatever is left when the event loop
     /// drains fails the execute; each execute starts with none.
@@ -82,12 +79,6 @@ struct PendingInvoke {
     call: PendingInvokeCall,
     resolve: Persistent<Function<'static>>,
     reject: Persistent<Function<'static>>,
-    /// Started after the script's synchronous run (in a promise callback,
-    /// after an `await`, or in a timer), so, as in Node, the execute waits
-    /// for it. One the script's top-level code started synchronously and
-    /// never awaited is released when the script ends, as in the CPython
-    /// guest.
-    keeps_alive: bool,
 }
 
 thread_local! {
@@ -181,7 +172,6 @@ fn native_invoke<'js>(
                 call,
                 resolve: Persistent::save(&ctx, resolve),
                 reject: Persistent::save(&ctx, reject),
-                keeps_alive: with_task(|task| task.past_sync_run).unwrap_or(false),
             };
             with_task(|task| task.register(pending));
         }
@@ -286,7 +276,6 @@ impl Task {
             stderr: Vec::new(),
             imports: Vec::new(),
             sleep: None,
-            past_sync_run: false,
             unhandled: Vec::new(),
         }
     }
@@ -445,10 +434,7 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
         {
             Ok(promise) => {
                 let promise = Persistent::save(ctx, promise);
-                with_task(|task| {
-                    task.completion = Some(promise);
-                    task.past_sync_run = true;
-                });
+                with_task(|task| task.completion = Some(promise));
                 poll(ctx, hooks)
             }
             // Syntax errors are thrown synchronously rather than rejecting.
@@ -627,10 +613,9 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
             }
         }
 
-        let (completion, has_pending, alive_invokes) = with_task(|task| {
+        let (completion, has_pending) = with_task(|task| {
             let completion = task.completion.clone().expect("completion promise set");
-            let alive = task.pending.values().any(|p| p.keeps_alive);
-            (completion, !task.pending.is_empty(), alive)
+            (completion, !task.pending.is_empty())
         })
         .expect("poll without an active task");
         let promise = completion.restore(ctx).expect("completion promise restore");
@@ -640,13 +625,14 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
             .unwrap_or((-1.0, false));
 
         // What keeps the execute running, as in Node: referenced timers and
-        // the invokes it waits for. Unref'd timers only fire while
-        // something else does.
+        // every invoke in flight, awaited or not, so a forgotten `await`
+        // still runs to the end (and its rejection is reported). Unref'd
+        // timers only fire while something else does.
         match promise.state() {
             // The loop drained: a rejection still unhandled now fails the
             // execute, as an uncaught error does. One handled in any earlier
             // tick doesn't.
-            PromiseState::Resolved if !referenced && !alive_invokes => {
+            PromiseState::Resolved if !referenced && !has_pending => {
                 let outcome = unhandled_rejection(ctx, hooks).map_or(Ok(()), Err);
                 return finish(hooks, outcome);
             }
@@ -766,8 +752,8 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         }
     }
 
-    // Invokes still in flight (never awaited, or started while a cancelled
-    // execute unwound) are cancelled and released with the task, so their
+    // Invokes still in flight (when the script failed, or started while a
+    // cancelled execute unwound) are cancelled and released with the task, so their
     // handles don't outlive it.
     for (handle, pending) in pending {
         unsafe { wit::waitable_join(handle, 0) };

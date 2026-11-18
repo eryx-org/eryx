@@ -601,17 +601,21 @@ async fn suspending_callback_halts_the_guest() {
         .build()
         .unwrap();
 
-    let outcome = sandbox
-        .execute_with_journal("try { await approve() } catch {} await marker()", None)
-        .await;
+    // Awaited, or never awaited: the execute waits for it either way.
+    for code in [
+        "try { await approve() } catch {} await marker()",
+        "approve(); console.log('script end')",
+    ] {
+        let outcome = sandbox.execute_with_journal(code, None).await;
 
-    assert_eq!(marker_calls.load(Ordering::SeqCst), 0);
-    let suspended = outcome.suspended.expect("execution should suspend");
-    assert_eq!(suspended.name, "approve");
-    assert!(matches!(
-        outcome.result.unwrap_err().kind(),
-        ErrorKind::Suspended(_)
-    ));
+        assert_eq!(marker_calls.load(Ordering::SeqCst), 0, "{code}");
+        let suspended = outcome.suspended.expect("execution should suspend");
+        assert_eq!(suspended.name, "approve");
+        assert!(
+            matches!(outcome.result.unwrap_err().kind(), ErrorKind::Suspended(_)),
+            "{code}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1028,16 +1032,15 @@ async fn callbacks_report_trace_events() {
     assert_eq!(contexts[1], None);
 }
 
-/// An `invoke` still in flight when the script ends (here never awaited) is
-/// cancelled and released by the guest: the execute returns, the session's
-/// next execute (and callback) works, and, as in the CPython guest, the host
-/// still runs the callback to the end, exactly once, and journals it, so a
-/// replay serves it from the journal.
+/// An `invoke` the script never awaits still keeps the execute running, as
+/// pending work keeps a Node process alive (#1079): its result arrives,
+/// the session's next execute (and callback) works, the host runs it
+/// exactly once and journals it, and a replay serves it from the journal.
 #[tokio::test]
-async fn abandoned_invokes_are_released() {
+async fn unawaited_invokes_finish_before_the_execute() {
     use eryx::Session as _;
 
-    const NEVER_AWAITED: &str = "slow(); console.log('script end')";
+    const NEVER_AWAITED: &str = "slow().then(console.log); console.log('script end')";
     const HANG: Duration = Duration::from_secs(8);
     let slow = || {
         let mut slow = TestCallback::new("slow", |_| Ok(json!("slept")));
@@ -1053,7 +1056,7 @@ async fn abandoned_invokes_are_released() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(out.stdout, b"script end\n");
+        assert_eq!(out.stdout, b"script end\nslept\n");
         let out = tokio::time::timeout(HANG, session.execute("console.log(await slow())"))
             .await
             .unwrap()
@@ -1071,7 +1074,7 @@ async fn abandoned_invokes_are_released() {
     let first = tokio::time::timeout(HANG, sandbox.execute_with_journal(NEVER_AWAITED, None))
         .await
         .unwrap();
-    first.result.unwrap();
+    assert_eq!(first.result.unwrap().stdout, b"script end\nslept\n");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         first.journal.entries.len(),
@@ -1085,13 +1088,58 @@ async fn abandoned_invokes_are_released() {
     )
     .await
     .unwrap();
-    second.result.unwrap();
+    assert_eq!(second.result.unwrap().stdout, b"script end\nslept\n");
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
         "the replay re-ran the callback"
     );
     assert_eq!(second.replayed_callbacks, 1);
+}
+
+/// A callback the script forgot to `await` that fails fails the execute,
+/// as an unhandled rejection (#1079), after the output before it.
+#[tokio::test]
+async fn an_unawaited_failing_callback_fails_the_execute() {
+    let Some(builder) = js_sandbox() else { return };
+    let mut fail = TestCallback::new("fail", |_| {
+        Err(CallbackError::ExecutionFailed("nope".to_string()))
+    });
+    fail.delay_ms = 50;
+    let sandbox = builder.with_callback(fail).build().unwrap();
+
+    let err = sandbox
+        .execute("fail(); console.log('script end')")
+        .await
+        .unwrap_err();
+    let (msg, stdout) = script_failure(&err);
+    assert!(msg.starts_with("Uncaught (in promise) Error: "), "{msg}");
+    assert!(msg.contains("nope"), "{msg}");
+    assert_eq!(stdout, b"script end\n");
+}
+
+/// Waiting for an un-awaited callback still ends at the execution timeout:
+/// without it, this would succeed once the callback returns. (The host
+/// still lets the callback run on, up to the callback timeout, before
+/// `execute` returns, as for an awaited one.)
+#[tokio::test]
+async fn an_unawaited_callback_respects_the_timeout() {
+    let Some(builder) = js_sandbox() else { return };
+    let mut slow = TestCallback::new("slow", |_| Ok(json!("slept")));
+    slow.delay_ms = 2_000;
+    let sandbox = builder
+        .with_callback(slow)
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+
+    let err = sandbox
+        .execute("slow(); console.log('script end')")
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
 }
 
 /// Callback replay matches calls on their arguments' text, which the guest

@@ -120,11 +120,13 @@ timeout.
   fails the execute (`ErrorKind::Timeout`). A timed-out execute discards its
   instance, so a session's next execute starts fresh (`state_was_reset`), as
   after running out of fuel.
-- **It waits for callbacks started after the script's synchronous run**: in a
-  promise callback (`Promise.resolve().then(() => tool())`), after an `await`,
-  or in a timer. A callback the script's top-level code starts synchronously
-  and never awaits (`tool(); console.log("done")`) is released when the
-  script ends, as in Python.
+- **It waits for every callback in flight**, awaited or not, wherever it
+  started: at top level, in a promise callback, after an `await`, or in a
+  timer. So a forgotten `await` (`tool(); console.log("done")`) still runs
+  the callback to the end, and if it fails, the execute fails as an unhandled
+  rejection (below). The wait counts towards the execution timeout. Python
+  differs: a coroutine that's never awaited never runs, and tasks still
+  pending when the script ends are dropped.
 - **`timer.unref()`** lets the execute finish without that timer, and an
   unref'd timer alone (like `AbortSignal.timeout()`'s) doesn't keep a script
   that never settles waiting. Timers still pending when the execute finishes
