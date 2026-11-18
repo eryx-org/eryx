@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 
 use wasmparser::{
-    ComponentAlias, ComponentExternalKind, ComponentOuterAliasKind, ComponentTypeRef, ConstExpr,
-    ElementItems, ExternalKind, Instance, Operator, Parser, Payload, TypeRef,
+    ComponentAlias, ComponentExternalKind, ComponentInstance, ComponentOuterAliasKind,
+    ComponentTypeRef, ConstExpr, ElementItems, ExternalKind, Instance, Operator, Parser, Payload,
+    TypeRef,
 };
 use wasmtime_environ::{HostPtr, VMOffsets, VMOffsetsFields};
 
@@ -30,8 +31,15 @@ pub(super) const UNSTAMPED: u64 = UNMODELLED_INSTANCE;
 
 /// What each core instance is charged in a component [`estimate`] doesn't
 /// model (nested components, imported or aliased core modules): the same
-/// conservative guess as for an unstamped command, per instance.
+/// conservative guess as for an unstamped command, per instance, or the
+/// largest core module's size if that's more.
 const UNMODELLED_INSTANCE: u64 = 4 << 20;
+
+/// The most core instances a child's store can create: wasmtime's default,
+/// which [`ChildMemory`](super::ChildMemory) doesn't change. A component
+/// whose core instances can't be counted here (one imported into a nested
+/// component) is taken to create this many.
+const MAX_INSTANCES: u64 = wasmtime::DEFAULT_INSTANCE_LIMIT as u64;
 
 /// Allowance per core instance for wasmtime's `Instance` itself, which
 /// precedes its `VMContext` in the same allocation.
@@ -48,7 +56,9 @@ const STAMP_TAG: u8 = 0x80;
 pub(super) fn estimate(wasm: &[u8]) -> u64 {
     let instances = match instance_sizes(wasm) {
         Ok(sizes) => sizes.iter().sum::<u64>(),
-        Err(Unmodelled { instances }) => UNMODELLED_INSTANCE * instances.max(1) as u64,
+        Err(Unmodelled { instances, largest }) => UNMODELLED_INSTANCE
+            .max(largest)
+            .saturating_mul(instances.max(1)),
     };
     instances + COMPONENT_HEADER
 }
@@ -63,9 +73,29 @@ pub(super) fn largest(wasm: &[u8]) -> u64 {
 }
 
 /// A component [`instance_sizes`] doesn't model, with how many core
-/// instances it creates (anywhere in it).
+/// instances it creates (anywhere in it, counting each time a nested
+/// component is instantiated) and its largest core module's size.
 struct Unmodelled {
-    instances: usize,
+    instances: u64,
+    largest: u64,
+}
+
+/// A component being walked: the core instances each component in its
+/// index space creates, and how many it creates itself per instantiation.
+#[derive(Default)]
+struct Frame {
+    components: Vec<u64>,
+    instances: u64,
+}
+
+impl Frame {
+    /// The core instances component `index` creates.
+    fn component(&self, index: u32) -> u64 {
+        self.components
+            .get(index as usize)
+            .copied()
+            .unwrap_or(MAX_INSTANCES)
+    }
 }
 
 /// Each core instance's metadata, in the order the component creates them.
@@ -81,11 +111,11 @@ fn instance_sizes(wasm: &[u8]) -> Result<Vec<u64>, Unmodelled> {
     let mut instances = Vec::new();
     let mut module: Option<Counts> = None;
     let mut modelled = true;
-    let mut instantiations = 0;
-    // How deep in nested components the walk is. wit-component nests one to
-    // re-export `wasi:cli/run` with its types, holding no core modules;
-    // only core modules or instances inside one are unmodelled.
-    let mut depth = 0usize;
+    // The component being walked and those enclosing it, innermost last.
+    // wit-component nests one to re-export `wasi:cli/run` with its types,
+    // holding no core modules; only core modules or instances inside one
+    // are unmodelled.
+    let mut frames = vec![Frame::default()];
     for payload in Parser::new(0).parse_all(wasm) {
         let Ok(payload) = payload else { break };
         if let Some(counts) = module.as_mut() {
@@ -95,17 +125,27 @@ fn instance_sizes(wasm: &[u8]) -> Result<Vec<u64>, Unmodelled> {
             }
             continue;
         }
+        let depth = frames.len() - 1;
+        let Some(frame) = frames.last_mut() else {
+            break;
+        };
         match payload {
             Payload::ModuleSection { .. } => {
                 modelled &= depth == 0;
                 module = Some(Counts::default());
             }
-            Payload::ComponentSection { .. } => depth += 1,
-            Payload::End(_) if depth > 0 => depth -= 1,
+            Payload::ComponentSection { .. } => frames.push(Frame::default()),
+            Payload::End(_) if depth > 0 => {
+                let instances = frame.instances;
+                frames.pop();
+                if let Some(parent) = frames.last_mut() {
+                    parent.components.push(instances);
+                }
+            }
             Payload::InstanceSection(section) => {
                 for instance in section.into_iter().flatten() {
                     if let Instance::Instantiate { module_index, .. } = instance {
-                        instantiations += 1;
+                        frame.instances = frame.instances.saturating_add(1);
                         match modules.get(module_index as usize) {
                             Some(&size) if depth == 0 => instances.push(size),
                             _ => modelled = false,
@@ -113,30 +153,66 @@ fn instance_sizes(wasm: &[u8]) -> Result<Vec<u64>, Unmodelled> {
                     }
                 }
             }
-            // Core modules from elsewhere take module indices too.
+            // Each instantiation of a nested component creates its core
+            // instances again.
+            Payload::ComponentInstanceSection(section) => {
+                for instance in section.into_iter().flatten() {
+                    if let ComponentInstance::Instantiate {
+                        component_index, ..
+                    } = instance
+                    {
+                        let created = frame.component(component_index);
+                        frame.instances = frame.instances.saturating_add(created);
+                    }
+                }
+            }
+            // Core modules from elsewhere take module indices too, and
+            // components from elsewhere component indices.
             Payload::ComponentImportSection(section) => {
-                if section
-                    .into_iter()
-                    .flatten()
-                    .any(|import| matches!(import.ty, ComponentTypeRef::Module(_)))
-                {
-                    modelled = false;
+                for import in section.into_iter().flatten() {
+                    match import.ty {
+                        ComponentTypeRef::Module(_) => modelled = false,
+                        ComponentTypeRef::Component(_) => frame.components.push(MAX_INSTANCES),
+                        _ => {}
+                    }
                 }
             }
             Payload::ComponentAliasSection(section) => {
-                if section.into_iter().flatten().any(|alias| {
-                    matches!(
-                        alias,
+                for alias in section.into_iter().flatten() {
+                    match alias {
                         ComponentAlias::InstanceExport {
                             kind: ComponentExternalKind::Module,
                             ..
-                        } | ComponentAlias::Outer {
+                        }
+                        | ComponentAlias::Outer {
                             kind: ComponentOuterAliasKind::CoreModule,
                             ..
+                        } => modelled = false,
+                        ComponentAlias::InstanceExport {
+                            kind: ComponentExternalKind::Component,
+                            ..
+                        } => frames[depth].components.push(MAX_INSTANCES),
+                        ComponentAlias::Outer {
+                            kind: ComponentOuterAliasKind::Component,
+                            count,
+                            index,
+                        } => {
+                            let created = depth
+                                .checked_sub(count as usize)
+                                .map_or(MAX_INSTANCES, |outer| frames[outer].component(index));
+                            frames[depth].components.push(created);
                         }
-                    )
-                }) {
-                    modelled = false;
+                        _ => {}
+                    }
+                }
+            }
+            // An exported component takes a new index too.
+            Payload::ComponentExportSection(section) => {
+                for export in section.into_iter().flatten() {
+                    if export.kind == ComponentExternalKind::Component {
+                        let created = frame.component(export.index);
+                        frame.components.push(created);
+                    }
                 }
             }
             _ => {}
@@ -146,7 +222,11 @@ fn instance_sizes(wasm: &[u8]) -> Result<Vec<u64>, Unmodelled> {
         Ok(instances)
     } else {
         Err(Unmodelled {
-            instances: instantiations,
+            instances: frames
+                .first()
+                .map_or(MAX_INSTANCES, |root| root.instances)
+                .min(MAX_INSTANCES),
+            largest: modules.iter().copied().max().unwrap_or(0),
         })
     }
 }
@@ -315,8 +395,9 @@ mod tests {
     #[test]
     fn unmodelled_components_are_charged_conservatively() {
         let nested = wat::parse_str(
-            "(component (component (core module $m) \
-             (core instance (instantiate $m)) (core instance (instantiate $m))))",
+            "(component (component $c (core module $m) \
+             (core instance (instantiate $m)) (core instance (instantiate $m))) \
+             (instance (instantiate $c)))",
         )
         .unwrap();
         assert_eq!(
@@ -333,6 +414,38 @@ mod tests {
         let plain = wat::parse_str("(component (core module $m) (core instance (instantiate $m)))")
             .unwrap();
         assert!(estimate(&plain) < UNMODELLED_INSTANCE);
+    }
+
+    /// A nested component's core instances are charged each time it's
+    /// instantiated, including through an outer alias or an export, and one
+    /// whose instances can't be counted is charged as many as a store holds.
+    #[test]
+    fn nested_instantiations_are_each_charged() {
+        let repeated = wat::parse_str(
+            "(component \
+               (component $c (core module $m) (core instance (instantiate $m))) \
+               (component $d (alias outer 1 $c (component $c)) \
+                 (instance (instantiate $c)) (instance (instantiate $c))) \
+               (export $e \"e\" (component $d)) \
+               (instance (instantiate $d)) (instance (instantiate $d)) \
+               (instance (instantiate $e)))",
+        )
+        .unwrap();
+        assert_eq!(
+            estimate(&repeated),
+            6 * UNMODELLED_INSTANCE + COMPONENT_HEADER
+        );
+        let imported = wat::parse_str(
+            "(component \
+               (component $c (core module $m) (core instance (instantiate $m))) \
+               (component $d (import \"c\" (component $i)) (instance (instantiate $i))) \
+               (instance (instantiate $d (with \"c\" (component $c)))))",
+        )
+        .unwrap();
+        assert_eq!(
+            estimate(&imported),
+            MAX_INSTANCES * UNMODELLED_INSTANCE + COMPONENT_HEADER
+        );
     }
 
     #[test]
