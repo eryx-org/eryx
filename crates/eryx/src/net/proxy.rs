@@ -1543,7 +1543,7 @@ mod tests {
             password
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-            "{password}"
+            "the proxy password isn't lowercase hex"
         );
         {
             use base64::Engine as _;

@@ -194,7 +194,7 @@ export const format = (object) => {
     if (typeof object === 'string') object = parse(object);
     if (object instanceof URL) return object.href;
     const protocol = object.protocol ? (object.protocol.endsWith(':') ? object.protocol : `${object.protocol}:`) : '';
-    const auth = object.auth ? `${encodeURIComponent(object.auth).replace(/%3A/i, ':')}@` : '';
+    const auth = object.auth ? `${encodeURIComponent(object.auth).replace(/%3A/gi, ':')}@` : '';
     let host = '';
     if (object.host) {
         host = object.host;

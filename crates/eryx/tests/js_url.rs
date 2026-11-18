@@ -112,6 +112,8 @@ async fn node_url() {
         const rel = url.parse('/p/q?x=1#y');
         console.log(rel.protocol, rel.pathname, rel.query, rel.hash, rel.href);
         console.log(url.format({ protocol: 'https', hostname: 'x.test', port: 8, pathname: 'p', query: { a: 1, b: ['2', '3'] } }));
+        // Every `:` in `auth` stays literal, as in Node; `@` is encoded.
+        console.log(url.format({ protocol: 'http', slashes: true, host: 'h', auth: 'a:b:c@d' }));
         console.log(url.format(new URL('http://x.test/a')), url.resolve('/one/two', 'three'), url.resolve('http://x.test/a/b', '../c'));
         ")
     .await;
@@ -128,6 +130,7 @@ async fn node_url() {
          [::1]:80 80 ::1 ? /p? x.test:80\n\
          null /p/q x=1 #y /p/q?x=1#y\n\
          https://x.test:8/p?a=1&b=2&b=3\n\
+         http://a:b:c%40d@h\n\
          http://x.test/a /one/three http://x.test/c\n"
     );
 }

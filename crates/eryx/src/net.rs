@@ -4813,7 +4813,12 @@ mod tests {
                 let non_matching = [&pad[..], &other[..]].concat();
                 let a = read_pattern(&[long, short], &matching, len).await;
                 let b = read_pattern(&[long, short], &non_matching, len).await;
-                assert_eq!(a, b, "{secret}[..{k}], trial {trial}");
+                assert_eq!(
+                    a,
+                    b,
+                    "{k} bytes of the {}-byte secret, trial {trial}",
+                    secret.len()
+                );
             }
         }
     }

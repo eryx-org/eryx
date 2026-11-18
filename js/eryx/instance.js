@@ -242,17 +242,18 @@ function concat(a, b) {
 /**
  * The `instantiate` of each guest's jco-generated component, by language.
  * JavaScript and shell are separate modules, loaded on first use so a
- * Python-only app never downloads them.
- * @type {Record<string, () => Promise<Function>>}
+ * Python-only app never downloads them. A `Map`, so that a language name
+ * can't reach `Object.prototype`.
+ * @type {Map<string, () => Promise<Function>>}
  */
-const components = {
-  python: async () => instantiatePython,
-  javascript: async () => (await import("./eryx-sandbox-javascript.js")).instantiate,
-  shell: async () => (await import("./eryx-sandbox-shell.js")).instantiate,
-};
+const components = new Map([
+  ["python", async () => instantiatePython],
+  ["javascript", async () => (await import("./eryx-sandbox-javascript.js")).instantiate],
+  ["shell", async () => (await import("./eryx-sandbox-shell.js")).instantiate],
+]);
 
 /** The guest languages this package runs. */
-export const languages = Object.keys(components);
+export const languages = [...components.keys()];
 
 /**
  * Instantiate a guest's component with its own filesystem and callback
@@ -280,7 +281,9 @@ export async function instantiateSandbox(
   const stdlib =
     language === "python" && !fileTree.dir["python-stdlib"] ? loadPythonStdlib() : undefined;
   stdlib?.catch(() => {}); // surfaced by the await below
-  const instantiate = await components[language]();
+  const load = components.get(language);
+  if (!load) throw new TypeError(`unknown language ${JSON.stringify(language)}`);
+  const instantiate = await load();
   const fd = createFdCapture();
   const processHost = createProcessHost(fileTree, commandLoaders(commands, getModule));
   const fs = createFilesystem({
