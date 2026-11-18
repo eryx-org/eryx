@@ -302,7 +302,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
   nothing else of the host. Files a child writes are the shell's, and last as
   long as the shell's own.
-- **Network:** none by default. With the sandbox's network, children can
+- **Network:** none by default. A child without network that tries to
+  resolve a name or open a socket gets `eryx: networking not enabled for
+  commands in this sandbox (curl has no network)` on its stderr (`for this
+  command` when only its command's network is taken away), once, before
+  its own error. With the sandbox's network, children can
   get some through a proxy on the host, and never more than the sandbox's
   policy allows: in Rust `with_child_network(ChildNetwork::Inherit)` (that
   policy) or `ChildNetwork::Narrow(config)` (only what both allow); in

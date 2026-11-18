@@ -49,6 +49,8 @@ use wasmtime::component::{
 use wasmtime::{
     AsContext, AsContextMut, Engine, ResourceLimiter, Store, StoreContextMut, UpdateDeadline,
 };
+use wasmtime_wasi::p2::bindings::sockets::ip_name_lookup as p2_lookup;
+use wasmtime_wasi::p3::bindings::sockets::ip_name_lookup as p3_lookup;
 use wasmtime_wasi::p3::bindings::sockets::types as p3_sockets;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -149,13 +151,37 @@ struct ChildSockets {
     live: Vec<(u32, bool)>,
     /// Sockets its execution's children hold.
     execution: Arc<AtomicUsize>,
+    /// What to tell it, if it has no network, the first time it tries to
+    /// use some (see [`OfflineNotice`]).
+    offline: Option<OfflineNotice>,
+}
+
+/// The line a child without network gets on its stderr the first time a
+/// name lookup or socket of its is refused, since its own error ("Could not
+/// resolve host") reads like a DNS problem (#1080).
+struct OfflineNotice {
+    line: String,
+    stderr: pipe::Writer,
 }
 
 impl ChildSockets {
-    fn new(execution: Arc<AtomicUsize>) -> Self {
+    fn new(execution: Arc<AtomicUsize>, offline: Option<OfflineNotice>) -> Self {
         Self {
             live: Vec::new(),
             execution,
+            offline,
+        }
+    }
+
+    /// A name lookup or socket was refused: tell an offline child why, once.
+    /// Best effort: dropped if its stderr is closed or full.
+    fn refused(&mut self) {
+        use wasmtime_wasi::p2::OutputStream;
+        let Some(OfflineNotice { line, mut stderr }) = self.offline.take() else {
+            return;
+        };
+        if stderr.check_write().is_ok_and(|room| room >= line.len()) {
+            let _ = stderr.write(line.into());
         }
     }
 
@@ -206,8 +232,9 @@ impl Drop for ChildSockets {
     }
 }
 
-/// `wasi:sockets/tcp-create-socket` for children: wasmtime-wasi's, counted
-/// against [`ChildSockets`].
+/// `wasi:sockets/tcp-create-socket` and `ip-name-lookup` for children:
+/// wasmtime-wasi's, with sockets counted against [`ChildSockets`] and
+/// refusals reported to offline children (see [`OfflineNotice`]).
 struct CountedSockets;
 
 impl wasmtime::component::HasData for CountedSockets {
@@ -268,9 +295,49 @@ impl wasmtime_wasi::p2::bindings::sockets::tcp_create_socket::Host for CountedSo
             }
             Err(e) => {
                 self.budget.release(1);
+                self.budget.refused();
                 Err(e)
             }
         }
+    }
+}
+
+// Name lookups, as wasmtime-wasi's. Children never resolve names themselves
+// (the proxy does), so every lookup fails; an offline child is told why.
+impl p2_lookup::Host for CountedSocketsView<'_> {
+    fn resolve_addresses(
+        &mut self,
+        network: Resource<wasmtime_wasi::p2::Network>,
+        name: String,
+    ) -> wasmtime_wasi::p2::SocketResult<Resource<p2_lookup::ResolveAddressStream>> {
+        let resolved = p2_lookup::Host::resolve_addresses(&mut self.sockets, network, name);
+        if resolved.is_err() {
+            self.budget.refused();
+        }
+        resolved
+    }
+}
+
+impl p2_lookup::HostResolveAddressStream for CountedSocketsView<'_> {
+    fn resolve_next_address(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime_wasi::p2::SocketResult<Option<p2_lookup::IpAddress>> {
+        p2_lookup::HostResolveAddressStream::resolve_next_address(&mut self.sockets, stream)
+    }
+
+    fn subscribe(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime::Result<Resource<wasmtime_wasi::p2::DynPollable>> {
+        p2_lookup::HostResolveAddressStream::subscribe(&mut self.sockets, stream)
+    }
+
+    async fn drop(
+        &mut self,
+        stream: Resource<p2_lookup::ResolveAddressStream>,
+    ) -> wasmtime::Result<()> {
+        p2_lookup::HostResolveAddressStream::drop(&mut self.sockets, stream).await
     }
 }
 
@@ -300,9 +367,39 @@ fn create_p3_tcp_socket(
         }
         Err(e) => {
             state.sockets.release(1);
+            state.sockets.refused();
             Ok((Err(e.downcast()?),))
         }
     }
+}
+
+/// What WASI 0.3's `resolve-addresses` returns.
+type Resolved = Result<Vec<p3_sockets::IpAddress>, p3_lookup::ErrorCode>;
+
+/// WASI 0.3's `resolve-addresses`, as wasmtime-wasi's, telling an offline
+/// child why it failed (see [`OfflineNotice`]).
+fn resolve_p3_addresses(
+    accessor: &wasmtime::component::Accessor<ChildState>,
+    (name,): (String,),
+) -> std::pin::Pin<Box<dyn Future<Output = wasmtime::Result<(Resolved,)>> + Send + '_>> {
+    use p3_lookup::HostWithStore;
+    Box::pin(async move {
+        let sockets = accessor.with_getter::<wasmtime_wasi::sockets::WasiSockets>(|state| {
+            wasmtime_wasi::sockets::WasiSocketsCtxView {
+                ctx: state.wasi.sockets(),
+                table: &mut state.table,
+            }
+        });
+        let resolved =
+            <wasmtime_wasi::sockets::WasiSockets as HostWithStore<ChildState>>::resolve_addresses(
+                &sockets, name,
+            )
+            .await?;
+        if resolved.is_err() {
+            accessor.with(|mut access| access.get().sockets.refused());
+        }
+        Ok((resolved,))
+    })
 }
 
 /// The interface holding WASI 0.3's `tcp-socket.create`, as wasmtime-wasi
@@ -310,6 +407,11 @@ fn create_p3_tcp_socket(
 const P3_SOCKETS: &str = "wasi:sockets/types@0.3.0";
 /// That function's name in it.
 const P3_TCP_CREATE: &str = "[static]tcp-socket.create";
+/// The interface holding WASI 0.3's `resolve-addresses`, as wasmtime-wasi
+/// links it.
+const P3_NAME_LOOKUP: &str = "wasi:sockets/ip-name-lookup@0.3.0";
+/// That function's name in it.
+const P3_RESOLVE: &str = "resolve-addresses";
 
 /// Replace wasmtime-wasi's WASI 0.3 `tcp-socket.create` in `linker` with
 /// [`create_p3_tcp_socket`].
@@ -330,6 +432,24 @@ fn count_p3_sockets(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
     linker
         .instance(P3_SOCKETS)?
         .func_wrap(P3_TCP_CREATE, create_p3_tcp_socket)
+}
+
+/// Replace wasmtime-wasi's WASI 0.3 `resolve-addresses` in `linker` with
+/// [`resolve_p3_addresses`], failing unless wasmtime-wasi defined it under
+/// [`P3_NAME_LOOKUP`] (as [`count_p3_sockets`] does).
+fn notice_p3_lookups(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {
+    linker.allow_shadowing(false);
+    let defined = linker
+        .instance(P3_NAME_LOOKUP)?
+        .func_wrap_concurrent(P3_RESOLVE, resolve_p3_addresses)
+        .is_err();
+    linker.allow_shadowing(true);
+    if !defined {
+        wasmtime::bail!("wasmtime-wasi no longer links `{P3_RESOLVE}` in `{P3_NAME_LOOKUP}`");
+    }
+    linker
+        .instance(P3_NAME_LOOKUP)?
+        .func_wrap_concurrent(P3_RESOLVE, resolve_p3_addresses)
 }
 
 /// Where a child finds the proxy's CA certificate (see [`ChildNet`]).
@@ -1102,6 +1222,15 @@ impl Spawner {
             },
             None => None,
         };
+        // Python's and JavaScript's wording, naming the command.
+        let offline = network.is_none().then(|| {
+            let scope = if self.net.is_some() {
+                "this command"
+            } else {
+                "commands in this sandbox"
+            };
+            format!("eryx: networking not enabled for {scope} ({cmd} has no network)\n")
+        });
         let mut argv = vec![cmd];
         argv.extend(args);
         let args_bytes = argv.iter().map(String::len).sum::<usize>()
@@ -1151,6 +1280,7 @@ impl Spawner {
             _live: Some(live),
             _args: args,
             network,
+            offline,
             spawner: command.spawns.then(|| Spawner {
                 depth: self.depth + 1,
                 traces: Some(self.traces.clone().unwrap_or_default()),
@@ -1675,7 +1805,18 @@ fn child_linker(engine: &Engine) -> Result<&'static Linker<ChildState>, Error> {
         },
     )
     .map_err(wasm_err)?;
+    p2_lookup::add_to_linker::<_, CountedSockets>(&mut linker, |state: &mut ChildState| {
+        CountedSocketsView {
+            sockets: wasmtime_wasi::sockets::WasiSocketsCtxView {
+                ctx: state.wasi.sockets(),
+                table: &mut state.table,
+            },
+            budget: &mut state.sockets,
+        }
+    })
+    .map_err(wasm_err)?;
     count_p3_sockets(&mut linker).map_err(wasm_err)?;
+    notice_p3_lookups(&mut linker).map_err(wasm_err)?;
     add_run_to_linker(&mut linker).map_err(wasm_err)?;
     piped::add_to_linker(&mut linker).map_err(wasm_err)?;
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -1874,6 +2015,9 @@ struct ChildRun {
     _args: Held,
     /// Its proxy, if children have network.
     network: Option<ChildLink>,
+    /// Without one, the line it gets when it tries the network (see
+    /// [`OfflineNotice`]).
+    offline: Option<String>,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -1993,6 +2137,10 @@ impl ChildRun {
                         .as_ref()
                         .map(|link| Arc::clone(&link.sockets))
                         .unwrap_or_default(),
+                    self.offline.map(|line| OfflineNotice {
+                        line,
+                        stderr: self.stderr.clone(),
+                    }),
                 ),
                 fuel: self.fuel,
                 fuel_used: Arc::clone(&self.fuel_used),
@@ -3098,6 +3246,7 @@ pub(crate) mod tests {
                 bytes: 0,
             },
             network: None,
+            offline: None,
             spawner: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs: None,

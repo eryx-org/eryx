@@ -208,6 +208,52 @@ async fn children_are_offline_by_default() {
     assert!(!out.contains("BEGIN CERTIFICATE"), "{out}");
 }
 
+/// A child without network is told so on its stderr when a name lookup or
+/// socket of its is refused, once per child, rather than only failing like a
+/// DNS error (#1080). Children that never try, or that have network, get
+/// nothing.
+#[tokio::test]
+async fn offline_children_are_told_why() {
+    const NOTICE: &str = "eryx: networking not enabled for";
+    let sandbox = Sandbox::embedded()
+        .shell()
+        .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
+        .build()
+        .unwrap();
+    let out = run(&sandbox, "tc argv0; tc3 argv0").await;
+    assert!(!out.contains(NOTICE), "{out}");
+    // A lookup and a connect by address, over WASI 0.2 and 0.3.
+    for tc in ["tc", "tc3"] {
+        for addr in ["example.test:443", "127.0.0.1:443"] {
+            let out = run(&sandbox, &format!("{tc} connect {addr}")).await;
+            let notice = format!("{NOTICE} commands in this sandbox ({tc} has no network)\n");
+            assert_eq!(out.matches(&notice).count(), 1, "{out}");
+            assert!(out.contains("error:"), "{out}");
+        }
+    }
+
+    // A command whose network is taken away says so.
+    let (port, _) = upstream(None).await;
+    let sandbox = shell(network())
+        .with_command("ta", test_cmd().with_network(ChildNetwork::None))
+        .build()
+        .unwrap();
+    let out = run(&sandbox, "ta connect example.test:443").await;
+    assert!(
+        out.contains("eryx: networking not enabled for this command (ta has no network)\n"),
+        "{out}"
+    );
+    // A child with network that's refused gets the policy's error only.
+    let out = run(
+        &sandbox,
+        &format!("tc connect 127.0.0.1:{port}; tc connect example.test:443; tc proxy-get http://evil.test:{port}/"),
+    )
+    .await;
+    assert!(out.contains(" 403 "), "{out}");
+    assert!(!out.contains(NOTICE), "{out}");
+}
+
 /// `with_child_network` needs the sandbox's network policy.
 #[test]
 fn child_network_needs_a_network() {
