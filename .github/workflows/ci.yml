@@ -986,11 +986,8 @@ jobs:
           done
 
       # The same command line as the main run below, which then reuses this
-      # build (`-p eryx` alone would unify features differently). It runs
-      # first because after the main run's tests, cargo saw eryx-runtime's
-      # build-script inputs as changed and rebuilt the workspace for this
-      # step (11m 05s on run 43909781570). It runs on pushes, where the
-      # components are pulled above.
+      # build (`-p eryx` alone would unify features differently). It runs on
+      # pushes, where the components are pulled above.
       - name: Run the CLI child tests
         if: steps.components.outputs.gh != '' || steps.components.outputs.git != ''
         env:
