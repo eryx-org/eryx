@@ -1277,10 +1277,11 @@ impl Pre {
     }
 }
 
-/// In-guest builtins that count as commands for an execution's
-/// allow-list: the shell's own `grep`. `list-commands` names each one the
-/// execution allows, and the guest refuses those it doesn't list.
-const GUEST_COMMANDS: [&str; 1] = ["grep"];
+/// In-guest commands that count as commands for an execution's
+/// allow-list: the shell's own `grep`, and `sh`/`bash` (nested shells).
+/// `list-commands` names each one the execution allows, and the guest
+/// refuses those it doesn't list.
+const GUEST_COMMANDS: [&str; 3] = ["grep", "sh", "bash"];
 
 /// The commands a sandbox can spawn, by name.
 #[derive(Debug, Clone, Default)]

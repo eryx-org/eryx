@@ -2448,8 +2448,8 @@ impl<'a> ExecuteBuilder<'a> {
     /// (shell only): the guest lists just those, and any other spawn fails
     /// with `command-not-found`. An empty list allows none; names that aren't
     /// registered are ignored. Without this, every registered command is
-    /// allowed. The shell's `grep` builtin counts as a command here; other
-    /// builtins and callbacks aren't affected.
+    /// allowed. The shell's `grep` builtin and nested `sh`/`bash` count as
+    /// commands here; other builtins and callbacks aren't affected.
     #[must_use]
     pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
     where

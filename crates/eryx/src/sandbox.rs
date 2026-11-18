@@ -1210,8 +1210,9 @@ impl ExecuteOptions {
     /// just those, and any other spawn fails with `command-not-found`. Only
     /// the shell spawns commands; for other guests it changes nothing (no
     /// error). An empty list allows none; names that aren't
-    /// registered are ignored. The shell's `grep` builtin counts as a
-    /// command here; other builtins and callbacks aren't affected. Sessions
+    /// registered are ignored. The shell's `grep` builtin and nested
+    /// `sh`/`bash` count as commands here; other builtins and callbacks
+    /// aren't affected. Sessions
     /// take the same option on [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
     #[must_use]
     pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self

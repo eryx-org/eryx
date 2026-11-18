@@ -928,3 +928,117 @@ async fn replay_ignores_flag_order_and_resumes_after_suspending() {
     assert_eq!(before_calls.load(Ordering::SeqCst), 0, "replayed");
     assert_eq!(after_calls.load(Ordering::SeqCst), 1, "live");
 }
+
+/// Run `code` in a fresh shell sandbox, and return its stdout and stderr.
+async fn run_shell(code: &str) -> (String, String) {
+    let sandbox = shell_sandbox().unwrap().build().unwrap();
+    let out = sandbox.execute(code).await.unwrap();
+    (
+        out.stdout_utf8().unwrap().to_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `sh` and `bash` run a nested shell, like an external command: it sees
+/// only exported variables, nothing it changes comes back, and its exit
+/// status is the command's.
+#[tokio::test]
+async fn sh_and_bash_run_nested_shells() {
+    let (stdout, stderr) = run_shell(
+        r#"
+bash -c 'echo $((1+2))'
+sh -c 'exit 7'; echo "status=$?"
+X=1; export Y=2; bash -c 'echo "[$X$Y]"'
+bash -c 'echo $0 $1 $2' me a b
+echo 'echo from stdin' | bash
+echo 'echo "$1"' | bash -s arg
+cd /tmp; bash -c 'cd /; Z=1'; echo "$PWD [$Z]"
+bash -ec 'false; echo not reached'; echo "e=$?"
+bash -o pipefail -c 'false | true'; echo "pipefail=$?"
+bash -c 'echo nested >&2'
+bash -c 'bash -c "sh -c \"echo deep\""'
+bash --login; echo "bad=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "3\nstatus=7\n[2]\nme a b\nfrom stdin\narg\n/tmp []\ne=1\npipefail=1\ndeep\nbad=2\n"
+    );
+    assert!(
+        stderr.starts_with("nested\nbash: --login: invalid option\n"),
+        "{stderr}"
+    );
+}
+
+/// `sh FILE` and `bash FILE` run a script with its arguments.
+#[tokio::test]
+async fn sh_runs_a_script_file() {
+    let (stdout, stderr) = run_shell(
+        r#"
+printf 'echo "$0 $# $1 $2"\nexit 4\n' > /tmp/f.sh
+sh /tmp/f.sh a b; echo "status=$?"
+cd /tmp && bash f.sh x; echo "status=$?"
+bash /tmp/missing.sh; echo "missing=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "/tmp/f.sh 2 a b\nstatus=4\nf.sh 1 x \nstatus=4\nmissing=127\n"
+    );
+    assert!(stderr.contains("missing.sh"), "{stderr}");
+}
+
+/// A nested shell is a pipeline stage like any other: its stdin and stdout
+/// are the pipes, a writer that wouldn't end for minutes stops once a
+/// nested `head` is done (and the other way round), and nested children's
+/// output reaches the outer pipe.
+#[tokio::test]
+async fn nested_shells_stream_through_pipelines() {
+    let (stdout, _) = run_shell(
+        r#"
+seq 1 1000000000 | bash -c 'head -n1'
+bash -c 'seq 1 1000000000' | head -n1
+seq 1 1000000000 | bash -c 'read x; echo "read $x"'
+echo hi | bash -c cat | cat
+seq 1 100000 | bash -c 'wc -l'
+bash -c 'seq 1 1000000000 | sh -c "head -n2"' | tail -n1
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "1\n1\nread 1\nhi\n100000\n2\n");
+}
+
+/// Callbacks are commands in a nested shell too.
+#[tokio::test]
+async fn callbacks_reach_nested_shells() {
+    let sandbox = shell_sandbox()
+        .unwrap()
+        .with_callback(TestCallback::new("add", add).with_schema(add_schema()))
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute("bash -c 'add 2 3'; sh -c 'invoke add \"{\\\"a\\\": 1, \\\"b\\\": 1}\"'")
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "5\n2\n");
+}
+
+/// Shells nested past the cap exit 126 with a message, rather than recurse
+/// until the guest runs out of memory.
+#[tokio::test]
+async fn nesting_shells_too_deep_fails_cleanly() {
+    let (stdout, stderr) = run_shell(
+        r#"
+printf 'bash /tmp/r.sh\n' > /tmp/r.sh
+bash /tmp/r.sh; echo "status=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "status=126\n");
+    assert!(
+        stderr.contains("bash: shells nested more than 16 deep"),
+        "{stderr}"
+    );
+}
