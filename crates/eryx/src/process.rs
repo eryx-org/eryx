@@ -2068,7 +2068,7 @@ impl WasiView for ChildState {
 }
 
 /// A child's resource table, holding at most [`MAX_CHILD_HANDLES`].
-fn child_table() -> ResourceTable {
+pub(crate) fn child_table() -> ResourceTable {
     let mut table = ResourceTable::new();
     table.set_max_capacity(MAX_CHILD_HANDLES);
     table

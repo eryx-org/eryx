@@ -1777,7 +1777,9 @@ impl ExecutorState {
     ) -> Self {
         Self {
             wasi,
-            table: ResourceTable::new(),
+            // A shell's child, capped like other children's (see
+            // `process::child_table`).
+            table: crate::process::child_table(),
             callback_tx: None,
             trace_tx: None,
             callbacks: Vec::new(),
