@@ -99,6 +99,13 @@ exits 127. A file without `#!` runs as an `sh` script. A path always
 names a file, never a command: `./ls` runs a file named `ls`, not the `ls`
 command. `env -S` in a `#!` line isn't supported.
 
+`env` is a builtin, because uutils' `env` can't run commands on WASI. `env`
+alone prints the exported environment. `env [-i] [-u NAME]... [NAME=VALUE]...
+COMMAND [ARG]...` runs `COMMAND` with those variables added (`NAME=VALUE`),
+removed (`-u`), or as the only ones (`-i`). The command is looked up like any
+other (builtins, commands, `sh`/`bash`, scripts) except functions. A command
+that isn't there exits 127, and any other option exits 125.
+
 ### Timers in JavaScript
 
 JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`

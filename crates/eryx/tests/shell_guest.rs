@@ -1090,3 +1090,31 @@ printf '#!/usr/bin/env head -n1\nfirst\nsecond\n' > /tmp/h
     .await;
     assert_eq!(stdout, "#!/usr/bin/cat\nhello\n#!/usr/bin/env head -n1\n");
 }
+
+/// `env` is a builtin (uutils' can't run commands on WASI): it prints the
+/// exported environment, or runs a command, found as any other is, with
+/// variables added (`NAME=VALUE`), removed (`-u`) or only those (`-i`).
+#[tokio::test]
+async fn env_runs_commands_in_a_changed_environment() {
+    let (stdout, stderr) = run_shell(
+        r#"
+export A=1; B=2
+env | grep -E '^(A|B)='
+env C=3 D=4 bash -c 'echo "$A $C $D"'
+env -i E=5 sh -c 'echo "[$A] $E"'
+env -i | wc -l
+env -u A sh -c 'echo "[$A]"'
+printf 'echo "$A"\n' > /tmp/s; env A=x /tmp/s
+echo "A=$A"
+env sh -c 'exit 9'; echo "status=$?"
+env nope; echo "missing=$?"
+env -S 'a b'; echo "bad=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "A=1\n1 3 4\n[] 5\n0\n[]\nx\nA=1\nstatus=9\nmissing=127\nbad=125\n"
+    );
+    assert!(stderr.contains("env: invalid option"), "{stderr}");
+}
