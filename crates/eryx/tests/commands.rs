@@ -1032,7 +1032,12 @@ async fn coreutils_see_the_root_and_dev() {
         // One big read is served in bounded chunks.
         ("head -c 50000000 /dev/urandom | wc -c", "50000000\n"),
         ("head -c 1000 /dev/zero | tr -d '\\000' | wc -c", "0\n"),
-        ("echo gone > /dev/null && cat /dev/null | wc -c", "0\n"),
+        // The devices are character devices to the utils too, not files of
+        // an unknown type.
+        ("echo gone > /dev/null && cat /dev/null && echo ok", "ok\n"),
+        ("cat /dev/zero | head -c 4 | wc -c", "4\n"),
+        ("cp /dev/null /tmp/f && wc -c < /tmp/f", "0\n"),
+        ("ls -l /dev/null | cut -c1", "c\n"),
     ])
     .await;
 
