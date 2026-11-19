@@ -108,6 +108,28 @@
     },
 
     // ------------------------------------------------------------------
+    // rolldown (eryx-bundler): rolldown pins its own crates with `=`, so
+    // they only move together. A bump also means re-vendoring
+    // rolldown_plugin_utils at the same version (vendor/README.md).
+    // ------------------------------------------------------------------
+    {
+      groupName: "rolldown",
+      separateMajorMinor: false,
+      matchPackageNames: ["rolldown", "rolldown_*"],
+    },
+
+    // ------------------------------------------------------------------
+    // brush (eryx-guest-shell) is pinned to a commit on a sd2k/brush
+    // feature branch. Renovate's git digest updates follow the fork's
+    // default branch, which is months behind (#1112/#1113 would have been a
+    // downgrade). Bump the rev by hand.
+    // ------------------------------------------------------------------
+    {
+      matchDepNames: ["brush-core", "brush-builtins"],
+      enabled: false,
+    },
+
+    // ------------------------------------------------------------------
     // wasm-bindgen crate (Cargo) and CLI (mise) must match exactly.
     //
     // js-sys, web-sys and wasm-bindgen-futures (transitive, via reqwest) pin
