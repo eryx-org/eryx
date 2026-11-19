@@ -956,9 +956,15 @@ impl Command {
 
     /// Whether it runs a guest runtime (see [`guest`](Self::guest)).
     fn is_guest(&self) -> bool {
-        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        #[cfg(all(
+            any(feature = "embedded", feature = "preinit"),
+            any(feature = "unstable-vfs", feature = "shell")
+        ))]
         return matches!(self.pre, Pre::Guest(_));
-        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        #[cfg(not(all(
+            any(feature = "embedded", feature = "preinit"),
+            any(feature = "unstable-vfs", feature = "shell")
+        )))]
         false
     }
 
@@ -1630,8 +1636,14 @@ impl Command {
 enum Pre {
     P2(wasmtime_wasi::p2::bindings::CommandPre<ChildState>),
     P3(wasmtime_wasi::p3::bindings::CommandPre<ChildState>),
-    /// Loaded on the child engine.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    /// Loaded on the child engine. Only with `embedded` or `preinit`: its one
+    /// constructor, [`Command::guest_from_precompiled_file`], loads a
+    /// precompiled runtime, which needs the unsafe code the crate forbids
+    /// without them.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     Guest(Arc<crate::Executor>),
 }
 
@@ -1667,7 +1679,10 @@ impl Pre {
         match self {
             Self::P2(pre) => pre.engine(),
             Self::P3(pre) => pre.engine(),
-            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            #[cfg(all(
+                any(feature = "embedded", feature = "preinit"),
+                any(feature = "unstable-vfs", feature = "shell")
+            ))]
             Self::Guest(executor) => executor.engine(),
         }
     }
@@ -1676,7 +1691,10 @@ impl Pre {
     /// failed instantiation; the inner one a trap, other than an exit.
     async fn run(&self, store: &mut Store<ChildState>) -> wasmtime::Result<wasmtime::Result<i32>> {
         let ran = match self {
-            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            #[cfg(all(
+                any(feature = "embedded", feature = "preinit"),
+                any(feature = "unstable-vfs", feature = "shell")
+            ))]
             Self::Guest(_) => {
                 return Err(wasmtime::Error::msg(
                     "a guest command runs in a sandbox store, not a child's",
@@ -2304,7 +2322,10 @@ impl ChildRun {
     /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
     async fn run(self) -> (Result<i32, String>, u64) {
-        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        #[cfg(all(
+            any(feature = "embedded", feature = "preinit"),
+            any(feature = "unstable-vfs", feature = "shell")
+        ))]
         if let Pre::Guest(executor) = &self.pre {
             let executor = Arc::clone(executor);
             return self.run_guest(&executor).await;
@@ -2430,7 +2451,10 @@ impl ChildRun {
     }
 }
 
-#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+#[cfg(all(
+    any(feature = "embedded", feature = "preinit"),
+    any(feature = "unstable-vfs", feature = "shell")
+))]
 impl ChildRun {
     /// Run a guest command (see [`Command::guest`]): a fresh instance of
     /// `executor`'s runtime on the child's pipes and filesystem, plus the

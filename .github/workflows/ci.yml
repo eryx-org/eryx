@@ -1304,6 +1304,12 @@ jobs:
         # cargo-all-features checks the powerset of feature combinations.
         # The Cargo.toml config skips preinit/native-extensions for local dev (no artifacts),
         # but in CI we have artifacts, so we check those separately.
+        # Warnings fail the step: code dead in one combination (e.g. #1078's
+        # guest commands with `shell` but not `embedded`) is only a warning,
+        # which `cargo check` would otherwise let through. Step-level, so it
+        # doesn't apply to mise's `cargo install` of cargo-all-features.
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           echo "=== Checking feature powerset (excluding preinit/native-extensions) ==="
           cargo check-all-features -- -p eryx
