@@ -56,29 +56,26 @@ sandbox fails to build or the execution to start, naming the command.
 
 ## The shell as a command, on by default
 
-A command registered with `allow_spawn` (git) that runs `sh -c ...` or
-`bash` used to get `command-not-found`. The embedded shell now registers
-itself as `sh` and `bash` for such commands (`Command::guest(Language::Shell)`):
-a fresh shell guest per run, running only what the command itself may run,
-one nesting level deeper, within its network, with no callbacks or network
-of its own. The shell's own `sh`/`bash` still run in its guest.
+The embedded shell registers itself as `sh` and `bash` for commands
+registered with `allow_spawn` (git) that run `sh -c ...` or `bash`
+(`Command::guest(Language::Shell)`): a fresh shell guest per run, running only
+what the command itself may run, one nesting level deeper, within its
+network, with no callbacks or network of its own. The shell's own `sh`/`bash`
+run in its guest.
 
 - `without_embedded_commands()` (and eryx-server's
   `--no-shell-embedded-commands`) leaves it out with coreutils.
 - An execution's allowed commands govern both: allow `sh`/`bash` for a
   child to run them. An allow-list that names `git` but not `sh` makes git's
-  `sh -c` fail as before.
-- A child's `sh` counts towards the nesting depth of 4, so a chain that
-  just fit before can be one level too deep if it goes through `sh`.
+  `sh -c` fail.
+- A child's `sh` counts towards the nesting depth of 4.
 
-Guest commands (`python3`, `node` and `sh`) now also get the execution's
-deadline, so `eryx:process/execution`'s `time-left` returns the real time
-left in them instead of none.
+Guest commands (`python3`, `node` and `sh`) get the execution's deadline, so
+`eryx:process/execution`'s `time-left` returns the time left in them.
 
-Jobs a nested in-guest shell leaves running (`sh -c 'slow &'`) are now
-waited for at the end of the execution, and killed at the timeout with the
-usual stderr line, like the script's own jobs. Before, the execution's end
-didn't wait for them.
+Jobs a nested in-guest shell leaves running (`sh -c 'slow &'`) are waited for
+at the end of the execution, and killed at the timeout with the usual stderr
+line, like the script's own jobs.
 
 ## JavaScript as a shell command
 
@@ -103,20 +100,9 @@ as in Node. `-v` prints `quickjs-ng <version>`, and `process.versions` has no
 shell's files, ES `import` of relative files from a script, and `node:fs`.
 Limits, files and the missing callbacks and network are as for Python.
 
-## JavaScript: `node:fs` works
+## JavaScript: `node:fs`
 
-`node:fs` and `node:fs/promises` used to throw "node:fs isn't available in
-eryx yet" on import. They're now a subset of Node's on the sandbox's own
+`node:fs` and `node:fs/promises` are a subset of Node's on the sandbox's own
 files, in `execute` too: whole-file reads and writes, directories, `stat`,
 rename, copy and remove, sync, with callbacks and as promises. No file
-descriptors (`readFileSync(0)` reads stdin), streams or watching. Code that
-caught the import error to fall back to something else now gets the module
-instead.
-
-## eryx-server: `--no-shell-coreutils` is now `--no-shell-embedded-commands`
-
-The flag (and its variable, `ERYX_NO_SHELL_COREUTILS`, now
-`ERYX_NO_SHELL_EMBEDDED_COMMANDS`) is renamed, because it covers all of the
-shell's embedded commands, not just coreutils. **The old names are gone**: a
-server started with the old flag fails to parse its arguments, and one with
-the old variable ignores it and keeps coreutils. Rename both in deployments.
+descriptors (`readFileSync(0)` reads stdin), streams or watching.

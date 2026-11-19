@@ -1,18 +1,16 @@
 # Upgrade notes: callback names a guest already uses (#962)
 
-These notes are for the release that ships #962 (#970, and the follow-up that
-made Python refuse too). Copy them into the release PR's CHANGELOG entry by
-hand: release-plz doesn't generate them, and they have to be re-applied if
-release-plz regenerates the PR.
+These notes are for the release that ships #962 (#970 and #991). Copy them
+into the release PR's CHANGELOG entry by hand: release-plz doesn't generate
+them, and they have to be re-applied if release-plz regenerates the PR.
 
 ## A callback can't be named like something the guest has
 
 A guest installs each callback under its name (for a dotted name like
-`http.get`, under its first part, `http`), and keeps what it already has. A
-callback named `print`, `fetch` or `echo` could therefore only be reached
-through `invoke("print")`, and in the shell a callback named like a command
-silently hid it. Building such a sandbox now fails, naming the callback and
-what it collides with:
+`http.get`, under its first part, `http`), and keeps what it already has. In
+Python, a callback named `print` or `open` could therefore only be reached
+through `invoke("print")`. Building a sandbox with such a callback now fails,
+in every guest, naming the callback and what it collides with:
 
 - **Python:** the builtins (`print`, `list`, `open`, `sum`, ...) and the
   names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`,

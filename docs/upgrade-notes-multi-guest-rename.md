@@ -4,10 +4,9 @@ These notes are for the release that ships #820. Copy them into the release
 PR's CHANGELOG entry by hand: release-plz doesn't generate them, and they have
 to be re-applied if release-plz regenerates the PR.
 
-eryx is getting more guest languages than Python (JavaScript, then a shell).
-This release renames the public API so it doesn't assume Python. Only Python
-runs today. The deprecated aliases below will be removed in the following
-minor release.
+This release adds JavaScript and shell guests next to Python, and renames the
+public API so it doesn't assume Python. The deprecated aliases below will be
+removed in the following minor release.
 
 ## Rust (`eryx` crate)
 
