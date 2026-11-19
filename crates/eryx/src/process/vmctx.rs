@@ -9,8 +9,8 @@
 //! charged it before it runs.
 //!
 //! A precompiled command has no wasm left to read, so
-//! [`Command::stamp_precompiled`](super::Command::stamp_precompiled) appends
-//! the figure to it, in the trailer format runtimes' language stamps use.
+//! [`Executor::precompile`](crate::Executor::precompile) appends the figure
+//! to it, in the trailer format runtimes' language stamps use.
 
 use std::collections::HashSet;
 
@@ -370,7 +370,6 @@ pub(super) fn stamp(precompiled: &mut Vec<u8>, bytes: u64) {
 }
 
 /// The figure a precompiled command ending in `tail` was stamped with.
-#[cfg(any(test, feature = "embedded", feature = "preinit", feature = "env-pack"))]
 pub(super) fn stamped(tail: &[u8]) -> Option<u64> {
     let (rest, magic) = tail.split_last_chunk::<8>()?;
     let (&tag, rest) = rest.split_last()?;

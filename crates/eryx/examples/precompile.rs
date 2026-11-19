@@ -168,9 +168,14 @@ fn main() -> anyhow::Result<()> {
     let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
     match language {
         Some(language) => eryx::Executor::stamp_language(&mut precompiled, language),
-        // As `eryx-precompile compile` does: without it, each running child
-        // is charged a conservative 4 MiB of the child memory pool.
-        None => eryx::Command::stamp_precompiled(&mut precompiled, &component_bytes),
+        // Precompiling stamps a command with its instance metadata. Without
+        // it each running child is charged a conservative 4 MiB of the child
+        // memory pool, so CI and release builds fail rather than ship one.
+        None if !eryx::Command::is_stamped(&precompiled) => anyhow::bail!(
+            "ERYX_LANGUAGE=command, but the precompiled output has no instance-metadata \
+             stamp: is {wasm_path} a WASI command (exporting wasi:cli/run)?"
+        ),
+        None => {}
     }
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
