@@ -112,6 +112,26 @@ removed (`-u`), or as the only ones (`-i`). The command is looked up like any
 other (builtins, commands, `sh`/`bash`, scripts) except functions. A command
 that isn't there exits 127, and any other option exits 125.
 
+`xargs` is a builtin too, for the same reason, so its command is looked up
+like `env`'s: `ls *.py | xargs grep -l TODO` runs the
+`grep` builtin, and `xargs -I {} sh -c '...'` a nested shell. It takes GNU's
+options: `-0`/`--null`, `-d DELIM`, `-a FILE`, `-n MAX`, `-L MAX`, `-I
+REPLACE` (and `-i`), `-r`, `-s MAX`, `-x`, `-t`, `-E EOF` and `-P MAX`, with
+GNU's quoting (`'a b'`, `"a b"`, `a\ b`) when items are split at blanks. The
+default command is `echo`. Command lines are also kept under the host's limit
+on a command's arguments and environment (2 MiB), so long input runs as
+several commands, never one that fails to start. `-P` runs commands at once,
+32 at most, and `-P 0` means 8. Commands running at once share the
+execution's child memory pool (`max_child_memory_bytes`, 256 MiB by
+default), so a run that doesn't fit fails (with memory-heavy commands such
+as `python3`, keep `-P` low). `xargs` exits 123 if a command failed
+(exit 1-125), 124 if one exited 255, 125 if one was killed (exit 129-254,
+as a job `kill` stops exits), 126 or 127 if the command can't be run or
+isn't there, and 1 for its own errors. It reads all its input before running
+the first command, so it doesn't work on endless input (`yes | xargs`). The
+commands get its stdin, which it has read to the end (or, with `-a`, left
+alone). `-p` isn't supported.
+
 Background jobs work as in bash: `cmd &` runs `cmd` alongside the script, and
 `$!` is its ID. `wait` waits for every job, `wait ID|%N...` for those jobs
 (returning the last one's status), and `wait -n` for the first to finish (127

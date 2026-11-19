@@ -28,6 +28,7 @@ mod grep;
 mod input;
 mod jobs;
 mod subshell;
+mod xargs;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -202,6 +203,9 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("env", builtins::Registration::of::<env::EnvCommand>());
+    shell
+        .builtins_mut()
+        .register("xargs", builtins::Registration::of::<xargs::XargsCommand>());
     shell
         .builtins_mut()
         .register("chmod", builtins::Registration::of::<chmod::ChmodCommand>());
@@ -873,7 +877,12 @@ mod tests {
         let mut builtins: Vec<String> =
             brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
                 .into_keys()
-                .chain(["invoke", "grep", "env", "chmod", "kill", "sh", "bash"].map(String::from))
+                .chain(
+                    [
+                        "invoke", "grep", "env", "xargs", "chmod", "kill", "sh", "bash",
+                    ]
+                    .map(String::from),
+                )
                 .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
                 .collect();
         builtins.sort();
