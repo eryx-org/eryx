@@ -1098,7 +1098,10 @@ impl MemoryTracker {
 
     /// A tracker for a guest command, charging `child`, its share of the
     /// children's memory pool.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     pub(crate) fn for_child(child: crate::process::ChildMemory) -> Self {
         Self {
             child: Some(child),
@@ -1108,7 +1111,10 @@ impl MemoryTracker {
 
     /// For a guest command, whether the children's pool has refused it
     /// memory.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     pub(crate) fn child_refused(&self) -> bool {
         self.child
             .as_ref()
@@ -1803,7 +1809,10 @@ impl ExecutorState {
     /// State for running the guest as a command (see
     /// [`Executor::run_command`]): its stdio is `wasi`'s and its filesystem
     /// `vfs`, and it gets no callbacks, tracing, network or commands.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     pub(crate) fn for_command(
         wasi: WasiCtx,
         vfs: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
@@ -4449,7 +4458,10 @@ impl Executor {
     /// `run-command` export; its exit status. The store's state comes from
     /// [`ExecutorState::for_command`], and its fuel and epoch deadline are the
     /// caller's to set.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     pub(crate) async fn run_command(
         &self,
         store: &mut Store<ExecutorState>,
