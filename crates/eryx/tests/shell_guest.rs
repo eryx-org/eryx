@@ -1363,3 +1363,27 @@ async fn session_jobs_end_with_their_execution() {
         .unwrap();
     assert_eq!(out.stdout, b"0\n127\n");
 }
+
+/// `test` tells file types apart: `/dev/null` is a character device, and `-f`
+/// and `-d` still see files and directories.
+#[tokio::test]
+async fn test_tells_file_types_apart() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "[ -c /dev/null ] && echo yes\n\
+             echo x > /tmp/f; mkdir -p /tmp/d\n\
+             for t in -c -b -p -S -f -d; do\n\
+               for p in /dev/null /tmp/f /tmp/d; do [ $t $p ] && echo \"$t $p\"; done\n\
+             done; true",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "yes\n-c /dev/null\n-f /tmp/f\n-d /tmp/d\n"
+    );
+}

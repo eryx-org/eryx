@@ -21,9 +21,10 @@ crate-type = ["cdylib"]
 # reubeno/brush#1739 (read/mapfile wait on a pipe that isn't ready) and
 # reubeno/brush#1740 (pipes report unread bytes, for backpressure); and, on
 # sd2k/brush's feat/wasm-background-jobs, job IDs for `$!`, abortable jobs,
-# `wait PID`/`wait -n` and `jobs -l` (#1091, not yet proposed upstream).
-brush-core = { git = "https://github.com/sd2k/brush", rev = "85210c63", default-features = false, features = ["serde"] }
-brush-builtins = { git = "https://github.com/sd2k/brush", rev = "85210c63", default-features = false, features = [
+# `wait PID`/`wait -n` and `jobs -l` (#1091), and `test -c`/`-b`/`-S` on
+# WASI; not yet proposed upstream.
+brush-core = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = [
     "builtin.echo",
     "builtin.printf",
     "builtin.true",

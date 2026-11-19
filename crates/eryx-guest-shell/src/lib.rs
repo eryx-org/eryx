@@ -285,7 +285,8 @@ fn take_result(shell: &mut Shell) -> String {
 /// First line of every snapshot: what wrote the serialized `Shell`. Bump the
 /// brush part with the brush pin in Cargo.toml when the pin changes what
 /// brush serializes, and the version when the guest's own state changes.
-/// (85210c63 only changed jobs, which aren't serialized.)
+/// (85210c63 and ed2d9a0c changed only jobs and file tests, which aren't
+/// serialized.)
 const STATE_FORMAT: &str = "eryx-shell-state/1 brush@25210fd6";
 
 /// Start of a `restore-state` error for a snapshot in another state format,
