@@ -433,9 +433,9 @@ covers = [{ path = "crates/eryx-runtime/libs/wasi_snapshot_preview1.reactor.wasm
 
 [[component]]
 name = "wasi_snapshot_preview1 command adapter (Wasmtime)"
-version = "50.0.2"
+version = "50.0.3"
 license = "Apache-2.0 WITH LLVM-exception"
-url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
+url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.3"
 # Adapts WASI preview 1 command modules into components (#993): the release
 # asset of the wasmtime eryx links, so a wasmtime bump fails this check until
 # the adapter is replaced with the new release's. `mise run
@@ -447,9 +447,9 @@ url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
 files = ["third_party/licenses/wasmtime-LICENSE"]
 artifacts = ["host"]
 crate = "wasmtime"
-crate_version = "50.0.2"
+crate_version = "50.0.3"
 update = "mise run update-preview1-adapter"
-covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "d708f61fca2f39ad1ad3e0e60787c9e7d66c4789fe4046206afb16eda661c717" }]
+covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "517933a625892c18e3d429ef563adef5e35415d61ec04bda24f45353e88eec25" }]
 
 [[component]]
 name = "QuickJS-ng"
