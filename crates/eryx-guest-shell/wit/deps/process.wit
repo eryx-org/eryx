@@ -126,9 +126,19 @@ interface pipe {
     }
 }
 
-/// Host side: links just the process interface next to `eryx:sandbox`.
+/// The current execution, for a guest that runs work of its own once the
+/// script has finished (the shell's background jobs).
+interface execution {
+    /// How long the execution has left before its timeout, in nanoseconds;
+    /// none if it has no timeout.
+    time-left: func() -> option<u64>;
+}
+
+/// Host side: links just the process and execution interfaces next to
+/// `eryx:sandbox`.
 world spawner {
     import process;
+    import execution;
 }
 
 /// What child commands import.

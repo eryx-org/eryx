@@ -587,7 +587,10 @@ export class Sandbox {
     try {
       // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
       // so a leading header-like line in user code isn't misparsed.
-      const output = await instance.execute(`#eryx-preamble:0\n${code}`);
+      // The deadline lets the shell stop its background jobs in time.
+      const deadline =
+        this.#timeoutMs === undefined ? undefined : Date.now() + this.#timeoutMs;
+      const output = await instance.execute(`#eryx-preamble:0\n${code}`, deadline);
       const result = _toResult(output, this.#stateWasReset, stats());
       this.#stateWasReset = false;
       return result;

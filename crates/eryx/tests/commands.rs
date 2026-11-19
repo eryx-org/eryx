@@ -626,8 +626,12 @@ async fn running_children_count_as_live() {
     let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
     // Each foreground `tc` yields, so every background job's child is waited
     // on (and was, before, no longer counted) before the next one spawns.
+    // Killing them at the end saves the implicit `wait` for them.
     let out = sandbox
-        .execute("for i in {1..70}; do tc busy 50 & tc exit 0; done")
+        .execute(
+            "for i in {1..70}; do tc busy 50 & tc exit 0; done\n\
+             for i in {1..70}; do kill %$i; done",
+        )
         .await
         .unwrap();
     assert!(
@@ -2389,7 +2393,7 @@ mod background_jobs {
             .execute(&format!(
                 "{BIG}\nfor i in 1 2 3; do X=\"$BIG\" sleep 30 & done; sleep 0.5\n\
                  X=\"$BIG\" tc argv0 || echo refused\n\
-                 kill -9 %1; wait %1; echo \"status: $?\"; X=\"$BIG\" tc argv0"
+                 kill -9 %1; wait %1; echo \"status: $?\"; X=\"$BIG\" tc argv0; kill %2 %3"
             ))
             .await
             .unwrap();
@@ -2398,40 +2402,91 @@ mod background_jobs {
             "refused\nstatus: 137\ntc\n",
             "{out:?}"
         );
-        let stderr = stderr(&out);
-        assert!(stderr.contains("tc: limit-exceeded"), "{stderr}");
-        assert!(
-            stderr.ends_with("eryx: killed 2 background jobs still running at exit\n"),
-            "{stderr}"
-        );
+        assert!(stderr(&out).contains("tc: limit-exceeded"), "{out:?}");
     }
 
-    /// Jobs still running when the script ends are killed, and said to be,
-    /// rather than dropped silently or waited for until the timeout.
+    /// The script ends with an implicit `wait`: a job still running then
+    /// finishes, its output and files are the execution's, and the status is
+    /// the script's own.
     #[tokio::test]
-    async fn jobs_left_running_are_killed_at_exit() {
-        let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    async fn the_script_waits_for_its_jobs_at_the_end() {
+        let sandbox = shell().build().unwrap();
+        let out = sandbox
+            .execute(
+                "(sleep 0.3; echo late; echo late-file > /tmp/late.txt; exit 3) &\n\
+                 echo script ends",
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "script ends\nlate\n");
+        assert_eq!(stderr(&out), "");
+        // A session sees what the job left behind.
+        let executor = shell().build().unwrap().executor();
+        let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+        session
+            .execute("(sleep 0.2; echo done > /tmp/late.txt) &")
+            .run()
+            .await
+            .unwrap();
+        let out = session.execute("cat /tmp/late.txt").run().await.unwrap();
+        assert_eq!(out.stdout, b"done\n");
+    }
+
+    /// A job still running when the execution would time out, once the
+    /// script itself has finished, is killed and said to be; the execution
+    /// keeps the script's result instead of failing.
+    #[tokio::test]
+    async fn jobs_outliving_the_timeout_are_killed_and_the_result_kept() {
+        let sandbox = shell()
+            .with_command("tc", test_cmd())
+            .with_resource_limits(
+                ResourceLimits::default().with_execution_timeout(Duration::from_secs(1)),
+            )
+            .build()
+            .unwrap();
         let start = Instant::now();
         let out = sandbox
-            .execute("sleep 30 & tc spin & echo script ends")
+            .execute("sleep 30 & tc spin & (sleep 0.1; echo quick) & echo script ends; result=42")
             .await
             .unwrap();
         assert!(
-            start.elapsed() < Duration::from_secs(3),
+            start.elapsed() < Duration::from_secs(2),
             "{:?}",
             start.elapsed()
         );
-        assert_eq!(out.stdout_utf8().unwrap(), "script ends\n");
+        assert_eq!(out.stdout_utf8().unwrap(), "script ends\nquick\n");
+        assert_eq!(out.result.as_deref(), Some("42"));
         assert_eq!(
             stderr(&out),
-            "eryx: killed 2 background jobs still running at exit\n"
+            "eryx: killed 2 background jobs still running when the execution timed out\n"
         );
-        // A job that finished before the end isn't counted.
-        let out = sandbox.execute("true & sleep 0.2").await.unwrap();
-        assert_eq!(stderr(&out), "");
     }
 
-    /// The execution timeout and cancellation still stop jobs' children.
+    /// In a session, the jobs killed at the timeout leave the session as it
+    /// was: no reset, and the next execution starts with no jobs.
+    #[tokio::test]
+    async fn a_session_goes_on_after_its_jobs_time_out() {
+        let executor = shell().build().unwrap().executor();
+        let limits = ResourceLimits::default().with_execution_timeout(Duration::from_millis(800));
+        let mut session = SessionExecutor::new_with_limits(executor, &[], &limits)
+            .await
+            .unwrap();
+        let out = session.execute("x=1; sleep 30 &").run().await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "eryx: killed 1 background job still running when the execution timed out\n"
+        );
+        let out = session
+            .execute("jobs; echo \"x=$x\"; wait %1; echo \"$?\"")
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"x=1\n127\n");
+        assert!(!out.state_was_reset);
+    }
+
+    /// A script that is itself still running at the timeout times out as
+    /// usual, jobs and all; cancellation still stops jobs' children.
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_and_cancel_stop_running_jobs() {
         let sandbox = shell()

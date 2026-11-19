@@ -67,16 +67,44 @@ pub(crate) fn abort_tree(id: u64) {
     });
 }
 
-/// Stop the jobs still running at the end of an execution, and forget them
-/// all; returns how many were stopped. Nothing runs between executions, so a
-/// job left running would otherwise vanish without a trace.
-pub(crate) fn stop_leftover_jobs(jobs: &mut jobs::JobManager) -> usize {
+/// How long before the execution's timeout [`finish_jobs`] gives up on the
+/// jobs, so the guest can stop them and return before the host's deadline.
+const TIMEOUT_MARGIN_NS: u64 = 50_000_000;
+
+/// Finish the jobs still running once the script has ended, as a trailing
+/// `wait` would: wait for them all, but if the execution would time out
+/// first (`time_left_ns`, none without a timeout), stop them in time to
+/// return the script's own result. Either way the shell has no jobs left
+/// afterwards. Returns how many were stopped.
+pub(crate) async fn finish_jobs(jobs: &mut jobs::JobManager, time_left_ns: Option<u64>) -> usize {
+    let finished = {
+        let mut waited = std::pin::pin!(jobs.wait_all());
+        let budget = time_left_ns.map(|left| left.saturating_sub(TIMEOUT_MARGIN_NS));
+        let mut timer = std::pin::pin!(async move {
+            match budget {
+                Some(ns) => crate::sleep(ns).await,
+                None => std::future::pending().await,
+            }
+        });
+        std::future::poll_fn(|cx| {
+            if waited.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(true)
+            } else if timer.as_mut().poll(cx).is_ready() {
+                std::task::Poll::Ready(false)
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await
+    };
     let mut stopped = 0;
-    for job in &mut jobs.jobs {
-        if matches!(job.poll_done(), Ok(None)) && !matches!(job.state, jobs::JobState::Done) {
-            // As a shell's jobs get SIGHUP when it exits.
-            job.abort((128 + 1).into());
-            stopped += 1;
+    if !finished {
+        for job in &mut jobs.jobs {
+            if matches!(job.poll_done(), Ok(None)) && !matches!(job.state, jobs::JobState::Done) {
+                // As a shell's jobs get SIGHUP when it exits.
+                job.abort((128 + 1).into());
+                stopped += 1;
+            }
         }
     }
     jobs.jobs.clear();

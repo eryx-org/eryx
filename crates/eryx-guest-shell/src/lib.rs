@@ -332,15 +332,17 @@ impl Guest for Sandbox {
                     &ExecutionParameters::default(),
                 )
                 .await;
-            // Jobs can't outlive the execution: the guest only runs during
-            // one. Say so rather than drop them silently; bash wouldn't wait
-            // for them either.
-            (status, jobs::stop_leftover_jobs(shell.jobs_mut()))
+            // Jobs can't outlive the execution (the guest only runs during
+            // one), so it ends with an implicit `wait`.
+            let time_left = eryx::process::execution::time_left();
+            (status, jobs::finish_jobs(shell.jobs_mut(), time_left).await)
         })
         .await;
         if stopped > 0 {
             let s = if stopped == 1 { "" } else { "s" };
-            eprintln!("eryx: killed {stopped} background job{s} still running at exit");
+            eprintln!(
+                "eryx: killed {stopped} background job{s} still running when the execution timed out"
+            );
         }
         let status = status.map(|r| u8::from(r.exit_code));
         let result_json = take_result(&mut shell);

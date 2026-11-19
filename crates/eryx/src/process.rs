@@ -538,7 +538,8 @@ impl ChildBudget {
 
 /// Add the `eryx:process` interface to a sandbox linker.
 pub(crate) fn add_to_linker(linker: &mut Linker<ExecutorState>) -> wasmtime::Result<()> {
-    bindings::eryx::process::process::add_to_linker::<_, HasSelf<ExecutorState>>(linker, |s| s)
+    bindings::eryx::process::process::add_to_linker::<_, HasSelf<ExecutorState>>(linker, |s| s)?;
+    bindings::eryx::process::execution::add_to_linker::<_, HasSelf<ExecutorState>>(linker, |s| s)
 }
 
 /// A WASI 0.2 or 0.3 command component that a shell sandbox can run as an
@@ -2410,6 +2411,15 @@ impl ExecutorState {
 impl Host for ExecutorState {
     async fn list_commands(&mut self) -> Vec<String> {
         self.commands.names()
+    }
+}
+
+impl bindings::eryx::process::execution::Host for ExecutorState {
+    async fn time_left(&mut self) -> Option<u64> {
+        let left = self
+            .deadline?
+            .saturating_duration_since(std::time::Instant::now());
+        Some(u64::try_from(left.as_nanos()).unwrap_or(u64::MAX))
     }
 }
 
