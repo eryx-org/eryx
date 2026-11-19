@@ -1038,12 +1038,15 @@ jobs:
           && (github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true') }}
         run: |
           df -h .
-          # The full run's test binaries (target/debug/deps/<name>-<hash>, no
-          # extension) aren't reused here, and with them in place the runner
-          # ran out of disk linking shell_guest (run 44524946379). The rlibs,
-          # proc macros (.so) and build scripts (target/debug/build) stay.
-          du -sch target/debug/deps 2>/dev/null | tail -1
-          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          # The full run's test binaries aren't reused here, and with them in
+          # place the runner ran out of disk linking shell_guest (run
+          # 44524946379). nextest knows where they are (cargo 1.100's build
+          # dir has no target/debug/deps); the rest of the build stays for
+          # reuse. Best effort: a failed listing only means less space.
+          cargo nextest list --workspace --all-features --list-type binaries-only \
+            --message-format json \
+            | jq -r '."rust-binaries"[]."binary-path"' | xargs -r rm -f \
+            || echo "::warning::couldn't remove the full run's test binaries"
           rm -rf target/debug/incremental
           df -h .
           cargo nextest run -p eryx --profile ci \
