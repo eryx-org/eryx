@@ -697,6 +697,15 @@ fn suspend(code: u32) -> u32 {
 
 /// Lower the `execute` result, call `task.return`, and tear the task down.
 fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
+    // An uncaught error ends stderr, as Node prints it and as Python's
+    // traceback does; the gRPC server leaves `error` empty for a script
+    // failure, so stderr is all its callers see. A cancelled execute isn't
+    // the script's failure.
+    if let Err(msg) = &outcome
+        && msg != CANCELLED
+    {
+        native_write(1, format!("{msg}\n"));
+    }
     let task = TASK
         .with(|task| task.borrow_mut().take())
         .expect("finish without an active task");

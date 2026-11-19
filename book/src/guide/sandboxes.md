@@ -135,6 +135,8 @@ timeout.
   finished callbacks in, so timers that are always due (a `setImmediate`
   loop) don't starve callback results.
 - An exception thrown in a timer callback fails the execute.
+- An uncaught error (or rejection, below) ends stderr as well as being the
+  failure's message, as Python's traceback does.
 - **A promise rejection still unhandled when the event loop drains fails the
   execute** as a script failure, with `Uncaught (in promise) Error: ...` and
   its stack as the message (the first one, with a count of any others). So
