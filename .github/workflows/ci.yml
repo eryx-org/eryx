@@ -19,7 +19,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Branch pushes cancel a superseded run too: the newer run tests a tree
+  # that contains the older commit, and on the 20-job free-plan runner cap a
+  # stale run only queues the newer one. Tag runs publish, so never cancel them.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -27,6 +30,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Dev and test builds keep file:line in backtraces and panics but drop the
+  # rest of the debuginfo, most of what test binaries weigh: less to compile,
+  # link, cache and store on the Test runner's nearly full disk.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # cargo-all-features has no prebuilt binary, so mise compiles it (~10s) in
   # every job. Only check-features uses it; it re-enables it below.
   MISE_DISABLE_TOOLS: cargo:cargo-all-features
@@ -331,6 +338,10 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # One entry for the three build-runtime jobs: what they share, the
+          # release precompiler, is the expensive part, and the 10 GB repo
+          # limit evicted three separate entries before the next run.
+          shared-key: build-runtime
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           # PR caches can't be read by other PRs and evict main's (10GB repo limit),
@@ -469,6 +480,10 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # One entry for the three build-runtime jobs: what they share, the
+          # release precompiler, is the expensive part, and the 10 GB repo
+          # limit evicted three separate entries before the next run.
+          shared-key: build-runtime
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           # PR caches can't be read by other PRs and evict main's (10GB repo limit),
@@ -568,6 +583,10 @@ jobs:
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # One entry for the three build-runtime jobs: what they share, the
+          # release precompiler, is the expensive part, and the 10 GB repo
+          # limit evicted three separate entries before the next run.
+          shared-key: build-runtime
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
           # PR caches can't be read by other PRs and evict main's (10GB repo limit),
@@ -1055,6 +1074,17 @@ jobs:
             --test js_environment
           df -h .
 
+      # kache archives its store in the post step, after both builds above
+      # have filled the disk: on multi-guest pushes the archive hit "No space
+      # left on device", so no store was ever saved there and every run fell
+      # back to main's (~14% hit by compile cost, a 15-16 min build). The
+      # target dir isn't part of the store.
+      - name: Free the disk for kache's save
+        if: always()
+        run: |
+          rm -rf target
+          df -h .
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
@@ -1180,12 +1210,9 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
-          prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
+      # No rust-cache: this job is off the critical path, and its entry
+      # never survived to the next run anyway (10 GB repo cache limit), so
+      # saving one only evicted the jobs that need theirs.
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -1210,12 +1237,9 @@ jobs:
       - name: Install nightly toolchain
         run: rustup toolchain install nightly
 
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
-          prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
+      # No rust-cache: this job is off the critical path, and its entry
+      # never survived to the next run anyway (10 GB repo cache limit), so
+      # saving one only evicted the jobs that need theirs.
 
       - name: Build docs (docs.rs simulation)
         run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
@@ -1242,12 +1266,9 @@ jobs:
 
       - uses: ./.github/actions/setup-rust
 
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
-          prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
+      # No rust-cache: this job is off the critical path, and its entry
+      # never survived to the next run anyway (10 GB repo cache limit), so
+      # saving one only evicted the jobs that need theirs.
 
       - name: Install cargo-semver-checks
         run: cargo install --locked --version 0.51.0 cargo-semver-checks
