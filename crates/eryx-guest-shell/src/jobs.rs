@@ -25,6 +25,14 @@ thread_local! {
     static TASKS: RefCell<HashMap<u64, (Vec<u64>, tokio::task::AbortHandle)>> =
         RefCell::new(HashMap::new());
     static NEXT_TASK: Cell<u64> = const { Cell::new(0) };
+    /// Jobs a nested shell left running when it exited (see [`orphan`]).
+    static ORPHANS: RefCell<Vec<jobs::Job>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keep the jobs a nested shell leaves running when it exits, as bash's
+/// keep running without it, for the execution's [`finish_jobs`] to wait for.
+pub(crate) fn orphan(jobs: &mut jobs::JobManager) {
+    ORPHANS.with(|o| o.borrow_mut().append(&mut jobs.jobs));
 }
 
 /// [`tokio::task::spawn_local`], recording the task under the one that
@@ -75,8 +83,10 @@ const TIMEOUT_MARGIN_NS: u64 = 50_000_000;
 /// `wait` would: wait for them all, but if the execution would time out
 /// first (`time_left_ns`, none without a timeout), stop them in time to
 /// return the script's own result. Either way the shell has no jobs left
-/// afterwards. Returns how many were stopped.
+/// afterwards, nor any [orphans](orphan). Returns how many were stopped.
 pub(crate) async fn finish_jobs(jobs: &mut jobs::JobManager, time_left_ns: Option<u64>) -> usize {
+    // Nested shells' leftover jobs end with the execution too.
+    ORPHANS.with(|o| jobs.jobs.append(&mut o.borrow_mut()));
     let finished = {
         let mut waited = std::pin::pin!(jobs.wait_all());
         let budget = time_left_ns.map(|left| left.saturating_sub(TIMEOUT_MARGIN_NS));

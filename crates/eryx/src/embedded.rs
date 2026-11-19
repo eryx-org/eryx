@@ -128,6 +128,17 @@ pub(crate) fn coreutils() -> Result<crate::Command, Error> {
         .map_err(|e| ErrorKind::Initialization(format!("embedded coreutils: {e}")).into())
 }
 
+/// The embedded shell as a command, `sh`/`bash` for children that run
+/// them (see [`crate::Command::guest`]), loaded once per process.
+#[cfg(feature = "shell")]
+pub(crate) fn shell_command() -> Result<crate::Command, Error> {
+    static SHELL: OnceLock<Result<crate::Command, String>> = OnceLock::new();
+    SHELL
+        .get_or_init(|| crate::Command::guest(Language::Shell).map_err(|e| e.to_string()))
+        .clone()
+        .map_err(|e| ErrorKind::Initialization(format!("embedded shell command: {e}")).into())
+}
+
 /// The runtime embedded for `language`, if this build has one.
 fn embedded_runtime(language: Language) -> Option<&'static EmbeddedRuntime> {
     match language {

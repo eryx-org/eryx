@@ -87,7 +87,9 @@ forms. A nested shell behaves like an external command. It sees only exported
 variables, its own file descriptors and the working directory. Nothing it
 changes (variables, functions, options, `cd`) comes back. Its exit status is
 the command's. It shares the sandbox's filesystem, commands and callbacks.
-Shells nest at most 16 deep; past that `sh`/`bash` exits 126.
+Shells nest at most 16 deep; past that `sh`/`bash` exits 126. Like bash's,
+a nested shell doesn't wait for its background jobs: they keep running after
+it, and the script's implicit `wait` (below) covers them.
 
 Any file is runnable (`./script.sh`, or a file in a `$PATH` directory). WASI
 has no execute bit. A file whose first line is `#!/bin/sh`, `#!/bin/bash`,
@@ -124,7 +126,7 @@ execution would time out while only jobs are left (the script itself has
 finished), the jobs are killed just before the deadline, stderr gets one line
 saying how many (`eryx: killed 2 background jobs still running when the
 execution timed out`), and the execution returns the script's result instead
-of a timeout. A script that is itself still running at the timeout times out
+of a timeout. Jobs a nested shell left running count too. A script that is itself still running at the timeout times out
 as usual. A job that loops on builtins alone (`while :; do :; done &`, with no
 command, pipe or `sleep` in it) never lets the shell stop it in time, so it
 ends in a timeout too. In a session, jobs never outlive the execution that
@@ -235,6 +237,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `rmdir`, `md5sum`, `sha1sum`, `sha256sum`, `sha512sum`, `b2sum`,
   `printenv`; `eryx::embedded::COREUTILS_TOOLS`). A registered command replaces
   the tool of the same name, and `without_embedded_commands()` leaves them out.
+  It also registers itself as `sh` and `bash` for commands that run them (see
+  **Shell as a command**).
 - **Python:** pass commands by name, e.g.
   `eryx.Sandbox(language="shell", commands={"rg": eryx.Command.from_file("rg.wasm")})`
   (`Command.from_bytes` and `Command.from_precompiled_file` too). The
@@ -245,7 +249,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   command or one precompiled by `eryx-precompile compile` (`.cwasm`). A
   `.wasm` can be pinned to its digest (see
   [Commands from a registry](./grpc-server.md#commands-from-a-registry)).
-  `--no-shell-embedded-commands` leaves the embedded coreutils out,
+  `--no-shell-embedded-commands` leaves the embedded coreutils (and `sh`/`bash`
+  for children) out,
   `--shell-python` adds `python`/`python3` (see **Python as a command**), and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**). An empty `ERYX_SHELL_COMMANDS` means no extra commands.
@@ -274,6 +279,20 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   pool (`max_child_memory_bytes`, 256 MiB by default). It gets no callbacks and no network (yet), so a credential can't
   be for it. A script's top-level `asyncio.run(main())` works as in
   `execute`.
+- **Shell as a command:** a command registered with `allow_spawn` that runs
+  `sh` or `bash` (git does, for aliases, hooks, `core.pager`,
+  `GIT_SSH_COMMAND` and credential helpers) gets the embedded shell, as
+  `Command::guest(Language::Shell)`: a fresh shell guest for each run, with
+  `-c CMD [NAME [ARG]...]`, a script file or commands from stdin, the options
+  above, and the args, env, directory and stdio the command gave it. It runs
+  the commands its caller may run (the execution's allowed ones), one level
+  deeper (it counts towards the depth limit of 4), within its caller's
+  network, and has no callbacks and no network of its own. It waits for its
+  background jobs before it exits, stopping them just before the
+  execution's timeout. Each run costs about 0.1 ms and 5 MB of the children's
+  memory pool. The embedded shell registers it unless
+  `without_embedded_commands()`; an execution's allowed commands must name
+  `sh` (or `bash`) for a child to run it, as for the shell's own nested `sh`.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
   download on first use; `coreutils: false` leaves it out), and `commands`
   adds others by the URL of their `jco transpile --instantiation async`

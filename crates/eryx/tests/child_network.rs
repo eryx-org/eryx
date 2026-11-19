@@ -726,6 +726,13 @@ async fn nested_children_stay_within_their_parents_network() {
     assert!(!out.contains("http://"), "{out}");
     let out = run(&sandbox, &format!("wide spawn {get}")).await;
     assert!(out.contains(" 200 OK"), "{out}");
+    // A `sh` between them holds its commands within its spawner's network.
+    for parent in ["off", "narrow"] {
+        let out = run(&sandbox, &format!("{parent} spawn sh -c '{get}'")).await;
+        assert!(!out.contains(" 200 OK"), "{parent}: {out}");
+    }
+    let out = run(&sandbox, &format!("wide spawn sh -c '{get}'")).await;
+    assert!(out.contains(" 200 OK"), "{out}");
 }
 
 /// The script's stdout and stderr under `options`, whether or not it failed.

@@ -244,8 +244,8 @@ struct Args {
     shell_command_spawn: Vec<String>,
 
     /// Leave out the shell's embedded commands (coreutils: cat, head, ls,
-    /// ...), so it runs only the --shell-command commands (and python, with
-    /// --shell-python).
+    /// ..., and sh/bash for commands that spawn them), so it runs only the
+    /// --shell-command commands (and python, with --shell-python).
     #[arg(long, env = "ERYX_NO_SHELL_EMBEDDED_COMMANDS")]
     no_shell_embedded_commands: bool,
 
@@ -680,7 +680,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chain(
             shell
                 .embedded
-                .then_some(eryx::embedded::COREUTILS_TOOLS)
+                // With the embedded shell as `sh`/`bash`, for commands that
+                // spawn them.
+                .then(|| {
+                    eryx::embedded::COREUTILS_TOOLS
+                        .iter()
+                        .chain(&["sh", "bash"])
+                })
                 .into_iter()
                 .flatten()
                 .map(|tool| (*tool).to_owned()),

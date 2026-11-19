@@ -71,7 +71,18 @@ Children are held to the same boundary as guests:
 - **What can run.** Children run only commands registered with the sandbox
   and allowed for the execution; names resolve against that map, never a
   path. Nested spawn needs `allow_spawn`, sees only the execution's allowed
-  commands, and is limited to a nesting depth of 4.
+  commands, and is limited to a nesting depth of 4 (the shell's children
+  are the first level).
+- **Guest runtimes as commands.** `Command::guest` runs an eryx guest
+  runtime as a child through its `run-command` export: `python3` (opt-in)
+  and `sh`/`bash` (registered by default in the embedded shell, for
+  commands with `allow_spawn`). A guest child gets no callbacks and no
+  network of its own, and the same budgets as any child. A shell child
+  links the full `eryx:process` interface (spawn, wait, pipe), but with its
+  spawner's table, one level deeper, and its children held within its
+  spawner's network, so `sh` gives a malicious command nothing it couldn't
+  run directly. Its argument parsing and the host's `eryx:process` imports
+  reached from a child store are in scope.
 - **Budgets charged to the parent.** All of an execution's children, nested
   and piped ones included, share its fuel and timeout, and run inside the
   parent's wait, so ending the execution ends them. They also share:
