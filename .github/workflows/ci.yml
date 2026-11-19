@@ -19,7 +19,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Branch pushes cancel a superseded run too: the newer run tests a tree
+  # that contains the older commit, and on the 20-job free-plan runner cap a
+  # stale run only queues the newer one. Tag runs publish, so never cancel them.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
