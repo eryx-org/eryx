@@ -1363,3 +1363,138 @@ async fn session_jobs_end_with_their_execution() {
         .unwrap();
     assert_eq!(out.stdout, b"0\n127\n");
 }
+
+/// `xargs` is a builtin (uutils' can't run commands on WASI): it runs its
+/// command, found as any other is (builtins such as `grep`, commands,
+/// `sh`/`bash`), on items read from stdin, with GNU's options and quoting.
+#[tokio::test]
+async fn xargs_runs_commands_on_its_input() {
+    let (stdout, stderr) = run_shell(
+        r#"
+type xargs
+printf 'a\nb\n' | xargs echo
+printf "x 'y z' \"w v\" u\\\\ t\n" | xargs -n 1 echo
+printf 'a b\0c\0' | xargs -0 echo
+printf 'a b\0c\0' | xargs -0 -n 1 echo
+printf 'p\nq\n' | xargs -I {} sh -c 'echo "== {}"'
+printf '' | xargs -r echo ran; echo "r=$?"
+printf '' | xargs echo empty
+printf 'hello\n' > /tmp/f1; printf 'bye\n' > /tmp/f2
+printf '/tmp/f1\n/tmp/f2\n' | xargs grep -l hello
+printf '1 2\n3\n' | xargs -t -L 1 echo
+printf 'a,b,' | xargs -d , echo
+printf 'k\nl\n' > /tmp/items; xargs -a /tmp/items echo
+printf 'a b STOP c\n' | xargs -E STOP echo
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "xargs is a shell builtin\na b\nx\ny z\nw v\nu t\na b c\na b\nc\n== p\n== q\nr=0\nempty\n\
+         /tmp/f1\n1 2\n3\na b\nk l\na b\n"
+    );
+    assert_eq!(stderr, "echo 1 2\necho 3\n");
+}
+
+/// `xargs` exits as GNU's does: 123 if a command failed, 124 if one exited
+/// 255, 125 if one was killed, 126 or 127 if it can't be run or isn't
+/// there, and 1 for its own errors.
+#[tokio::test]
+async fn xargs_exit_statuses_follow_gnu() {
+    let (stdout, stderr) = run_shell(
+        r#"
+printf 'a\nb\n' | xargs -n 1 sh -c 'exit 0'; echo "ok=$?"
+printf 'a\nb\n' | xargs -n 1 sh -c 'echo "$0"; [ "$0" = b ] && exit 3; exit 0'; echo "failed=$?"
+printf 'a\nb\n' | xargs -n 1 sh -c 'echo "$0"; exit 255'; echo "255=$?"
+echo a | xargs sh -c 'sleep 5 & kill $!; wait $!'; echo "killed=$?"
+echo a | xargs /tmp; echo "dir=$?"
+echo a | xargs nope; echo "missing=$?"
+echo a | xargs -q; echo "bad=$?"
+echo "'a" | xargs echo; echo "quote=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "ok=0\na\nb\nfailed=123\na\n255=124\nkilled=125\ndir=126\nmissing=127\nbad=1\nquote=1\n"
+    );
+    for message in [
+        "xargs: sh: exited with status 255; aborting",
+        "xargs: sh: terminated by signal 15",
+        "xargs: invalid option -- 'q'",
+        "xargs: unmatched single quote",
+    ] {
+        assert!(stderr.contains(message), "{message}: {stderr}");
+    }
+}
+
+/// `xargs -P` runs its commands at once: four one-second sleeps take about
+/// a second, not four, and every run's output arrives. Killing an `xargs`
+/// job stops the commands it's running.
+#[tokio::test]
+async fn xargs_runs_commands_in_parallel() {
+    let sandbox = shell_sandbox().unwrap().build().unwrap();
+    let parallel = |code: &'static str| {
+        let sandbox = &sandbox;
+        async move {
+            let start = std::time::Instant::now();
+            let out = sandbox.execute(code).await.unwrap();
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_millis(2500),
+                "{code}: {elapsed:?}"
+            );
+            out.stdout_utf8().unwrap().to_owned()
+        }
+    };
+    let out =
+        parallel("printf '1\\n2\\n3\\n4\\n' | xargs -P 4 -n 1 sh -c 'sleep 1; echo \"$0\"'").await;
+    let mut lines: Vec<&str> = out.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, ["1", "2", "3", "4"]);
+    // Host commands too, and -P 0 is "as many as allowed".
+    let out = parallel("printf '1 1 1 1' | xargs -P 0 -n 1 sleep; echo \"$?\"").await;
+    assert_eq!(out, "0\n");
+    let out = parallel(
+        "seq 4 | xargs -P 2 -n 1 sh -c 'sleep 5; echo late' & sleep 0.2; kill %1; wait %1; echo \"killed: $?\"",
+    )
+    .await;
+    assert_eq!(out, "killed: 143\n");
+}
+
+/// Long input is split into several command lines: at `-s`, and at the
+/// host's limit on a command's arguments, so a host command never fails to
+/// start for it.
+#[tokio::test]
+async fn xargs_splits_long_input_at_the_size_limits() {
+    let (stdout, stderr) = run_shell(
+        r#"
+seq 3000 | xargs -s 2000 echo | wc -l
+seq 3000 | xargs -s 2000 echo | wc -w
+seq 100000 | xargs -s 100000000 sh -c 'echo $#' x | wc -l
+seq 100000 | xargs -s 100000000 basename -a | wc -l
+seq 10 | xargs -s 4 echo; echo "too_long=$?"
+"#,
+    )
+    .await;
+    // 2000 bytes of "echo\0" plus numbers of up to 4 digits and a NUL.
+    let per_line = 1
+        + (1..=3000)
+            .scan(5usize, |used, n: usize| {
+                let len = n.to_string().len() + 1;
+                if *used + len > 2000 {
+                    *used = 5 + len;
+                    Some(1)
+                } else {
+                    *used += len;
+                    Some(0)
+                }
+            })
+            .sum::<usize>();
+    assert_eq!(
+        stdout,
+        format!("{per_line}\n3000\n2\n100000\ntoo_long=1\n"),
+        "{stderr}"
+    );
+    assert_eq!(stderr, "xargs: argument line too long\n");
+}

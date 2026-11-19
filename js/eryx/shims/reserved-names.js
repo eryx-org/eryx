@@ -347,6 +347,7 @@ export const RESERVED_CALLBACK_NAMES = Object.freeze({
     "until",
     "wait",
     "while",
+    "xargs",
     "{",
     "}",
   ]),
