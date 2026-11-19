@@ -1096,6 +1096,148 @@ async fn guest_commands_cant_have_credentials() {
     assert!(err.to_string().contains("guest runtime"), "{err}");
 }
 
+/// A shell sandbox where `node` and `js` run the embedded JavaScript
+/// runtime as a command (#831).
+#[cfg(feature = "javascript")]
+fn node_shell() -> SandboxBuilder<Shell, state::Has> {
+    let node = eryx::Command::guest(Language::JavaScript).unwrap();
+    shell_sandbox().unwrap().with_commands(["node", "js"], node)
+}
+
+#[cfg(feature = "javascript")]
+async fn run_node_shell(code: &str) -> (String, String) {
+    let out = node_shell().build().unwrap().execute(code).await.unwrap();
+    (
+        out.stdout_utf8().unwrap().to_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_is_opt_in() {
+    let sandbox = shell_sandbox().unwrap().build().unwrap();
+    let err = sandbox.execute("node -e 1").await.unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::ScriptFailed {
+                exit_code: Some(127),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_runs_code_and_pipelines() {
+    let (stdout, stderr) = run_node_shell(
+        "node -e 'console.log(1+1)'\n\
+         echo 'console.log(2)' | node\n\
+         node -p '6*7'\n\
+         js -e 'console.log(process.argv.slice(1).join(\" \"))' a b\n\
+         node -e 'for (let i = 0; i < 5; i++) console.log(i)' | wc -l\n\
+         seq 1 1000 | node -e 'console.log(require(\"fs\").readFileSync(0, \"utf8\").length)'\n\
+         node -e 'for (let i = 0; i < 100000; i++) console.log(i)' | head -2",
+    )
+    .await;
+    assert_eq!(stdout, "2\n2\n42\na b\n5\n3893\n0\n1\n", "{stderr}");
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_runs_scripts_with_shebangs_and_args() {
+    let (stdout, stderr) = run_node_shell(
+        r#"cd /tmp
+printf '%s\n' '#!/usr/bin/env node' 'console.log(process.argv.slice(2), __filename)' > s.js
+node s.js a b
+./s.js c
+printf 'module.exports = 6\n' > six.js
+node -e 'console.log(require("./six") * 7)'
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout, "[\"a\",\"b\"] /tmp/s.js\n[\"c\"] /tmp/s.js\n42\n",
+        "{stderr}"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_exit_status_and_errors_reach_the_shell() {
+    let (stdout, stderr) = run_node_shell(
+        "node -e 'process.exit(3)'; echo $?\n\
+         node -e 'throw new Error(\"boom\")' 2>/tmp/err; echo $?\n\
+         head -1 /tmp/err\n\
+         node --bogus 2>/dev/null; echo $?",
+    )
+    .await;
+    assert_eq!(stdout, "3\n1\nError: boom\n9\n", "{stderr}");
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_shares_the_shells_files_env_and_cwd() {
+    let (stdout, stderr) = run_node_shell(
+        "echo from-sh > /tmp/x\n\
+         node -e \"const fs = require('fs'); console.log(fs.readFileSync('/tmp/x', 'utf8').trim()); fs.writeFileSync('/tmp/y', 'from-node')\"\n\
+         cat /tmp/y; echo\n\
+         FOO=1 node -e 'console.log(process.env.FOO)'\n\
+         cd /tmp && node -e 'console.log(process.cwd(), require(\"fs\").existsSync(\"x\"))'",
+    )
+    .await;
+    assert_eq!(stdout, "from-sh\nfrom-node\n1\n/tmp true\n", "{stderr}");
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_burns_the_executions_fuel_and_time() {
+    let mut session = SessionExecutor::new(node_shell().build().unwrap().executor(), &[])
+        .await
+        .unwrap();
+    let err = session
+        .execute("node -e 'while (true) {}'")
+        .with_fuel_limit(500_000_000)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "expected FuelExhausted, got {err:?}"
+    );
+
+    let sandbox = node_shell()
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_millis(100)),
+        )
+        .build()
+        .unwrap();
+    let err = sandbox
+        .execute("node -e 'while (true) {}'")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Timeout(_)),
+        "expected Timeout, got {err:?}"
+    );
+}
+
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_memory_counts_against_the_child_pool() {
+    let (stdout, stderr) = run_node_shell(
+        // More than the children's 256 MiB pool.
+        "node -e 'new Uint8Array(300 * 1024 * 1024).fill(1)' 2>/dev/null; echo $?\n\
+         node -e 'console.log(new Uint8Array(1 << 20).length)'",
+    )
+    .await;
+    assert_eq!(stdout, "1\n1048576\n", "{stderr}");
+}
+
 /// Run `code` in a fresh shell sandbox, and return its stdout and stderr.
 async fn run_shell(code: &str) -> (String, String) {
     let sandbox = shell_sandbox().unwrap().build().unwrap();

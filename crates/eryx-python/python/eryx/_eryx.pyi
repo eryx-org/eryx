@@ -792,6 +792,29 @@ class Command:
         """
         ...
 
+    @staticmethod
+    def node(*, runtime_path: PathLike | None = None) -> Command:
+        """JavaScript as a command, to register as ``node`` and ``js``.
+
+        ``js = Command.node()``, then
+        ``Sandbox(language="shell", commands={"node": js, "js": js})`` runs
+        ``node -e CODE``, ``node -p EXPR``, ``node script.js`` and
+        ``... | node``. Each run is a fresh QuickJS instance with Node's
+        ``process``, ``require`` and ``node:fs`` on the shell's files,
+        environment, working directory and stdio, within the execution's
+        limits, with no callbacks and no network.
+
+        The runtime is found as for ``Sandbox(language="javascript")``:
+        ``runtime_path``, then ``ERYX_RUNTIME_CWASM_JAVASCRIPT``, then the
+        ``pyeryx-runtime-javascript`` package, then the cache
+        ``eryx-precompile setup --language javascript`` writes.
+
+        Raises:
+            InitializationError: If there's no JavaScript runtime, or it
+                can't be loaded.
+        """
+        ...
+
 
 @final
 class Sandbox:

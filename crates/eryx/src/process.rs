@@ -873,12 +873,14 @@ impl Command {
 
     /// Run `language`'s embedded runtime as a command, as the shell runs
     /// `python3 -c CODE`, through the runtime's `run-command` export: for
-    /// Python, register it as `python` and `python3` with
+    /// Python, register it as `python` and `python3`, and for JavaScript as
+    /// `node` and `js`, with
     /// [`SandboxBuilder::with_commands`](crate::SandboxBuilder::with_commands).
-    /// Only Python can run as a command so far.
+    /// Only Python and JavaScript can run as commands so far.
     ///
     /// A guest child is a fresh instance of the runtime (for Python, the
-    /// pre-initialized interpreter with the embedded standard library). It
+    /// pre-initialized interpreter with the embedded standard library; for
+    /// JavaScript, QuickJS with `node:fs` on the shell's files). It
     /// sees the shell's filesystem, environment, working directory and
     /// stdio, burns the execution's fuel and counts against the children's
     /// memory like any child, and gets no callbacks, no network and no
@@ -934,9 +936,12 @@ impl Command {
         path: impl AsRef<Path>,
         stdlib: Option<std::path::PathBuf>,
     ) -> Result<Self, Error> {
-        if language != crate::Language::Python {
+        if !matches!(
+            language,
+            crate::Language::Python | crate::Language::JavaScript
+        ) {
             return Err(ErrorKind::Initialization(format!(
-                "{language} can't run as a command yet: only python can"
+                "{language} can't run as a command yet: only python and javascript can"
             ))
             .into());
         }
