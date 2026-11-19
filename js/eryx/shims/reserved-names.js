@@ -293,6 +293,7 @@ export const RESERVED_CALLBACK_NAMES = Object.freeze({
     "break",
     "case",
     "cd",
+    "chmod",
     "command",
     "continue",
     "coproc",

@@ -1,6 +1,6 @@
 # Names a shell callback can't take: the shell guest's builtins (brush's
-# BashMode set as the guest builds it, plus its own `invoke`, `grep` and
-# `env`, and the `sh` and `bash` it runs as nested shells), and
+# BashMode set as the guest builds it, plus its own `invoke`, `grep`,
+# `env` and `chmod`, and the `sh` and `bash` it runs as nested shells), and
 # the shell's reserved words (brush-core's keywords.rs), which are parsed as
 # syntax, so a command of that name can't be run. Checked against the guest
 # by its builtins_match_the_host_list test.
@@ -15,6 +15,7 @@ bash
 break
 case
 cd
+chmod
 command
 continue
 coproc

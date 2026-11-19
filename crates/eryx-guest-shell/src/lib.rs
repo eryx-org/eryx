@@ -22,6 +22,7 @@
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
 
 mod call;
+mod chmod;
 mod env;
 mod grep;
 mod input;
@@ -196,6 +197,9 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("env", builtins::Registration::of::<env::EnvCommand>());
+    shell
+        .builtins_mut()
+        .register("chmod", builtins::Registration::of::<chmod::ChmodCommand>());
     // The host lists `grep` when this execution's allowed commands include
     // it (or there's no allow-list), so it can be narrowed like a command.
     let commands = eryx::process::process::list_commands();
@@ -805,7 +809,7 @@ mod tests {
         let mut builtins: Vec<String> =
             brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
                 .into_keys()
-                .chain(["invoke", "grep", "env", "sh", "bash"].map(String::from))
+                .chain(["invoke", "grep", "env", "chmod", "sh", "bash"].map(String::from))
                 .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
                 .collect();
         builtins.sort();
