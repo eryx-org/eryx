@@ -98,7 +98,7 @@ wasmtime-wasi-io = "50.0.0"
 # alone leaves a second wasmtime-environ in the tree, sizing with the old
 # layout; process.rs's instance_metadata_estimates_match_wasmtime test, which
 # checks the estimate against wasmtime's own figure, is what catches that.
-wasmtime-environ = "=50.0.2"
+wasmtime-environ = "=50.0.3"
 wasmtime-wizer = { version = "50.0.0", features = ["component-model", "wasmtime"] }
 wat = "1"
 webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhra CAs)
@@ -107,8 +107,8 @@ wit-component = "0.263"
 # wasmparser/wasm-encoder), so components they encode are ones wasmtime
 # parses: eryx adapts WASI preview 1 modules with wit-component (#993), and
 # its tests probe the child linker with both. Bump with wasmtime.
-wit-component-wasmtime = { package = "wit-component", version = "=0.261.0" }
-wit-parser-wasmtime = { package = "wit-parser", version = "=0.261.0" }
+wit-component-wasmtime = { package = "wit-component", version = "=0.263.0" }
+wit-parser-wasmtime = { package = "wit-parser", version = "=0.263.0" }
 wit-dylib = "0.263"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
