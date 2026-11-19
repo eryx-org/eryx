@@ -1240,6 +1240,37 @@ printf '#!/usr/bin/env head -n1\nfirst\nsecond\n' > /tmp/h
     assert_eq!(stdout, "#!/usr/bin/cat\nhello\n#!/usr/bin/env head -n1\n");
 }
 
+/// `chmod` changes nothing (WASI has no permission bits, and any file runs),
+/// but accepts the usual modes so `chmod +x x && ./x` works under `set -e`,
+/// and fails like GNU's on a missing file or a bad mode (#1092).
+#[tokio::test]
+async fn chmod_accepts_modes_and_checks_files() {
+    let (stdout, stderr) = run_shell(
+        r#"
+set -e
+cd /tmp
+printf 'echo ran\n' > s.sh; touch t; mkdir -p d/e
+chmod +x s.sh && ./s.sh
+chmod u+x,go-w s.sh
+chmod 755 s.sh t; chmod -R a+rX d; chmod -x t; chmod -- 0644 t
+before=$(ls -l s.sh); chmod 600 s.sh; [ "$before" = "$(ls -l s.sh)" ] && echo same
+set +e
+chmod +x nope; echo "missing=$?"
+chmod -f +x nope; echo "quiet=$?"
+chmod zz t; echo "mode=$?"
+chmod +x; echo "operand=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "ran\nsame\nmissing=1\nquiet=1\nmode=1\noperand=1\n");
+    assert_eq!(
+        stderr,
+        "chmod: cannot access 'nope': No such file or directory\n\
+         chmod: invalid mode: 'zz'\nTry 'chmod --help' for more information.\n\
+         chmod: missing operand after '+x'\nTry 'chmod --help' for more information.\n"
+    );
+}
+
 /// `env` is a builtin (uutils' can't run commands on WASI): it prints the
 /// exported environment, or runs a command, found as any other is, with
 /// variables added (`NAME=VALUE`), removed (`-u`) or only those (`-i`).

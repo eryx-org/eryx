@@ -97,7 +97,11 @@ sandbox's command of the interpreter's file name, with the script's path:
 `#!/usr/bin/env python3` runs `python3 ./script`. A command that isn't there
 exits 127. A file without `#!` runs as an `sh` script. A path always
 names a file, never a command: `./ls` runs a file named `ls`, not the `ls`
-command. `env -S` in a `#!` line isn't supported.
+command. `env -S` in a `#!` line isn't supported. `chmod` is a builtin that
+changes nothing (`ls -l` and `stat` show the same mode after it): it checks
+the mode (`+x`, `u+x`, `755`, ...) and that each file exists, so
+`chmod +x script.sh && ./script.sh` works. A missing file fails as in GNU
+`chmod` (exit 1, `chmod: cannot access ...`).
 
 `env` is a builtin, because uutils' `env` can't run commands on WASI. `env`
 alone prints the exported environment. `env [-i] [-u NAME]... [NAME=VALUE]...
