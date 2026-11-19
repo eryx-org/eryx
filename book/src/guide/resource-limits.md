@@ -299,6 +299,36 @@ default. A forked child starts with its own count. Rust embedders can change it 
 gRPC server sets both with `--max-open-host-files` and
 `--max-open-host-files-total`.
 
+## Child Processes
+
+A shell sandbox's commands run as child processes, whose memory is outside
+`max_memory_bytes`. Two limits bound it per execution:
+
+- `max_child_memory_bytes` (default 256 MiB) is the pool of memory the
+  running commands share: their linear memories, tables and instance
+  metadata. Each running command reserves its initial memory, about 4 MiB for
+  a coreutils command and 17 MiB for `python3`, so the default fits about 60
+  concurrent coreutils commands or 15 `python3` runs. A command that doesn't
+  fit isn't started, and the shell's stderr says why:
+  `eryx: not enough memory for sleep (child memory pool full: 14 of 16 MiB in use; 7 commands running)`.
+- `max_child_host_bytes` (default 64 MiB) is the host memory the commands'
+  arguments and environments may hold.
+
+At most 64 commands may be running at once (`eryx: too many commands running
+(limit 64)`), whatever the pool's size. Raising `max_child_memory_bytes` raises
+how much host memory one execution can use, so size it for the host's memory
+and the number of concurrent executions. Neither limit is cleared by
+`ResourceLimits::unlimited()`. pyeryx can't set them yet; the gRPC server takes
+them as `resource_limits.max_child_memory_bytes` and `max_child_host_bytes`,
+capped by `--max-child-memory-bytes` and `--max-child-host-bytes`.
+
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default().with_max_child_memory_bytes(512 * 1024 * 1024);
+```
+
 ## Callback Invocation Limits
 
 Limit the total number of callback invocations to prevent abuse:

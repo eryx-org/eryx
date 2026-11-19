@@ -97,7 +97,11 @@ sandbox's command of the interpreter's file name, with the script's path:
 `#!/usr/bin/env python3` runs `python3 ./script`. A command that isn't there
 exits 127. A file without `#!` runs as an `sh` script. A path always
 names a file, never a command: `./ls` runs a file named `ls`, not the `ls`
-command. `env -S` in a `#!` line isn't supported.
+command. `env -S` in a `#!` line isn't supported. `chmod` is a builtin that
+changes nothing (`ls -l` and `stat` show the same mode after it): it checks
+the mode (`+x`, `u+x`, `755`, ...) and that each file exists, so
+`chmod +x script.sh && ./script.sh` works. A missing file fails as in GNU
+`chmod` (exit 1, `chmod: cannot access ...`).
 
 `env` is a builtin, because uutils' `env` can't run commands on WASI. `env`
 alone prints the exported environment. `env [-i] [-u NAME]... [NAME=VALUE]...
@@ -105,6 +109,28 @@ COMMAND [ARG]...` runs `COMMAND` with those variables added (`NAME=VALUE`),
 removed (`-u`), or as the only ones (`-i`). The command is looked up like any
 other (builtins, commands, `sh`/`bash`, scripts) except functions. A command
 that isn't there exits 127, and any other option exits 125.
+
+Background jobs work as in bash: `cmd &` runs `cmd` alongside the script, and
+`$!` is its ID. `wait` waits for every job, `wait ID|%N...` for those jobs
+(returning the last one's status), and `wait -n` for the first to finish (127
+if there are none). `jobs` (with `-l` or `-p`) lists them. `kill [-SIGNAL]
+ID|%N...` stops a job, its builtins and its child commands. WASI has no signals,
+so every signal ends the job, which then exits with 128 plus the signal's number
+(143 for the default `TERM`). `kill -0` checks that a job is still running.
+Job IDs are the shell's own; no process has one. A script ends with an
+implicit `wait`: jobs still running then finish within the same execution,
+their output is its output, and its status is still the script's own. If the
+execution would time out while only jobs are left (the script itself has
+finished), the jobs are killed just before the deadline, stderr gets one line
+saying how many (`eryx: killed 2 background jobs still running when the
+execution timed out`), and the execution returns the script's result instead
+of a timeout. A script that is itself still running at the timeout times out
+as usual. A job that loops on builtins alone (`while :; do :; done &`, with no
+command, pipe or `sleep` in it) never lets the shell stop it in time, so it
+ends in a timeout too. In a session, jobs never outlive the execution that
+started them. Jobs count against the execution's limits like any other
+command. `fg`, `bg`, stopped jobs, `trap` on signals, and `%name` job specs
+aren't supported.
 
 ### Timers in JavaScript
 
@@ -135,6 +161,8 @@ timeout.
   finished callbacks in, so timers that are always due (a `setImmediate`
   loop) don't starve callback results.
 - An exception thrown in a timer callback fails the execute.
+- An uncaught error (or rejection, below) ends stderr as well as being the
+  failure's message, as Python's traceback does.
 - **A promise rejection still unhandled when the event loop drains fails the
   execute** as a script failure, with `Uncaught (in promise) Error: ...` and
   its stack as the message (the first one, with a count of any others). So
@@ -243,7 +271,7 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   (`/tmp` and volumes), environment, working directory and stdio. It burns
   the execution's fuel, stops at its timeout, and its memory (about 17 MB
   per run, more as it allocates) counts against the children's shared
-  256 MiB. It gets no callbacks and no network (yet), so a credential can't
+  pool (`max_child_memory_bytes`, 256 MiB by default). It gets no callbacks and no network (yet), so a credential can't
   be for it. A script's top-level `asyncio.run(main())` works as in
   `execute`.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
@@ -400,8 +428,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `execution_timeout` and cancellation, even mid-computation. They're
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).
-  The running children share 256 MiB of memory, outside `max_memory_bytes`;
-  a child that can't grow fails like one out of memory. A child holds at
+  The running children share one pool of memory,
+  `ResourceLimits::max_child_memory_bytes` (default 256 MiB), outside
+  `max_memory_bytes`; a child that can't grow fails like one out of memory,
+  and one that can't start says so on the shell's stderr (`eryx: not enough
+  memory for <command> (child memory pool full: ...)`). A child holds at
   most 16,384 resource handles (open files, streams, sockets) at once. Children run on an
   engine of their own that allocates on demand, so they take none of the
   pooling allocator's slots (`ERYX_POOL_INSTANCES`).
@@ -411,7 +442,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   children spawned but not yet finished and 2 MiB of arguments and
   environment per spawn. Each argument and variable counts its host
   overhead as well as its text (24 bytes per string on 64-bit hosts). Past a limit the spawn fails and the shell reports
-  `<command>: limit-exceeded`.
+  `<command>: limit-exceeded`, after a line saying which limit (`eryx: too
+  many commands running (limit 64)`, say).
 - **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
   so pipeline stages run together and a full pipe makes its writer wait:
   `yes | head -n 1` stops once `head` exits. A loop of builtins writing into

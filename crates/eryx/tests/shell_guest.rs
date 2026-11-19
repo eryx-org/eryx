@@ -1038,6 +1038,24 @@ async fn python3_burns_the_executions_fuel() {
     );
 }
 
+/// An execution's peak memory counts its children's, held at the same time
+/// as the shell's own.
+#[tokio::test]
+async fn peak_memory_includes_child_processes() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let alone = sandbox.execute("true").await.unwrap();
+    let alone = alone.stats.peak_memory_bytes.unwrap();
+    let out = sandbox
+        .execute("python3 -c 'b = bytearray(100 * 1024 * 1024)'")
+        .await
+        .unwrap();
+    let peak = out.stats.peak_memory_bytes.unwrap();
+    assert!(peak > alone + 100 * 1024 * 1024, "{peak} vs {alone} alone");
+}
+
 #[tokio::test]
 async fn python3_memory_counts_against_the_child_pool() {
     let Some(builder) = python_shell() else {
@@ -1240,6 +1258,37 @@ printf '#!/usr/bin/env head -n1\nfirst\nsecond\n' > /tmp/h
     assert_eq!(stdout, "#!/usr/bin/cat\nhello\n#!/usr/bin/env head -n1\n");
 }
 
+/// `chmod` changes nothing (WASI has no permission bits, and any file runs),
+/// but accepts the usual modes so `chmod +x x && ./x` works under `set -e`,
+/// and fails like GNU's on a missing file or a bad mode (#1092).
+#[tokio::test]
+async fn chmod_accepts_modes_and_checks_files() {
+    let (stdout, stderr) = run_shell(
+        r#"
+set -e
+cd /tmp
+printf 'echo ran\n' > s.sh; touch t; mkdir -p d/e
+chmod +x s.sh && ./s.sh
+chmod u+x,go-w s.sh
+chmod 755 s.sh t; chmod -R a+rX d; chmod -x t; chmod -- 0644 t
+before=$(ls -l s.sh); chmod 600 s.sh; [ "$before" = "$(ls -l s.sh)" ] && echo same
+set +e
+chmod +x nope; echo "missing=$?"
+chmod -f +x nope; echo "quiet=$?"
+chmod zz t; echo "mode=$?"
+chmod +x; echo "operand=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "ran\nsame\nmissing=1\nquiet=1\nmode=1\noperand=1\n");
+    assert_eq!(
+        stderr,
+        "chmod: cannot access 'nope': No such file or directory\n\
+         chmod: invalid mode: 'zz'\nTry 'chmod --help' for more information.\n\
+         chmod: missing operand after '+x'\nTry 'chmod --help' for more information.\n"
+    );
+}
+
 /// `env` is a builtin (uutils' can't run commands on WASI): it prints the
 /// exported environment, or runs a command, found as any other is, with
 /// variables added (`NAME=VALUE`), removed (`-u`) or only those (`-i`).
@@ -1266,4 +1315,51 @@ env -S 'a b'; echo "bad=$?"
         "A=1\n1 3 4\n[] 5\n0\n[]\nx\nA=1\nstatus=9\nmissing=127\nbad=125\n"
     );
     assert!(stderr.contains("env: invalid option"), "{stderr}");
+}
+
+/// A background job made only of builtins (no child processes) runs, and
+/// `kill` stops one that would loop forever, with its pipeline stages.
+#[tokio::test]
+async fn background_builtin_pipelines_run_and_can_be_killed() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "{ i=0; while [ $i -lt 200 ]; do echo $i; i=$((i + 1)); done | { n=0; while read -r _; do n=$((n + 1)); done; echo \"counted $n\"; }; } &\n\
+             wait $!; echo \"status: $?\"\n\
+             { while :; do echo y; done | while read -r _; do :; done; } &\n\
+             kill %1; wait %1; echo \"killed: $?\"",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "counted 200\nstatus: 0\nkilled: 143\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+/// A session's next execution starts with no jobs: the last one waited for
+/// its own.
+#[tokio::test]
+async fn session_jobs_end_with_their_execution() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    let out = session
+        .execute("(sleep 0.1; echo job) & echo started")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"started\njob\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let out = session
+        .execute("jobs; wait; echo \"$?\"; wait %1; echo \"$?\"")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"0\n127\n");
 }

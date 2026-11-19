@@ -203,7 +203,7 @@ dependencies = [
 [[package]]
 name = "brush-builtins"
 version = "0.2.0"
-source = "git+https://github.com/sd2k/brush?rev=25210fd6#25210fd612e776a433d475416b892a595ffd7086"
+source = "git+https://github.com/sd2k/brush?rev=85210c63#85210c638c6e12ff49d26a1b3ef1e4194412db19"
 dependencies = [
  "brush-core",
  "brush-parser",
@@ -227,7 +227,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
-source = "git+https://github.com/sd2k/brush?rev=25210fd6#25210fd612e776a433d475416b892a595ffd7086"
+source = "git+https://github.com/sd2k/brush?rev=85210c63#85210c638c6e12ff49d26a1b3ef1e4194412db19"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -266,7 +266,7 @@ dependencies = [
 [[package]]
 name = "brush-parser"
 version = "0.4.0"
-source = "git+https://github.com/sd2k/brush?rev=25210fd6#25210fd612e776a433d475416b892a595ffd7086"
+source = "git+https://github.com/sd2k/brush?rev=85210c63#85210c638c6e12ff49d26a1b3ef1e4194412db19"
 dependencies = [
  "bon",
  "cached",
@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "brush-winnow-args-adapter"
 version = "0.1.0"
-source = "git+https://github.com/sd2k/brush?rev=25210fd6#25210fd612e776a433d475416b892a595ffd7086"
+source = "git+https://github.com/sd2k/brush?rev=85210c63#85210c638c6e12ff49d26a1b3ef1e4194412db19"
 dependencies = [
  "brush-core",
  "winnow-args",

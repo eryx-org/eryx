@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
     // The guest language of the component: ERYX_LANGUAGE, default python.
     // It is stamped into the output. Python and JavaScript are pre-initialized.
     // `command` precompiles a shell command component (e.g. coreutils), which
-    // gets the version stamp but no language.
+    // gets the version stamp and its instance-metadata stamp, but no language.
     let language: Option<eryx::Language> = match std::env::var("ERYX_LANGUAGE").as_deref() {
         Ok("command") => None,
         Ok(name) => Some(name.parse().map_err(|e: String| std::io::Error::other(e))?),
@@ -166,8 +166,11 @@ fn main() -> anyhow::Result<()> {
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
     let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
-    if let Some(language) = language {
-        eryx::Executor::stamp_language(&mut precompiled, language);
+    match language {
+        Some(language) => eryx::Executor::stamp_language(&mut precompiled, language),
+        // As `eryx-precompile compile` does: without it, each running child
+        // is charged a conservative 4 MiB of the child memory pool.
+        None => eryx::Command::stamp_precompiled(&mut precompiled, &component_bytes),
     }
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");

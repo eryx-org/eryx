@@ -25,8 +25,8 @@ pub struct ExecuteResult {
     #[pyo3(get)]
     pub callback_invocations: u32,
 
-    /// Peak memory usage in bytes (if available); in a session, the peak so
-    /// far across executions.
+    /// Peak memory usage in bytes (if available), child processes'
+    /// included; in a session, the peak so far across executions.
     #[pyo3(get)]
     pub peak_memory_bytes: Option<u64>,
 

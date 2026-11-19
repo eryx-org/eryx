@@ -528,8 +528,9 @@ impl Sandbox {
                 crate::session::executor::VfsLimits::of(&self.resource_limits),
             );
         }
-        execute_builder =
-            execute_builder.with_max_child_host_bytes(self.resource_limits.max_child_host_bytes);
+        execute_builder = execute_builder
+            .with_max_child_host_bytes(self.resource_limits.max_child_host_bytes)
+            .with_max_child_memory_bytes(self.resource_limits.max_child_memory_bytes);
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -3834,9 +3835,13 @@ pub struct ExecuteStats {
     /// Number of callback invocations.
     pub callback_invocations: u32,
     /// Peak memory usage in bytes (if available): the guest instance's
-    /// largest linear memory. In a session, which keeps its instance, that's
-    /// the peak so far, not just this execution's growth: linear memory
-    /// never shrinks, so it never falls between executions.
+    /// largest linear memory, plus what its child processes (shell commands,
+    /// nested shells, `python3`) held at the same time. Children have a pool
+    /// of their own, so this can exceed
+    /// [`ResourceLimits::max_memory_bytes`](crate::ResourceLimits::max_memory_bytes),
+    /// which limits the guest's. In a session, which keeps its instance,
+    /// that's the peak so far, not just this execution's growth: linear
+    /// memory never shrinks, so it never falls between executions.
     pub peak_memory_bytes: Option<u64>,
     /// Fuel consumed during execution (if fuel tracking is enabled).
     ///
@@ -3943,6 +3948,17 @@ pub struct ResourceLimits {
     /// pipes.) Only applies to shell sandboxes with commands. `None` uses the
     /// default of 64 MiB.
     pub max_child_host_bytes: Option<u64>,
+    /// Maximum memory an execution's running child processes may hold
+    /// together: their linear memories, tables and instance metadata.
+    ///
+    /// This is on top of [`max_memory_bytes`](Self::max_memory_bytes), which
+    /// bounds only the guest's own memory, so raising it raises how much host
+    /// memory one execution can use. A command that doesn't fit isn't started
+    /// (or fails as it grows), and the shell's stderr says the pool is full.
+    /// Each running command reserves its initial memory: about 4 MiB for a
+    /// coreutils command, 17 MiB for `python3`. Only applies to shell
+    /// sandboxes with commands. `None` uses the default of 256 MiB.
+    pub max_child_memory_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -3952,11 +3968,12 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None,             // Unlimited by default, but still tracked
-            max_vfs_bytes: None,        // eryx-vfs default (64 MiB)
-            max_vfs_entries: None,      // eryx-vfs default (65,536)
-            max_open_host_files: None,  // eryx-vfs default (256)
-            max_child_host_bytes: None, // 64 MiB
+            max_fuel: None,               // Unlimited by default, but still tracked
+            max_vfs_bytes: None,          // eryx-vfs default (64 MiB)
+            max_vfs_entries: None,        // eryx-vfs default (65,536)
+            max_open_host_files: None,    // eryx-vfs default (256)
+            max_child_host_bytes: None,   // 64 MiB
+            max_child_memory_bytes: None, // 256 MiB
         }
     }
 }
@@ -3974,7 +3991,8 @@ impl ResourceLimits {
     /// outstay its welcome; raise them explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
     /// default, since host descriptors are shared with the whole process,
-    /// and [`max_child_host_bytes`](Self::max_child_host_bytes) for the same
+    /// and [`max_child_host_bytes`](Self::max_child_host_bytes) and
+    /// [`max_child_memory_bytes`](Self::max_child_memory_bytes) for the same
     /// reason as `max_vfs_bytes`.
     #[must_use]
     pub fn unlimited() -> Self {
@@ -3988,6 +4006,7 @@ impl ResourceLimits {
             max_vfs_entries: None,
             max_open_host_files: None,
             max_child_host_bytes: None,
+            max_child_memory_bytes: None,
         }
     }
 
@@ -4076,6 +4095,16 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_child_host_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
         self.max_child_host_bytes = bytes.into();
+        self
+    }
+
+    /// Set how much memory running child processes may hold together.
+    ///
+    /// Pass `None` to use the default of 256 MiB; see
+    /// [`max_child_memory_bytes`](Self::max_child_memory_bytes).
+    #[must_use]
+    pub fn with_max_child_memory_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_child_memory_bytes = bytes.into();
         self
     }
 }

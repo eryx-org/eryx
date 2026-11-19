@@ -295,12 +295,19 @@ async fn uncaught_errors_are_script_failures() {
         let ErrorKind::ScriptFailed {
             message: msg,
             exit_code: None,
+            stderr,
             ..
         } = err.kind()
         else {
             panic!("{code}: expected a script failure, got {err:?}");
         };
         assert!(msg.contains(expected), "{code}: {msg}");
+        // The error ends stderr too, as Python's traceback does.
+        assert_eq!(
+            String::from_utf8_lossy(stderr),
+            format!("{msg}\n"),
+            "{code}"
+        );
     }
 }
 
@@ -362,6 +369,14 @@ async fn unhandled_rejections_are_script_failures() {
         let (msg, stdout) = script_failure(&err);
         assert!(msg.starts_with(expected), "{code}: {msg}");
         assert_eq!(stdout, b"done\n", "{code}");
+        let ErrorKind::ScriptFailed { stderr, .. } = err.kind() else {
+            unreachable!()
+        };
+        assert_eq!(
+            String::from_utf8_lossy(stderr),
+            format!("{msg}\n"),
+            "{code}"
+        );
     }
     // An Error's stack comes with it, as for an uncaught throw.
     let err = sandbox

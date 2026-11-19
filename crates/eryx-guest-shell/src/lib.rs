@@ -22,9 +22,11 @@
 #![allow(clippy::expect_used)] // single-threaded guest: a broken invariant traps either way
 
 mod call;
+mod chmod;
 mod env;
 mod grep;
 mod input;
+mod jobs;
 mod subshell;
 
 use std::cell::{Cell, RefCell};
@@ -158,11 +160,15 @@ impl TaskSpawner for LocalSpawner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let task = tokio::task::spawn_local(future);
-        TaskHandle::from_future(async move {
-            task.await
-                .map_err(|e| brush_core::ErrorKind::TaskError(Box::new(e)).into())
-        })
+        // `kill` aborts a job's task, and with it every task the job started.
+        let (id, task) = jobs::spawn_local(future);
+        TaskHandle::from_future_with_abort(
+            async move {
+                task.await
+                    .map_err(|e| brush_core::ErrorKind::TaskError(Box::new(e)).into())
+            },
+            move || jobs::abort_tree(id),
+        )
     }
 
     fn spawn_blocking<F>(
@@ -196,6 +202,13 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("env", builtins::Registration::of::<env::EnvCommand>());
+    shell
+        .builtins_mut()
+        .register("chmod", builtins::Registration::of::<chmod::ChmodCommand>());
+    // brush's `kill` needs Unix signals; this one stops jobs.
+    shell
+        .builtins_mut()
+        .register("kill", builtins::Registration::of::<jobs::KillCommand>());
     // The host lists `grep` when this execution's allowed commands include
     // it (or there's no allow-list), so it can be narrowed like a command.
     let commands = eryx::process::process::list_commands();
@@ -270,8 +283,9 @@ fn take_result(shell: &mut Shell) -> String {
 }
 
 /// First line of every snapshot: what wrote the serialized `Shell`. Bump the
-/// brush part with the brush pin in Cargo.toml, and the version when the
-/// guest's own state changes.
+/// brush part with the brush pin in Cargo.toml when the pin changes what
+/// brush serializes, and the version when the guest's own state changes.
+/// (85210c63 only changed jobs, which aren't serialized.)
 const STATE_FORMAT: &str = "eryx-shell-state/1 brush@25210fd6";
 
 /// Start of a `restore-state` error for a snapshot in another state format,
@@ -314,13 +328,27 @@ impl Guest for Sandbox {
             ))
             .await;
         }
-        let status = run_local(shell.run_string(
-            code,
-            &SourceInfo::default(),
-            &ExecutionParameters::default(),
-        ))
-        .await
-        .map(|r| u8::from(r.exit_code));
+        let (status, stopped) = run_local(async {
+            let status = shell
+                .run_string(
+                    code,
+                    &SourceInfo::default(),
+                    &ExecutionParameters::default(),
+                )
+                .await;
+            // Jobs can't outlive the execution (the guest only runs during
+            // one), so it ends with an implicit `wait`.
+            let time_left = eryx::process::execution::time_left();
+            (status, jobs::finish_jobs(shell.jobs_mut(), time_left).await)
+        })
+        .await;
+        if stopped > 0 {
+            let s = if stopped == 1 { "" } else { "s" };
+            eprintln!(
+                "eryx: killed {stopped} background job{s} still running when the execution timed out"
+            );
+        }
+        let status = status.map(|r| u8::from(r.exit_code));
         let result_json = take_result(&mut shell);
         *lock(&SHELL) = Some(shell);
         // std's stdout is line-buffered; flush so the host sees the tail.
@@ -439,7 +467,7 @@ impl EryxLauncher {
             .collect();
         let name = name.to_owned();
         let depth = self.depth;
-        let task = tokio::task::spawn_local(async move {
+        let (_, task) = jobs::spawn_local(async move {
             subshell::run_shell(&name, &args, &request.env, &request.working_dir, fds, depth).await
         });
         Ok(ChildProcess::from_future(async move {
@@ -563,10 +591,12 @@ fn spawn_child(
     let mut files = request.open_files;
     // The pumps and the wait run as tasks of their own, concurrently with
     // each other and the rest of the pipeline.
-    let feed = tokio::task::spawn_local(feed(files.remove_fd(OpenFiles::STDIN_FD), stdin_tx));
-    let out = tokio::task::spawn_local(drain(stdout, files.remove_fd(OpenFiles::STDOUT_FD)));
-    let err = tokio::task::spawn_local(drain(stderr, files.remove_fd(OpenFiles::STDERR_FD)));
-    let wait = tokio::task::spawn_local(async move { child.wait().await });
+    // In the job's task tree, so that `kill` stops them, and cancelling the
+    // wait kills the child.
+    let (_, feed) = jobs::spawn_local(feed(files.remove_fd(OpenFiles::STDIN_FD), stdin_tx));
+    let (_, out) = jobs::spawn_local(drain(stdout, files.remove_fd(OpenFiles::STDOUT_FD)));
+    let (_, err) = jobs::spawn_local(drain(stderr, files.remove_fd(OpenFiles::STDERR_FD)));
+    let (_, wait) = jobs::spawn_local(async move { child.wait().await });
     Ok(ChildProcess::from_future(async move {
         let code = match wait.await.map_err(std::io::Error::other)? {
             Ok(code) => u8::try_from(code & 0xff).unwrap_or(1),
@@ -805,7 +835,7 @@ mod tests {
         let mut builtins: Vec<String> =
             brush_builtins::default_builtins::<super::Ext>(brush_builtins::BuiltinSet::BashMode)
                 .into_keys()
-                .chain(["invoke", "grep", "env", "sh", "bash"].map(String::from))
+                .chain(["invoke", "grep", "env", "chmod", "kill", "sh", "bash"].map(String::from))
                 .chain(KEYWORDS.iter().map(|k| (*k).to_string()))
                 .collect();
         builtins.sort();
