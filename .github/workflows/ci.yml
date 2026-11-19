@@ -1038,6 +1038,14 @@ jobs:
           && (github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true') }}
         run: |
           df -h .
+          # The full run's test binaries (target/debug/deps/<name>-<hash>, no
+          # extension) aren't reused here, and with them in place the runner
+          # ran out of disk linking shell_guest (run 44524946379). The rlibs,
+          # proc macros (.so) and build scripts (target/debug/build) stay.
+          du -sch target/debug/deps 2>/dev/null | tail -1
+          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          rm -rf target/debug/incremental
+          df -h .
           cargo nextest run -p eryx --profile ci \
             --features embedded,shell,javascript,env-pack \
             --test shell_guest --test commands --test p3_guest --test pack \
