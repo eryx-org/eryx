@@ -23,7 +23,7 @@ crate-type = ["cdylib"]
 # sd2k/brush's feat/wasm-background-jobs, job IDs for `$!`, abortable jobs,
 # `wait PID`/`wait -n` and `jobs -l` (#1091), and `test -c`/`-b`/`-S` on
 # WASI; not yet proposed upstream.
-brush-core = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = ["serde"] }
+brush-core = { git = "https://github.com/sd2k/brush", rev = "0e83cc9185b62f914aa4a3b56bfe095333e09d85", default-features = false, features = ["serde"] }
 brush-builtins = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = [
     "builtin.echo",
     "builtin.printf",
