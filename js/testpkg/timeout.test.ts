@@ -15,6 +15,16 @@ describe("timeoutMs", () => {
     expect((await sandbox.execute("pass")).stateWasReset).toBe(false);
   });
 
+  it("stops a shell's background jobs in time, keeping the script's result", async () => {
+    using sandbox = new Sandbox({ language: "shell", timeoutMs: 1000 });
+    const result = await sandbox.execute("x=1; sleep 10 & echo hi");
+    expect(result.stdout).toBe("hi\n");
+    expect(result.stderr).toContain("eryx: killed 1 background job");
+    const after = await sandbox.execute('echo "x=$x"');
+    expect(after.stdout).toBe("x=1\n");
+    expect(after.stateWasReset).toBe(false);
+  });
+
   it("reports a timeout from executeWithJournal as the outcome's error", async () => {
     const sandbox = new Sandbox({ timeoutMs: 1000 });
     const outcome = await sandbox.executeWithJournal("while True: pass");
