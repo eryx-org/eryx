@@ -33,10 +33,13 @@ const HOST_ENTRY_OVERHEAD: usize = 24;
 /// Bytes kept free under the host's limit, as GNU keeps 2048 under
 /// `ARG_MAX`: the shell adds to a command's environment (`_`, its path).
 const HOST_HEADROOM: usize = 2048;
-/// Most commands `-P` runs at once (and what `-P 0` means): half the host's
-/// 64 live children per execution, leaving room for the commands' own
-/// children and the rest of the script.
+/// Most commands `-P` runs at once: half the host's 64 live children per
+/// execution, leaving room for the commands' own children and the rest of
+/// the script.
 const MAX_PROCS: usize = 32;
+/// What `-P 0` ("as many as possible") means. Running commands share the
+/// execution's child memory pool, so this stays well under [`MAX_PROCS`].
+const DEFAULT_PROCS: usize = 8;
 
 /// How input is split into items.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,9 +243,10 @@ fn parse(args: &[String]) -> Result<Request, String> {
     if r.command.is_empty() {
         r.command.push("echo".into());
     }
-    if r.procs == 0 || r.procs > MAX_PROCS {
-        r.procs = MAX_PROCS;
-    }
+    r.procs = match r.procs {
+        0 => DEFAULT_PROCS,
+        n => n.min(MAX_PROCS),
+    };
     Ok(r)
 }
 
@@ -594,8 +598,8 @@ async fn run<SE: ShellExtensions>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_MAX_CHARS, Group, HOST_ENTRY_OVERHEAD, HOST_HEADROOM, HOST_MAX_ARGS_BYTES,
-        MAX_PROCS, Request, Split, command_lines, delimiter, parse, split,
+        DEFAULT_MAX_CHARS, DEFAULT_PROCS, Group, HOST_ENTRY_OVERHEAD, HOST_HEADROOM,
+        HOST_MAX_ARGS_BYTES, MAX_PROCS, Request, Split, command_lines, delimiter, parse, split,
     };
 
     fn args(line: &str) -> Vec<String> {
@@ -621,7 +625,7 @@ mod tests {
                 trace: true,
                 exit_on_size: true,
                 max_chars: 100,
-                procs: MAX_PROCS,
+                procs: DEFAULT_PROCS,
                 command: args("grep -n x"),
                 ..Request::default()
             }
@@ -645,6 +649,7 @@ mod tests {
         assert_eq!(parse(&args("-a f")).unwrap().arg_file.as_deref(), Some("f"));
         assert_eq!(parse(&args("-d ,")).unwrap().split, Split::Delimiter(','));
         assert_eq!(parse(&args("-P 4")).unwrap().procs, 4);
+        assert_eq!(parse(&args("-P 99")).unwrap().procs, MAX_PROCS);
         let long = parse(&args("--null --max-args=3 --replace --max-procs 2 -- -x")).unwrap();
         assert_eq!(long.split, Split::Delimiter('\0'));
         assert_eq!(long.group, Group::Replace("{}".into()));

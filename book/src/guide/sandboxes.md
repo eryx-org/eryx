@@ -119,7 +119,10 @@ GNU's quoting (`'a b'`, `"a b"`, `a\ b`) when items are split at blanks. The
 default command is `echo`. Command lines are also kept under the host's limit
 on a command's arguments and environment (2 MiB), so long input runs as
 several commands, never one that fails to start. `-P` runs commands at once,
-32 at most (also what `-P 0` means). `xargs` exits 123 if a command failed
+32 at most, and `-P 0` means 8. Commands running at once share the
+execution's child memory pool (`max_child_memory_bytes`, 256 MiB by
+default), so a run that doesn't fit fails (with memory-heavy commands such
+as `python3`, keep `-P` low). `xargs` exits 123 if a command failed
 (exit 1-125), 124 if one exited 255, 125 if one was killed (exit 129-254,
 as a job `kill` stops exits), 126 or 127 if the command can't be run or
 isn't there, and 1 for its own errors. It reads all its input before running
