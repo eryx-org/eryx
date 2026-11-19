@@ -248,6 +248,13 @@ message ResourceLimits {
   // (0 = the server's --max-child-host-bytes). A spawn past it fails, and the
   // shell reports the command as failed.
   uint64 max_child_host_bytes = 6;
+
+  // Shell only (ignored for other languages): most memory the execution's
+  // running child processes may hold together, on top of max_memory_bytes
+  // (0 = the server's --max-child-memory-bytes, by default 256 MiB). A
+  // command that doesn't fit isn't started, and the shell's stderr says the
+  // child memory pool is full.
+  uint64 max_child_memory_bytes = 7;
 }
 
 // Network configuration for the sandbox.

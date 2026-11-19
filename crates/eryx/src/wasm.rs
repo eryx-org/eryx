@@ -1106,6 +1106,15 @@ impl MemoryTracker {
         }
     }
 
+    /// For a guest command, whether the children's pool has refused it
+    /// memory.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    pub(crate) fn child_refused(&self) -> bool {
+        self.child
+            .as_ref()
+            .is_some_and(crate::process::ChildMemory::refused)
+    }
+
     /// Get the peak memory usage observed so far (in bytes): the guest's,
     /// plus, for an execution, what its child processes held at the same time.
     #[must_use]
@@ -1218,7 +1227,7 @@ const FD_CAPTURE_LIMIT: usize = 1024 * 1024;
 /// they can be appended to the execution's captured output. At most
 /// [`FD_CAPTURE_LIMIT`] bytes are kept between [`take`](Self::take)s; the
 /// rest is dropped.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FdCapture(Arc<Mutex<Vec<u8>>>);
 
 impl FdCapture {
@@ -1232,7 +1241,7 @@ impl FdCapture {
         )
     }
 
-    fn push(&self, data: &[u8]) {
+    pub(crate) fn push(&self, data: &[u8]) {
         let mut buf = self
             .0
             .lock()
@@ -2308,7 +2317,7 @@ pub struct ExecuteBuilder<'a> {
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
-    max_child_host_bytes: Option<u64>,
+    child_limits: crate::process::ChildLimits,
     child_net: Option<crate::process::ChildNet>,
     allowed_commands: Option<Vec<String>>,
     command_options: HashMap<String, crate::process::CommandOptions>,
@@ -2361,7 +2370,7 @@ impl<'a> ExecuteBuilder<'a> {
             execution_timeout: None,
             cancellation_token: None,
             fuel_limit: None,
-            max_child_host_bytes: None,
+            child_limits: crate::process::ChildLimits::default(),
             child_net: None,
             allowed_commands: None,
             command_options: HashMap::new(),
@@ -2520,7 +2529,16 @@ impl<'a> ExecuteBuilder<'a> {
     /// [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes)).
     #[must_use]
     pub fn with_max_child_host_bytes(mut self, bytes: Option<u64>) -> Self {
-        self.max_child_host_bytes = bytes;
+        self.child_limits.host_bytes = bytes;
+        self
+    }
+
+    /// Limit the memory running child processes may hold together (default
+    /// 256 MiB; see
+    /// [`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes)).
+    #[must_use]
+    pub fn with_max_child_memory_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.child_limits.memory_bytes = bytes;
         self
     }
 
@@ -2586,7 +2604,7 @@ impl<'a> ExecuteBuilder<'a> {
                 self.execution_timeout,
                 self.cancellation_token,
                 self.fuel_limit,
-                self.max_child_host_bytes,
+                self.child_limits,
                 self.child_net,
                 self.allowed_commands.as_deref(),
                 &self.command_options,
@@ -4200,7 +4218,7 @@ impl Executor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
-        max_child_host_bytes: Option<u64>,
+        child_limits: crate::process::ChildLimits,
         child_net: Option<crate::process::ChildNet>,
         allowed_commands: Option<&[String]>,
         command_options: &HashMap<String, crate::process::CommandOptions>,
@@ -4330,7 +4348,8 @@ impl Executor {
             )?)
         };
 
-        let child_budget = crate::process::ChildBudget::new(max_child_host_bytes);
+        let child_budget =
+            crate::process::ChildBudget::new(child_limits, Some(fd_output.stderr.clone()));
         let mut memory_tracker = MemoryTracker::new(memory_limit);
         memory_tracker.set_children(child_budget.memory());
         let state = ExecutorState {

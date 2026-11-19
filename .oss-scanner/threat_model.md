@@ -75,9 +75,13 @@ Children are held to the same boundary as guests:
 - **Budgets charged to the parent.** All of an execution's children, nested
   and piped ones included, share its fuel and timeout, and run inside the
   parent's wait, so ending the execution ends them. They also share:
-  - a child memory pool covering each child's linear memory, tables and
-    instance metadata (each core instance a command component creates,
-    estimated before it runs);
+  - a child memory pool (`max_child_memory_bytes`, default 256 MiB,
+    configurable by the embedder and, under the server's
+    `--max-child-memory-bytes` ceiling, per gRPC request) covering each
+    child's linear memory, tables and instance metadata (each core instance a
+    command component creates, estimated before it runs). It is on top of the
+    guest's `max_memory_bytes`, so an operator raising it raises the host
+    memory one execution can hold;
   - a host-bytes budget (`max_child_host_bytes`, default 64 MiB) charged for
     each spawn's argv and env, including per-argument overhead, for captured
     output and for trace copies, and held while the child runs;

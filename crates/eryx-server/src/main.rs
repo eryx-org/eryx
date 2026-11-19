@@ -163,6 +163,13 @@ struct Args {
     #[arg(long, default_value_t = 64 * 1024 * 1024, env = "ERYX_MAX_CHILD_HOST_BYTES")]
     max_child_host_bytes: u64,
 
+    /// Ceiling on `resource_limits.max_child_memory_bytes`: the most memory
+    /// a shell execution's running child processes may hold together, on top
+    /// of its own `--max-memory-bytes`. Also the value for requests that set
+    /// none. Raising it raises the host memory one execution can use.
+    #[arg(long, default_value_t = 256 * 1024 * 1024, env = "ERYX_MAX_CHILD_MEMORY_BYTES")]
+    max_child_memory_bytes: u64,
+
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
     /// requests are rejected and secrets are only substituted over TLS.
@@ -565,6 +572,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("--max-output-bytes", args.max_output_bytes as u64),
         ("--max-open-host-files", args.max_open_host_files as u64),
         ("--max-child-host-bytes", args.max_child_host_bytes),
+        ("--max-child-memory-bytes", args.max_child_memory_bytes),
         (
             "--max-open-host-files-total",
             args.max_open_host_files_total.unwrap_or(1) as u64,
@@ -753,6 +761,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_output_bytes: args.max_output_bytes,
         max_open_host_files: args.max_open_host_files,
         max_child_host_bytes: args.max_child_host_bytes,
+        max_child_memory_bytes: args.max_child_memory_bytes,
         allow_plaintext_secrets: args.allow_plaintext_secrets,
     };
     if let Some(total) = args.max_open_host_files_total {

@@ -31,8 +31,9 @@
 //! - **Limits:** children burn the parent execution's fuel as they run (at
 //!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
 //!   work per running child, and stop at its timeout and cancellation. The
-//!   running children share one `CHILD_MEMORY_LIMIT` of memory, on top of
-//!   the parent's own limit, and the host memory their arguments hold is
+//!   running children share one pool of memory
+//!   ([`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes)),
+//!   on top of the parent's own limit, and the host memory their arguments hold is
 //!   bounded by the execution's `ChildBudget`.
 
 use std::collections::HashMap;
@@ -103,9 +104,10 @@ const PIPE_CAPACITY: usize = 64 * 1024;
 /// epoch tick, so children together overshoot the parent's fuel by at most
 /// one tick of work each, for up to [`MAX_LIVE_CHILDREN`] of them.
 const CHILD_FUEL: u64 = 10_000_000_000;
-/// Memory an execution's running children may grow to together, on top of
-/// the parent's own limit.
-const CHILD_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+/// Default for [`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes):
+/// the memory an execution's running children may grow to together, on top
+/// of the parent's own limit.
+pub(crate) const DEFAULT_CHILD_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 /// Children spawned and not yet finished, at most, per execution.
 const MAX_LIVE_CHILDREN: usize = 64;
 /// Bytes of argv and env one spawn may pass, at most (like `ARG_MAX`),
@@ -473,6 +475,73 @@ const CA_ENV: [&str; 4] = [
 /// Default for [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes).
 pub(crate) const DEFAULT_CHILD_HOST_BYTES: u64 = 64 * 1024 * 1024;
 
+/// An execution's limits on its children, from its
+/// [`ResourceLimits`](crate::ResourceLimits) (`None` for the defaults).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ChildLimits {
+    /// [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes).
+    pub(crate) host_bytes: Option<u64>,
+    /// [`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes).
+    pub(crate) memory_bytes: Option<u64>,
+}
+
+impl ChildLimits {
+    pub(crate) fn of(limits: &crate::ResourceLimits) -> Self {
+        Self {
+            host_bytes: limits.max_child_host_bytes,
+            memory_bytes: limits.max_child_memory_bytes,
+        }
+    }
+}
+
+/// `bytes` in whole MiB, rounded up, for notices.
+fn mib(bytes: u64) -> u64 {
+    bytes.div_ceil(1024 * 1024)
+}
+
+/// Where the host tells a process why a command it started was refused or
+/// couldn't start (its own error, `limit-exceeded` or `spawn-failed`, doesn't
+/// say which limit): one line on its stderr, as [`OfflineNotice`] does for
+/// the network.
+#[derive(Clone, Default)]
+enum Notices {
+    /// Nowhere (an isolated run, or a unit test).
+    #[default]
+    None,
+    /// The guest's own stderr (fd 2): the shell's, for its commands.
+    Guest(crate::wasm::FdCapture),
+    /// A child's stderr, for the commands it runs.
+    Child(pipe::Writer),
+}
+
+impl std::fmt::Debug for Notices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "None",
+            Self::Guest(_) => "Guest",
+            Self::Child(_) => "Child",
+        })
+    }
+}
+
+impl Notices {
+    /// Write `line`, best effort: dropped if a child's stderr is closed or
+    /// full.
+    fn write(&self, line: &str) {
+        use wasmtime_wasi::p2::OutputStream;
+        match self {
+            Self::None => {}
+            Self::Guest(stderr) => stderr.push(line.as_bytes()),
+            Self::Child(stderr) => {
+                let mut stderr = stderr.clone();
+                if stderr.check_write().is_ok_and(|room| room >= line.len()) {
+                    let _ = stderr.write(line.to_owned().into());
+                }
+            }
+        }
+    }
+}
+
 /// Host memory held for an execution's children's argv and env, outside the
 /// guest's memory limit. The shell spawns every pipeline stage before running
 /// any, so without this a script could make the host hold many large
@@ -487,25 +556,46 @@ pub(crate) struct ChildBudget {
     /// Children spawned and not yet finished (or dropped), out of
     /// [`MAX_LIVE_CHILDREN`].
     live: Arc<AtomicUsize>,
-    /// Linear memory the running children hold, out of `CHILD_MEMORY_LIMIT`.
+    /// Linear memory the running children hold, out of `memory_limit`.
     memory: Arc<MemoryPool>,
+    /// The most `memory` may hold.
+    memory_limit: usize,
+    /// The guest's stderr, where refusals of its own spawns are reported
+    /// (see [`Notices`]).
+    stderr: Option<crate::wasm::FdCapture>,
 }
 
 impl Default for ChildBudget {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(ChildLimits::default(), None)
     }
 }
 
 impl ChildBudget {
-    /// A budget of `limit` bytes ([`DEFAULT_CHILD_HOST_BYTES`] for `None`).
-    pub(crate) fn new(limit: Option<u64>) -> Self {
+    /// A budget within `limits` (the defaults for `None`s), telling the
+    /// guest through `stderr` when one of its spawns is refused.
+    pub(crate) fn new(limits: ChildLimits, stderr: Option<crate::wasm::FdCapture>) -> Self {
+        let memory = limits.memory_bytes.unwrap_or(DEFAULT_CHILD_MEMORY_BYTES);
         Self {
-            limit: limit.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
+            limit: limits.host_bytes.unwrap_or(DEFAULT_CHILD_HOST_BYTES),
             used: Arc::default(),
             live: Arc::default(),
             memory: Arc::default(),
+            memory_limit: usize::try_from(memory).unwrap_or(usize::MAX),
+            stderr,
         }
+    }
+
+    /// What a child running `cmd` is told when the memory pool can't fit it.
+    fn pool_full(&self, cmd: &str) -> String {
+        let used = self.memory.used.load(Ordering::Relaxed) as u64;
+        // Not counting the one refused.
+        let others = self.live.load(Ordering::Relaxed).saturating_sub(1);
+        format!(
+            "eryx: not enough memory for {cmd} (child memory pool full: {} of {} MiB in use; {others} commands running)\n",
+            mib(used),
+            mib(self.memory_limit as u64),
+        )
     }
 
     /// The children's memory pool, which the execution's own
@@ -1153,6 +1243,8 @@ struct Spawner {
     /// Where its children's process events go, for the shell's `wait` to
     /// report: shared by every descendant of one of the shell's children.
     traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
+    /// Where the process it spawns for is told why a command was refused.
+    notices: Notices,
 }
 
 /// Nested children's process events, queued for the `wait` of the shell's
@@ -1319,20 +1411,25 @@ impl Spawner {
                 .iter()
                 .map(|(k, v)| k.len() + v.len() + 2 * size_of::<String>())
                 .sum::<usize>();
-        let live = (args_bytes <= MAX_ARGS_BYTES)
-            .then(|| LiveSlot::take(&self.budget.live))
-            .flatten();
-        let Some(live) = live else {
-            tracing::warn!(
-                args_bytes,
-                live = self.budget.live.load(Ordering::Relaxed),
-                "child spawn over the argument or live-child limit"
-            );
+        let name = &argv[0];
+        if args_bytes > MAX_ARGS_BYTES {
+            tracing::warn!(args_bytes, "child spawn over the argument limit");
+            self.notices.write(&format!(
+                "eryx: argument list too long for {name} ({args_bytes} bytes; limit {} MiB)\n",
+                mib(MAX_ARGS_BYTES as u64)
+            ));
+            return Err(ProcessError::LimitExceeded);
+        }
+        let Some(live) = LiveSlot::take(&self.budget.live) else {
+            tracing::warn!("child spawn over the live-child limit");
+            self.notices.write(&format!(
+                "eryx: too many commands running (limit {MAX_LIVE_CHILDREN})\n"
+            ));
             return Err(ProcessError::LimitExceeded);
         };
         let Some(memory) = ChildMemory::reserve(
             Arc::clone(&self.budget.memory),
-            CHILD_MEMORY_LIMIT,
+            self.budget.memory_limit,
             command.vmctx,
         ) else {
             tracing::warn!(
@@ -1340,16 +1437,22 @@ impl Spawner {
                 used = self.budget.memory.used.load(Ordering::Relaxed),
                 "no room in the child memory pool for a child's instance metadata"
             );
+            self.notices.write(&self.budget.pool_full(name));
             return Err(ProcessError::LimitExceeded);
         };
         let mut args = Held {
             budget: self.budget.clone(),
             bytes: 0,
         };
-        args.charge(args_bytes as u64)?;
         // A nested child's trace keeps a copy of its argv (see `NestedTrace`).
-        if self.traces.is_some() {
-            args.charge(argv_bytes as u64)?;
+        let traced = if self.traces.is_some() { argv_bytes } else { 0 };
+        if let Err(e) = args.charge((args_bytes + traced) as u64) {
+            self.notices.write(&format!(
+                "eryx: not enough room for {name}'s arguments (commands' arguments and environments hold {} of {} MiB)\n",
+                mib(self.budget.used.load(Ordering::Relaxed)),
+                mib(self.budget.limit),
+            ));
+            return Err(e);
         }
 
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
@@ -1361,7 +1464,7 @@ impl Spawner {
             env,
             stdin: stdin_rx,
             stdout: stdout_tx,
-            stderr: stderr_tx,
+            stderr: stderr_tx.clone(),
             fuel: 0,
             fuel_used: Arc::default(),
             memory,
@@ -1369,10 +1472,12 @@ impl Spawner {
             _args: args,
             network,
             offline,
+            notices: self.notices.clone(),
             spawner: command.spawns.then(|| Spawner {
                 within: scope,
                 depth: self.depth + 1,
                 traces: Some(self.traces.clone().unwrap_or_default()),
+                notices: Notices::Child(stderr_tx.clone()),
                 ..self.clone()
             }),
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -1958,7 +2063,8 @@ pub(crate) struct ChildState {
 /// it reports as its peak memory.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryPool {
-    /// What the running children hold, out of `CHILD_MEMORY_LIMIT`.
+    /// What the running children hold, out of the execution's
+    /// `max_child_memory_bytes`.
     used: AtomicUsize,
     /// The execution's own guest memory (linear memory doesn't shrink).
     guest: AtomicU64,
@@ -1986,12 +2092,14 @@ impl MemoryPool {
 }
 
 /// A child's share of `pool`, which may grow to `limit` (its execution's
-/// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
+/// `max_child_memory_bytes`), given back when its store is dropped.
 #[derive(Debug)]
 pub(crate) struct ChildMemory {
     pool: Arc<MemoryPool>,
     held: usize,
     limit: usize,
+    /// Whether the pool has refused it anything.
+    refused: bool,
 }
 
 impl ChildMemory {
@@ -2008,6 +2116,7 @@ impl ChildMemory {
             pool,
             held: bytes,
             limit,
+            refused: false,
         })
     }
 }
@@ -2025,8 +2134,15 @@ impl ChildMemory {
         if reserved {
             self.held += bytes;
             self.pool.record();
+        } else {
+            self.refused = true;
         }
         reserved
+    }
+
+    /// Whether the pool has refused it anything: why it failed, if it did.
+    pub(crate) fn refused(&self) -> bool {
+        self.refused
     }
 }
 
@@ -2150,6 +2266,9 @@ struct ChildRun {
     /// Without one, the line it gets when it tries the network (see
     /// [`OfflineNotice`]).
     offline: Option<String>,
+    /// Where the process that spawned it is told if it fails for want of
+    /// memory (see [`Notices`]).
+    notices: Notices,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -2296,6 +2415,12 @@ impl ChildRun {
             }
         }
         .await;
+        // Failed to instantiate (its initial memory refused) or trapped
+        // after a refused grow.
+        if code.is_err() && store.data().limits.refused() {
+            self.notices
+                .write(&self._args.budget.pool_full(&self.argv[0]));
+        }
         let fuel_used = self.fuel.saturating_sub(store.get_fuel().unwrap_or(0));
         // Dropping the store closes the child's ends of its pipes, which ends
         // its output streams.
@@ -2339,6 +2464,9 @@ impl ChildRun {
             .run_command(&mut store, self.argv, self.env, cwd)
             .await
             .map_err(|e| format!("{name}: {e}"));
+        if code.is_err() && store.data().memory_tracker.child_refused() {
+            self.notices.write(&self._args.budget.pool_full(&name));
+        }
         tracing::debug!(
             command = %name,
             peak_memory_bytes = store.data().memory_tracker.peak_memory_bytes(),
@@ -2426,6 +2554,11 @@ impl ExecutorState {
             within: Some(NetScope::execution()),
             depth: 1,
             traces: None,
+            notices: self
+                .child_budget
+                .stderr
+                .clone()
+                .map_or(Notices::None, Notices::Guest),
         }
     }
 
@@ -2895,7 +3028,13 @@ pub(crate) mod tests {
     /// including when it's dropped midway (a timeout, or its caller killed).
     #[test]
     fn nested_runs_give_back_their_budget() {
-        let budget = ChildBudget::new(Some(100));
+        let budget = ChildBudget::new(
+            ChildLimits {
+                host_bytes: Some(100),
+                ..ChildLimits::default()
+            },
+            None,
+        );
         let mut held = Held {
             budget: budget.clone(),
             bytes: 0,
@@ -3060,7 +3199,7 @@ pub(crate) mod tests {
         assert!(engine.pooling_allocator_metrics().is_none());
         let component = Component::from_binary(&engine, &test_cmd_wasm()).unwrap();
         let too_big =
-            Command::from_component(&engine, &component, CHILD_MEMORY_LIMIT as u64 + 1).unwrap();
+            Command::from_component(&engine, &component, DEFAULT_CHILD_MEMORY_BYTES + 1).unwrap();
         let sandbox = crate::Sandbox::embedded()
             .shell()
             .with_command("fits", fits)
@@ -3390,7 +3529,8 @@ pub(crate) mod tests {
             stderr,
             fuel: CHILD_FUEL,
             fuel_used: Arc::default(),
-            memory: ChildMemory::reserve(Arc::default(), CHILD_MEMORY_LIMIT, 0).unwrap(),
+            memory: ChildMemory::reserve(Arc::default(), DEFAULT_CHILD_MEMORY_BYTES as usize, 0)
+                .unwrap(),
             _live: LiveSlot::take(&Arc::default()),
             _args: Held {
                 budget: ChildBudget::default(),
@@ -3398,6 +3538,7 @@ pub(crate) mod tests {
             },
             network: None,
             offline: None,
+            notices: Notices::None,
             spawner: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs: None,
