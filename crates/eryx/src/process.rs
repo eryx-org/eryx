@@ -488,7 +488,7 @@ pub(crate) struct ChildBudget {
     /// [`MAX_LIVE_CHILDREN`].
     live: Arc<AtomicUsize>,
     /// Linear memory the running children hold, out of `CHILD_MEMORY_LIMIT`.
-    memory: Arc<AtomicUsize>,
+    memory: Arc<MemoryPool>,
 }
 
 impl Default for ChildBudget {
@@ -506,6 +506,12 @@ impl ChildBudget {
             live: Arc::default(),
             memory: Arc::default(),
         }
+    }
+
+    /// The children's memory pool, which the execution's own
+    /// [`MemoryTracker`](crate::wasm::MemoryTracker) reports the peak of.
+    pub(crate) fn memory(&self) -> Arc<MemoryPool> {
+        Arc::clone(&self.memory)
     }
 
     /// Take `bytes` from the budget, or fail if that would overdraw it.
@@ -1331,7 +1337,7 @@ impl Spawner {
         ) else {
             tracing::warn!(
                 needs = command.vmctx,
-                used = self.budget.memory.load(Ordering::Relaxed),
+                used = self.budget.memory.used.load(Ordering::Relaxed),
                 "no room in the child memory pool for a child's instance metadata"
             );
             return Err(ProcessError::LimitExceeded);
@@ -1947,11 +1953,43 @@ pub(crate) struct ChildState {
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
 
+/// The memory an execution's running children hold, and the most the
+/// execution held at once, its own guest's and its children's together: what
+/// it reports as its peak memory.
+#[derive(Debug, Default)]
+pub(crate) struct MemoryPool {
+    /// What the running children hold, out of `CHILD_MEMORY_LIMIT`.
+    used: AtomicUsize,
+    /// The execution's own guest memory (linear memory doesn't shrink).
+    guest: AtomicU64,
+    /// The most `guest + used` has been.
+    peak: AtomicU64,
+}
+
+impl MemoryPool {
+    fn record(&self) {
+        let used = self.used.load(Ordering::Relaxed) as u64;
+        let total = self.guest.load(Ordering::Relaxed).saturating_add(used);
+        self.peak.fetch_max(total, Ordering::Relaxed);
+    }
+
+    /// The execution's own guest memory grew to `bytes`.
+    pub(crate) fn guest_grew(&self, bytes: u64) {
+        self.guest.fetch_max(bytes, Ordering::Relaxed);
+        self.record();
+    }
+
+    /// The most the guest and its children held at once.
+    pub(crate) fn peak(&self) -> u64 {
+        self.peak.load(Ordering::Relaxed)
+    }
+}
+
 /// A child's share of `pool`, which may grow to `limit` (its execution's
 /// `CHILD_MEMORY_LIMIT`), given back when its store is dropped.
 #[derive(Debug)]
 pub(crate) struct ChildMemory {
-    pool: Arc<AtomicUsize>,
+    pool: Arc<MemoryPool>,
     held: usize,
     limit: usize,
 }
@@ -1959,11 +1997,13 @@ pub(crate) struct ChildMemory {
 impl ChildMemory {
     /// A share of `pool` holding `bytes` already (for the child's instance
     /// metadata), or `None` if that doesn't fit `limit`.
-    fn reserve(pool: Arc<AtomicUsize>, limit: usize, bytes: usize) -> Option<Self> {
-        pool.try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-            used.checked_add(bytes).filter(|&u| u <= limit)
-        })
-        .ok()?;
+    fn reserve(pool: Arc<MemoryPool>, limit: usize, bytes: usize) -> Option<Self> {
+        pool.used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|&u| u <= limit)
+            })
+            .ok()?;
+        pool.record();
         Some(Self {
             pool,
             held: bytes,
@@ -1977,12 +2017,14 @@ impl ChildMemory {
     fn charge(&mut self, bytes: usize) -> bool {
         let reserved = self
             .pool
+            .used
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(bytes).filter(|&u| u <= self.limit)
             })
             .is_ok();
         if reserved {
             self.held += bytes;
+            self.pool.record();
         }
         reserved
     }
@@ -2018,7 +2060,7 @@ impl ResourceLimiter for ChildMemory {
 
 impl Drop for ChildMemory {
     fn drop(&mut self) {
-        self.pool.fetch_sub(self.held, Ordering::Relaxed);
+        self.pool.used.fetch_sub(self.held, Ordering::Relaxed);
     }
 }
 
@@ -2975,16 +3017,16 @@ pub(crate) mod tests {
     /// when the child ends.
     #[test]
     fn table_growth_is_charged_to_the_pool() {
-        let pool = Arc::new(AtomicUsize::new(0));
+        let pool = Arc::new(MemoryPool::default());
         let ptr = std::mem::size_of::<usize>();
         let mut child = ChildMemory::reserve(Arc::clone(&pool), 100 * ptr, 0).unwrap();
         assert!(child.table_growing(0, 60, None).unwrap());
-        assert_eq!(pool.load(Ordering::Relaxed), 60 * ptr);
+        assert_eq!(pool.used.load(Ordering::Relaxed), 60 * ptr);
         assert!(!child.table_growing(60, 120, None).unwrap());
         assert!(child.memory_growing(0, 40 * ptr, None).unwrap());
         assert!(!child.memory_growing(40 * ptr, 41 * ptr, None).unwrap());
         drop(child);
-        assert_eq!(pool.load(Ordering::Relaxed), 0);
+        assert_eq!(pool.used.load(Ordering::Relaxed), 0);
     }
 
     /// Commands run on the child engine: with the pooling allocator on the
@@ -3034,12 +3076,30 @@ pub(crate) mod tests {
     /// started; its share is given back once it ends.
     #[test]
     fn instance_metadata_is_charged_to_the_pool() {
-        let pool = Arc::new(AtomicUsize::new(0));
+        let pool = Arc::new(MemoryPool::default());
         let held = ChildMemory::reserve(Arc::clone(&pool), 100, 60).unwrap();
-        assert_eq!(pool.load(Ordering::Relaxed), 60);
+        assert_eq!(pool.used.load(Ordering::Relaxed), 60);
         assert!(ChildMemory::reserve(Arc::clone(&pool), 100, 60).is_none());
         drop(held);
-        assert_eq!(pool.load(Ordering::Relaxed), 0);
+        assert_eq!(pool.used.load(Ordering::Relaxed), 0);
+    }
+
+    /// The pool's peak is the most the guest and its live children held at
+    /// once: a child's memory is added to the guest's while it runs, not
+    /// after it ends.
+    #[test]
+    fn the_peak_adds_live_children_to_the_guest() {
+        let pool = Arc::new(MemoryPool::default());
+        pool.guest_grew(100);
+        let mut child = ChildMemory::reserve(Arc::clone(&pool), 1000, 10).unwrap();
+        assert!(child.memory_growing(0, 40, None).unwrap());
+        assert_eq!(pool.peak(), 150);
+        drop(child);
+        // Guest growth after the child ended doesn't add the child again.
+        pool.guest_grew(120);
+        assert_eq!(pool.peak(), 150);
+        pool.guest_grew(200);
+        assert_eq!(pool.peak(), 200);
     }
 
     /// A command is linked for the WASI version whose `wasi:cli/run` it

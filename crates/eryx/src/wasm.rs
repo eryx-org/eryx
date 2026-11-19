@@ -505,8 +505,9 @@ pub struct ExecutionOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr from the Python execution (raw bytes).
     pub stderr: Vec<u8>,
-    /// Peak memory usage in bytes: the instance's largest linear memory
-    /// (in a session, so far; see [`crate::ExecuteStats::peak_memory_bytes`]).
+    /// Peak memory usage in bytes: the instance's largest linear memory, plus
+    /// its children's at the time (in a session, so far; see
+    /// [`crate::ExecuteStats::peak_memory_bytes`]).
     pub peak_memory_bytes: u64,
     /// Execution duration.
     pub duration: Duration,
@@ -1071,6 +1072,9 @@ pub struct MemoryTracker {
     /// pool, which its memory and tables are charged to.
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     child: Option<crate::process::ChildMemory>,
+    /// For an execution, its children's memory pool, whose peak (with this
+    /// guest's memory) is the execution's.
+    children: Option<std::sync::Arc<crate::process::MemoryPool>>,
 }
 
 impl MemoryTracker {
@@ -1082,7 +1086,14 @@ impl MemoryTracker {
             memory_limit,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             child: None,
+            children: None,
         }
+    }
+
+    /// Count `children`, the execution's children's memory pool, in its peak.
+    pub(crate) fn set_children(&mut self, children: std::sync::Arc<crate::process::MemoryPool>) {
+        children.guest_grew(self.peak_memory_bytes.load(Ordering::Relaxed));
+        self.children = Some(children);
     }
 
     /// A tracker for a guest command, charging `child`, its share of the
@@ -1095,15 +1106,22 @@ impl MemoryTracker {
         }
     }
 
-    /// Get the peak memory usage observed so far (in bytes).
+    /// Get the peak memory usage observed so far (in bytes): the guest's,
+    /// plus, for an execution, what its child processes held at the same time.
     #[must_use]
     pub fn peak_memory_bytes(&self) -> u64 {
-        self.peak_memory_bytes.load(Ordering::Relaxed)
+        let own = self.peak_memory_bytes.load(Ordering::Relaxed);
+        self.children
+            .as_ref()
+            .map_or(own, |children| own.max(children.peak()))
     }
 
     /// Record memory that was already in use before this tracker was installed.
     pub(crate) fn observe(&self, bytes: u64) {
         self.peak_memory_bytes.fetch_max(bytes, Ordering::Relaxed);
+        if let Some(children) = &self.children {
+            children.guest_grew(bytes);
+        }
     }
 }
 
@@ -1137,6 +1155,9 @@ impl ResourceLimiter for MemoryTracker {
         }
         #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
         let _ = current;
+        if let Some(children) = &self.children {
+            children.guest_grew(desired_u64);
+        }
         Ok(true)
     }
 
@@ -4309,13 +4330,16 @@ impl Executor {
             )?)
         };
 
+        let child_budget = crate::process::ChildBudget::new(max_child_host_bytes);
+        let mut memory_tracker = MemoryTracker::new(memory_limit);
+        memory_tracker.set_children(child_budget.memory());
         let state = ExecutorState {
             wasi,
             table: ResourceTable::new(),
             callback_tx,
             trace_tx,
             callbacks: callback_infos,
-            memory_tracker: MemoryTracker::new(memory_limit),
+            memory_tracker,
             net_tx,
             output_tx,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
@@ -4324,7 +4348,7 @@ impl Executor {
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
             commands,
-            child_budget: crate::process::ChildBudget::new(max_child_host_bytes),
+            child_budget,
             child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
             trace_clock: TraceClock::default(),
         };
