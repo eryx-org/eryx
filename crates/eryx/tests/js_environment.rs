@@ -158,10 +158,10 @@ async fn unknown_modules_and_builtins_fail_clearly() {
             "environment provides date-fns, lodash, nanoid, uuid, waits, zod",
         ),
         (
-            "await import('node:fs')",
-            "node:fs isn't available in eryx yet",
+            "await import('node:net')",
+            "node:net isn't available in eryx yet",
         ),
-        ("require('fs')", "node:fs isn't available in eryx yet"),
+        ("require('net')", "node:net isn't available in eryx yet"),
         (
             "await import('../eryx-environment.json')",
             "relative imports only work",

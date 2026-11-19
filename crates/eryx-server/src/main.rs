@@ -256,6 +256,14 @@ struct Args {
     /// callbacks or network.
     #[arg(long, env = "ERYX_SHELL_PYTHON")]
     shell_python: bool,
+
+    /// Let the shell run JavaScript as `node` and `js` (`node -e ...`,
+    /// `node script.js`, `... | node`): a fresh QuickJS instance per run,
+    /// from the embedded JavaScript runtime, with Node's `process`,
+    /// `require` and `node:fs` on the script's files, env and limits. It has
+    /// no callbacks or network.
+    #[arg(long, env = "ERYX_SHELL_NODE")]
+    shell_node: bool,
 }
 
 /// One `--shell-command`: the names to register, the component's path, and
@@ -444,6 +452,15 @@ fn python_command(
         }
         None => eryx::Command::guest(eryx::Language::Python).map_err(fail),
     }
+}
+
+/// `node`/`js` for the shell (--shell-node): the embedded JavaScript runtime.
+fn node_command() -> Result<eryx::Command, String> {
+    #[cfg(feature = "javascript")]
+    return eryx::Command::guest(eryx::Language::JavaScript)
+        .map_err(|e| format!("--shell-node: {e}"));
+    #[cfg(not(feature = "javascript"))]
+    Err("--shell-node needs the `javascript` cargo feature".to_owned())
 }
 
 /// Build the sandbox pool for a language other than Python, from its
@@ -668,6 +685,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             python_command(args.runtime_cwasm.as_deref(), args.stdlib.as_deref())?,
         ));
     }
+    if args.shell_node {
+        commands.push((vec!["node".to_owned(), "js".to_owned()], node_command()?));
+    }
     let shell = ShellCommands {
         commands,
         embedded: !args.no_shell_embedded_commands,
@@ -695,15 +715,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shell_configured = !shell.commands.is_empty() || !shell.embedded;
     if shell_configured && !cfg!(feature = "shell") {
         return Err(
-            "--shell-command, --shell-python and --no-shell-embedded-commands need the `shell` \
-             cargo feature"
+            "--shell-command, --shell-python, --shell-node and --no-shell-embedded-commands need \
+             the `shell` cargo feature"
                 .into(),
         );
     }
     if shell_configured && !args.languages.contains(&eryx::Language::Shell) {
         return Err(
-            "--shell-command, --shell-python and --no-shell-embedded-commands need the shell in \
-             --languages"
+            "--shell-command, --shell-python, --shell-node and --no-shell-embedded-commands need \
+             the shell in --languages"
                 .into(),
         );
     }
@@ -881,11 +901,13 @@ mod tests {
             "cat,head=/opt/coreutils.cwasm",
             "--no-shell-embedded-commands",
             "--shell-python",
+            "--shell-node",
         ])
         .unwrap();
         assert_eq!(parse_shell_commands(&args.shell_commands).unwrap().len(), 2);
         assert!(args.no_shell_embedded_commands);
         assert!(args.shell_python);
+        assert!(args.shell_node);
     }
 
     /// `--shell-command` registers a command (here coreutils' multicall
@@ -962,6 +984,29 @@ mod tests {
         let sandbox = pool.acquire().await.unwrap();
         let out = sandbox
             .execute("seq 3 | python3 -c 'import sys; print(sum(map(int, sys.stdin)))'")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "6\n");
+    }
+
+    /// `--shell-node` registers the embedded JavaScript as `node` and `js`.
+    #[cfg(all(feature = "shell", feature = "javascript"))]
+    #[tokio::test]
+    async fn shell_node_runs_javascript_in_the_shell() {
+        let shell = ShellCommands {
+            commands: vec![(vec!["node".into(), "js".into()], node_command().unwrap())],
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("seq 3 | node -e 'console.log(require(\"fs\").readFileSync(0).length)'")
             .await
             .unwrap();
         assert_eq!(out.stdout_utf8().unwrap(), "6\n");

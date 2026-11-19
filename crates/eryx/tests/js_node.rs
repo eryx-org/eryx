@@ -154,9 +154,27 @@ async fn buffer_is_not_a_global() {
     assert!(err.to_string().contains("Buffer is not defined"), "{err}");
 }
 
+/// `node:fs` works in `execute` too, on whatever files the sandbox has
+/// (here none); the shell's `node` command covers reading and writing.
+#[tokio::test]
+async fn fs_imports_and_reports_node_errors() {
+    let out = ok(r"
+        const fs = require('fs');
+        try { fs.readFileSync('/nope/x') } catch (e) { console.log(e.code, e.syscall, e.message) }
+        console.log(fs.existsSync('/nope'), fs.statSync('/nope', { throwIfNoEntry: false }));
+        const { readFile } = await import('node:fs/promises');
+        console.log(await readFile('/nope/x').catch((e) => e.code));
+        ")
+    .await;
+    assert_eq!(
+        out,
+        "ENOENT open ENOENT: no such file or directory, open '/nope/x'\nfalse undefined\nENOENT\n"
+    );
+}
+
 #[tokio::test]
 async fn other_builtins_still_fail_clearly() {
-    for module in ["fs", "node:os", "child_process", "net"] {
+    for module in ["os", "node:os", "child_process", "net"] {
         let err = run(&format!("await import('{module}')")).await.unwrap_err();
         let name = module.trim_start_matches("node:");
         assert!(

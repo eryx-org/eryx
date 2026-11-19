@@ -111,6 +111,37 @@ impl Command {
             .map_err(eryx_error_to_py)
     }
 
+    /// JavaScript as a command, for a shell sandbox to register as `node`
+    /// and `js`: `commands={"node": js, "js": js}` with `js = Command.node()`.
+    /// The shell can then run `node -e CODE`, `node -p EXPR`,
+    /// `node script.js` and `... | node`. Each run is a fresh QuickJS
+    /// instance with Node's `process`, `require` and `node:fs` on the
+    /// shell's files, environment, working directory and stdio, within the
+    /// execution's limits, with no callbacks and no network.
+    ///
+    /// The runtime is found as for `Sandbox(language="javascript")`:
+    /// `runtime_path`, then `ERYX_RUNTIME_CWASM_JAVASCRIPT`, then the
+    /// `pyeryx-runtime-javascript` package, then the cache `eryx-precompile
+    /// setup --language javascript` writes.
+    ///
+    /// Raises:
+    ///     InitializationError: If there's no JavaScript runtime, or it
+    ///         can't be loaded.
+    #[staticmethod]
+    #[pyo3(signature = (*, runtime_path=None))]
+    fn node(py: Python<'_>, runtime_path: Option<PathBuf>) -> PyResult<Self> {
+        let (path, _) = crate::sandbox::find_runtime(py, eryx::Language::JavaScript, runtime_path)?;
+        // SAFETY: an explicit runtime is trusted as `Sandbox(runtime_path=)`
+        // is; the others come from the companion package or the private
+        // setup cache.
+        #[allow(unsafe_code)]
+        unsafe {
+            eryx::Command::guest_from_precompiled_file(eryx::Language::JavaScript, path, None)
+        }
+        .map(|inner| Self { inner })
+        .map_err(eryx_error_to_py)
+    }
+
     fn __repr__(&self) -> &'static str {
         "Command(...)"
     }

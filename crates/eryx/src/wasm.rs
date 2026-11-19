@@ -5579,6 +5579,19 @@ mod run_command_tests {
         stdin: &str,
     ) -> Ran {
         let executor = Executor::from_embedded_runtime().unwrap();
+        run_command_in(&executor, "python3", storage, args, env, cwd, stdin).await
+    }
+
+    /// Run `NAME ARGS` on `executor`'s runtime, as [`run_in`] does.
+    async fn run_command_in(
+        executor: &Executor,
+        name: &str,
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
         let stdout = MemoryOutputPipe::new(1 << 20);
         let stderr = MemoryOutputPipe::new(1 << 20);
         let mut wasi = WasiCtxBuilder::new();
@@ -5591,13 +5604,13 @@ mod run_command_tests {
             eryx_vfs::DirPerms::all(),
             eryx_vfs::FilePerms::all(),
         );
-        let vfs = crate::session::executor::command_vfs_context(&executor, Some(base)).unwrap();
+        let vfs = crate::session::executor::command_vfs_context(executor, Some(base)).unwrap();
         let state = ExecutorState::for_command(wasi.build(), vfs, MemoryTracker::new(None), None);
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
         store.set_fuel(u64::MAX).unwrap();
         store.set_epoch_deadline(u64::MAX / 2);
-        let args = std::iter::once("python3")
+        let args = std::iter::once(name)
             .chain(args.iter().copied())
             .map(str::to_owned)
             .collect();
@@ -5728,6 +5741,182 @@ mod run_command_tests {
         assert_eq!(
             (ran.status, ran.stdout.as_str()),
             (4, "['s.py', 'x'] __main__ s.py\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    /// Run `node ARGS` with `stdin`, in `cwd`, as [`run_in`] does Python.
+    #[cfg(feature = "javascript")]
+    async fn node_in(
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
+        let executor = Executor::from_embedded_runtime_for(Language::JavaScript).unwrap();
+        run_command_in(&executor, "node", storage, args, env, cwd, stdin).await
+    }
+
+    #[cfg(feature = "javascript")]
+    async fn node(args: &[&str], stdin: &str) -> Ran {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        node_in(&storage, args, &[], "/tmp", stdin).await
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_evals_prints_and_reads_stdin() {
+        let ran = node(
+            &["-e", "console.log(1 + 1, process.argv.slice(1))", "a"],
+            "",
+        )
+        .await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "2 [\"a\"]\n"),
+            "{}",
+            ran.stderr
+        );
+        let ran = node(&["-p", "6 * 7"], "").await;
+        assert_eq!(ran.stdout, "42\n", "{}", ran.stderr);
+        let ran = node(&[], "console.log(2)").await;
+        assert_eq!(ran.stdout, "2\n", "{}", ran.stderr);
+        let ran = node(&["-", "x"], "console.log(process.argv.slice(1))").await;
+        assert_eq!(ran.stdout, "[\"-\",\"x\"]\n", "{}", ran.stderr);
+        let ran = node(
+            &[
+                "-e",
+                "console.log(require('fs').readFileSync(0, 'utf8').length)",
+            ],
+            &"x".repeat(100_000),
+        )
+        .await;
+        assert_eq!(ran.stdout, "100000\n", "{}", ran.stderr);
+        let ran = node(&["--version"], "").await;
+        assert!(ran.stdout.starts_with("quickjs-ng "), "{}", ran.stdout);
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_exit_status() {
+        let ran = node(&["-e", "process.exit(3); console.log('not reached')"], "").await;
+        assert_eq!((ran.status, ran.stdout.as_str()), (3, ""), "{}", ran.stderr);
+        // From a timer, past a `catch`, and with `exitCode`.
+        let ran = node(
+            &[
+                "-e",
+                "setTimeout(() => { try { process.exit(4) } catch {} console.log('x') }, 1)",
+            ],
+            "",
+        )
+        .await;
+        assert_eq!((ran.status, ran.stderr.as_str()), (4, ""));
+        let ran = node(&["-e", "process.exitCode = 5"], "").await;
+        assert_eq!(ran.status, 5, "{}", ran.stderr);
+        let ran = node(&["-e", "function f() { throw new Error('boom') }\nf()"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(ran.stderr.starts_with("Error: boom\n"), "{}", ran.stderr);
+        let ran = node(&["-e", "Promise.reject(new Error('later'))"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(
+            ran.stderr.contains("Uncaught (in promise) Error: later"),
+            "{}",
+            ran.stderr
+        );
+        // Un-awaited work and timers finish before the command does.
+        let ran = node(
+            &[
+                "-e",
+                "setTimeout(() => console.log('t'), 20); (async () => console.log('a'))()",
+            ],
+            "",
+        )
+        .await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "a\nt\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_usage_errors_exit_9() {
+        let ran = node(&["--bogus"], "").await;
+        assert_eq!(
+            (ran.status, ran.stderr.as_str()),
+            (9, "node: bad option: --bogus\n")
+        );
+        let ran = node(&["-e"], "").await;
+        assert_eq!(ran.status, 9);
+        let ran = node(&["/nope.js"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(
+            ran.stderr.contains("Cannot find module '/nope.js'"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_env_cwd_and_files() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let ran = node_in(
+            &storage,
+            &[
+                "-e",
+                "console.log(process.env.FOO, process.cwd(), 'PATH' in process.env)",
+            ],
+            &[("FOO", "bar")],
+            "/tmp",
+            "",
+        )
+        .await;
+        assert_eq!(ran.stdout, "bar /tmp false\n", "{}", ran.stderr);
+
+        // A script with its argv, a CommonJS module and an ES module beside
+        // it, relative paths against the cwd, and node:fs.
+        let setup = r##"
+            const fs = require('fs');
+            fs.mkdirSync('/tmp/lib/sub', { recursive: true });
+            fs.writeFileSync('lib/cjs.js', "exports.twice = (x) => 2 * x; exports.data = require('./sub/d.json');");
+            fs.writeFileSync('lib/sub/d.json', '{"n": 3}');
+            fs.writeFileSync('/tmp/lib/esm.mjs', "export const hi = 'hi';");
+            fs.writeFileSync('/tmp/s.js', [
+                "#!/usr/bin/env node",
+                "import { hi } from './lib/esm.mjs';",
+                "const { twice, data } = require('./lib/cjs');",
+                "console.log(hi, twice(data.n), process.argv.slice(1), __filename, require.main === module);",
+            ].join('\n'));
+        "##;
+        let ran = node_in(&storage, &["-e", setup], &[], "/tmp", "").await;
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        let ran = node_in(&storage, &["s.js", "x"], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "hi 6 [\"/tmp/s.js\",\"x\"] /tmp/s.js true\n"),
+            "{}",
+            ran.stderr
+        );
+        let check = r#"
+            const fs = require('node:fs');
+            console.log(fs.readdirSync('/tmp/lib').join(','), fs.statSync('/tmp/s.js').isFile(), fs.existsSync('/tmp/no'));
+            try { fs.readFileSync('/tmp/no') } catch (e) { console.log(e.code) }
+            fs.appendFileSync('/tmp/log', 'a'); fs.appendFileSync('/tmp/log', 'b');
+            fs.renameSync('/tmp/log', '/tmp/log2');
+            const { readFile } = await import('fs/promises');
+            console.log(await readFile('/tmp/log2', 'utf8'));
+            fs.rmSync('/tmp/lib', { recursive: true });
+            console.log(fs.existsSync('/tmp/lib'));
+        "#;
+        let ran = node_in(&storage, &["-e", check], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "cjs.js,esm.mjs,sub true false\nENOENT\nab\nfalse\n"),
             "{}",
             ran.stderr
         );

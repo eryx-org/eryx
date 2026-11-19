@@ -73,6 +73,9 @@ struct Task {
     /// order they were rejected. Whatever is left when the event loop
     /// drains fails the execute; each execute starts with none.
     unhandled: Vec<(Persistent<Value<'static>>, Persistent<Value<'static>>)>,
+    /// A `run-command` (`node ARGS`) rather than an `execute`: output goes
+    /// straight to fds 1/2, and it returns an exit status.
+    command: bool,
 }
 
 struct PendingInvoke {
@@ -112,6 +115,7 @@ impl Engine {
             crate::fetch::install(&ctx)?;
             hooks.set("timers", crate::timers::install(&ctx)?)?;
             crate::modules::install(&ctx)?;
+            crate::fs::install(&ctx)?;
             Ok::<_, rquickjs::Error>(Persistent::save(&ctx, hooks))
         });
         let hooks = hooks.unwrap_or_else(|e| panic!("failed to evaluate prelude: {e}"));
@@ -180,8 +184,17 @@ fn native_invoke<'js>(
 }
 
 /// `__eryx.write(stream, text)`: buffer output for `execute-output` and stream
-/// it to the host as it happens. 0 = stdout, 1 = stderr.
-fn native_write(stream: u32, text: String) {
+/// it to the host as it happens. 0 = stdout, 1 = stderr. A command writes
+/// to its fds instead, and ends when its reader has gone.
+fn native_write(ctx: Ctx<'_>, stream: u32, text: String) -> rquickjs::Result<()> {
+    if with_task(|task| task.command).unwrap_or(false) {
+        return crate::command::write_js(&ctx, stream + 1, &text);
+    }
+    buffer_output(stream, text);
+    Ok(())
+}
+
+fn buffer_output(stream: u32, text: String) {
     let bytes = text.into_bytes();
     wit::report_output(stream, &bytes);
     with_task(|task| {
@@ -277,6 +290,7 @@ impl Task {
             imports: Vec::new(),
             sleep: None,
             unhandled: Vec::new(),
+            command: false,
         }
     }
 
@@ -446,6 +460,101 @@ pub(crate) fn start_execute(export: ExportFunction, cx: Box<EryxCall>, code: Str
     })
 }
 
+/// Start a `run-command` export (see `src/command.rs`). Returns a Component
+/// Model callback code.
+pub(crate) fn start_command(export: ExportFunction, mut cx: Box<EryxCall>) -> u32 {
+    let (args, env, cwd) = pop_command_args(&mut cx);
+    let run = match crate::command::prepare(args, env, cwd) {
+        Ok(run) => run,
+        Err(status) => {
+            cx.stack.push(WitValue::S32(status));
+            export.call_task_return(&mut *cx);
+            return CALLBACK_EXIT;
+        }
+    };
+    let (code, _) = crate::modules::rewrite_imports(&run.code);
+    let code = code.into_owned();
+    let mut task = Task::new(export, cx);
+    task.command = true;
+    TASK.with(|slot| *slot.borrow_mut() = Some(task));
+    with_ctx(|ctx, hooks| {
+        crate::fresh::reseed(ctx).expect("failed to reseed the QuickJS context");
+        if let Err(e) = crate::command::install(ctx, &run).catch(ctx) {
+            let msg = format!("failed to set up the command: {e}");
+            return finish(hooks, Err(msg));
+        }
+        let mut options = EvalOptions::default();
+        options.strict = false;
+        options.filename = Some(run.filename.clone());
+        let evaluated = if run.print {
+            // `-p`: the completion value, printed as console.log would.
+            ctx.eval_with_options::<Value<'_>, _>(code, options)
+                .and_then(|value| {
+                    let console: Object<'_> = ctx.globals().get("console")?;
+                    console
+                        .get::<_, Function<'_>>("log")?
+                        .call::<_, ()>((value,))?;
+                    let (promise, resolve, _) = ctx.promise()?;
+                    resolve.call::<_, ()>(())?;
+                    Ok(promise)
+                })
+                .catch(ctx)
+        } else {
+            options.promise = true;
+            ctx.eval_with_options::<Promise<'_>, _>(code, options)
+                .catch(ctx)
+        };
+        match evaluated {
+            Ok(promise) => {
+                let promise = Persistent::save(ctx, promise);
+                with_task(|task| task.completion = Some(promise));
+                poll(ctx, hooks)
+            }
+            Err(e) => {
+                let msg = format_caught(ctx, hooks, e);
+                finish(hooks, Err(msg))
+            }
+        }
+    })
+}
+
+/// `run-command(args: list<string>, env: list<tuple<string, string>>, cwd:
+/// string)`'s parameters; the last is on top.
+fn pop_command_args(cx: &mut EryxCall) -> (Vec<String>, Vec<(String, String)>, String) {
+    use wit_dylib_ffi::Call;
+
+    let cwd = cx.pop_string().to_string();
+    let env = match cx.stack.pop() {
+        Some(WitValue::GenericList(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                WitValue::Tuple(pair) => match <[WitValue; 2]>::try_from(pair) {
+                    Ok([WitValue::String(k), WitValue::String(v)]) => (k, v),
+                    other => panic!("expected (string, string) env entry, got {other:?}"),
+                },
+                other => panic!("expected tuple env entry, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected list for run-command env, got {other:?}"),
+    };
+    let args = match cx.stack.pop() {
+        Some(WitValue::GenericList(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                WitValue::String(s) => s,
+                other => panic!("expected string arg, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected list for run-command args, got {other:?}"),
+    };
+    (args, env, cwd)
+}
+
+/// Run the job queue dry, unless `process.exit` stops the command first.
+fn drain(ctx: &Ctx<'_>) {
+    while crate::command::exit_requested().is_none() && ctx.execute_pending_job() {}
+}
+
 /// What a Component Model event means for the suspended `execute`.
 #[derive(Debug, PartialEq, Eq)]
 enum AsyncEvent {
@@ -595,17 +704,29 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
     loop {
         // Microtasks, then the timers due now (Node's timers phase), each
         // with the microtasks it queues. Timers their callbacks schedule wait
-        // for the next pass, so a pass always ends.
-        while ctx.execute_pending_job() {}
+        // for the next pass, so a pass always ends. `process.exit` ends a
+        // command wherever it is.
+        drain(ctx);
+        if crate::command::exit_requested().is_some() {
+            return finish(hooks, Ok(()));
+        }
         if let Err(e) = timers_call::<()>(hooks, "startPass", ()) {
             eprintln!("eryx-js: failed to start a timers pass: {e}");
         }
         loop {
             match timers_call::<bool>(hooks, "runDue", ()).catch(ctx) {
-                Ok(true) => while ctx.execute_pending_job() {},
+                Ok(true) => {
+                    drain(ctx);
+                    if crate::command::exit_requested().is_some() {
+                        return finish(hooks, Ok(()));
+                    }
+                }
                 Ok(false) => break,
                 // An exception in a timer callback fails the execute, as an
                 // uncaught one ends a Node process.
+                Err(_) if crate::command::exit_requested().is_some() => {
+                    return finish(hooks, Ok(()));
+                }
                 Err(e) => {
                     let msg = format_caught(ctx, hooks, e);
                     return finish(hooks, Err(msg));
@@ -637,6 +758,9 @@ fn poll<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
                 return finish(hooks, outcome);
             }
             PromiseState::Resolved => {}
+            PromiseState::Rejected if crate::command::exit_requested().is_some() => {
+                return finish(hooks, Ok(()));
+            }
             PromiseState::Rejected => {
                 // `result` rethrows the rejection reason so `catch` can pick it up.
                 let _ = promise.result::<Value<'_>>();
@@ -700,11 +824,19 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
     // An uncaught error ends stderr, as Node prints it and as Python's
     // traceback does; the gRPC server leaves `error` empty for a script
     // failure, so stderr is all its callers see. A cancelled execute isn't
-    // the script's failure.
+    // the script's failure, and nor is what `process.exit` threw.
+    let exited = crate::command::exit_requested();
     if let Err(msg) = &outcome
         && msg != CANCELLED
+        && exited.is_none()
     {
-        native_write(1, format!("{msg}\n"));
+        let msg = format!("{msg}\n");
+        if with_task(|task| task.command).unwrap_or(false) {
+            // The command's ending anyway: a closed stderr changes nothing.
+            let _ = crate::command::write(2, &msg);
+        } else {
+            buffer_output(1, msg);
+        }
     }
     let task = TASK
         .with(|task| task.borrow_mut().take())
@@ -718,11 +850,22 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         stderr,
         imports,
         sleep,
+        command,
         ..
     } = task;
     let result_variable = RESULT_VARIABLE.with(|name| name.borrow().clone());
 
     match outcome {
+        // run-command's exit status: `process.exit`'s, or 1 for an uncaught
+        // error, or `process.exitCode`.
+        _ if command => {
+            let status = match (exited, &outcome) {
+                (Some(status), _) => status,
+                (None, Err(_)) => 1,
+                (None, Ok(())) => exit_code(hooks),
+            };
+            cx.stack.push(WitValue::S32(status));
+        }
         Ok(()) => {
             if let Err(e) = commit_imports(hooks, &imports) {
                 eprintln!("eryx-js: failed to record the script's imports: {e}");
@@ -786,6 +929,19 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
 
     export.call_task_return(&mut *cx);
     CALLBACK_EXIT
+}
+
+/// `process.exitCode` at the end of a command, as Node exits with it.
+fn exit_code(hooks: &Object<'_>) -> i32 {
+    let code = hooks
+        .ctx()
+        .globals()
+        .get::<_, Object<'_>>("process")
+        .and_then(|process| process.get::<_, Option<f64>>("exitCode"));
+    match code {
+        Ok(Some(code)) if code.is_finite() => (code as i32) & 0xff,
+        _ => 0,
+    }
 }
 
 /// Record imports that ran, for [`snapshot_state`].

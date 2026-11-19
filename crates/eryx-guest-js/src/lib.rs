@@ -24,7 +24,10 @@
 //!   execute's event loop (`js::poll`) on the host's `sleep` import. An
 //!   execute waits for referenced timers, as Node does.
 //! - `import`/`require` of an environment's modules and of the Node built-ins
-//!   in `src/node/` (`src/modules.rs`).
+//!   in `src/node/` (`src/modules.rs`), including a subset of `node:fs` on
+//!   the sandbox's files (`src/fs.rs`).
+//! - `run-command`: `node ARGS...` as a shell command, on the real fds
+//!   (`src/command.rs`).
 //!
 //! - `snapshot-state` serializes the session's top-level variables (global
 //!   properties and `let`/`const` bindings) with QuickJS's `JS_WriteObject`;
@@ -46,8 +49,10 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+mod command;
 mod fetch;
 mod fresh;
+mod fs;
 mod js;
 mod modules;
 mod timers;
@@ -132,11 +137,7 @@ impl Interpreter for JsInterpreter {
             EXPORT_CLEAR_STATE => js::clear_state(),
             EXPORT_SET_RESULT_VARIABLE => js::set_result_variable(cx.pop_string().to_string()),
             // run-command(args, env, cwd) -> s32
-            EXPORT_RUN_COMMAND => {
-                cx.stack.clear();
-                eprintln!("node: running JavaScript as a command is not supported yet");
-                cx.stack.push(Value::S32(127));
-            }
+            EXPORT_RUN_COMMAND => return js::start_command(func, cx),
             other => panic!("unknown export function index: {other}"),
         }
         func.call_task_return(&mut *cx);

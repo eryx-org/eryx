@@ -562,7 +562,7 @@ pub(crate) fn build_for(
 /// Find the precompiled runtime for `language`: `explicit`, then
 /// `ERYX_RUNTIME_CWASM_<LANGUAGE>`, then the `pyeryx_runtime_<language>`
 /// companion package, then the cache `eryx-precompile setup` writes.
-fn find_runtime(
+pub(crate) fn find_runtime(
     py: Python<'_>,
     language: eryx::Language,
     explicit: Option<PathBuf>,

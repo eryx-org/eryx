@@ -32,8 +32,8 @@ script path, `-` or no argument (the program comes from stdin), `-V`, and the
 no-op flags `-u`, `-B`, `-I`, `-E`, `-s` and `-q`; anything else exits 2. A
 script's top-level `asyncio.run(main())` runs on the guest's event loop, as in
 `execute`. The shell runtime implements it as `sh`/`bash` (`-c`, a script,
-stdin, waiting for its background jobs). The JavaScript runtime returns 127
-for now.
+stdin, waiting for its background jobs), and the JavaScript runtime as
+`node` (below).
 
 ## Python as a shell command
 
@@ -71,14 +71,47 @@ of its own. The shell's own `sh`/`bash` still run in its guest.
 - A child's `sh` counts towards the nesting depth of 4, so a chain that
   just fit before can be one level too deep if it goes through `sh`.
 
-Guest commands (`python3` and `sh`) now also get the execution's deadline,
-so `eryx:process/execution`'s `time-left` returns the real time left in
-them instead of none.
+Guest commands (`python3`, `node` and `sh`) now also get the execution's
+deadline, so `eryx:process/execution`'s `time-left` returns the real time
+left in them instead of none.
 
 Jobs a nested in-guest shell leaves running (`sh -c 'slow &'`) are now
 waited for at the end of the execution, and killed at the timeout with the
 usual stderr line, like the script's own jobs. Before, the execution's end
 didn't wait for them.
+
+## JavaScript as a shell command
+
+New, and opt-in like Python: nothing registers it by default.
+
+- **Rust:** `Command::guest(Language::JavaScript)` (with `embedded`,
+  `javascript` and `shell` or `unstable-vfs`), or
+  `Command::guest_from_precompiled_file(Language::JavaScript, path, None)`.
+  Register it with `with_commands(["node", "js"], ...)`.
+- **pyeryx:** `eryx.Command.node()` (optionally `runtime_path=`), passed as
+  `commands={"node": js, "js": js}`. It uses the JavaScript runtime
+  `Sandbox(language="javascript")` would (`pyeryx[javascript]`, the setup
+  cache or `ERYX_RUNTIME_CWASM_JAVASCRIPT`).
+- **eryx-server:** `--shell-node` (`ERYX_SHELL_NODE`) registers `node` and
+  `js` from the embedded JavaScript runtime.
+
+It takes `-e`/`--eval`, `-p`/`--print`, a script (and `#!/usr/bin/env node`
+scripts), `-` or no argument (stdin), `-v` and `-h`; other options exit 9,
+as in Node. `-v` prints `quickjs-ng <version>`, and `process.versions` has no
+`node`: this is QuickJS, not Node. Scripts get `process.argv`, `env`, `cwd()`,
+`exit()`, `exitCode` and `stdout`/`stderr.write`, CommonJS `require` of the
+shell's files, ES `import` of relative files from a script, and `node:fs`.
+Limits, files and the missing callbacks and network are as for Python.
+
+## JavaScript: `node:fs` works
+
+`node:fs` and `node:fs/promises` used to throw "node:fs isn't available in
+eryx yet" on import. They're now a subset of Node's on the sandbox's own
+files, in `execute` too: whole-file reads and writes, directories, `stat`,
+rename, copy and remove, sync, with callbacks and as promises. No file
+descriptors (`readFileSync(0)` reads stdin), streams or watching. Code that
+caught the import error to fall back to something else now gets the module
+instead.
 
 ## eryx-server: `--no-shell-coreutils` is now `--no-shell-embedded-commands`
 

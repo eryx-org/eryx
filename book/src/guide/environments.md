@@ -148,9 +148,11 @@ when it was loaded, as pools and factories do for every sandbox they make.
   `randomInt`, `getRandomValues`) and `node:url` (`URL`, `URLSearchParams`,
   `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`, `domainToASCII`,
   `domainToUnicode`, and a subset of the legacy `parse`, `format` and
-  `resolve`) work, with or without `node:`, and with
-  `require` too. They don't need an environment. The rest (`fs`, `net`,
-  `child_process`, `http`, `os`, ...) throw "node:fs isn't available in eryx
+  `resolve`) and `node:fs` (a subset: whole-file reads and writes,
+  directories, `stat`, rename, copy and remove, sync, with callbacks and as
+  `fs/promises`, on the sandbox's files) work, with or without `node:`, and
+  with `require` too. They don't need an environment. The rest (`net`,
+  `child_process`, `http`, `os`, ...) throw "node:net isn't available in eryx
   yet" on import, so a package that imports one statically fails when it's
   imported. Packages written for browsers or Workers generally avoid them.
 - **Web globals:** `crypto.getRandomValues()` and `crypto.randomUUID()`

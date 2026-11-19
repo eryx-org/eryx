@@ -90,7 +90,7 @@ containers:
 
 ### Shell requests
 
-A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-embedded-commands` is set, any `--shell-command`s, and `python`/`python3` with `--shell-python` (from the server's Python runtime: `--runtime-cwasm` and `--stdlib`, or the embedded one).
+A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-embedded-commands` is set, any `--shell-command`s, `python`/`python3` with `--shell-python` (from the server's Python runtime: `--runtime-cwasm` and `--stdlib`, or the embedded one), and `node`/`js` with `--shell-node` (the embedded JavaScript runtime).
 - **Which commands:** `allowed_commands` narrows a request to some of them.
 - **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.

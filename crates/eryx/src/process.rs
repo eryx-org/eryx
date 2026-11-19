@@ -871,24 +871,28 @@ impl Command {
 
     /// Run `language`'s embedded runtime as a command, as the shell runs
     /// `python3 -c CODE`, through the runtime's `run-command` export: for
-    /// Python, register it as `python` and `python3` with
+    /// Python, register it as `python` and `python3`, and for JavaScript as
+    /// `node` and `js`, with
     /// [`SandboxBuilder::with_commands`](crate::SandboxBuilder::with_commands).
-    /// Python and the shell can run as commands so far. The embedded shell
-    /// already registers itself as `sh` and `bash`, for commands that
-    /// [spawn](Self::allow_spawn) them (git's aliases and hooks), unless
+    /// Python, JavaScript and the shell can run as commands so far. The
+    /// embedded shell already registers itself as `sh` and `bash`, for
+    /// commands that [spawn](Self::allow_spawn) them (git's aliases and
+    /// hooks), unless
     /// [`without_embedded_commands`](crate::SandboxBuilder::without_embedded_commands);
     /// the shell's own `sh` runs in its guest instead.
     ///
     /// A guest child is a fresh instance of the runtime (for Python, the
-    /// pre-initialized interpreter with the embedded standard library). It
+    /// pre-initialized interpreter with the embedded standard library; for
+    /// JavaScript, QuickJS with `node:fs` on the shell's files). It
     /// sees the shell's filesystem, environment, working directory and
     /// stdio, burns the execution's fuel and counts against the children's
     /// memory like any child, and gets no callbacks and no network
     /// ([`with_network`](Self::with_network) doesn't apply to it, and a
-    /// [`Credential`](crate::net::Credential) can't be for it). Python runs
-    /// no commands. The shell runs those of the command that spawned it, as
-    /// a spawning command's child would ([`allow_spawn`](Self::allow_spawn)
-    /// is implied): one level deeper, within its spawner's network.
+    /// [`Credential`](crate::net::Credential) can't be for it). Python and
+    /// JavaScript run no commands. The shell runs those of the command that
+    /// spawned it, as a spawning command's child would
+    /// ([`allow_spawn`](Self::allow_spawn) is implied): one level deeper,
+    /// within its spawner's network.
     ///
     /// # Errors
     ///
@@ -938,9 +942,12 @@ impl Command {
         path: impl AsRef<Path>,
         stdlib: Option<std::path::PathBuf>,
     ) -> Result<Self, Error> {
-        if !matches!(language, crate::Language::Python | crate::Language::Shell) {
+        if !matches!(
+            language,
+            crate::Language::Python | crate::Language::JavaScript | crate::Language::Shell
+        ) {
             return Err(ErrorKind::Initialization(format!(
-                "{language} can't run as a command yet: only python and the shell can"
+                "{language} can't run as a command yet: only python, javascript and the shell can"
             ))
             .into());
         }

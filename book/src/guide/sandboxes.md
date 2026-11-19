@@ -251,7 +251,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   [Commands from a registry](./grpc-server.md#commands-from-a-registry)).
   `--no-shell-embedded-commands` leaves the embedded coreutils (and `sh`/`bash`
   for children) out,
-  `--shell-python` adds `python`/`python3` (see **Python as a command**), and
+  `--shell-python` adds `python`/`python3` (see **Python as a command**),
+  `--shell-node` adds `node`/`js` (see **JavaScript as a command**), and
   `--shell-command-tunnels NAME` (repeatable) lets a command open tunnels
   (see **Network**). An empty `ERYX_SHELL_COMMANDS` means no extra commands.
 - **Python as a command:** `Command::guest(Language::Python)` (Rust, with
@@ -293,6 +294,41 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   memory pool. The embedded shell registers it unless
   `without_embedded_commands()`; an execution's allowed commands must name
   `sh` (or `bash`) for a child to run it, as for the shell's own nested `sh`.
+- **JavaScript as a command:** `Command::guest(Language::JavaScript)` (Rust,
+  with `embedded` and `javascript`), `eryx.Command.node()` (pyeryx, from the
+  JavaScript runtime `Sandbox(language="javascript")` would use) and
+  `--shell-node` (eryx-server) run QuickJS as a command. It isn't registered
+  by default; register it as `node` and `js`:
+
+  ```rust,ignore
+  let sandbox = Sandbox::embedded()
+      .shell()
+      .with_commands(["node", "js"], Command::guest(Language::JavaScript)?)
+      .build()?;
+  sandbox.execute("seq 3 | node -e 'console.log(require(\"fs\").readFileSync(0, \"utf8\"))'").await?;
+  ```
+
+  It takes `-e CODE`, `-p CODE` (prints the value), a script (also through
+  a `#!/usr/bin/env node` line), `-` or no argument (the program from
+  stdin), `-v` (which prints the QuickJS version: this isn't Node) and
+  `-h`; any other option exits 9, as in Node. The program runs as an
+  `execute`'s code does (leading `import`s and top-level `await` work), with
+  `process.argv` (`[execPath, script, ...args]`), `process.env`,
+  `process.cwd()`, `process.exit(n)`, `process.exitCode` and
+  `process.stdout.write`, and the main module's `require`, `module`,
+  `exports`, `__filename` and `__dirname`. `require("./x")` loads a
+  CommonJS module (or `.json`) from the shell's files, and a script's
+  `import ... from "./x.mjs"` an ES module. `node:fs` reads and writes the
+  shell's files: whole-file `readFileSync`/`writeFileSync`/`appendFileSync`
+  (`readFileSync(0)` is stdin), `existsSync`, `statSync`, `readdirSync`,
+  `mkdirSync`, `rmSync`, `renameSync`, `copyFileSync` and friends, each also
+  as a callback and in `fs.promises`. There's no `process.stdin` stream,
+  `fs.createReadStream` or file descriptor API. The command waits for its
+  timers and un-awaited promises, and an uncaught error or unhandled
+  rejection prints to stderr and exits 1. `process.exit` throws to unwind
+  the script, so a `catch` around it sees that, but the command still exits
+  with its status when that code returns. Limits, files and the missing
+  callbacks and network are as for Python.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
   download on first use; `coreutils: false` leaves it out), and `commands`
   adds others by the URL of their `jco transpile --instantiation async`

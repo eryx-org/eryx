@@ -242,3 +242,12 @@ def test_python_runs_as_a_command():
         "echo 'print(6 * 7)' | python3; python -c 'import sys; sys.exit(3)'; echo $?"
     )
     assert result.stdout == b"42\n3\n"
+
+
+def test_node_runs_as_a_command():
+    js = eryx.Command.node(runtime_path=built("runtime-javascript.cwasm"))
+    sandbox = eryx.Sandbox(language="shell", commands={"node": js, "js": js})
+    result = sandbox.execute(
+        "echo 'console.log(6 * 7)' | node; js -e 'process.exit(3)'; echo $?"
+    )
+    assert result.stdout == b"42\n3\n"
