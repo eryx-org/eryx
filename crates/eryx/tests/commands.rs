@@ -516,8 +516,13 @@ async fn a_fast_child_waits_for_slow_stages() {
         .await
         .unwrap();
     assert_eq!(out.stdout_utf8().unwrap(), "y\ny");
+    // The peak counts the 11 live children too (about 3 MiB each, ~37 MiB in
+    // all); without the wait, the shell alone fills its 128 MiB.
     let peak = out.stats.peak_memory_bytes.unwrap();
-    assert!(peak < 16 << 20, "the shell's memory peaked at {peak} bytes");
+    assert!(
+        peak < 64 << 20,
+        "the execution's memory peaked at {peak} bytes"
+    );
 }
 
 /// A child writing more than a pipe's high-water mark into a stage that

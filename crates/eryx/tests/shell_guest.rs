@@ -1038,6 +1038,24 @@ async fn python3_burns_the_executions_fuel() {
     );
 }
 
+/// An execution's peak memory counts its children's, held at the same time
+/// as the shell's own.
+#[tokio::test]
+async fn peak_memory_includes_child_processes() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let alone = sandbox.execute("true").await.unwrap();
+    let alone = alone.stats.peak_memory_bytes.unwrap();
+    let out = sandbox
+        .execute("python3 -c 'b = bytearray(100 * 1024 * 1024)'")
+        .await
+        .unwrap();
+    let peak = out.stats.peak_memory_bytes.unwrap();
+    assert!(peak > alone + 100 * 1024 * 1024, "{peak} vs {alone} alone");
+}
+
 #[tokio::test]
 async fn python3_memory_counts_against_the_child_pool() {
     let Some(builder) = python_shell() else {

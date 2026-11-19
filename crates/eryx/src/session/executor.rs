@@ -2530,6 +2530,7 @@ impl ExecutorState {
     ) -> Self {
         self.commands = commands;
         self.child_budget = crate::process::ChildBudget::new(max_child_host_bytes);
+        self.memory_tracker.set_children(self.child_budget.memory());
         self
     }
 

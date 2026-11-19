@@ -3834,9 +3834,13 @@ pub struct ExecuteStats {
     /// Number of callback invocations.
     pub callback_invocations: u32,
     /// Peak memory usage in bytes (if available): the guest instance's
-    /// largest linear memory. In a session, which keeps its instance, that's
-    /// the peak so far, not just this execution's growth: linear memory
-    /// never shrinks, so it never falls between executions.
+    /// largest linear memory, plus what its child processes (shell commands,
+    /// nested shells, `python3`) held at the same time. Children have a pool
+    /// of their own, so this can exceed
+    /// [`ResourceLimits::max_memory_bytes`](crate::ResourceLimits::max_memory_bytes),
+    /// which limits the guest's. In a session, which keeps its instance,
+    /// that's the peak so far, not just this execution's growth: linear
+    /// memory never shrinks, so it never falls between executions.
     pub peak_memory_bytes: Option<u64>,
     /// Fuel consumed during execution (if fuel tracking is enabled).
     ///

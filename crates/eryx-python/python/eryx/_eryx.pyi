@@ -294,7 +294,9 @@ class ExecuteResult:
     def peak_memory_bytes(self) -> Optional[int]:
         """Peak memory usage in bytes (if available).
 
-        The guest instance's largest linear memory. In a session that's the
+        The guest instance's largest linear memory, plus what its child
+        processes held at the same time (which can take it past
+        ``max_memory_bytes``, the guest's own limit). In a session that's the
         peak so far, not just this execution's growth, since memory never
         shrinks between executions.
         """
