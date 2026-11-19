@@ -62,11 +62,10 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   holding the mounts, a writable `/tmp` (under `max_vfs_bytes`, with or
   without `unstable-vfs`), `/dev/null`, `/dev/zero` and `/dev/urandom`, and
   `HOME`, `PATH`, `TERM`, `LANG`, `LC_ALL`, `USER`, `PWD` and `TMPDIR`. The
-  `shell` feature now pulls in eryx-vfs for it; the VFS API stays behind
+  `shell` feature pulls in eryx-vfs for it; the VFS API stays behind
   `unstable-vfs`. See the Sandboxes guide.
 - A shell script that exits non-zero fails with
-  `ErrorKind::ScriptFailed { exit_code: Some(status), .. }`. External commands
-  aren't available to the shell yet and exit 127.
+  `ErrorKind::ScriptFailed { exit_code: Some(status), .. }`.
 
 ## gRPC server (`eryx-server`)
 
@@ -90,14 +89,13 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
   them, the server has no JavaScript or shell code or runtimes, and a request
   for one gets `INVALID_ARGUMENT` naming the missing feature.
 - The Dockerfile takes `--build-arg ERYX_LANGUAGES=python,javascript,shell`
-  (the default). `ERYX_LANGUAGES=python` builds a Python-only image the size
-  of the previous release's: 170,232,862 bytes against 170,212,172 for
-  `sd2k/eryx-server:0.15.0`, of which this change adds 2,832. The
-  all-languages image is 193,330,478 bytes (the JavaScript and shell
-  runtimes add about 23 MB).
+  (the default). `ERYX_LANGUAGES=python` builds a Python-only image about
+  the size of the previous release's. The JavaScript and shell runtimes make
+  the all-languages image larger: on Docker Hub, `main` is about 85 MB
+  compressed against 68 MB for `main-python` (65 MB for `0.15.2`).
 - **The published image `sd2k/eryx-server` now comes in two variants, and
   the plain tags are the bigger one.** `latest`, `X.Y.Z`, `X.Y`, `main` and
-  `<sha>` are the all-languages image (about 23 MB larger than before).
+  `<sha>` are the all-languages image (about 17 MB larger compressed).
   The Python-only image, the same size as the previous release's, has the
   same tags with a `-python` suffix: `X.Y.Z-python`, `X.Y-python`,
   `latest-python`, `main-python`, `<sha>-python`. Deployments that pull
@@ -112,8 +110,9 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 - The shell runs the embedded uutils coreutils. `--shell-command
   NAME[,NAME...]=PATH` (repeatable; `ERYX_SHELL_COMMANDS`, `;`-separated)
   registers more commands, from a `.wasm` or a `.cwasm` precompiled by
-  `eryx-precompile compile`, and `--no-shell-coreutils` drops coreutils. A bad
-  path fails startup.
+  `eryx-precompile compile`, and `--no-shell-embedded-commands`
+  (`ERYX_NO_SHELL_EMBEDDED_COMMANDS`) drops the embedded commands. A bad path
+  fails startup.
 
 ## JavaScript (`@eryx-org/eryx`)
 
@@ -158,9 +157,9 @@ eryx now builds, precompiles and embeds a runtime per guest language: Python
 - `runtime_path=` also works for Python, to run a custom precompiled runtime.
 - Shell sandboxes and sessions take `commands={"name": eryx.Command, ...}`
   (`Command.from_file`, `from_bytes`, `from_precompiled_file`); `commands=`
-  with another language raises `ValueError`. `pyeryx-runtime-shell` now ships
-  uutils coreutils (`coreutils.cwasm`, about 5 MB more per wheel), registered
-  by default; `commands` replace tools of the same name.
+  with another language raises `ValueError`. `pyeryx-runtime-shell` ships
+  uutils coreutils (`coreutils.cwasm`), registered by default; `commands`
+  replace tools of the same name.
 - A failed shell script's `PythonExceptionError` has `exit_code`; it is
   `None` for Python and JavaScript.
 
