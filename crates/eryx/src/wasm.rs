@@ -3597,9 +3597,7 @@ impl Executor {
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(None)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
     }
 
     /// Pre-compile a WASM component file to native code.
@@ -3649,9 +3647,7 @@ impl Executor {
     ) -> std::result::Result<Vec<u8>, Error> {
         Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(target)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
     }
 
     /// Pre-compile a WASM component file to native code for a specific target.
@@ -3704,9 +3700,20 @@ impl Executor {
         cpu_features: CpuFeatureLevel,
     ) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine_with_options(target, cpu_features)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
+    }
+
+    /// Compile `wasm_bytes` on `engine`: what every `precompile` function
+    /// does. A command also gets its instance-metadata stamp here, so no
+    /// path produces a precompiled command without it.
+    fn precompile_on(engine: &Engine, wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        let mut precompiled = engine.precompile_component(wasm_bytes).map_err(|e| {
+            Error::from(ErrorKind::WasmEngine(format!(
+                "Failed to precompile component: {e}"
+            )))
+        })?;
+        crate::process::stamp_if_command(&mut precompiled, wasm_bytes);
+        Ok(precompiled)
     }
 
     /// Stamp `precompiled` (output of the `precompile` functions) with the

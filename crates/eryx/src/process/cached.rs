@@ -157,8 +157,7 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     // A WASI preview 1 module compiles as the command component it's adapted
     // into, or its .cwasm wouldn't load as a command.
     let component = Command::to_component(wasm)?;
-    let mut precompiled = crate::Executor::precompile(&component)?;
-    Command::stamp_precompiled(&mut precompiled, &component);
+    let precompiled = crate::Executor::precompile(&component)?;
     // Through a temporary file and a rename, so a concurrent load of the same
     // command only ever sees a complete file.
     let written = tempfile::NamedTempFile::new_in(&dir).and_then(|mut file| {

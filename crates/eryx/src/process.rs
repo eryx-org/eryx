@@ -806,17 +806,15 @@ impl Command {
         Ok(info)
     }
 
-    /// Stamp `precompiled`, the output of
-    /// [`Executor::precompile`](crate::Executor::precompile) (or its
-    /// variants) for `wasm`, with what its instances need of the host's
-    /// memory, so a sandbox can charge each running child for it.
-    /// `eryx-precompile compile` does this for commands.
-    ///
-    /// A precompiled command without the stamp is charged 4 MiB per child,
-    /// usually enough (gh, the largest measured, needs 1.3 MB), but it fits
-    /// fewer children in their memory pool.
-    pub fn stamp_precompiled(precompiled: &mut Vec<u8>, wasm: &[u8]) {
-        vmctx::stamp(precompiled, vmctx::estimate(wasm));
+    /// Whether `precompiled` (or its last bytes) carries the stamp of what
+    /// its instances need of the host's memory. Every command precompiled
+    /// by [`Executor::precompile`](crate::Executor::precompile) (or its
+    /// variants) does; one without it is charged 4 MiB per running child,
+    /// which fits fewer children in their memory pool. Release builds check
+    /// their commands with this.
+    #[must_use]
+    pub fn is_stamped(precompiled: &[u8]) -> bool {
+        vmctx::stamped(precompiled).is_some()
     }
 
     /// Load a command precompiled by
@@ -954,8 +952,12 @@ impl Command {
             tunnels: false,
             // The shell runs commands; it's what it's for.
             spawns: language == crate::Language::Shell,
-            vmctx: usize::try_from(precompiled_vmctx(&file_tail(path).unwrap_or_default()))
-                .unwrap_or(usize::MAX),
+            // Not `precompiled_vmctx`: a runtime is rarely stamped, so it'd
+            // only warn.
+            vmctx: usize::try_from(
+                vmctx::stamped(&file_tail(path).unwrap_or_default()).unwrap_or(vmctx::UNSTAMPED),
+            )
+            .unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
         })
@@ -1058,11 +1060,29 @@ impl Command {
     }
 }
 
+/// Stamp `precompiled`, wasmtime's output for `wasm`, with what its
+/// instances need of the host's memory, if `wasm` is a command (it exports
+/// `wasi:cli/run`), so a sandbox can charge each running child for it.
+/// Every [`Executor::precompile`](crate::Executor::precompile) variant
+/// calls this; runtimes, which aren't commands, are left alone.
+pub(crate) fn stamp_if_command(precompiled: &mut Vec<u8>, wasm: &[u8]) {
+    if imports::inspect(wasm).is_ok_and(|info| info.wasi.is_some()) {
+        vmctx::stamp(precompiled, vmctx::estimate(wasm));
+    }
+}
+
 /// What a precompiled command's instances need of the host's memory, as
-/// [`Command::stamp_precompiled`] recorded it.
+/// [`stamp_if_command`] recorded it.
 #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
 fn precompiled_vmctx(precompiled: &[u8]) -> u64 {
-    vmctx::stamped(precompiled).unwrap_or(vmctx::UNSTAMPED)
+    vmctx::stamped(precompiled).unwrap_or_else(|| {
+        tracing::warn!(
+            "precompiled command has no instance-metadata stamp (not built by \
+             Executor::precompile?): each child is charged {} MiB of the child memory pool",
+            vmctx::UNSTAMPED >> 20
+        );
+        vmctx::UNSTAMPED
+    })
 }
 
 /// The last bytes of `path`, where a stamp would be.
@@ -3224,11 +3244,15 @@ pub(crate) mod tests {
     #[allow(unsafe_code)]
     fn precompiled_commands_carry_their_estimate() {
         let wasm = test_cmd_wasm();
-        let mut precompiled = crate::Executor::precompile(&wasm).unwrap();
-        // SAFETY: built just above.
-        let plain = unsafe { Command::from_precompiled(&precompiled) }.unwrap();
+        let precompiled = crate::Executor::precompile(&wasm).unwrap();
+        assert!(Command::is_stamped(&precompiled));
+        // Without the stamp, it's charged the conservative figure, and the
+        // check rejects it.
+        let unstamped = &precompiled[..precompiled.len() - vmctx::STAMP_LEN];
+        assert!(!Command::is_stamped(unstamped));
+        // SAFETY: built just above, less its trailer.
+        let plain = unsafe { Command::from_precompiled(unstamped) }.unwrap();
         assert_eq!(plain.vmctx as u64, vmctx::UNSTAMPED);
-        Command::stamp_precompiled(&mut precompiled, &wasm);
         // SAFETY: as above, with a trailer wasmtime ignores.
         let stamped = unsafe { Command::from_precompiled(&precompiled) }.unwrap();
         assert_eq!(stamped.vmctx as u64, vmctx::estimate(&wasm));
