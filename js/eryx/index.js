@@ -167,7 +167,8 @@ async function instantiateInWorker(language, host, net, commands) {
 
   await started;
   return {
-    execute: (code) => call("execute", code),
+    // The deadline lets the shell stop its background jobs in time.
+    execute: (code, deadline) => call("execute", code, deadline),
     snapshotState: () => call("snapshotState"),
     restoreState: (data) => call("restoreState", data),
     clearState: () => call("clearState"),
