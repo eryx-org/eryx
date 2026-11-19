@@ -117,6 +117,31 @@ async fn exit_status_stderr_and_env_reach_the_shell() {
     );
 }
 
+/// A child's exit status reaches `$?` exactly, above 1 too, from WASI 0.2
+/// and 0.3 children. A preview 1 child's becomes 1: wasmtime's adapter
+/// passes on only success or failure.
+#[tokio::test]
+async fn exit_statuses_above_one_reach_the_shell() {
+    let sandbox = shell()
+        .with_command("tc", test_cmd())
+        .with_command("tc3", test_cmd_p3())
+        .with_command("tc1", test_cmd_p1())
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "for c in tc tc3 tc1; do \
+                 for n in 3 42 126 255; do $c exit $n 2>/dev/null; printf '%s ' $?; done; echo; \
+             done",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "3 42 126 255 \n3 42 126 255 \n1 1 1 1 \n"
+    );
+}
+
 #[tokio::test]
 async fn unregistered_commands_exit_127() {
     let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
