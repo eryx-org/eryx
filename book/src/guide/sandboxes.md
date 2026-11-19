@@ -110,6 +110,28 @@ removed (`-u`), or as the only ones (`-i`). The command is looked up like any
 other (builtins, commands, `sh`/`bash`, scripts) except functions. A command
 that isn't there exits 127, and any other option exits 125.
 
+Background jobs work as in bash: `cmd &` runs `cmd` alongside the script, and
+`$!` is its ID. `wait` waits for every job, `wait ID|%N...` for those jobs
+(returning the last one's status), and `wait -n` for the first to finish (127
+if there are none). `jobs` (with `-l` or `-p`) lists them. `kill [-SIGNAL]
+ID|%N...` stops a job, its builtins and its child commands. WASI has no signals,
+so every signal ends the job, which then exits with 128 plus the signal's number
+(143 for the default `TERM`). `kill -0` checks that a job is still running.
+Job IDs are the shell's own; no process has one. A script ends with an
+implicit `wait`: jobs still running then finish within the same execution,
+their output is its output, and its status is still the script's own. If the
+execution would time out while only jobs are left (the script itself has
+finished), the jobs are killed just before the deadline, stderr gets one line
+saying how many (`eryx: killed 2 background jobs still running when the
+execution timed out`), and the execution returns the script's result instead
+of a timeout. A script that is itself still running at the timeout times out
+as usual. A job that loops on builtins alone (`while :; do :; done &`, with no
+command, pipe or `sleep` in it) never lets the shell stop it in time, so it
+ends in a timeout too. In a session, jobs never outlive the execution that
+started them. Jobs count against the execution's limits like any other
+command. `fg`, `bg`, stopped jobs, `trap` on signals, and `%name` job specs
+aren't supported.
+
 ### Timers in JavaScript
 
 JavaScript has `setTimeout`, `setInterval`, `setImmediate` and their `clear*`

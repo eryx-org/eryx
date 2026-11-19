@@ -1751,6 +1751,7 @@ impl SessionExecutor {
         } else {
             crate::wasm::arm_epoch_deadline(&mut store, execution_timeout);
         }
+        store.data_mut().deadline = execution_timeout.map(|t| std::time::Instant::now() + t);
 
         // Execute the code.
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
@@ -1791,6 +1792,7 @@ impl SessionExecutor {
         // Disarm the deadline so it can't fire during later calls into the
         // instance (snapshot/restore/clear) made after the timeout window.
         crate::wasm::arm_epoch_deadline(&mut store, None);
+        store.data_mut().deadline = None;
 
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
@@ -2493,6 +2495,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: crate::wasm::TraceClock::default(),
+            deadline: None,
         }
     }
 
@@ -2524,6 +2527,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: crate::wasm::TraceClock::default(),
+            deadline: None,
         }
     }
 

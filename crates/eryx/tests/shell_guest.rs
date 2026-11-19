@@ -1316,3 +1316,50 @@ env -S 'a b'; echo "bad=$?"
     );
     assert!(stderr.contains("env: invalid option"), "{stderr}");
 }
+
+/// A background job made only of builtins (no child processes) runs, and
+/// `kill` stops one that would loop forever, with its pipeline stages.
+#[tokio::test]
+async fn background_builtin_pipelines_run_and_can_be_killed() {
+    let Some(builder) = shell_sandbox() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let out = sandbox
+        .execute(
+            "{ i=0; while [ $i -lt 200 ]; do echo $i; i=$((i + 1)); done | { n=0; while read -r _; do n=$((n + 1)); done; echo \"counted $n\"; }; } &\n\
+             wait $!; echo \"status: $?\"\n\
+             { while :; do echo y; done | while read -r _; do :; done; } &\n\
+             kill %1; wait %1; echo \"killed: $?\"",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "counted 200\nstatus: 0\nkilled: 143\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+/// A session's next execution starts with no jobs: the last one waited for
+/// its own.
+#[tokio::test]
+async fn session_jobs_end_with_their_execution() {
+    let Some(executor) = shell_executor() else {
+        return;
+    };
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    let out = session
+        .execute("(sleep 0.1; echo job) & echo started")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"started\njob\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let out = session
+        .execute("jobs; wait; echo \"$?\"; wait %1; echo \"$?\"")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(out.stdout, b"0\n127\n");
+}

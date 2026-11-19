@@ -417,7 +417,7 @@ async fn a_spinning_child_stops_at_the_parents_timeout() {
 /// children each holding 1 MiB running, a fourth doesn't fit a 3.5 MiB
 /// budget, and once they've finished it does. Background children start
 /// asynchronously, so they're given a second (they take milliseconds), and
-/// their end is polled for (this shell has no `wait`).
+/// their end is polled for.
 #[cfg(feature = "coreutils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn running_children_keep_their_arguments_charged() {
@@ -645,8 +645,12 @@ async fn running_children_count_as_live() {
     let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
     // Each foreground `tc` yields, so every background job's child is waited
     // on (and was, before, no longer counted) before the next one spawns.
+    // Killing them at the end saves the implicit `wait` for them.
     let out = sandbox
-        .execute("for i in {1..70}; do tc busy 50 & tc exit 0; done")
+        .execute(
+            "for i in {1..70}; do tc busy 50 & tc exit 0; done\n\
+             for i in {1..70}; do kill %$i; done",
+        )
         .await
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -2302,4 +2306,275 @@ async fn children_take_no_pool_slots() {
     );
     assert!(during.memories() <= memories + 1, "{}", during.memories());
     run.await.unwrap().unwrap();
+}
+
+/// Background jobs (#1091): `&` with `wait`, `$!`, `jobs` and `kill`.
+#[cfg(feature = "coreutils")]
+mod background_jobs {
+    use super::*;
+
+    fn stderr(out: &eryx::ExecuteResult) -> String {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    /// The usual way to parallelise: every job's output arrives, the jobs
+    /// run at once, and nothing is reported killed.
+    #[tokio::test]
+    async fn wait_collects_every_job_of_a_loop() {
+        let sandbox = shell().build().unwrap();
+        let start = Instant::now();
+        let out = sandbox
+            .execute(
+                "for f in a b c d; do (sleep 0.5; echo \"done $f\") & done; wait; echo all done",
+            )
+            .await
+            .unwrap();
+        let stdout = out.stdout_utf8().unwrap();
+        let mut lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.pop(), Some("all done"), "{stdout}");
+        lines.sort_unstable();
+        assert_eq!(lines, ["done a", "done b", "done c", "done d"], "{stdout}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(stderr(&out), "");
+    }
+
+    /// `$!` names the job; `wait` on it gives the job's status, whether its
+    /// last command was a child or the shell's.
+    #[tokio::test]
+    async fn wait_returns_the_jobs_status() {
+        let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+        let out = sandbox
+            .execute(
+                "tc exit 5 & pid=$!; case $pid in ''|*[!0-9]*) echo \"bad pid: $pid\";; esac\n\
+                 wait $pid; echo \"child: $?\"\n\
+                 (sleep 0.1; exit 3) & wait $!; echo \"subshell: $?\"\n\
+                 if wait 12345; then :; else echo \"unknown: $?\"; fi",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stdout_utf8().unwrap(),
+            "child: 5\nsubshell: 3\nunknown: 127\n"
+        );
+        assert!(stderr(&out).contains("pid 12345 is not a child"), "{out:?}");
+    }
+
+    /// `wait -n` returns as the first job finishes, with its status.
+    #[tokio::test]
+    async fn wait_n_takes_the_first_job_to_finish() {
+        let sandbox = shell().build().unwrap();
+        let out = sandbox
+            .execute(
+                "(sleep 0.5; exit 2) & (sleep 0.1; exit 7) &\n\
+                 wait -n; echo \"first: $?\"; wait -n; echo \"second: $?\"; wait -n; echo \"none: $?\"",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stdout_utf8().unwrap(),
+            "first: 7\nsecond: 2\nnone: 127\n"
+        );
+    }
+
+    /// `jobs` lists running and finished jobs; `-l` and `-p` give their IDs,
+    /// the same ones as `$!`.
+    #[tokio::test]
+    async fn jobs_lists_the_shells_jobs() {
+        let sandbox = shell().build().unwrap();
+        let out = sandbox
+            .execute(
+                "true & sleep 5 & echo \"last=$!\"; sleep 0.2\n\
+                 jobs; jobs -l %2; jobs -p %2\n\
+                 kill %2; wait",
+            )
+            .await
+            .unwrap();
+        let stdout = out.stdout_utf8().unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 5, "{stdout}");
+        let pid = lines[0].strip_prefix("last=").unwrap();
+        assert!(
+            !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()),
+            "{stdout}"
+        );
+        assert!(
+            lines[1].starts_with("[1]-") && lines[1].contains("Done"),
+            "{stdout}"
+        );
+        assert!(
+            lines[2].starts_with("[2]+") && lines[2].contains("Running"),
+            "{stdout}"
+        );
+        assert!(lines[2].ends_with("sleep 5"), "{stdout}");
+        assert!(lines[3].contains(&format!(" {pid} Running")), "{stdout}");
+        assert_eq!(lines[4], pid, "{stdout}");
+        assert_eq!(stderr(&out), "");
+    }
+
+    /// `kill %1` stops a job's child at once, the fuel it burned is charged,
+    /// and what it held (its live-child slot and arguments budget) comes
+    /// back; the job reads as ended by the signal.
+    #[tokio::test]
+    async fn kill_stops_a_jobs_child_and_frees_what_it_held() {
+        let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+        let idle = sandbox.execute("sleep 0.5").await.unwrap();
+
+        let start = Instant::now();
+        let out = sandbox
+            .execute("tc spin & sleep 0.5; kill %1; wait %1; echo \"status: $?\"")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "status: 143\n");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+        // Half a second of spinning costs far more than half a second asleep.
+        let (spun, idle) = (
+            out.stats.fuel_consumed.unwrap(),
+            idle.stats.fuel_consumed.unwrap(),
+        );
+        assert!(spun > idle * 10, "spun {spun}, idle {idle}");
+
+        // Three running children hold the arguments budget; killing one
+        // gives its share back.
+        let sandbox = shell()
+            .with_command("tc", test_cmd())
+            .with_resource_limits(ResourceLimits::default().with_max_child_host_bytes(7 << 19))
+            .build()
+            .unwrap();
+        let out = sandbox
+            .execute(&format!(
+                "{BIG}\nfor i in 1 2 3; do X=\"$BIG\" sleep 30 & done; sleep 0.5\n\
+                 X=\"$BIG\" tc argv0 || echo refused\n\
+                 kill -9 %1; wait %1; echo \"status: $?\"; X=\"$BIG\" tc argv0; kill %2 %3"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stdout_utf8().unwrap(),
+            "refused\nstatus: 137\ntc\n",
+            "{out:?}"
+        );
+        assert!(stderr(&out).contains("tc: limit-exceeded"), "{out:?}");
+    }
+
+    /// The script ends with an implicit `wait`: a job still running then
+    /// finishes, its output and files are the execution's, and the status is
+    /// the script's own.
+    #[tokio::test]
+    async fn the_script_waits_for_its_jobs_at_the_end() {
+        let sandbox = shell().build().unwrap();
+        let out = sandbox
+            .execute(
+                "(sleep 0.3; echo late; echo late-file > /tmp/late.txt; exit 3) &\n\
+                 echo script ends",
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "script ends\nlate\n");
+        assert_eq!(stderr(&out), "");
+        // A session sees what the job left behind.
+        let executor = shell().build().unwrap().executor();
+        let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+        session
+            .execute("(sleep 0.2; echo done > /tmp/late.txt) &")
+            .run()
+            .await
+            .unwrap();
+        let out = session.execute("cat /tmp/late.txt").run().await.unwrap();
+        assert_eq!(out.stdout, b"done\n");
+    }
+
+    /// A job still running when the execution would time out, once the
+    /// script itself has finished, is killed and said to be; the execution
+    /// keeps the script's result instead of failing.
+    #[tokio::test]
+    async fn jobs_outliving_the_timeout_are_killed_and_the_result_kept() {
+        let sandbox = shell()
+            .with_command("tc", test_cmd())
+            .with_resource_limits(
+                ResourceLimits::default().with_execution_timeout(Duration::from_secs(1)),
+            )
+            .build()
+            .unwrap();
+        let start = Instant::now();
+        let out = sandbox
+            .execute("sleep 30 & tc spin & (sleep 0.1; echo quick) & echo script ends; result=42")
+            .await
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(out.stdout_utf8().unwrap(), "script ends\nquick\n");
+        assert_eq!(out.result.as_deref(), Some("42"));
+        assert_eq!(
+            stderr(&out),
+            "eryx: killed 2 background jobs still running when the execution timed out\n"
+        );
+    }
+
+    /// In a session, the jobs killed at the timeout leave the session as it
+    /// was: no reset, and the next execution starts with no jobs.
+    #[tokio::test]
+    async fn a_session_goes_on_after_its_jobs_time_out() {
+        let executor = shell().build().unwrap().executor();
+        let limits = ResourceLimits::default().with_execution_timeout(Duration::from_millis(800));
+        let mut session = SessionExecutor::new_with_limits(executor, &[], &limits)
+            .await
+            .unwrap();
+        let out = session.execute("x=1; sleep 30 &").run().await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "eryx: killed 1 background job still running when the execution timed out\n"
+        );
+        let out = session
+            .execute("jobs; echo \"x=$x\"; wait %1; echo \"$?\"")
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, b"x=1\n127\n");
+        assert!(!out.state_was_reset);
+    }
+
+    /// A script that is itself still running at the timeout times out as
+    /// usual, jobs and all; cancellation still stops jobs' children.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_and_cancel_stop_running_jobs() {
+        let sandbox = shell()
+            .with_command("tc", test_cmd())
+            .with_resource_limits(
+                ResourceLimits::default().with_execution_timeout(Duration::from_millis(500)),
+            )
+            .build()
+            .unwrap();
+        let start = Instant::now();
+        let err = sandbox
+            .execute("tc spin & sleep 30 & wait")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+
+        let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+        let handle = sandbox.execute_cancellable("tc spin & sleep 30 & wait");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        handle.cancel();
+        let err = tokio::time::timeout(Duration::from_secs(3), handle.wait())
+            .await
+            .expect("cancellation stops the jobs")
+            .unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+    }
 }

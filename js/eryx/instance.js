@@ -286,6 +286,14 @@ export async function instantiateSandbox(
   const instantiate = await load();
   const fd = createFdCapture();
   const processHost = createProcessHost(fileTree, commandLoaders(commands, getModule));
+  // When the running execution times out (`Date.now()` ms), if it can.
+  let deadline;
+  const execution = {
+    timeLeft: () =>
+      deadline === undefined
+        ? undefined
+        : BigInt(Math.max(0, Math.round((deadline - Date.now()) * 1e6))),
+  };
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),
     preopens: { "/": fileTree },
@@ -301,6 +309,8 @@ export async function instantiateSandbox(
     "eryx:net/tls": net.tls,
     // Only the shell imports it; see shims/process.js.
     "eryx:process/process": processHost,
+    // The shell's background jobs stop in time for the deadline.
+    "eryx:process/execution": execution,
     "wasi:cli/environment": environment,
     "wasi:cli/exit": exit,
     "wasi:cli/stderr": fd.stderr,
@@ -346,14 +356,21 @@ export async function instantiateSandbox(
   };
   return {
     ...instance,
-    async execute(code) {
+    /**
+     * @param {string} code
+     * @param {number} [deadlineMs] - When the execution times out, as `Date.now()`.
+     */
+    async execute(code, deadlineMs) {
       processHost.startExecution();
+      deadline = deadlineMs;
       let output;
       try {
         output = await instance.execute(code);
       } catch (e) {
         if (e?.payload) appendFdOutput(e.payload, true);
         throw e;
+      } finally {
+        deadline = undefined;
       }
       appendFdOutput(output);
       return output;

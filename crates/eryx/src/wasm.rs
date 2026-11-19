@@ -1610,6 +1610,9 @@ pub struct ExecutorState {
     /// When each callback still running started, for `callback_end`'s
     /// duration.
     pub(crate) trace_clock: TraceClock,
+    /// When the running execution times out, for `eryx:process/execution`'s
+    /// `time-left`; none without a timeout, or between executions.
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1667,6 +1670,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: TraceClock::default(),
+            deadline: None,
         }
     }
 
@@ -1824,6 +1828,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: TraceClock::default(),
+            deadline: None,
         }
     }
 }
@@ -4370,6 +4375,7 @@ impl Executor {
             child_budget,
             child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
             trace_clock: TraceClock::default(),
+            deadline: None,
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -4537,6 +4543,7 @@ impl Executor {
         } else {
             arm_epoch_deadline(store, execution_timeout);
         }
+        store.data_mut().deadline = execution_timeout.map(|t| std::time::Instant::now() + t);
 
         // Call the async execute export
         let code_owned = code.to_string();
