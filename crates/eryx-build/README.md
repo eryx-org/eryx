@@ -28,7 +28,7 @@ relative to that root, and sources are fetched into its `scratch/` dir.
 | `lang` | Builds with | Needs on the build machine |
 |---|---|---|
 | `rust` | `cargo build --release --target wasm32-wasip2` | `cargo` and the `wasm32-wasip2` target |
-| `c` | wasi-sdk's clang: plain, CMake, autotools or make | `WASI_SDK_PATH` pointing at wasi-sdk, and `rustc` with the `wasm32-wasip2` target |
+| `c` | wasi-sdk's clang: plain, CMake, autotools or make | `WASI_SDK_PATH` pointing at wasi-sdk, `wit-bindgen`, and `rustc` with the `wasm32-wasip2` target |
 | `go` | the wasip3 Go fork, componentized with `wasm-tools` | the fork, at `ERYX_GO_WASIP3_ROOT` (default `scratch/go-wasip3`) |
 
 All lanes need `git`, `curl` and `wasm-tools` on `PATH`, and `wasmtime` when
@@ -38,6 +38,9 @@ is documented on the `Manifest` type in `src/manifest.rs`.
 The C and Rust lanes link a small start-up object, compiled with
 `rustc --target wasm32-wasip2`, that moves the command into `$PWD` when it
 starts, since WASI children don't otherwise start in the shell's directory.
+The C lane also links `src/exit_code.c`, which exits with
+`wasi:cli/exit.exit-with-code`, since wasi-libc reports only success or
+failure (any non-zero status became 1). Rust's std already uses it.
 
 Upstream sources are pinned by content: a git `commit`, or the `sha256` of an
 archive. A checkout or download that doesn't match fails the build.

@@ -18,6 +18,9 @@
 //!   and the build's flags as make variables, and copy `[build] artifact`
 //!   out (e.g. git).
 //!
+//! Every build links `src/exit_code.c`, so exit statuses above 1 survive
+//! (wasi-libc on wasip2 reports only success or failure).
+//!
 //! `[build] shims` are compiled with the build's own `cflags` and linked in,
 //! and `[build] wit` generates `wit-bindgen c` bindings into `<output>/wit`
 //! (compiled and linked the same way) for sources that call component
@@ -94,9 +97,10 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         run("bash", &[&patch_s], &source_dir, &[])?;
     }
 
-    // The main build's own glue: the start-in-$PWD constructor, WIT
-    // bindings, then shims.
+    // The main build's own glue: the start-in-$PWD constructor, the exit
+    // status shim, WIT bindings, then shims.
     shim_objs.push(super::cwd_from_pwd_obj(&output_dir)?);
+    shim_objs.extend(exit_code_objs(manifest, &clang, &output_dir)?);
     if let Some(wit) = &manifest.build.wit {
         shim_objs.extend(build_wit(manifest, wit, &clang, &output_dir, &repo_root)?);
     }
@@ -411,7 +415,13 @@ fn build_autotools(
     let mut ldflags = subst(&manifest.build.link_flags)?;
     // As `-Wl,` linker inputs: libtool refuses a bare object in LDFLAGS when
     // it links a library (jq's libjq.la), and passes these through.
-    ldflags.extend(shim_objs.iter().map(|obj| format!("-Wl,{obj}")));
+    ldflags.extend(shim_objs.iter().map(|obj| {
+        if obj.starts_with("-Wl,") {
+            obj.clone()
+        } else {
+            format!("-Wl,{obj}")
+        }
+    }));
     let ldflags = ldflags.join(" ");
     let configure_flags = subst(&manifest.build.configure_flags)?;
 
@@ -468,6 +478,53 @@ fn compile_c(
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     run(&path_str(clang)?, &args_ref, repo_root, &[])?;
     Ok(obj)
+}
+
+/// Build `src/exit_code.c`, which passes the program's exit status on with
+/// `exit-with-code` (wasi-libc only reports success or failure); returns its
+/// object, the component-type object declaring the import, and the
+/// `--wrap=__main_void` flag it relies on, all for the link line.
+fn exit_code_objs(manifest: &Manifest, clang: &Path, output_dir: &Path) -> Result<Vec<String>> {
+    eprintln!("=== [{}] compile exit status shim ===", manifest.name);
+    let dir = output_dir.join("exit-code");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let source = dir.join("exit_code.c");
+    let wit = dir.join("exit_code.wit");
+    std::fs::write(&source, include_str!("../exit_code.c"))
+        .with_context(|| format!("writing {}", source.display()))?;
+    std::fs::write(&wit, include_str!("../exit_code.wit"))
+        .with_context(|| format!("writing {}", wit.display()))?;
+    let dir_s = path_str(&dir)?;
+    run(
+        "wit-bindgen",
+        &[
+            "c",
+            "--world",
+            "eryx-exit-code",
+            &path_str(&wit)?,
+            "--out-dir",
+            &dir_s,
+        ],
+        &dir,
+        &[],
+    )
+    .context("the C lane needs `wit-bindgen` for its exit status shim")?;
+    let obj = path_str(&dir.join("exit_code.o"))?;
+    run(
+        &path_str(clang)?,
+        &[
+            "--target=wasm32-wasip2",
+            "-O2",
+            "-c",
+            &path_str(&source)?,
+            "-o",
+            &obj,
+        ],
+        &dir,
+        &[],
+    )?;
+    let component_type = path_str(&dir.join("eryx_exit_code_component_type.o"))?;
+    Ok(vec![obj, component_type, "-Wl,--wrap=__main_void".into()])
 }
 
 /// Compile `[build] shims`; returns their objects.
@@ -665,5 +722,64 @@ mod tests {
         );
         let err = dep_flags(&deps[2], &deps[..2], root).unwrap_err();
         assert!(err.to_string().contains("isn't built before it"), "{err}");
+    }
+
+    /// A C program's exit status survives, from `main`'s return and from
+    /// `exit`, mod 256 as natively. Opt-in: it needs `WASI_SDK_PATH`, and
+    /// `wit-bindgen` and `wasmtime` on PATH (`mise exec --` provides them).
+    #[test]
+    #[ignore = "needs WASI_SDK_PATH, wit-bindgen and wasmtime"]
+    fn exit_statuses_survive() {
+        let sdk = PathBuf::from(std::env::var_os("WASI_SDK_PATH").unwrap());
+        let clang = sdk.join("bin/clang");
+        let dir = std::env::temp_dir().join(format!("eryx-build-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("t.c"),
+            "#include <stdlib.h>\n\
+             int main(int argc, char **argv) {\n\
+                 if (argc > 2) exit(atoi(argv[2]));\n\
+                 return atoi(argv[1]);\n\
+             }\n",
+        )
+        .unwrap();
+        let manifest: Manifest = toml::from_str(
+            r#"
+            name = "t"
+            license = "MIT"
+            lang = "c"
+            [source]
+            repo = "https://example.com/t"
+            ref = "0"
+            dir = "."
+            [build]
+            sources = ["t.c"]
+            [output]
+            dir = "."
+            "#,
+        )
+        .unwrap();
+        let objs = exit_code_objs(&manifest, &clang, &dir).unwrap();
+        let component = dir.join("t.wasm");
+        build_single(&manifest, &clang, &dir, &component, &objs).unwrap();
+        let cases: [(&[&str], i32); 7] = [
+            (&["0"], 0),
+            (&["3"], 3),
+            (&["42"], 42),
+            (&["0", "126"], 126),
+            (&["0", "255"], 255),
+            (&["256"], 0),
+            (&["0", "257"], 1),
+        ];
+        for (args, want) in cases {
+            let status = std::process::Command::new("wasmtime")
+                .arg("run")
+                .arg(&component)
+                .args(args)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(want), "t {args:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

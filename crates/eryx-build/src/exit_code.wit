@@ -1,0 +1,16 @@
+// The `exit-with-code` import exit_code.c makes. wasi-libc declares
+// `wasi:cli/exit` at an older 0.2 version without it; wasm-component-ld
+// merges the two into this one.
+package wasi:cli@0.2.12;
+
+interface exit {
+  @since(version = 0.2.0)
+  exit: func(status: result);
+
+  @since(version = 0.2.12)
+  exit-with-code: func(status-code: u8);
+}
+
+world eryx-exit-code {
+  import exit;
+}
