@@ -68,6 +68,7 @@ export const RESERVED_CALLBACK_NAMES = Object.freeze({
     "__defineGetter__",
     "__defineSetter__",
     "__eryx_bound",
+    "__eryx_fs",
     "__eryx_import",
     "__eryx_loading",
     "__lookupGetter__",
