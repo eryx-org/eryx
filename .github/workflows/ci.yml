@@ -557,8 +557,9 @@ jobs:
           # the shell's embedded coreutils (#809). v3 -> v4: the shell is
           # built for wasm32-wasip3. v4 -> v5: more async builtins (#816). v5 -> v6:
           # coreutils.cwasm carries its instance-metadata stamp (#942). v6 -> v7:
-          # the guest-sources hash.
-          key: wasm-runtime-shell-v7-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # the guest-sources hash. v7 -> v8: the precompile example stamps
+          # coreutils.cwasm too (it never had, so v7's were unstamped).
+          key: wasm-runtime-shell-v8-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
