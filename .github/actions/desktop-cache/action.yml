@@ -1,0 +1,16 @@
+name: Desktop runner cache
+description: >-
+  On the eryx-desktop runner (scripts/desktop-runner), point target/ at the
+  VM's warm cache disk, one directory per job. Does nothing on GitHub-hosted
+  runners.
+runs:
+  using: composite
+  steps:
+    - if: runner.environment == 'self-hosted'
+      shell: bash
+      env:
+        JOB: ${{ github.job }}
+      run: |
+        mkdir -p "/cache/target/$JOB"
+        ln -sfn "/cache/target/$JOB" target
+        df -h /cache

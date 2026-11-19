@@ -1,0 +1,19 @@
+[Unit]
+Description=eryx-desktop CI runner slot %i (one throwaway VM per job)
+After=incus.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=eryx-ci
+Group=eryx-ci
+ExecStart=/usr/local/lib/eryx-ci/launcher.sh %i
+Restart=always
+RestartSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/eryx-ci
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
