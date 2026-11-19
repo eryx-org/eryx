@@ -15,6 +15,7 @@ their packages' full licences in a comment at the top of the module.
 | `node:crypto` | `crypto.js`, written for eryx: random values only | (eryx's) |
 | `node:url` | `url.js`, written for eryx: the globals, `fileURLToPath`, `pathToFileURL`, `urlToHttpOptions`, `domainTo*`, and a subset of the legacy `parse`/`format`/`resolve` | (eryx's) |
 | `URL`, `URLSearchParams` globals | [core-js-pure] 3.51.0's URL modules, as `url_globals.js` | MIT |
+| `node:fs`, `node:fs/promises` | `fs.js`, `fs_promises.js`, written for eryx, on `../fs.rs`: whole-file reads and writes, directories, stat, rename, copy, remove | (eryx's) |
 | `node:timers`, `node:timers/promises` | `timers.js`, `timers_promises.js`, written for eryx, on the timer globals (`../timers.js`) | (eryx's) |
 
 - `licenses/`: each vendored package's licence file, from its npm tarball.
@@ -23,7 +24,7 @@ their packages' full licences in a comment at the top of the module.
   package bundled into one minified ES module, with named exports so static
   imports link, and its licences in front. Needs the npm registry and node.
 
-The other built-ins (`fs`, `net`, `child_process`, `http`, `os`, ...) throw
+The other built-ins (`net`, `child_process`, `http`, `os`, ...) throw
 "node:… isn't available in eryx yet" on import.
 
 [buffer]: https://github.com/feross/buffer

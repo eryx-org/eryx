@@ -8,8 +8,10 @@
 //! - a specifier in `exports`, and relative imports between environment
 //!   modules, which stay inside the environment;
 //! - Node built-ins (`node:fs`, or a bare `fs` the environment doesn't
-//!   provide), as stubs that throw when imported, until there's a compat
-//!   layer for them;
+//!   provide): the ones in `src/node/`, and stubs that throw when imported
+//!   for the rest;
+//! - in a `node script.js` command (`src/command.rs`), relative imports
+//!   from the script and the modules it imports, among the sandbox's files;
 //! - nothing else ("Cannot find module").
 //!
 //! Scripts run as global code, where `import` declarations aren't allowed,
@@ -41,6 +43,8 @@ fn node_module(name: &str) -> Option<&'static str> {
         "buffer" => include_str!("node/buffer.js"),
         "crypto" => include_str!("node/crypto.js"),
         "events" => include_str!("node/events.js"),
+        "fs" => include_str!("node/fs.js"),
+        "fs/promises" => include_str!("node/fs_promises.js"),
         "path" | "path/posix" => include_str!("node/path.js"),
         "string_decoder" => include_str!("node/string_decoder.js"),
         "timers" => include_str!("node/timers.js"),
@@ -201,6 +205,16 @@ impl Resolver for EnvResolver {
             if let Environment::Present { content_dir, .. } = &*environment
                 && base.starts_with(content_dir.as_str())
                 && let Some(path) = join_inside(content_dir, base, name)
+            {
+                return Ok(path);
+            }
+            // A module among the sandbox's own files (a `node script.js`
+            // command's script, or a module it imported) imports its
+            // neighbours. Only command scripts have such a path: an
+            // execute's code is `<eryx>`.
+            if base.starts_with('/')
+                && !base.starts_with(MOUNT)
+                && let Some(path) = join_inside("", base, name)
             {
                 return Ok(path);
             }
