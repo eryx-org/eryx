@@ -61,6 +61,16 @@ jobs:
       # everything else (pushes, PRs into main, tags) runs everything. The
       # jobs left out check `full` in their `if:`, so they report as skipped.
       full: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
+      # Where the compile-heavy Linux jobs run: the eryx-desktop runner
+      # (scripts/desktop-runner) when the DESKTOP_RUNNER repo variable is
+      # `on`, for pushes to main and same-repo PRs only; ubuntu-latest
+      # otherwise. A fork can edit this expression, so it isn't the fork
+      # boundary: the repo's approval requirement for outside contributors is.
+      rust-runner: >-
+        ${{ (vars.DESKTOP_RUNNER == 'on'
+        && ((github.event_name == 'push' && github.ref == 'refs/heads/main')
+        || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))
+        && '["self-hosted","eryx-desktop"]' || '"ubuntu-latest"' }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
@@ -758,7 +768,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.rust-runner) }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
@@ -768,6 +778,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/desktop-cache
 
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
@@ -793,6 +805,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -827,7 +840,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.rust-runner) }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
@@ -840,6 +853,7 @@ jobs:
       # The full run and the shell-only run below each build a feature set of
       # the workspace, which a cold kache can't fit in the runner's free disk.
       - name: Free disk space
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
@@ -847,6 +861,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/desktop-cache
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -919,7 +935,7 @@ jobs:
       # can't do.
       - name: Configure kache
         id: kache
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && runner.environment == 'github-hosted' }}
         uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
         with:
           version: v1.2.2
@@ -1042,10 +1058,14 @@ jobs:
           # extension) aren't reused here, and with them in place the runner
           # ran out of disk linking shell_guest (run 44524946379). The rlibs,
           # proc macros (.so) and build scripts (target/debug/build) stay.
-          du -sch target/debug/deps 2>/dev/null | tail -1
-          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
-          rm -rf target/debug/incremental
-          df -h .
+          # (Not on the desktop runner: there the disk is big enough and
+          # target/ is the warm cache, whose test binaries save relinking.)
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            du -sch target/debug/deps 2>/dev/null | tail -1
+            find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+            rm -rf target/debug/incremental
+            df -h .
+          fi
           cargo nextest run -p eryx --profile ci \
             --features embedded,shell,javascript,env-pack \
             --test shell_guest --test commands --test p3_guest --test pack \
@@ -1275,7 +1295,7 @@ jobs:
   # Check that all feature combinations compile
   check-features:
     name: Check Feature Combinations
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.rust-runner) }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
@@ -1286,6 +1306,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/desktop-cache
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1305,6 +1327,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -1402,7 +1425,7 @@ jobs:
   # Test Python bindings
   python-bindings:
     name: Python Bindings
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.rust-runner) }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       needs.changes.outputs.full == 'true'
@@ -1418,6 +1441,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/desktop-cache
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1437,6 +1462,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -1763,7 +1789,7 @@ jobs:
   # Test book examples
   book-tests:
     name: Book Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.rust-runner) }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       needs.changes.outputs.full == 'true'
@@ -1778,6 +1804,7 @@ jobs:
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - name: Free disk space
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
@@ -1785,6 +1812,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/desktop-cache
 
       - name: Download WASM artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1804,6 +1833,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Configure Rust cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}

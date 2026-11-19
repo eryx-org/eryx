@@ -1,0 +1,13 @@
+[Unit]
+Description=Let the eryx CI VMs' traffic past Docker's FORWARD DROP
+After=docker.service firewalld.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/eryx-ci/docker-user.sh add @UPLINK@
+ExecStop=/usr/local/lib/eryx-ci/docker-user.sh del @UPLINK@
+
+[Install]
+WantedBy=docker.service

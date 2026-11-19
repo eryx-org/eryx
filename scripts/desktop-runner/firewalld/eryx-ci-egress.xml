@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CI VMs -> the internet through the uplink's zone, NATed. Private,
+     link-local and CGNAT (tailnet) destinations are rejected first, so no
+     LAN host, tailnet node or dockerlo address (10.44/16) is reachable.
+     Other zones (docker, trusted/tailscale0) have no policy from eryx-ci,
+     so firewalld denies forwarding to them anyway. -->
+<policy target="ACCEPT" priority="-100">
+  <short>eryx-ci-egress</short>
+  <ingress-zone name="eryx-ci"/>
+  <egress-zone name="@UPLINK_ZONE@"/>
+  <masquerade/>
+  <rule family="ipv4"><destination address="10.0.0.0/8"/><reject/></rule>
+  <rule family="ipv4"><destination address="172.16.0.0/12"/><reject/></rule>
+  <rule family="ipv4"><destination address="192.168.0.0/16"/><reject/></rule>
+  <rule family="ipv4"><destination address="100.64.0.0/10"/><reject/></rule>
+  <rule family="ipv4"><destination address="169.254.0.0/16"/><reject/></rule>
+</policy>

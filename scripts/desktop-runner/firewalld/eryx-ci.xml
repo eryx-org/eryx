@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The CI VMs' bridge. To the host itself they get DHCP and DNS (incus's
+     dnsmasq) and nothing else; VM-to-VM forwarding stays off (no <forward/>). -->
+<zone target="%%REJECT%%">
+  <short>eryx-ci</short>
+  <description>incus CI VMs (eryx-desktop runner)</description>
+  <interface name="incusci0"/>
+  <service name="dhcp"/>
+  <service name="dns"/>
+</zone>
