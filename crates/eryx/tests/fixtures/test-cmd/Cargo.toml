@@ -1,0 +1,14 @@
+# A tiny command for tests/commands.rs, built by the test itself, for WASI
+# 0.2 (wasm32-wasip2) and, for the `p3_` tests, WASI 0.3 (wasm32-wasip3).
+[package]
+name = "eryx-test-cmd"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not part of the eryx workspace: it only builds for WASI.
+[workspace]
+
+[dependencies]
+# `spawn` runs commands through eryx:process/run.
+wit-bindgen = "0.63"

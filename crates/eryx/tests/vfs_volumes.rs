@@ -5,19 +5,19 @@
 use std::sync::{Arc, OnceLock};
 
 use eryx::vfs::{ArcStorage, InMemoryStorage};
-use eryx::{PythonExecutor, SessionExecutor, VfsConfig, VolumeMount};
+use eryx::{Executor, SessionExecutor, VfsConfig, VolumeMount};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
@@ -195,4 +195,70 @@ async fn open_host_file_limit_is_enforced() {
         .unwrap();
     let result = sandbox.execute(HOLD_OPEN_FILES).await.unwrap();
     assert_eq!(result.stdout_text().trim(), "5 EDQUOT");
+}
+
+/// Times can be set through a descriptor opened read-only, as `touch` does,
+/// for a directory or a file on a writable volume.
+#[tokio::test]
+async fn times_can_be_set_through_a_read_only_descriptor() {
+    let host = tempfile::tempdir().unwrap();
+    let stdout = run_with_volume(
+        VolumeMount::new(host.path(), "/vol"),
+        r#"
+import os
+os.makedirs('/vol/d')
+open('/vol/d/f', 'w').close()
+for p in ['/vol/d', '/vol/d/f']:
+    fd = os.open(p, os.O_RDONLY)
+    os.utime(fd, (1_000_000, 2_000_000))
+    os.close(fd)
+    print(int(os.stat(p).st_mtime))
+"#,
+    )
+    .await;
+    assert_eq!(stdout.trim(), "2000000\n2000000");
+}
+
+/// A read-only volume still refuses to set times, by path or through a
+/// descriptor, for a directory or a file, whether it is served from the host
+/// or from storage.
+#[tokio::test]
+async fn read_only_volumes_refuse_to_set_times() {
+    use eryx::vfs::VfsStorage;
+
+    let host = tempfile::tempdir().unwrap();
+    std::fs::create_dir(host.path().join("d")).unwrap();
+    std::fs::write(host.path().join("d/f"), b"x").unwrap();
+    let storage = Arc::new(InMemoryStorage::new());
+    storage.mkdir("/mnt").await.unwrap();
+    storage.mkdir("/mnt/ro").await.unwrap();
+    storage.mkdir("/mnt/ro/d").await.unwrap();
+    storage.write("/mnt/ro/d/f", b"x").await.unwrap();
+
+    let code = r#"
+import os
+for p in [ROOT + '/d', ROOT + '/d/f']:
+    before = os.stat(p).st_mtime
+    try:
+        os.utime(p, (1_000_000, 2_000_000))
+        print('path allowed')
+    except OSError:
+        print('path refused')
+    fd = os.open(p, os.O_RDONLY)
+    try:
+        os.utime(fd, (1_000_000, 2_000_000))
+        print('fd allowed')
+    except OSError:
+        print('fd refused')
+    os.close(fd)
+    print('unchanged' if os.stat(p).st_mtime == before else 'changed')
+"#;
+    let expected = "path refused\nfd refused\nunchanged\n".repeat(2);
+    for volume in [
+        VolumeMount::read_only(host.path(), "/mnt/ro"),
+        VolumeMount::read_only_storage("/mnt/ro", storage.clone()),
+    ] {
+        let stdout = run_with_volume(volume, &format!("ROOT = '/mnt/ro'\n{code}")).await;
+        assert_eq!(stdout, expected);
+    }
 }

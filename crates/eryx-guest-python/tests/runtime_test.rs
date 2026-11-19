@@ -1,0 +1,1093 @@
+// Tests use expect/unwrap for simplicity
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::manual_strip)]
+
+//! Test to verify the runtime component can be instantiated and called.
+//!
+//! # Prerequisites
+//!
+//! Before running tests, you need to extract the Python stdlib from componentize-py:
+//!
+//! ```bash
+//! # From the eryx-guest-python crate directory:
+//! mkdir -p tests/python-stdlib tests/site-packages
+//! tar -xf ../eryx-runtime/.venv/lib/python3.12/site-packages/componentize_py/python-lib.tar.zst \
+//!     -C tests/python-stdlib
+//! ```
+//!
+//! # Running
+//!
+//! ```bash
+//! cargo test --package eryx-guest-python --test runtime_test
+//! ```
+
+use std::io::Cursor;
+use std::path::PathBuf;
+use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wit_component::{StringEncoding, embed_component_metadata};
+
+fn decompress_zstd(data: &[u8]) -> Vec<u8> {
+    zstd::decode_all(Cursor::new(data)).expect("failed to decompress")
+}
+
+// Define a struct matching the WIT execute-output record
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct ExecuteOutput {
+    #[component(name = "stdout")]
+    stdout: Vec<u8>,
+    #[component(name = "stderr")]
+    stderr: Vec<u8>,
+    #[component(name = "result-json")]
+    result: String,
+    #[component(name = "result-error")]
+    result_error: String,
+}
+
+/// Mirror of the WIT `execute-error` record returned when `execute` fails.
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct ExecuteError {
+    #[component(name = "message")]
+    message: String,
+    #[component(name = "exit-code")]
+    exit_code: Option<i32>,
+    #[component(name = "stdout")]
+    stdout: Vec<u8>,
+    #[component(name = "stderr")]
+    stderr: Vec<u8>,
+}
+
+impl std::fmt::Display for ExecuteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Mirror of the WIT `state-snapshot` record returned by `snapshot-state`.
+#[derive(Debug, Clone, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(record)]
+struct StateSnapshot {
+    #[component(name = "data")]
+    data: Vec<u8>,
+    #[component(name = "skipped")]
+    skipped: Vec<String>,
+}
+
+struct State {
+    ctx: WasiCtx,
+    table: ResourceTable,
+}
+
+impl WasiView for State {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+/// Load a library from decompressed dir, or decompress from .zst if needed
+fn load_lib(libs_dir: &std::path::Path, name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let decompressed = libs_dir.join("decompressed").join(name);
+    if decompressed.exists() {
+        return Ok(std::fs::read(&decompressed)?);
+    }
+
+    let compressed = libs_dir.join(format!("{name}.zst"));
+    if compressed.exists() {
+        return Ok(decompress_zstd(&std::fs::read(&compressed)?));
+    }
+
+    Err(format!("Library not found: {name} (checked {decompressed:?} and {compressed:?})").into())
+}
+
+fn build_component() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let libs_dir = project_root.join("crates/eryx-runtime/libs");
+
+    // Path to our runtime .so
+    let runtime_path = manifest_dir.join("target/liberyx_runtime.so");
+    if !runtime_path.exists() {
+        panic!(
+            "Runtime not found at {}. Run `BUILD_ERYX_RUNTIME=1 cargo build -p eryx-runtime` first",
+            runtime_path.display()
+        );
+    }
+
+    let runtime = std::fs::read(&runtime_path)?;
+
+    // Load base libraries
+    let libc = load_lib(&libs_dir, "libc.so")?;
+    let libcxx = load_lib(&libs_dir, "libc++.so")?;
+    let libcxxabi = load_lib(&libs_dir, "libc++abi.so")?;
+    let wasi_clocks = load_lib(&libs_dir, "libwasi-emulated-process-clocks.so")?;
+    let wasi_signal = load_lib(&libs_dir, "libwasi-emulated-signal.so")?;
+    let wasi_mman = load_lib(&libs_dir, "libwasi-emulated-mman.so")?;
+    let wasi_getpid = load_lib(&libs_dir, "libwasi-emulated-getpid.so")?;
+    let libpython = load_lib(&libs_dir, "libpython3.14.so")?;
+    let adapter = load_lib(&libs_dir, "wasi_snapshot_preview1.reactor.wasm")?;
+
+    // Parse the WIT files from the wit/ directory
+    let wit_path = project_root.join("crates/eryx-runtime/wit");
+    let mut resolve = wit_parser::Resolve::default();
+    let (pkg_id, _) = resolve.push_dir(&wit_path)?;
+    let world_id = resolve.select_world(&[pkg_id], Some("sandbox"))?;
+
+    // Generate bindings pointing to our runtime
+    let mut opts = wit_dylib::DylibOpts {
+        interpreter: Some("liberyx_runtime.so".to_string()),
+        async_: wit_dylib::AsyncFilterSet::default(),
+        stack_pointer: wit_dylib::StackPointer::Global,
+    };
+
+    let mut bindings = wit_dylib::create(&resolve, world_id, Some(&mut opts))?;
+    embed_component_metadata(
+        &mut bindings,
+        &resolve,
+        world_id,
+        StringEncoding::UTF8,
+        false,
+    )?;
+
+    // Link - order matters! Dependencies must come before dependents
+    // wit-component 0.257 turned `Linker` into a `&mut self` builder and moved
+    // `validate`/`adapter` onto the inner `ComponentEncoder`.
+    let mut linker = wit_component::Linker::default();
+    linker.use_built_in_libdl(true);
+    linker.encoder().validate(true);
+    linker
+        // WASI emulation libs
+        .library("libwasi-emulated-process-clocks.so", &wasi_clocks, false)?
+        .library("libwasi-emulated-signal.so", &wasi_signal, false)?
+        .library("libwasi-emulated-mman.so", &wasi_mman, false)?
+        .library("libwasi-emulated-getpid.so", &wasi_getpid, false)?
+        // C/C++ runtime
+        .library("libc.so", &libc, false)?
+        .library("libc++abi.so", &libcxxabi, false)?
+        .library("libc++.so", &libcxx, false)?
+        // Python
+        .library("libpython3.14.so", &libpython, false)?
+        // Our runtime and bindings
+        .library("liberyx_runtime.so", &runtime, false)?
+        .library("liberyx_bindings.so", &bindings, false)?;
+
+    // WASI adapter
+    linker
+        .encoder()
+        .adapter("wasi_snapshot_preview1", &adapter)?;
+
+    Ok(linker.encode()?)
+}
+
+#[tokio::test]
+async fn test_instantiate_component() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Building component...");
+    let component_bytes = build_component()?;
+    println!("Component size: {} bytes", component_bytes.len());
+
+    // Create engine with async and component model support
+    let mut config = Config::new();
+    config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
+
+    let engine = Engine::new(&config)?;
+
+    println!("Loading component into wasmtime...");
+    let component = Component::new(&engine, &component_bytes)?;
+
+    // Set up paths for Python stdlib
+    // Check ERYX_PYTHON_STDLIB env var first (used in CI)
+    let stdlib_path = std::env::var("ERYX_PYTHON_STDLIB")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            manifest_dir.join("tests/python-stdlib")
+        });
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let site_packages_path = manifest_dir.join("tests/site-packages");
+
+    if !stdlib_path.exists() {
+        panic!(
+            "Python stdlib not found at {}. Set ERYX_PYTHON_STDLIB or extract python-lib.tar.zst first.",
+            stdlib_path.display()
+        );
+    }
+
+    // Create site-packages if it doesn't exist
+    std::fs::create_dir_all(&site_packages_path)?;
+
+    // Create WASI context with preopened directories for Python
+    let wasi = WasiCtxBuilder::new()
+        .inherit_stdio()
+        // Set PYTHONPATH so Python can find stdlib during initialization
+        .env("PYTHONPATH", "/python-stdlib:/site-packages")
+        // Mount stdlib at /python-stdlib (matches what initialize_python expects)
+        .preopened_dir(
+            &stdlib_path,
+            "/python-stdlib",
+            wasmtime_wasi::FsPerms::ReadOnly,
+        )?
+        // Mount site-packages
+        .preopened_dir(
+            &site_packages_path,
+            "/site-packages",
+            wasmtime_wasi::FsPerms::ReadOnly,
+        )?
+        .build();
+
+    let state = State {
+        ctx: wasi,
+        table: ResourceTable::new(),
+    };
+
+    let mut store = Store::new(&engine, state);
+
+    // Create linker and add WASI
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+
+    // Add stub implementations for sandbox imports
+    use wasmtime::component::{Accessor, Val};
+
+    // sleep: async func(duration-ns: u64)
+    linker.root().func_wrap_concurrent(
+        "sleep",
+        |_accessor: &Accessor<State>, (duration_ns,): (u64,)| {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_nanos(duration_ns)).await;
+                Ok(())
+            })
+        },
+    )?;
+
+    // invoke: async func(name: string, arguments-json: string) -> result<string, string>
+    // This implementation handles a few test callbacks:
+    // - "get_time": returns a fixed timestamp as JSON
+    // - "echo": echoes back the arguments
+    // - "add": adds two numbers
+    linker.root().func_wrap_concurrent(
+        "invoke",
+        |_accessor: &Accessor<State>, (name, args): (String, String)| {
+            Box::pin(async move {
+                let result: Result<String, String> = match name.as_str() {
+                    "get_time" => Ok(r#"{"timestamp": 1234567890}"#.to_string()),
+                    "echo" => {
+                        // Echo back the arguments
+                        Ok(args)
+                    }
+                    "add" => {
+                        // Simple JSON parsing for {"a": x, "b": y}
+                        // Extract numbers using basic string operations
+                        let extract_num = |key: &str| -> i64 {
+                            args.find(&format!("\"{key}\":"))
+                                .and_then(|pos| {
+                                    let start = pos + key.len() + 3; // skip "key":
+                                    let rest = &args[start..];
+                                    let rest = rest.trim_start();
+                                    let end = rest
+                                        .find(|c: char| !c.is_ascii_digit() && c != '-')
+                                        .unwrap_or(rest.len());
+                                    rest[..end].parse().ok()
+                                })
+                                .unwrap_or(0)
+                        };
+                        let a = extract_num("a");
+                        let b = extract_num("b");
+                        Ok(format!(r#"{{"result": {}}}"#, a + b))
+                    }
+                    "http.get" => {
+                        // Extract URL from {"url": "..."}
+                        let url = args
+                            .find("\"url\":")
+                            .and_then(|pos| {
+                                let rest = &args[pos + 6..];
+                                let rest = rest.trim_start();
+                                if rest.starts_with('"') {
+                                    let rest = &rest[1..];
+                                    rest.find('"').map(|end| &rest[..end])
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or("unknown");
+                        Ok(format!(
+                            r#"{{"status": 200, "url": "{url}", "body": "test response"}}"#
+                        ))
+                    }
+                    _ => Err(format!("unknown callback: {name}")),
+                };
+                Ok((result,))
+            })
+        },
+    )?;
+
+    // list-callbacks: func() -> list<callback-info>
+    // Returns a list of available callbacks for testing
+    linker.root().func_new(
+        "list-callbacks",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         results: &mut [Val]| {
+            // Create callback info records
+            let callbacks = vec![
+                // Simple callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("get_time".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Get current timestamp".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String("{}".to_string()),
+                    ),
+                ]),
+                // Echo callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("echo".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Echo back arguments".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String("{}".to_string()),
+                    ),
+                ]),
+                // Add callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("add".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("Add two numbers".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String(r#"{"a": "number", "b": "number"}"#.to_string()),
+                    ),
+                ]),
+                // Dotted namespace callback
+                Val::Record(vec![
+                    ("name".to_string(), Val::String("http.get".to_string())),
+                    (
+                        "description".to_string(),
+                        Val::String("HTTP GET request".to_string()),
+                    ),
+                    (
+                        "parameters-schema-json".to_string(),
+                        Val::String(r#"{"url": "string"}"#.to_string()),
+                    ),
+                ]),
+            ];
+
+            results[0] = Val::List(callbacks);
+            Ok(())
+        },
+    )?;
+
+    // get-execution-options: func() -> execution-options
+    // Preserve the default behavior: tracing enabled, callback reuse disabled.
+    linker.root().func_new(
+        "get-execution-options",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         results: &mut [Val]| {
+            results[0] = Val::Record(vec![
+                ("tracing".to_string(), Val::Bool(true)),
+                ("reuse-empty-callbacks".to_string(), Val::Bool(false)),
+            ]);
+            Ok(())
+        },
+    )?;
+
+    // report-trace: func(lineno: u32, event-json: string, context-json: string)
+    linker.root().func_new(
+        "report-trace",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         _results: &mut [Val]| { Ok(()) },
+    )?;
+
+    // report-output: func(stream: u32, data: string)
+    linker.root().func_new(
+        "report-output",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         _func_ty: wasmtime::component::types::ComponentFunc,
+         _params: &[Val],
+         _results: &mut [Val]| { Ok(()) },
+    )?;
+
+    // Add network stub implementations (TCP and TLS)
+    // These return "not-permitted" errors since networking is not available in this test.
+    add_network_stubs(&mut linker)?;
+
+    println!("Instantiating component...");
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+
+    println!("SUCCESS! Component instantiated");
+
+    // Get the execute function
+    // execute: async func(code: string) -> result<execute-output, execute-error>
+    println!("Looking for execute function...");
+
+    let execute = instance
+        .get_typed_func::<(String,), (Result<ExecuteOutput, ExecuteError>,)>(
+            &mut store,
+            "[async]execute",
+        )
+        .or_else(|_| {
+            instance.get_typed_func::<(String,), (Result<ExecuteOutput, ExecuteError>,)>(
+                &mut store, "execute",
+            )
+        })?;
+
+    // Test 1: Simple print statement
+    println!("Test 1: execute('print(1+1)')...");
+    let (result,) = execute
+        .call_async(&mut store, ("print(1+1)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "2\n",
+                "print(1+1) should output '2\\n'"
+            );
+        }
+        Err(error) => {
+            panic!("Test 1 failed with error: {error}");
+        }
+    }
+
+    // Test 2: Multiple prints
+    println!("Test 2: Multiple print statements...");
+    let (result,) = execute
+        .call_async(&mut store, ("print('hello')\nprint('world')".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(
+                output.stdout, b"hello\nworld\n",
+                "Should have two lines of output"
+            );
+        }
+        Err(error) => {
+            panic!("Test 2 failed with error: {error}");
+        }
+    }
+
+    // Test 3: Variable assignment (no output)
+    println!("Test 3: Variable assignment with no output...");
+    let (result,) = execute
+        .call_async(&mut store, ("x = 42".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output.stdout, b"", "Assignment should produce no output");
+            assert_eq!(output.result, "", "No `result` variable -> empty result");
+            assert_eq!(output.result_error, "", "No serialization error expected");
+        }
+        Err(error) => {
+            panic!("Test 3 failed with error: {error}");
+        }
+    }
+
+    // Test 3b: `result` variable is JSON-serialized and captured.
+    println!("Test 3b: result variable capture...");
+    let (result,) = execute
+        .call_async(&mut store, ("result = {\"k\": 5}".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(output.result, "{\"k\": 5}", "result should be JSON");
+            assert_eq!(output.result_error, "", "No serialization error expected");
+        }
+        Err(error) => {
+            panic!("Test 3b failed with error: {error}");
+        }
+    }
+
+    // Test 4: Syntax error should return Err
+    println!("Test 4: Syntax error...");
+    let (result,) = execute
+        .call_async(&mut store, ("def broken(".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 4 should have failed, but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  Expected error: {error}");
+            assert!(
+                error.message.contains("SyntaxError") || error.message.contains("syntax"),
+                "Error should mention syntax: {error}"
+            );
+            assert_eq!(error.exit_code, None, "Python failures have no exit code");
+        }
+    }
+
+    // Test 4b: a failed run keeps the output it captured before failing
+    println!("Test 4b: output before an exception...");
+    let (result,) = execute
+        .call_async(&mut store, ("print('before')\n1 / 0".to_string(),))
+        .await?;
+    match &result {
+        Ok(output) => panic!("Test 4b should have failed, but got: {output:?}"),
+        Err(error) => {
+            assert_eq!(String::from_utf8_lossy(&error.stdout), "before\n");
+            assert!(
+                String::from_utf8_lossy(&error.stderr).contains("ZeroDivisionError"),
+                "stderr should carry the traceback"
+            );
+        }
+    }
+
+    // Test 5: Runtime error should return Err
+    println!("Test 5: Runtime error (NameError)...");
+    let (result,) = execute
+        .call_async(&mut store, ("print(undefined_variable)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 5 should have failed, but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  Expected error: {error}");
+            assert!(
+                error.message.contains("NameError") || error.message.contains("undefined"),
+                "Error should mention NameError: {error}"
+            );
+        }
+    }
+
+    // Test 6: State persists between calls
+    println!("Test 6: State persistence...");
+    let (result,) = execute
+        .call_async(&mut store, ("my_var = 'persisted'".to_string(),))
+        .await?;
+    match &result {
+        Ok(_) => println!("  Assignment OK"),
+        Err(e) => panic!("Assignment failed with: {e}"),
+    }
+
+    let (result,) = execute
+        .call_async(&mut store, ("print(my_var)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "persisted\n",
+                "Variable should persist between calls"
+            );
+        }
+        Err(error) => {
+            panic!("Test 6 failed with error: {error}");
+        }
+    }
+
+    // Test 7: Import stdlib module
+    println!("Test 7: Import stdlib (math)...");
+    let (result,) = execute
+        .call_async(&mut store, ("import math; print(math.pi)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).starts_with("3.14"),
+                "math.pi should start with 3.14: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 7 failed with error: {error}");
+        }
+    }
+
+    // =========================================================================
+    // State Management Tests
+    // =========================================================================
+
+    // Get the state management functions
+    let snapshot_state = instance
+        .get_typed_func::<(), (Result<StateSnapshot, String>,)>(&mut store, "[async]snapshot-state")
+        .or_else(|_| {
+            instance.get_typed_func::<(), (Result<StateSnapshot, String>,)>(
+                &mut store,
+                "snapshot-state",
+            )
+        })?;
+
+    let restore_state = instance
+        .get_typed_func::<(Vec<u8>,), (Result<(), String>,)>(&mut store, "[async]restore-state")
+        .or_else(|_| {
+            instance
+                .get_typed_func::<(Vec<u8>,), (Result<(), String>,)>(&mut store, "restore-state")
+        })?;
+
+    let clear_state = instance
+        .get_typed_func::<(), ()>(&mut store, "[async]clear-state")
+        .or_else(|_| instance.get_typed_func::<(), ()>(&mut store, "clear-state"))?;
+
+    // Test 8: Snapshot state
+    println!("Test 8: Snapshot state...");
+    // First set some variables
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            ("x = 42\ny = 'hello'\nz = [1, 2, 3]".to_string(),),
+        )
+        .await?;
+    assert!(result.is_ok(), "Setting variables should succeed");
+
+    // Take a snapshot
+    let (snapshot_result,) = snapshot_state.call_async(&mut store, ()).await?;
+
+    let snapshot_data = match snapshot_result {
+        Ok(snapshot) => {
+            println!("  OK: Snapshot taken, {} bytes", snapshot.data.len());
+            assert!(!snapshot.data.is_empty(), "Snapshot should not be empty");
+            assert!(snapshot.skipped.is_empty(), "Nothing should be skipped");
+            snapshot.data
+        }
+        Err(error) => {
+            panic!("Test 8 failed: {error}");
+        }
+    };
+
+    // Test 9: Clear state
+    println!("Test 9: Clear state...");
+    clear_state.call_async(&mut store, ()).await?;
+
+    // Verify variables are gone
+    let (result,) = execute
+        .call_async(&mut store, ("print(x)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            panic!("Test 9 should have failed (x should be cleared), but got: {output:?}");
+        }
+        Err(error) => {
+            println!("  OK: Variable x is cleared (error: {error})");
+            assert!(
+                error.message.contains("NameError") || error.message.contains("not defined"),
+                "Error should indicate x is not defined: {error}"
+            );
+        }
+    }
+
+    // Test 10: Restore state
+    println!("Test 10: Restore state...");
+    let (restore_result,) = restore_state
+        .call_async(&mut store, (snapshot_data,))
+        .await?;
+
+    match &restore_result {
+        Ok(()) => {
+            println!("  OK: State restored");
+        }
+        Err(error) => {
+            panic!("Test 10 failed: {error}");
+        }
+    }
+
+    // Verify variables are restored
+    let (result,) = execute
+        .call_async(&mut store, ("print(x, y, z)".to_string(),))
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: Restored values: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("42")
+                    && String::from_utf8_lossy(&output.stdout).contains("hello")
+                    && String::from_utf8_lossy(&output.stdout).contains("[1, 2, 3]"),
+                "Restored values should match: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 10 verification failed: {error}");
+        }
+    }
+
+    // =========================================================================
+    // Callback Tests
+    // =========================================================================
+    // These tests verify that Python can call host functions via invoke()
+    // and the callback wrapper functions.
+
+    // Test 11: list_callbacks() returns available callbacks
+    println!("Test 11: list_callbacks()...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+cbs = list_callbacks()
+print(f"list_callbacks returned: {type(cbs).__name__}")
+print(f"count: {len(cbs)}")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("list_callbacks returned: list"),
+                "list_callbacks should return a list: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 11 failed: {error}");
+        }
+    }
+
+    // Test 12: invoke() calls host callback and returns result
+    println!("Test 12: invoke() calls get_time callback...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+result = await invoke("get_time")
+print(f"result type: {type(result).__name__}")
+print(f"timestamp: {result.get('timestamp', 'missing')}")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("result type: dict"),
+                "invoke should return a dict: {output:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("timestamp: 1234567890"),
+                "invoke should return correct timestamp: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 12 failed: {error}");
+        }
+    }
+
+    // Test 13: Verify list_callbacks() still works (introspection is available)
+    println!("Test 13: list_callbacks() provides callback info...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+cbs = list_callbacks()
+names = [cb['name'] for cb in cbs]
+print(f"callbacks: {names}")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("get_time"),
+                "Should list get_time callback: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 13 failed: {error}");
+        }
+    }
+
+    // Test 14: invoke() with arguments (add callback)
+    println!("Test 14: invoke() with arguments...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+result = await invoke("add", a=10, b=32)
+print(f"add result: {result.get('result', 'missing')}")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("add result: 42"),
+                "invoke('add', a=10, b=32) should return 42: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 14 failed: {error}");
+        }
+    }
+
+    // Test 15: Callback wrappers work (http.get via namespace)
+    println!("Test 15: Namespace callback (http.get)...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+result = await http.get(url="https://example.com")
+print(f"status: {result.get('status', 'missing')}")
+print(f"url: {result.get('url', 'missing')}")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("status: 200"),
+                "http.get should return status 200: {output:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("url: https://example.com"),
+                "http.get should return correct url: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 15 failed: {error}");
+        }
+    }
+
+    // Test 16: Error handling for unknown callback
+    println!("Test 16: invoke() error handling for unknown callback...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+try:
+    await invoke("nonexistent_callback")
+    print("ERROR: should have raised")
+except RuntimeError as e:
+    print(f"OK: RuntimeError raised")
+    if "unknown callback" in str(e):
+        print("CORRECT: error message")
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  OK: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("RuntimeError raised"),
+                "invoke('nonexistent') should raise RuntimeError: {output:?}"
+            );
+        }
+        Err(error) => {
+            panic!("Test 16 failed: {error}");
+        }
+    }
+
+    // Test 17: stderr capture works
+    println!("Test 17: stderr capture...");
+    let (result,) = execute
+        .call_async(
+            &mut store,
+            (r#"
+import sys
+print("to stdout")
+print("to stderr", file=sys.stderr)
+"#
+            .to_string(),),
+        )
+        .await?;
+
+    match &result {
+        Ok(output) => {
+            println!("  stdout: {:?}", output.stdout);
+            println!("  stderr: {:?}", output.stderr);
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "to stdout\n",
+                "stdout should capture print()"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "to stderr\n",
+                "stderr should capture print(..., file=sys.stderr)"
+            );
+        }
+        Err(error) => {
+            panic!("Test 17 failed: {error}");
+        }
+    }
+
+    println!("\nAll tests passed!");
+    Ok(())
+}
+
+/// TCP error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TcpError {
+    #[component(name = "connection-refused")]
+    ConnectionRefused,
+    #[component(name = "connection-reset")]
+    ConnectionReset,
+    #[component(name = "timed-out")]
+    TimedOut,
+    #[component(name = "host-not-found")]
+    HostNotFound,
+    #[component(name = "io-error")]
+    IoError(String),
+    #[component(name = "not-permitted")]
+    NotPermitted(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// TLS error type for test stubs.
+#[derive(
+    wasmtime::component::ComponentType, wasmtime::component::Lift, wasmtime::component::Lower, Clone,
+)]
+#[component(variant)]
+enum TlsError {
+    #[component(name = "tcp")]
+    Tcp(TcpError),
+    #[component(name = "handshake-failed")]
+    HandshakeFailed(String),
+    #[component(name = "certificate-error")]
+    CertificateError(String),
+    #[component(name = "invalid-handle")]
+    InvalidHandle,
+}
+
+/// Add stub implementations for network imports (TCP and TLS).
+/// These return "not-permitted" errors since networking is not available in this test.
+fn add_network_stubs(linker: &mut Linker<State>) -> Result<(), Box<dyn std::error::Error>> {
+    // TCP interface stubs
+    let mut tcp = linker.instance("eryx:net/tcp@0.1.0")?;
+
+    // tcp.connect: func(host: string, port: u16, timeout-ms: u32) -> result<tcp-handle, tcp-error>
+    tcp.func_wrap_async(
+        "connect",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_host, _port, _timeout_ms): (String, u16, u32)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.read: func(handle: tcp-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tcp-error>
+    tcp.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.write: func(handle: tcp-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tcp-error>
+    tcp.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TcpError>::Err(TcpError::NotPermitted(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tcp.close: func(handle: tcp-handle)
+    tcp.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
+    // TLS interface stubs
+    let mut tls = linker.instance("eryx:net/tls@0.1.0")?;
+
+    // tls.upgrade: func(tcp: tcp-handle, hostname: string, timeout-ms: u32) -> result<tls-handle, tls-error>
+    tls.func_wrap_async(
+        "upgrade",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_tcp_handle, _hostname, _timeout_ms): (u32, String, u32)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.read: func(handle: tls-handle, len: u32, timeout-ms: u32) -> result<list<u8>, tls-error>
+    tls.func_wrap_async(
+        "read",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _len, _timeout_ms): (u32, u32, u32)| {
+            Box::new(async move {
+                Ok((Result::<Vec<u8>, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.write: func(handle: tls-handle, timeout-ms: u32, data: list<u8>) -> result<u32, tls-error>
+    tls.func_wrap_async(
+        "write",
+        |_ctx: wasmtime::StoreContextMut<'_, State>,
+         (_handle, _timeout_ms, _data): (u32, u32, Vec<u8>)| {
+            Box::new(async move {
+                Ok((Result::<u32, TlsError>::Err(TlsError::HandshakeFailed(
+                    "networking not available in test".into(),
+                )),))
+            })
+        },
+    )?;
+
+    // tls.close: func(handle: tls-handle)
+    tls.func_wrap(
+        "close",
+        |_ctx: wasmtime::StoreContextMut<'_, State>, (_handle,): (u32,)| Ok(()),
+    )?;
+
+    Ok(())
+}

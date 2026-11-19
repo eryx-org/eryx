@@ -116,7 +116,7 @@ pub mod base_libraries {
 
 /// Link native extensions with the base libraries to create a new component.
 ///
-/// This uses our custom eryx-wasm-runtime instead of componentize-py's runtime.
+/// This uses our custom eryx-guest-python instead of componentize-py's runtime.
 ///
 /// # Arguments
 ///

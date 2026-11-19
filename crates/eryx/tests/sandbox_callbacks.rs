@@ -305,11 +305,11 @@ fn runtime_wasm_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
-        .join("runtime.wasm")
+        .join("runtime-python.wasm")
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     // Check ERYX_PYTHON_STDLIB env var first (used in CI)
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
@@ -323,13 +323,13 @@ fn python_stdlib_path() -> PathBuf {
     PathBuf::from(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib")
 }
 
 /// Create a sandbox builder with the appropriate WASM source.
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has> {
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
@@ -339,7 +339,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     // Fallback to explicit paths for testing without embedded feature
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
             .with_python_stdlib(&stdlib_path)

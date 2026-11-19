@@ -202,18 +202,13 @@ pub enum ErrorKind {
     WasmComponent(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// A precompiled runtime (a `.cwasm` file, embedded runtime or saved
-    /// factory) was built by a different eryx version.
+    /// factory) was built by a different eryx version, or, in a build from
+    /// an eryx checkout, from other guest sources than this eryx's.
     ///
     /// Precompiled files only load in the eryx version that built them, so
     /// they have to be rebuilt after every eryx upgrade: with the matching
     /// `eryx-precompile`, or by re-saving the factory.
-    #[error(
-        "this precompiled runtime was built by {}, but this is {expected}. \
-         Precompiled runtimes and saved factories only load in the eryx version \
-         that built them: rebuild it with eryx-precompile {}, or re-save the factory",
-        describe_built_by(built_by),
-        env!("CARGO_PKG_VERSION")
-    )]
+    #[error("{}", incompatible_message(built_by, expected, *guest))]
     #[non_exhaustive]
     IncompatiblePrecompiled {
         /// The version string stored in the file, e.g. `eryx 0.13.0 (wasmtime 50)`.
@@ -222,31 +217,61 @@ pub enum ErrorKind {
         built_by: String,
         /// The version string this eryx build expects.
         expected: String,
+        /// The language whose guest sources differ, when the eryx version
+        /// matches but the runtime was built from other guest sources (a
+        /// development build); `None` for a version mismatch.
+        guest: Option<crate::Language>,
     },
 
-    /// Error during Python execution machinery (e.g. a WASM trap, the store or
+    /// A command imports interfaces children aren't given, so it can't be
+    /// registered. [`Command::inspect`](crate::Command::inspect) lists all of
+    /// a command's imports.
+    #[error("{}", crate::process::missing_message(missing))]
+    #[non_exhaustive]
+    CommandImports {
+        /// Each import children don't get, with why.
+        missing: Vec<crate::CommandImport>,
+    },
+
+    /// A command file's sha256 isn't the pinned one
+    /// ([`Command::from_file_expecting`](crate::Command::from_file_expecting),
+    /// [`Command::load_cached`](crate::Command::load_cached)).
+    #[error("command digest mismatch: expected {expected}, got {actual}")]
+    #[non_exhaustive]
+    CommandDigest {
+        /// The pinned digest, `sha256:<hex>`.
+        expected: String,
+        /// The file's digest, or why `expected` isn't a sha256 digest.
+        actual: String,
+    },
+
+    /// Error during execution machinery (e.g. a WASM trap, the store or
     /// bindings being unavailable, or invalid input). This is a *sandbox* failure
-    /// — the runtime could not faithfully execute the script. An uncaught
-    /// exception raised *by* the script is [`ErrorKind::PythonException`] instead.
+    /// — the runtime could not faithfully execute the script. A failure of the
+    /// script itself is [`ErrorKind::ScriptFailed`] instead.
     #[error("execution failed: {0}")]
     Execution(String),
 
-    /// The script raised an uncaught Python exception. `traceback` is the
-    /// traceback exactly as CPython would have written it to stderr. This is
-    /// a *script* failure, not a sandbox failure: the runtime ran the code
+    /// The script failed: it raised an uncaught exception (Python,
+    /// JavaScript) or exited with a failure status (a shell). This is a
+    /// *script* failure, not a sandbox failure: the runtime ran the code
     /// faithfully and the code itself errored.
     ///
-    /// The output the script wrote before it raised is kept in `stdout` and
+    /// The output the script wrote before it failed is kept in `stdout` and
     /// `stderr` (also via [`Error::stdout`] and [`Error::stderr`]); `stderr`
     /// includes the traceback, as for a successful run.
-    #[error("{traceback}")]
+    #[error("{message}")]
     #[non_exhaustive]
-    PythonException {
-        /// The traceback, as CPython would have written it to stderr.
-        traceback: String,
-        /// Raw stdout captured before the exception.
+    ScriptFailed {
+        /// What the guest reported: for Python, the traceback exactly as
+        /// CPython would have written it to stderr.
+        message: String,
+        /// The script's exit status, for guests that have one (a shell).
+        /// `None` for Python and JavaScript, whose scripts fail by raising.
+        exit_code: Option<i32>,
+        /// Raw stdout captured before the failure.
         stdout: Vec<u8>,
-        /// Raw stderr captured up to the exception, including the traceback.
+        /// Raw stderr captured up to the failure, including any traceback.
         stderr: Vec<u8>,
     },
 
@@ -276,15 +301,33 @@ pub enum ErrorKind {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    /// Python stdlib not found during auto-detection.
+    /// The language's stdlib was not found during auto-detection.
     ///
-    /// Use [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
+    /// Only Python has a separate stdlib. Use
+    /// [`SandboxBuilder::with_python_stdlib()`](crate::SandboxBuilder::with_python_stdlib)
     /// to specify the stdlib path explicitly, or enable the `embedded` feature and use
     /// [`Sandbox::embedded()`](crate::Sandbox::embedded).
+    #[error("{language} stdlib not found{}", missing_stdlib_hint(*language))]
+    #[non_exhaustive]
+    MissingStdlib {
+        /// The language whose stdlib is missing.
+        language: crate::Language,
+    },
+
+    /// No runtime was supplied for the selected language, and this build
+    /// embeds none for it (a language's runtime is embedded with the
+    /// `embedded` feature and that language's feature).
+    ///
+    /// Supply one with [`SandboxBuilder::with_wasm_file()`](crate::SandboxBuilder::with_wasm_file)
+    /// or a precompiled equivalent.
     #[error(
-        "Python stdlib not found. Set ERYX_PYTHON_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
+        "no {language} runtime is embedded in this build of eryx; supply one with with_wasm_file() or with_precompiled_file()"
     )]
-    MissingPythonStdlib,
+    #[non_exhaustive]
+    MissingRuntime {
+        /// The language that has no runtime.
+        language: crate::Language,
+    },
 
     /// State snapshot error.
     #[error("snapshot error: {0}")]
@@ -301,6 +344,18 @@ pub enum ErrorKind {
     IncompatibleSnapshot {
         /// The format version stored in the snapshot.
         format_version: u8,
+    },
+
+    /// The guest can't read a state snapshot's data: its guest-specific state
+    /// format (for the shell, the brush version that serialized it) isn't the
+    /// one this runtime reads.
+    #[error("this snapshot's state is in format {snapshot:?}, but this runtime reads {runtime:?}")]
+    #[non_exhaustive]
+    IncompatibleStateFormat {
+        /// The format the snapshot's state is in (empty if it has none).
+        snapshot: String,
+        /// The format this runtime reads.
+        runtime: String,
     },
 
     /// Execution was cancelled.
@@ -324,26 +379,57 @@ pub enum ErrorKind {
     Io(#[from] std::io::Error),
 }
 
+/// How to supply `language`'s stdlib, for [`ErrorKind::MissingStdlib`].
+fn missing_stdlib_hint(language: crate::Language) -> &'static str {
+    match language {
+        crate::Language::Python => {
+            ". Set ERYX_STDLIB, use with_python_stdlib(), or use Sandbox::embedded()"
+        }
+        // Only Python has a stdlib apart from its runtime, so only Python
+        // raises this; the Python hints would mislead for anything else.
+        _ => "",
+    }
+}
+
 impl Error {
-    /// The stdout the script wrote before it raised, or `None` if the guest
+    /// The stdout the script wrote before it failed, or `None` if the guest
     /// did not get as far as running it (and for a timeout, fuel limit or
     /// cancellation, which stop the guest before it can report its output).
     #[must_use]
     pub fn stdout(&self) -> Option<&[u8]> {
         match &self.kind {
-            ErrorKind::PythonException { stdout, .. } => Some(stdout),
+            ErrorKind::ScriptFailed { stdout, .. } => Some(stdout),
             _ => None,
         }
     }
 
-    /// The stderr captured up to the exception, including the traceback;
+    /// The stderr captured up to the failure, including any traceback;
     /// `None` in the same cases as [`Error::stdout`].
     #[must_use]
     pub fn stderr(&self) -> Option<&[u8]> {
         match &self.kind {
-            ErrorKind::PythonException { stderr, .. } => Some(stderr),
+            ErrorKind::ScriptFailed { stderr, .. } => Some(stderr),
             _ => None,
         }
+    }
+}
+
+/// The message for [`ErrorKind::IncompatiblePrecompiled`].
+fn incompatible_message(built_by: &str, expected: &str, guest: Option<crate::Language>) -> String {
+    match guest {
+        Some(language) => format!(
+            "this precompiled {language} runtime was built from other {language} guest \
+             sources than this eryx ({built_by}, but this is {expected}): rebuild the \
+             runtime (`mise run precompile-runtime-{language}` in the eryx checkout, or \
+             eryx-precompile), or re-save the factory"
+        ),
+        None => format!(
+            "this precompiled runtime was built by {}, but this is {expected}. \
+             Precompiled runtimes and saved factories only load in the eryx version \
+             that built them: rebuild it with eryx-precompile {}, or re-save the factory",
+            describe_built_by(built_by),
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 
@@ -370,8 +456,8 @@ impl From<serde_json::Error> for ErrorKind {
 /// Currently this rejects embedded NUL bytes: the code is handed to the guest
 /// as a C string, so a NUL would be caught there and surface as an opaque guest
 /// error. Validating host-side keeps it classified as a sandbox/input failure
-/// ([`ErrorKind::Execution`]) rather than being mistaken for an uncaught Python
-/// exception ([`ErrorKind::PythonException`]).
+/// ([`ErrorKind::Execution`]) rather than being mistaken for a script failure
+/// ([`ErrorKind::ScriptFailed`]).
 pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
     if code.contains('\0') {
         return Err(ErrorKind::Execution(
@@ -380,4 +466,21 @@ pub(crate) fn validate_user_code(code: &str) -> Result<(), Error> {
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_stdlib_hints_are_per_language() {
+        let python = Error::from(ErrorKind::MissingStdlib {
+            language: crate::Language::Python,
+        });
+        assert!(python.to_string().contains("with_python_stdlib()"));
+        let shell = Error::from(ErrorKind::MissingStdlib {
+            language: crate::Language::Shell,
+        });
+        assert_eq!(shell.to_string(), "shell stdlib not found");
+    }
 }

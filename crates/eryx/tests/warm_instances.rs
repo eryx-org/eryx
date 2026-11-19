@@ -259,8 +259,8 @@ async fn warm_instances_are_kept_for_a_bounded_number_of_components() {
 /// correctly initialised instance.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtimes_without_preinit_are_not_warmed() {
-    let wasm =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/runtime.wasm");
+    let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../eryx-runtime/runtime-python.wasm");
     let stdlib = eryx::embedded::EmbeddedResources::get().unwrap().stdlib();
     let sandbox = Sandbox::builder()
         .with_wasm_file(wasm)

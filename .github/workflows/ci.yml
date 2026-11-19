@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # multi-guest too, so its merges save the caches its PRs restore (a PR's
+    # own caches are scoped to it). Only pushes save; see the save steps.
+    branches: [main, multi-guest]
     # Release tags (pushed by release-plz via the GitHub App token) so the
     # docker job can publish a version-tagged image, e.g. sd2k/eryx-server:0.5.0.
     tags: ['eryx-v[0-9]+.[0-9]+.[0-9]+']
@@ -13,11 +15,11 @@ on:
     # a tag (rust-cache via lookup-only, kache and the rest via their own inputs or an
     # `if:`). See zizmor's cache-poisoning audit.
   pull_request:
-    branches: [main]
+    branches: [main, multi-guest]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -38,6 +40,11 @@ env:
   # commit are those building from the checkout: Build eryx-runtime on a cache
   # miss, and the MSRV and platform checks on every core change.
   ERYX_REQUIRE_FRESH_PREBUILT: "1"
+  # Which sd2k/eryx-server variant gets the unsuffixed tags (0.16.0, latest,
+  # ...): `all-languages` or `python-only`. The other variant's tags get a
+  # suffix: `-python` for the Python-only image, `-all` for the
+  # all-languages one. All-languages, decided in #847.
+  DOCKER_UNSUFFIXED_VARIANT: all-languages
 
 jobs:
   # Detect which paths changed to skip unnecessary jobs.
@@ -49,6 +56,11 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      # Whether to run the whole suite. PRs into multi-guest run a fast
+      # subset (lint, fmt, Linux tests and what they need, feature checks);
+      # everything else (pushes, PRs into main, tags) runs everything. The
+      # jobs left out check `full` in their `if:`, so they report as skipped.
+      full: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
@@ -58,6 +70,9 @@ jobs:
       examples: ${{ steps.filter.outputs.examples }}
       js: ${{ steps.filter.outputs.js }}
       demo: ${{ steps.filter.outputs.demo }}
+      bundler: ${{ steps.filter.outputs.bundler }}
+      shell: ${{ steps.filter.outputs.shell }}
+      notices: ${{ steps.filter.outputs.notices }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,10 +85,16 @@ jobs:
               - 'crates/eryx-core/**'
               - 'crates/eryx/**'
               - 'crates/eryx-vfs/**'
-              - 'crates/eryx-wasm-runtime/**'
+              - 'crates/eryx-guest-python/**'
+              - 'crates/eryx-guest-js/**'
+              - 'crates/eryx-guest-call/**'
+              - 'crates/eryx-guest-shell/**'
               - 'crates/eryx-runtime/**'
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
+              # A unit test in crates/eryx keeps the JS SDK's copy of the
+              # reserved callback names current (#962).
+              - 'js/eryx/shims/reserved-names.js'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - '.github/workflows/ci.yml'
@@ -104,6 +125,47 @@ jobs:
               - 'js/**'
             demo:
               - 'demo/**'
+            bundler:
+              - 'crates/eryx-bundler/**'
+              - 'mise.toml'
+              - '.github/workflows/ci.yml'
+            # What the Test job's shell-only step (no unstable-vfs) checks: the
+            # shell guest, VFS, child processes and environments. Pull
+            # requests touching none of it skip that step; pushes always run it.
+            shell:
+              - 'crates/eryx-guest-shell/**'
+              - 'crates/eryx-vfs/**'
+              - 'crates/eryx/Cargo.toml'
+              - 'crates/eryx/build.rs'
+              - 'crates/eryx/src/process.rs'
+              - 'crates/eryx/src/process/**'
+              - 'crates/eryx/src/session/**'
+              - 'crates/eryx/src/environment/**'
+              - 'crates/eryx/src/embedded.rs'
+              - 'crates/eryx/tests/shell_guest.rs'
+              - 'crates/eryx/tests/commands.rs'
+              - 'crates/eryx/tests/p3_guest.rs'
+              - 'crates/eryx/tests/pack.rs'
+              - 'crates/eryx/tests/js_environment.rs'
+              - 'crates/eryx/tests/fixtures/**'
+              - '.github/workflows/ci.yml'
+            # What the third-party notices are made from (#837).
+            notices:
+              - '**/Cargo.lock'
+              - '**/Cargo.toml'
+              - 'crates/eryx/python-stdlib.tar.*'
+              - 'crates/eryx-runtime/prebuilt/**'
+              - 'about.toml'
+              - 'third_party/**'
+              - 'scripts/notices.py'
+              - 'scripts/*update_preview1_adapter.py'
+              - 'crates/eryx-runtime/libs/**'
+              - 'crates/eryx-guest-js/src/node/**'
+              - 'clis/coreutils.toml'
+              - 'mise.toml'
+              # The toolchain whose standard library the notices list.
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
 
   # Fast check for dependency drift - runs in parallel with build
   unify-check:
@@ -128,8 +190,9 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install protoc for eryx-server build.rs
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
@@ -141,6 +204,30 @@ jobs:
         run: cargo rail unify --check
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+  # Third-party notices (#837): every shipped crate's licence is one
+  # about.toml accepts, and every vendored non-Rust input has an entry in
+  # third_party/manual.toml with its current version. Reads the lock files
+  # only; nothing is built.
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.notices == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check the notices
+        run: mise run notices-check
+
+      - name: Test the preview1 adapter sync
+        run: python3 -m unittest discover -s scripts -p 'test_update_preview1_adapter.py'
 
   # The bundled stdlib ships precompiled bytecode (the sandbox mounts it
   # read-only, so Python can't cache it). Fail if it drifts from the sources.
@@ -162,9 +249,9 @@ jobs:
       - name: Check stdlib bytecode is up to date
         run: scripts/compile-stdlib.sh --check
 
-  # Build eryx-wasm-runtime and precompile it - other jobs depend on this.
+  # Build eryx-guest-python and precompile it - other jobs depend on this.
   # Runs when core paths change, or when any downstream job needs WASM artifacts.
-  build-eryx-runtime:
+  build-runtime-python:
     name: Build eryx-runtime
     runs-on: ubuntu-latest
     needs: changes
@@ -189,15 +276,15 @@ jobs:
         # not evaluate a step `if:` for actions/cache, and lookup-only would
         # report a hit without restoring the files, hence the ignore.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            crates/eryx-runtime/runtime.wasm
-            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-python.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
-            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+            crates/eryx-guest-python/target/liberyx_runtime.so
           # NOTE: this key does not cover the cwasm's CPU-feature configuration,
           # which comes from `ERYX_CPU_FEATURES` below and the flag lists in
           # crates/eryx/src/wasm.rs (compiled into the `precompile` example).
@@ -207,19 +294,21 @@ jobs:
           # Windows cwasm built alongside the Linux one, v5 -> v6 for the macOS one,
           # v6 -> v7 for the eryx version stored in every cwasm (engine config in
           # crates/eryx/src/wasm.rs). The version itself comes from Cargo.toml,
-          # which the key covers.
-          key: wasm-runtime-v7-${{ hashFiles('crates/eryx-wasm-runtime/src/**', 'crates/eryx-wasm-runtime/clock_stubs.c', 'crates/eryx-wasm-runtime/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml') }}
+          # which the key covers. v7 -> v8: the engine enables the component
+          # model's more async builtins (#816). v8 -> v9: runtimes carry their
+          # guest-sources hash, so a stale one fails to load.
+          key: wasm-runtime-v9-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
         run: |
           # Touch all cached files so mise/make consider them current
-          touch crates/eryx-runtime/runtime.wasm
-          touch crates/eryx-runtime/runtime.cwasm
+          touch crates/eryx-runtime/runtime-python.wasm
+          touch crates/eryx-runtime/runtime-python.cwasm
           touch crates/eryx-runtime/runtime-windows.cwasm
           touch crates/eryx-runtime/runtime-macos.cwasm
           touch crates/eryx-runtime/prebuilt/*
-          touch crates/eryx-wasm-runtime/target/liberyx_runtime.so
+          touch crates/eryx-guest-python/target/liberyx_runtime.so
 
       - name: Upload WASM artifacts (cache hit)
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -227,12 +316,12 @@ jobs:
         with:
           name: wasm-runtime
           path: |
-            crates/eryx-runtime/runtime.wasm
-            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-python.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
-            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+            crates/eryx-guest-python/target/liberyx_runtime.so
           retention-days: 1
 
       - uses: ./.github/actions/setup-rust
@@ -244,26 +333,27 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          # PR caches can't be read by other PRs and evict main's (10GB repo limit).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Force rebuild (cache may have stale timestamps)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         run: |
           # Touch ALL sources to ensure mise doesn't skip build due to cached timestamps
           # The Rust cache may restore .rlib files with newer timestamps than sources
-          find crates/eryx-wasm-runtime/src -name "*.rs" -exec touch {} +
-          touch crates/eryx-wasm-runtime/clock_stubs.c
-          touch crates/eryx-wasm-runtime/Cargo.toml
+          find crates/eryx-guest-python/src -name "*.rs" -exec touch {} +
+          touch crates/eryx-guest-python/clock_stubs.c
+          touch crates/eryx-guest-python/Cargo.toml
           # Remove outputs (mise checks mtime, not existence)
-          rm -f crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
+          rm -f crates/eryx-runtime/runtime-python.wasm crates/eryx-runtime/runtime-python.cwasm
           # Clean nested build-std target dirs to avoid stale std artifacts
           # when the nightly toolchain updates between runs
           rm -rf target/release/build/eryx-runtime-*/out/wasm-runtime-target target/release/build/eryx-runtime/*/out/wasm-runtime-target
 
       - name: Build eryx-runtime
         if: steps.wasm-cache.outputs.cache-hit != 'true'
-        run: mise run build-eryx-runtime
+        run: mise run build-runtime-python
 
       - name: Copy prebuilt late-linking artifacts
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -273,11 +363,11 @@ jobs:
           # (not just any OUT_DIR - the preinit build creates a new one without .so files)
           OUT_DIR=$(find target/release -path "*/eryx-runtime*/out/liberyx_runtime.so" -type f | head -1 | xargs dirname)
           echo "Found OUT_DIR: $OUT_DIR"
-          # Also copy liberyx_runtime.so for eryx-wasm-runtime tests now, before preinit build
-          mkdir -p crates/eryx-wasm-runtime/target
-          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-wasm-runtime/target/
+          # Also copy liberyx_runtime.so for eryx-guest-python tests now, before preinit build
+          mkdir -p crates/eryx-guest-python/target
+          cp "$OUT_DIR/liberyx_runtime.so" crates/eryx-guest-python/target/
           ls -la crates/eryx-runtime/prebuilt/
-          ls -la crates/eryx-wasm-runtime/target/
+          ls -la crates/eryx-guest-python/target/
 
       - name: Set up python-stdlib for preinit
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -304,24 +394,372 @@ jobs:
           # Use x86-64-v2 for portable cwasm across runner types
           ERYX_CPU_FEATURES: "x86-64-v2"
 
+      - name: Save WASM runtime artifacts
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-python.cwasm
+            crates/eryx-runtime/runtime-windows.cwasm
+            crates/eryx-runtime/runtime-macos.cwasm
+            crates/eryx-runtime/prebuilt/
+            crates/eryx-guest-python/target/liberyx_runtime.so
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
       - name: Upload WASM artifacts (cache miss)
         if: steps.wasm-cache.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-runtime
           path: |
-            crates/eryx-runtime/runtime.wasm
-            crates/eryx-runtime/runtime.cwasm
+            crates/eryx-runtime/runtime-python.wasm
+            crates/eryx-runtime/runtime-python.cwasm
             crates/eryx-runtime/runtime-windows.cwasm
             crates/eryx-runtime/runtime-macos.cwasm
             crates/eryx-runtime/prebuilt/
-            crates/eryx-wasm-runtime/target/liberyx_runtime.so
+            crates/eryx-guest-python/target/liberyx_runtime.so
+          retention-days: 1
+
+  # Build and precompile the JavaScript guest runtime. It has its own cache key,
+  # over only what it is built from, so changing another guest doesn't
+  # rebuild it. Also cross-compiles the Windows and macOS cwasms the
+  # pyeryx jobs embed.
+  build-runtime-javascript:
+    name: Build JavaScript runtime
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache JavaScript runtime
+        id: wasm-cache
+        # See the Python runtime's cache step for the tag-build caveats.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-javascript.wasm
+            crates/eryx-runtime/runtime-javascript.cwasm
+            crates/eryx-runtime/runtime-javascript-windows.cwasm
+            crates/eryx-runtime/runtime-javascript-macos.cwasm
+          # As with the Python key, the cwasm's engine and CPU-feature settings
+          # aren't covered: bump the prefix when they change. v1 -> v2: v1
+          # cwasms were built without the CPU presets (host features). v3 -> v4:
+          # more async builtins (#816). v4 -> v5: the guest-sources hash.
+          key: wasm-runtime-javascript-v5-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
+      - name: Configure Rust cache
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prefix-key: v2
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
+
+      - name: Build and precompile
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: |
+          mise run build-runtime-javascript
+          # The precompile example cross-compiles and pre-initializes, as for
+          # the Python runtime (`preinit` also lets it apply ERYX_CPU_FEATURES).
+          compile() {
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
+          }
+          export ERYX_WASM_PATH=crates/eryx-runtime/runtime-javascript.wasm ERYX_LANGUAGE=javascript
+          # Portable CPU features, as for the Python runtime.
+          compile x86-64-v2 --output crates/eryx-runtime/runtime-javascript.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/runtime-javascript-windows.cwasm
+          # aarch64 has no psABI presets, so "baseline" is the portable setting.
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/runtime-javascript-macos.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save JavaScript runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-javascript.wasm
+            crates/eryx-runtime/runtime-javascript.cwasm
+            crates/eryx-runtime/runtime-javascript-windows.cwasm
+            crates/eryx-runtime/runtime-javascript-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
+      - name: Upload JavaScript runtime
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-runtime-guest-javascript
+          path: crates/eryx-runtime/runtime-javascript*
+          retention-days: 1
+
+  # Build and precompile the shell guest runtime. It has its own cache key,
+  # over only what it is built from, so changing another guest doesn't
+  # rebuild it. Also cross-compiles the Windows and macOS cwasms the
+  # pyeryx jobs embed.
+  build-runtime-shell:
+    name: Build shell runtime
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache shell runtime
+        id: wasm-cache
+        # See the Python runtime's cache step for the tag-build caveats.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-shell.wasm
+            crates/eryx-runtime/runtime-shell.cwasm
+            crates/eryx-runtime/runtime-shell-windows.cwasm
+            crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
+          # As with the Python key, the cwasm's engine and CPU-feature settings
+          # aren't covered: bump the prefix when they change. v1 -> v2: v1
+          # cwasms were built without the CPU presets (host features). v2 -> v3:
+          # the shell's embedded coreutils (#809). v3 -> v4: the shell is
+          # built for wasm32-wasip3. v4 -> v5: more async builtins (#816). v5 -> v6:
+          # coreutils.cwasm carries its instance-metadata stamp (#942). v6 -> v7:
+          # the guest-sources hash. v7 -> v8: the precompile example stamps
+          # coreutils.cwasm too (it never had, so v7's were unstamped).
+          key: wasm-runtime-shell-v8-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
+      - name: Configure Rust cache
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prefix-key: v2
+          # PR caches can't be read by other PRs and evict main's (10GB repo limit),
+          # so only pushes to main and multi-guest save.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
+
+      - name: Build and precompile
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: |
+          mise run build-runtime-shell
+          # The precompile example cross-compiles, as for the Python runtime.
+          # `preinit` is what lets it apply ERYX_CPU_FEATURES; it doesn't
+          # pre-initialize the shell.
+          compile() {
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
+          }
+          export ERYX_WASM_PATH=crates/eryx-runtime/runtime-shell.wasm ERYX_LANGUAGE=shell
+          # Portable CPU features, as for the Python runtime.
+          compile x86-64-v2 --output crates/eryx-runtime/runtime-shell.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/runtime-shell-windows.cwasm
+          # aarch64 has no psABI presets, so "baseline" is the portable setting.
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/runtime-shell-macos.cwasm
+
+          # The shell's embedded commands (the `coreutils` feature): built from
+          # clis/coreutils.toml, precompiled like the runtime but as a command.
+          mise run build-coreutils
+          export ERYX_WASM_PATH=crates/eryx-runtime/coreutils.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/coreutils.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/coreutils-windows.cwasm
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/coreutils-macos.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save shell runtime
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/runtime-shell.wasm
+            crates/eryx-runtime/runtime-shell.cwasm
+            crates/eryx-runtime/runtime-shell-windows.cwasm
+            crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.cwasm
+            crates/eryx-runtime/coreutils-windows.cwasm
+            crates/eryx-runtime/coreutils-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
+      - name: Upload shell runtime
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-runtime-guest-shell
+          path: |
+            crates/eryx-runtime/runtime-shell*
+            crates/eryx-runtime/coreutils*.cwasm
+          retention-days: 1
+
+  # The shell guest is its own workspace (see AGENTS.md), so the workspace
+  # lint jobs don't cover it.
+  shell-guest-lint:
+    name: Shell guest lint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Check formatting
+        working-directory: crates/eryx-guest-shell
+        run: cargo fmt --check
+
+      # The guest is its own workspace, so it keeps copies of the host's WIT.
+      - name: WIT copies match the host's
+        run: |
+          cmp crates/eryx-runtime/wit/runtime.wit crates/eryx-guest-shell/wit/deps/sandbox.wit
+          cmp crates/eryx-runtime/wit/deps/net.wit crates/eryx-guest-shell/wit/deps/net.wit
+          cmp crates/eryx-runtime/wit/deps/process.wit crates/eryx-guest-shell/wit/deps/process.wit
+
+      # It ships for WASI 0.3, and for WASI 0.2 in js/eryx.
+      - name: Clippy
+        working-directory: crates/eryx-guest-shell
+        run: |
+          rustup target add wasm32-wasip2 wasm32-wasip3
+          cargo clippy --locked --target wasm32-wasip3 -- -D warnings
+          cargo clippy --locked --target wasm32-wasip2 -- -D warnings
+
+      # The argument parsing and builtins are plain Rust, so their unit tests
+      # run natively.
+      - name: Unit tests
+        working-directory: crates/eryx-guest-shell
+        run: cargo test --locked --lib
+
+  # The JavaScript bundler (rolldown as a WASI command), its own workspace,
+  # embedded by eryx's `env-pack` feature: builds with --all-features need
+  # its cwasm, so this runs whenever the runtimes do.
+  build-bundler:
+    name: Build bundler
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.book == 'true'
+      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.js == 'true'
+      || needs.changes.outputs.demo == 'true'
+      || needs.changes.outputs.bundler == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache bundler
+        id: wasm-cache
+        # See the Python runtime's cache step for the tag-build caveats.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/eryx-bundler.wasm
+            crates/eryx-runtime/eryx-bundler.cwasm
+            crates/eryx-runtime/eryx-bundler-windows.cwasm
+            crates/eryx-runtime/eryx-bundler-macos.cwasm
+          # As for the runtimes, the cwasm's engine and CPU-feature settings
+          # aren't covered: bump the prefix when they change. v1 -> v2: more
+          # async builtins (#816). v2 -> v3: the instance-metadata stamp (#942).
+          # v3 -> v4: v3's were still unstamped (the precompile example didn't
+          # stamp commands; precompiling does now, and the example checks it).
+          key: wasm-bundler-v4-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+
+      - name: Lint, test and smoke-test
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: mise run test-bundler
+
+      - name: Precompile
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: |
+          compile() {
+            ERYX_CPU_FEATURES="$1" cargo run -p eryx --example precompile --features preinit --release -- "${@:2}"
+          }
+          # A command, like coreutils: portable CPU features, as for the runtimes.
+          export ERYX_WASM_PATH=crates/eryx-runtime/eryx-bundler.wasm ERYX_LANGUAGE=command
+          compile x86-64-v2 --output crates/eryx-runtime/eryx-bundler.cwasm
+          compile x86-64-v2 --target x86_64-pc-windows-msvc \
+            --output crates/eryx-runtime/eryx-bundler-windows.cwasm
+          # aarch64 has no psABI presets, so "baseline" is the portable setting.
+          compile baseline --target aarch64-apple-darwin \
+            --output crates/eryx-runtime/eryx-bundler-macos.cwasm
+        env:
+          ERYX_PRECOMPILE_BOOTSTRAP: "1"
+
+      - name: Save bundler
+        # Pushes to main and multi-guest save; PRs only restore (a PR's
+        # caches are scoped to it, and would only evict main's).
+        if: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest') && steps.wasm-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/eryx-runtime/eryx-bundler.wasm
+            crates/eryx-runtime/eryx-bundler.cwasm
+            crates/eryx-runtime/eryx-bundler-windows.cwasm
+            crates/eryx-runtime/eryx-bundler-macos.cwasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
+
+      # Named like the guest runtimes, so the jobs that download those get it.
+      - name: Upload bundler
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-runtime-guest-bundler
+          path: crates/eryx-runtime/eryx-bundler*
           retention-days: 1
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -343,6 +781,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -352,7 +797,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -374,7 +819,7 @@ jobs:
         # A test that needs more features than it is gated on fails to build
         # here, rather than only for whoever runs it with that one feature.
         run: |
-          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals; do
+          for features in macros embedded-stdlib embedded preinit native-extensions unstable-vfs unstable-internals javascript shell; do
             echo "::group::--features $features"
             cargo check -p eryx --tests --features "$features"
             echo "::endgroup::"
@@ -383,12 +828,22 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'
+    permissions:
+      contents: read # to check out the repository
+      packages: read # to pull eryx-org/eryx-commands' published gh and git below
     steps:
+      # The full run and the shell-only run below each build a feature set of
+      # the workspace, which a cold kache can't fit in the runner's free disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -399,17 +854,24 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
-      - name: Set up eryx-wasm-runtime test artifacts
+      - name: Set up eryx-guest-python test artifacts
         run: |
-          # Extract python stdlib for eryx-wasm-runtime tests (from checked-in archive)
-          mkdir -p crates/eryx-wasm-runtime/tests/python-stdlib
-          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-wasm-runtime/tests/
+          # Extract python stdlib for eryx-guest-python tests (from checked-in archive)
+          mkdir -p crates/eryx-guest-python/tests/python-stdlib
+          tar -xf crates/eryx/python-stdlib.tar.zst -C crates/eryx-guest-python/tests/
           # Create empty site-packages directory (tests expect it)
-          mkdir -p crates/eryx-wasm-runtime/tests/site-packages
-          ls -la crates/eryx-wasm-runtime/target/
-          find crates/eryx-wasm-runtime/tests/python-stdlib/ -mindepth 1 -maxdepth 1 | sort | head -10
+          mkdir -p crates/eryx-guest-python/tests/site-packages
+          ls -la crates/eryx-guest-python/target/
+          find crates/eryx-guest-python/tests/python-stdlib/ -mindepth 1 -maxdepth 1 | sort | head -10
 
       # For crates/eryx/tests/pooling_native_extensions.rs.
       - name: Download numpy-wasi
@@ -451,9 +913,10 @@ jobs:
 
       # kache (per-crate compiler cache) in place of rust-cache on the two
       # slowest compile-bound jobs. Its store goes in the Actions cache, one
-      # entry per lockfile, saved from main only (like rust-cache's save-if) so
-      # PR runs never evict main's entries. Build-script outputs are cached
-      # too, which a remote (S3/R2) backend can't do.
+      # entry per lockfile, saved from main and multi-guest pushes only (like
+      # rust-cache's save-if) so PR runs never evict their entries.
+      # Build-script outputs are cached too, which a remote (S3/R2) backend
+      # can't do.
       - name: Configure kache
         id: kache
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -465,24 +928,138 @@ jobs:
           # hashes Cargo.lock, and an exact hit never re-saves, so rebuilt deps
           # would otherwise be recompiled every run until the lockfile changes.
           cache-key-prefix: kache-test-p2
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           pr-comment: false
 
+      # Tests build small guests of their own: a wasm32-wasip3 probe
+      # (crates/eryx-vfs/tests/p3_filesystem.rs), a wasm32-wasip3 guest
+      # (crates/eryx/tests/p3_guest.rs) and a command built for both
+      # (crates/eryx/tests/commands.rs, child_network.rs), and for
+      # wasm32-wasip1, which eryx adapts into a component (#993).
+      - name: Install wasm32-wasip1, wasm32-wasip2 and wasm32-wasip3 targets
+        id: targets
+        run: rustup target add wasm32-wasip1 wasm32-wasip2 wasm32-wasip3
+
+      # The opt-in CLI child tests: a Go-built gh (WASI 0.3) reaching
+      # api.github.com through the child proxy (#927), and C git running
+      # `git` itself (#830) and cloning, fetching and pushing over HTTP(S)
+      # with a secret (#1042). They're eryx-org/eryx-commands' published
+      # builds, pinned by manifest digest (versions in the comments). cosign
+      # checks each was signed by eryx-commands' publish workflow on main,
+      # and its wasm layer is fetched by the digest that signed manifest
+      # names, which eryx-commands' commands.lock records too.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.event_name == 'push'
+        with:
+          cosign-release: v3.1.4
+      - uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+        if: github.event_name == 'push'
+        with:
+          version: 1.3.6
+      - name: Pull the CLI components
+        id: components
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          # eryx/gh 2.87.3-r.3
+          GH_REF: ghcr.io/eryx-org/commands/eryx/gh@sha256:ba2fa499c0e3129b32d0f2c8079709a32e1a2759943f52aefad266c7d9d2b16a
+          GH_LAYER: sha256:609bd7da3b2c20123b31158fa578aa50bc8d4c0da755f9b160f214611f71c3f0
+          # eryx-gpl/git 2.56.1-r.2
+          GIT_REF: ghcr.io/eryx-org/commands/eryx-gpl/git@sha256:0bea155f8d28b90676dcbc3efcbc9670e1d604c535a54347f9480d0de4c7bf21
+          GIT_LAYER: sha256:387502da2e137c5a47b28f74748063efa163b61f3cda46dd09962f085c5f748b
+          IDENTITY: https://github.com/eryx-org/eryx-commands/.github/workflows/ci.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          echo "$GH_TOKEN" | oras login ghcr.io -u "$ACTOR" --password-stdin
+          mkdir -p scratch
+          for cli in gh git; do
+            ref_var="${cli^^}_REF" layer_var="${cli^^}_LAYER"
+            ref="${!ref_var}" layer="${!layer_var}"
+            cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+              "$ref" > /dev/null
+            got=$(oras manifest fetch "$ref" \
+              | jq -r '[.layers[] | select(.mediaType == "application/wasm")] | if length == 1 then .[0].digest else empty end')
+            if [ "$got" != "$layer" ]; then
+              echo "::error::$ref has wasm layer '$got', not the pinned $layer"
+              exit 1
+            fi
+            oras blob fetch --output "scratch/$cli.wasm" "${ref%@*}@$layer"
+            echo "$cli=$PWD/scratch/$cli.wasm" >> "$GITHUB_OUTPUT"
+          done
+
+      # The same command line as the main run below, which then reuses this
+      # build (`-p eryx` alone would unify features differently). It runs on
+      # pushes, where the components are pulled above.
+      - name: Run the CLI child tests
+        if: steps.components.outputs.gh != '' || steps.components.outputs.git != ''
+        env:
+          ERYX_TEST_GH_WASM: ${{ steps.components.outputs.gh }}
+          ERYX_TEST_GIT_WASM: ${{ steps.components.outputs.git }}
+        run: |
+          tests=()
+          if [ -n "$ERYX_TEST_GH_WASM" ]; then
+            tests+=('test(=p3_gh_reaches_github_through_the_proxy)')
+          fi
+          if [ -n "$ERYX_TEST_GIT_WASM" ]; then
+            tests+=('test(=git_stash_runs_git_itself)')
+            tests+=('test(=git_clones_fetches_and_pushes_over_http_with_a_secret)')
+            tests+=('test(=git_authenticates_without_writing_the_secret_to_a_file)')
+            tests+=('test(=git_authenticates_with_a_credential_the_sandbox_never_sees)')
+            tests+=('test(=git_clones_from_github_over_https)')
+          fi
+          filter=$(IFS='|'; echo "${tests[*]}")
+          cargo nextest run --workspace --all-features --profile ci \
+            --run-ignored only -E "$filter"
+
+      # Runs whether or not the CLI child tests above failed (the gh one
+      # reaches the real api.github.com), as long as the setup succeeded.
       - name: Run tests
+        id: tests
+        if: ${{ !cancelled() && steps.targets.outcome == 'success' }}
         # Use --all-features to test everything. This works because:
-        # - runtime.wasm and runtime.cwasm are provided by artifacts
+        # - runtime-python.wasm and runtime-python.cwasm are provided by artifacts
         # - prebuilt/liberyx_*.so.zst are provided for late-linking feature
-        # - liberyx_runtime.so and python-stdlib are provided for eryx-wasm-runtime tests
+        # - liberyx_runtime.so and python-stdlib are provided for eryx-guest-python tests
         # Use --profile ci for longer timeouts on slow WASM component tests
         run: cargo nextest run --workspace --all-features --profile ci
+
+      # The shell (and JavaScript) without `unstable-vfs`, which --all-features
+      # always turns on: bugs gated on its absence (#910's p3 gate, #914's
+      # environment mount) only show up here. (`env-pack` implies
+      # `environment`.) Only the suites that exercise
+      # that path, reusing this job's artifacts and compiled dependencies, so
+      # it costs about the eryx crate's own rebuild plus a minute of tests
+      # (5.4 min on #941). Pull requests run it only when the `shell` paths
+      # change; pushes and tags always do.
+      - name: Run the shell suites without unstable-vfs
+        if: >-
+          ${{ !cancelled() && steps.tests.outcome == 'success'
+          && (github.event_name != 'pull_request' || needs.changes.outputs.shell == 'true') }}
+        run: |
+          df -h .
+          # The full run's test binaries (target/debug/deps/<name>-<hash>, no
+          # extension) aren't reused here, and with them in place the runner
+          # ran out of disk linking shell_guest (run 44524946379). The rlibs,
+          # proc macros (.so) and build scripts (target/debug/build) stay.
+          du -sch target/debug/deps 2>/dev/null | tail -1
+          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+          rm -rf target/debug/incremental
+          df -h .
+          cargo nextest run -p eryx --profile ci \
+            --features embedded,shell,javascript,env-pack \
+            --test shell_guest --test commands --test p3_guest --test pack \
+            --test js_environment
+          df -h .
 
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -492,6 +1069,7 @@ jobs:
         uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         with:
           cache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          cache_save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           mise_toml: |
             [tools]
             rust = "1.100"
@@ -501,7 +1079,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check MSRV
         # Exclude crates that require WASM artifacts or WASI SDK
@@ -512,8 +1090,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     strategy:
       matrix:
         os: [windows-latest, macos-latest]
@@ -527,7 +1106,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install Rust
         # Install the pinned toolchain rather than trusting the runner image's
@@ -549,15 +1128,27 @@ jobs:
 
       - name: Check compilation
         # Exclude crates that need WASI SDK, Python, or WASM artifacts
-        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-wasm-runtime --exclude eryx-server
+        run: cargo check --workspace --exclude eryx-python --exclude eryx-precompile --exclude eryx-guest-python --exclude eryx-server
+
+      # eryx-precompile as its cargo-dist releases build it: default features
+      # (`env`, so eryx's `packages`) and no runtime artifacts, so eryx embeds
+      # the bundler's placeholder (#913). No other job builds it on these OSes.
+      - name: Check eryx-precompile
+        run: cargo check -p eryx-precompile
+
+      # Host-file appends reopen the file in a platform-specific way
+      # (crates/eryx-vfs/src/file_io.rs), so run those tests here too.
+      - name: Test host-file appends
+        run: cargo test -p eryx-vfs --lib -- append reopen
 
   doc:
     name: Documentation
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -575,6 +1166,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -584,7 +1182,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build documentation
         # Use --all-features now that prebuilt artifacts are available
@@ -598,8 +1196,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -613,7 +1212,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Build docs (docs.rs simulation)
         run: DOCS_RS=1 cargo +nightly doc -p eryx -p eryx-runtime --all-features --no-deps
@@ -628,8 +1227,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'pull_request'
-      && needs.changes.outputs.core == 'true'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'pull_request'
+      && needs.changes.outputs.core == 'true')
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -644,18 +1244,28 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install cargo-semver-checks
         run: cargo install --locked --version 0.51.0 cargo-semver-checks
 
-      # The `embedded` feature's build script needs a runtime.cwasm, which
+      # The `embedded` feature's build script needs a runtime-python.cwasm, which
       # rustdoc only embeds as bytes. An empty placeholder is enough (see the
       # same step in release-plz.yml).
-      - name: Provide placeholder runtime.cwasm
+      - name: Provide placeholder cwasms
         run: |
-          : > "$RUNNER_TEMP/runtime.cwasm"
-          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime.cwasm" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/runtime-python.cwasm"
+          echo "ERYX_RUNTIME_CWASM=$RUNNER_TEMP/runtime-python.cwasm" >> "$GITHUB_ENV"
+          for lang in JAVASCRIPT SHELL; do
+            : > "$RUNNER_TEMP/runtime-$lang.cwasm"
+            echo "ERYX_RUNTIME_CWASM_$lang=$RUNNER_TEMP/runtime-$lang.cwasm" >> "$GITHUB_ENV"
+          done
+          # The shell's embedded coreutils (the `coreutils` feature, #809).
+          : > "$RUNNER_TEMP/coreutils.cwasm"
+          echo "ERYX_COREUTILS_CWASM=$RUNNER_TEMP/coreutils.cwasm" >> "$GITHUB_ENV"
+          # The bundler `env pack` runs (the `env-pack` feature, #827).
+          : > "$RUNNER_TEMP/eryx-bundler.cwasm"
+          echo "ERYX_BUNDLER_CWASM=$RUNNER_TEMP/eryx-bundler.cwasm" >> "$GITHUB_ENV"
 
       - name: Check public API against the base branch
         run: cargo semver-checks check-release -p eryx --baseline-rev "$BASE_SHA"
@@ -666,7 +1276,7 @@ jobs:
   check-features:
     name: Check Feature Combinations
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
@@ -683,6 +1293,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -692,12 +1309,18 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Check all feature combinations
         # cargo-all-features checks the powerset of feature combinations.
         # The Cargo.toml config skips preinit/native-extensions for local dev (no artifacts),
         # but in CI we have artifacts, so we check those separately.
+        # Warnings fail the step: code dead in one combination (e.g. #1078's
+        # guest commands with `shell` but not `embedded`) is only a warning,
+        # which `cargo check` would otherwise let through. Step-level, so it
+        # doesn't apply to mise's `cargo install` of cargo-all-features.
+        env:
+          RUSTFLAGS: -D warnings
         run: |
           echo "=== Checking feature powerset (excluding preinit/native-extensions) ==="
           cargo check-all-features -- -p eryx
@@ -712,11 +1335,12 @@ jobs:
   examples:
     name: Examples
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.examples == 'true'
+      || needs.changes.outputs.examples == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -727,6 +1351,13 @@ jobs:
         with:
           name: wasm-runtime
           path: crates/
+
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
 
       - uses: ./.github/actions/mark-wasm-current
 
@@ -740,7 +1371,7 @@ jobs:
           version: v1.2.2
           github-cache: true
           cache-key-prefix: kache-examples
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
           pr-comment: false
 
       - name: Run examples
@@ -772,11 +1403,12 @@ jobs:
   python-bindings:
     name: Python Bindings
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -793,6 +1425,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -802,7 +1441,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -853,11 +1492,12 @@ jobs:
   python-bindings-windows:
     name: Python Bindings (Windows)
     runs-on: windows-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -874,18 +1514,28 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - name: Mark WASM artifacts as current
         shell: bash
         run: |
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
-      - name: Use the Windows cwasm
+      - name: Use the Windows cwasms
         shell: bash
         run: |
-          # Cross-compiled by build-eryx-runtime; embedded by the eryx build.
-          mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime.cwasm
-          touch crates/eryx-runtime/runtime.cwasm
+          # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
+          mv crates/eryx-runtime/runtime-windows.cwasm crates/eryx-runtime/runtime-python.cwasm
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-windows.cwasm" "crates/eryx-runtime/$name.cwasm"
+          done
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         shell: bash
@@ -903,7 +1553,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -947,11 +1597,12 @@ jobs:
   python-bindings-macos:
     name: Python Bindings (macOS)
     runs-on: macos-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -968,16 +1619,26 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - name: Mark WASM artifacts as current
         run: |
-          touch crates/eryx-runtime/runtime.wasm
+          touch crates/eryx-runtime/runtime-python.wasm
           touch crates/eryx-runtime/prebuilt/*
 
-      - name: Use the macOS cwasm
+      - name: Use the macOS cwasms
         run: |
-          # Cross-compiled by build-eryx-runtime; embedded by the eryx build.
-          mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime.cwasm
-          touch crates/eryx-runtime/runtime.cwasm
+          # Cross-compiled by the build-runtime-* jobs; embedded by the eryx build.
+          mv crates/eryx-runtime/runtime-macos.cwasm crates/eryx-runtime/runtime-python.cwasm
+          for name in runtime-javascript runtime-shell coreutils; do
+            mv "crates/eryx-runtime/$name-macos.cwasm" "crates/eryx-runtime/$name.cwasm"
+          done
+          touch crates/eryx-runtime/*.cwasm
 
       - name: Install Rust
         run: |
@@ -994,7 +1655,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -1103,12 +1764,13 @@ jobs:
   book-tests:
     name: Book Tests
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.book == 'true'
-      || needs.changes.outputs.python == 'true'
+      || needs.changes.outputs.python == 'true')
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1130,6 +1792,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -1139,7 +1808,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install mdbook tools
         run: |
@@ -1233,6 +1902,11 @@ jobs:
 
       - name: Test Python code blocks
         working-directory: book
+        env:
+          # Stand in for `pip install pyeryx[javascript]` (the companion
+          # packages aren't published yet, #847): the book's JavaScript
+          # example runs the runtime downloaded from build-runtime-javascript.
+          ERYX_RUNTIME_CWASM_JAVASCRIPT: ${{ github.workspace }}/crates/eryx-runtime/runtime-javascript.cwasm
         run: |
           source ../.venv/bin/activate
           python scripts/test_examples.py
@@ -1311,15 +1985,16 @@ jobs:
   deploy-demo:
     name: Deploy Demo (Cloudflare)
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && github.actor != 'dependabot[bot]'
       && github.ref_type != 'tag'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true')
+      || needs.changes.outputs.demo == 'true'))
     permissions:
       contents: read
       deployments: write
@@ -1335,6 +2010,13 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
       - uses: ./.github/actions/mark-wasm-current
 
       - uses: ./.github/actions/setup-rust
@@ -1344,7 +2026,7 @@ jobs:
         with:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           prefix-key: v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/multi-guest' }}
 
       - name: Install wasm32-unknown-unknown target
         run: rustup target add wasm32-unknown-unknown
@@ -1421,17 +2103,21 @@ jobs:
           fi
 
   # Build Docker image for the gRPC server.
-  # Uses the pre-built runtime.cwasm from build-eryx-runtime to skip the
+  # Uses the pre-built runtime-python.cwasm from build-runtime-python to skip the
   # expensive WASM precompilation step inside Docker. Only pushes on main.
-  docker:
-    name: Docker
+  # The Python-only server image (ERYX_LANGUAGES=python): built, never
+  # pushed, to check it still builds and to report its size, which should
+  # match the image before the JavaScript and shell guests.
+  docker-python-only:
+    name: Docker (Python only)
     runs-on: ubuntu-latest
-    needs: [changes, build-eryx-runtime]
+    needs: [changes, build-runtime-python]
     if: >-
-      github.event.pull_request.head.repo.fork != true
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
     steps:
@@ -1445,11 +2131,96 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      - name: Prepare runtime.cwasm for Docker build context
-        run: cp crates/eryx-runtime/runtime.cwasm crates/eryx-server/runtime.cwasm
+      - name: Prepare runtime-python.cwasm for Docker build context
+        run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: sd2k
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The same tags as the all-languages image (see the docker job), with
+      # this variant's suffix unless it gets the unsuffixed tags.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: sd2k/eryx-server
+          flavor: |
+            suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != 'python-only' && '-python' || '' }},onlatest=true
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=match,pattern=\d+.\d+.\d+,group=0
+            type=match,pattern=\d+.\d+,group=0
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: crates/eryx-server/Dockerfile
+          build-args: |
+            RUNTIME_SOURCE=custom
+            RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
+            ERYX_LANGUAGES=python
+          # Push or load, never both: some BuildKit versions refuse the pair
+          # on the default docker driver (docker/build-push-action#727). The
+          # docker job only pushes too.
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+          load: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+          tags: |
+            eryx-server:python-only
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Report image size
+        if: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+        run: |
+          size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
+          echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
+    if: >-
+      needs.changes.outputs.full == 'true'
+      && (github.event.pull_request.head.repo.fork != true
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true'
+      || needs.changes.outputs.server == 'true'))
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-runtime
+          path: crates/
+
+      - name: Download guest runtimes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wasm-runtime-guest-*
+          merge-multiple: true
+          path: crates/eryx-runtime/
+
+      - name: Prepare runtime-python.cwasm for Docker build context
+        run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+
+      - name: Log in to Docker Hub
+        # Only main and release tags publish. ci.yml also runs on pushes to
+        # multi-guest (for its caches), which must build like a PR, not push.
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
@@ -1460,6 +2231,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: sd2k/eryx-server
+          # The suffix, if any, is DOCKER_UNSUFFIXED_VARIANT's (see env).
+          flavor: |
+            suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != 'all-languages' && '-all' || '' }},onlatest=true
           # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
           # the version tags 0.5.0 and 0.5 (type=match strips the eryx-v prefix).
           # latest stays tied to main and is not moved by tag builds.
@@ -1477,7 +2251,7 @@ jobs:
           file: crates/eryx-server/Dockerfile
           build-args: |
             RUNTIME_SOURCE=custom
-            RUNTIME_CWASM=crates/eryx-server/runtime.cwasm
-          push: ${{ github.event_name == 'push' }}
+            RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

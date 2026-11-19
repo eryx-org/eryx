@@ -6,6 +6,9 @@
  * traces and networking are forwarded to the creating thread, which keeps the
  * handlers, the journal and the network policy.
  *
+ * The language and the shell's commands come from `workerData` (Node.js) or
+ * the Worker's `name`, as JSON (browsers).
+ *
  * Protocol (all messages are plain objects):
  * - in:  {type: "call", id, method, args, callbacks, options}
  *        {type: "reply", id, value} | {type: "reply", id, error}
@@ -15,10 +18,12 @@
  *        {type: "notify", target, args}       no reply
  */
 
-import { _fileTree, decodeError, encodeError, instantiateSandbox, isNode } from "./instance.js";
+import { decodeError, encodeError, instantiateSandbox, isNode, newFileTree } from "./instance.js";
 import { sleep } from "./shims/callbacks.js";
 
-const port = isNode ? (await import("node:worker_threads")).parentPort : globalThis;
+const threads = isNode ? await import("node:worker_threads") : null;
+const port = isNode ? threads.parentPort : globalThis;
+const { language, commands } = isNode ? threads.workerData : JSON.parse(globalThis.name);
 const post = (message) => port.postMessage(message);
 const onMessage = (fn) =>
   isNode ? port.on("message", fn) : port.addEventListener("message", (e) => fn(e.data));
@@ -38,7 +43,7 @@ const notify = (target) => (...args) => post({ type: "notify", target, args });
 
 // Set from each call, so the sync imports answer like the host's own would.
 let callbacks = [];
-let options = { pythonTracing: false, reuseEmptyCallbacks: false };
+let options = { tracing: false, reuseEmptyCallbacks: false };
 
 const cb = {
   invoke: forward("invoke"),
@@ -93,7 +98,14 @@ onMessage(async (message) => {
 try {
   // Core modules are compiled by the creating thread, so workers don't
   // compile them again.
-  instance = await instantiateSandbox(_fileTree, cb, net, (name) => request("module", [name]));
+  instance = await instantiateSandbox(
+    language,
+    newFileTree(language),
+    cb,
+    net,
+    (name) => request("module", [name]),
+    commands,
+  );
   post({ type: "ready" });
 } catch (e) {
   post({ type: "failed", ...encodeError(e) });

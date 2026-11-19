@@ -168,7 +168,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         let allowed = if descriptor.is_dir {
             descriptor.dir_perms.contains(DirPerms::MUTATE)
         } else {
-            descriptor.file_perms.contains(FilePerms::WRITE)
+            descriptor.mount_file_perms.contains(FilePerms::WRITE)
         };
         if !allowed {
             return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
@@ -338,13 +338,9 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::AccessDenied(full_path).into());
         }
 
-        // Check if the path exists
-        let exists = !self.ctx.open_files.is_unlinked(0, &full_path)
-            && self.ctx.storage.exists(&full_path).await?;
-
         if is_directory {
             // Opening a directory
-            if !exists {
+            if !self.ctx.storage.exists(&full_path).await? {
                 return Err(crate::VfsError::NotFound(full_path).into());
             }
             let meta = self.ctx.storage.stat(&full_path).await?;
@@ -360,25 +356,43 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
             let truncate = oflags.contains(types::OpenFlags::TRUNCATE);
 
-            if exclusive && exists {
-                return Err(crate::VfsError::AlreadyExists(full_path).into());
-            }
-
-            if !exists {
-                if !create {
-                    return Err(crate::VfsError::NotFound(full_path).into());
+            // Creating checks and creates in one storage step, so concurrent
+            // `CREATE|EXCLUSIVE` opens (lockfiles) can't both succeed.
+            let unlinked = self.ctx.open_files.is_unlinked(0, &full_path);
+            let created = if create && descriptor.dir_perms.contains(DirPerms::MUTATE) {
+                if unlinked {
+                    // A new file takes the unlinked name, replacing the old
+                    // contents that open descriptors still use.
+                    self.ctx.open_files.set_linked(0, &full_path, true);
+                    self.ctx.storage.write(&full_path, &[]).await?;
+                    true
+                } else {
+                    self.ctx.storage.create_file(&full_path, exclusive).await?
                 }
-                // Check mutate permission for creating files
-                if !descriptor.dir_perms.contains(DirPerms::MUTATE) {
+            } else {
+                let exists = !unlinked && self.ctx.storage.exists(&full_path).await?;
+                if exclusive && exists {
+                    return Err(crate::VfsError::AlreadyExists(full_path).into());
+                }
+                if !exists {
+                    if !create {
+                        return Err(crate::VfsError::NotFound(full_path).into());
+                    }
+                    // Creating files needs mutate permission.
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
-                // Create the file
-                self.ctx.storage.write(&full_path, &[]).await?;
-                self.ctx.open_files.set_linked(0, &full_path, true);
-            } else {
-                // Check it's not a directory
+                false
+            };
+
+            if !created {
                 let meta = self.ctx.storage.stat(&full_path).await?;
                 if meta.is_dir {
+                    // As on POSIX, a directory opens without O_DIRECTORY
+                    // unless the open would change it.
+                    if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                        let resource = self.table.push(descriptor.child_dir(full_path))?;
+                        return Ok(resource);
+                    }
                     return Err(crate::VfsError::NotFile(full_path).into());
                 }
                 if truncate {
@@ -392,7 +406,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
                 }
             }
 
-            let new_descriptor = VfsDescriptor::file(full_path.clone(), file_perms);
+            let mut new_descriptor = VfsDescriptor::file(full_path.clone(), file_perms);
+            new_descriptor.mount_file_perms = descriptor.mount_file_perms;
             let resource = self.table.push(new_descriptor)?;
             self.ctx.open_files.open(0, &full_path);
             Ok(resource)
@@ -430,8 +445,12 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
             return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
         }
         let full_path = descriptor.resolve_path(&path)?;
-        crate::wasi_impl::remove_dir(&self.ctx.storage, &mut self.ctx.open_files, 0, &full_path)
-            .await?;
+        let unlinked = self.ctx.open_files.unlinked_under(0, &full_path);
+        let open_files = &mut self.ctx.open_files;
+        crate::wasi_impl::remove_dir(&self.ctx.storage, &full_path, unlinked, |path| {
+            open_files.set_linked(0, path, true);
+        })
+        .await?;
         Ok(())
     }
 

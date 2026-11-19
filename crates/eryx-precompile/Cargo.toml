@@ -26,6 +26,21 @@ tempfile.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 walkdir.workspace = true
 
+[features]
+default = ["env"]
+# `env pack`: pack installed packages into environments (eryx's `env-pack`
+# feature). The JavaScript bundler is embedded if it's built; otherwise, as
+# in releases, it's loaded from `eryx-precompile setup --bundler`'s cache.
+env = ["eryx/env-pack"]
+
+[package.metadata.cargo-all-features]
+# CI checks eryx's feature powerset with `cargo check-all-features -- -p eryx`,
+# which runs once per workspace package with that package's features but
+# always `-p eryx`, so `env` (a feature of this package) would be passed to
+# eryx. Both settings of `env` are covered by the default build and clippy
+# --all-features.
+skip_package = true
+
 [package.metadata.dist]
 dist = true
 

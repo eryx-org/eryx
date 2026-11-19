@@ -14,7 +14,7 @@ use wasmtime_wasi_io::streams::{InputStream, OutputStream, StreamError, StreamRe
 
 use crate::error::{VfsError, VfsResult};
 use crate::file_io::{read_at, write_at};
-use crate::hybrid::check_file_size;
+use crate::hybrid::{Device, check_file_size};
 use crate::storage::VfsStorage;
 
 /// Largest buffer a single stream read will allocate, regardless of the length
@@ -117,6 +117,9 @@ impl RealFileOutputStream {
     }
 
     /// Create a new file output stream for appending.
+    ///
+    /// `file` must be opened for appending (`O_APPEND`), e.g. by
+    /// `reopen_for_append`, so the OS picks the end at each write.
     pub fn append(file: Arc<std::fs::File>, max_size: Option<u64>) -> Self {
         Self {
             file,
@@ -153,12 +156,15 @@ impl OutputStream for RealFileOutputStream {
         }
 
         let result = if self.append {
-            // For append mode, get the file length and write there
-            // since there's no direct append_at method
-            match self.file.metadata() {
-                Ok(meta) => self.write_checked(&bytes, meta.len()),
-                Err(e) => Err(e),
-            }
+            // The handle appends, so the OS picks the end at the write itself.
+            // The size cap is checked against the length just before; another
+            // writer growing the file in between can push it past the cap by
+            // at most that one write.
+            self.file.metadata().and_then(|meta| {
+                check_file_size(self.max_size, meta.len().saturating_add(bytes.len() as u64))?;
+                std::io::Write::write_all(&mut &*self.file, &bytes)?;
+                Ok(bytes.len())
+            })
         } else {
             self.write_checked(&bytes, self.position)
         };
@@ -193,6 +199,72 @@ impl OutputStream for RealFileOutputStream {
     async fn blocking_write_and_flush(&mut self, bytes: Bytes) -> StreamResult<()> {
         self.write(bytes)?;
         self.flush()
+    }
+}
+
+// ============================================================================
+// Device Streams
+// ============================================================================
+
+/// Read up to `len` bytes from `device`, never more than [`MAX_READ_CHUNK`]
+/// at once: reads may be short, so a guest asking for more just reads again.
+/// Returns the bytes and whether the device is at end of file.
+pub(crate) fn device_read(device: Device, len: usize) -> (Vec<u8>, bool) {
+    let len = len.min(MAX_READ_CHUNK);
+    match device {
+        Device::Null => (Vec::new(), true),
+        Device::Zero => (vec![0; len], false),
+        Device::Urandom => {
+            use rand::Rng as _;
+            let mut buf = vec![0; len];
+            rand::rng().fill_bytes(&mut buf);
+            (buf, false)
+        }
+    }
+}
+
+/// A read stream over a device under `/dev`.
+pub(crate) struct DeviceInputStream(pub(crate) Device);
+
+#[async_trait::async_trait]
+impl Pollable for DeviceInputStream {
+    async fn ready(&mut self) {}
+}
+
+#[async_trait::async_trait]
+impl InputStream for DeviceInputStream {
+    fn read(&mut self, size: usize) -> StreamResult<Bytes> {
+        match device_read(self.0, size) {
+            (_, true) => Err(StreamError::Closed),
+            (bytes, false) => Ok(Bytes::from(bytes)),
+        }
+    }
+
+    async fn blocking_read(&mut self, size: usize) -> StreamResult<Bytes> {
+        self.read(size)
+    }
+}
+
+/// A write stream over a device under `/dev`, which discards what it's given.
+pub(crate) struct DiscardOutputStream;
+
+#[async_trait::async_trait]
+impl Pollable for DiscardOutputStream {
+    async fn ready(&mut self) {}
+}
+
+#[async_trait::async_trait]
+impl OutputStream for DiscardOutputStream {
+    fn write(&mut self, _bytes: Bytes) -> StreamResult<()> {
+        Ok(())
+    }
+
+    fn flush(&mut self) -> StreamResult<()> {
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> StreamResult<usize> {
+        Ok(64 * 1024)
     }
 }
 
@@ -383,21 +455,25 @@ impl<S: VfsStorage + Clone + 'static> VfsOutputStream<S> {
         let path = self.path.clone();
         let position = self.position;
         async move {
-            let position = match position {
-                Some(pos) => pos,
-                // Append mode: write at the current end of the file, or at 0
-                // if it doesn't exist yet.
-                None => storage.stat(&path).await.map_or(0, |meta| meta.size),
-            };
-            storage.write_at(&path, position, &bytes).await?;
-            Ok(position + bytes.len() as u64)
+            match position {
+                Some(pos) => {
+                    storage.write_at(&path, pos, &bytes).await?;
+                    Ok(pos + bytes.len() as u64)
+                }
+                // Append mode: storage finds the end and writes there in one
+                // step, so concurrent appenders don't overwrite each other.
+                None => storage.append(&path, &bytes).await,
+            }
         }
     }
 
     /// Record the outcome of a finished write.
     fn finish_write(&mut self, result: VfsResult<u64>) -> StreamResult<()> {
-        // Appends become positional after the first write.
-        self.position = Some(result.map_err(stream_error)?);
+        let end = result.map_err(stream_error)?;
+        // Appends stay appends: every write goes to the end as it is then.
+        if self.position.is_some() {
+            self.position = Some(end);
+        }
         Ok(())
     }
 
@@ -430,7 +506,9 @@ impl<S: VfsStorage + Clone + 'static> Pollable for VfsOutputStream<S> {
             let result = self.start_write(bytes).await;
             self.queued = None;
             match result {
-                Ok(position) => self.position = Some(position),
+                // As in `finish_write`: appends stay appends.
+                Ok(end) if self.position.is_some() => self.position = Some(end),
+                Ok(_) => {}
                 Err(err) => self.error = Some(err),
             }
         }
@@ -487,14 +565,71 @@ mod tests {
     use super::*;
     use crate::storage::{ArcStorage, InMemoryStorage};
 
+    /// A host file with a path, which `reopen_for_append` needs.
+    fn named_file() -> (tempfile::NamedTempFile, Arc<std::fs::File>) {
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let file = Arc::new(named.as_file().try_clone().unwrap());
+        (named, file)
+    }
+
+    fn appender(file: &std::fs::File) -> Arc<std::fs::File> {
+        Arc::new(crate::file_io::reopen_for_append(file).unwrap())
+    }
+
+    /// Appenders on separate handles to one host file, plus a plain host
+    /// writer appending to it, all land every record intact: the OS picks
+    /// the end at each write, so none overwrites another.
+    #[test]
+    fn real_appenders_on_separate_handles_keep_every_record() {
+        const RECORDS: usize = 200;
+        let named = tempfile::NamedTempFile::new().unwrap();
+        let mut writers: Vec<std::thread::JoinHandle<()>> = (0..2)
+            .map(|w| {
+                // Each guest-side appender gets its own open of the file, as
+                // two sandboxes sharing a mount would.
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(named.path())
+                    .unwrap();
+                let mut stream = RealFileOutputStream::append(appender(&file), None);
+                std::thread::spawn(move || {
+                    for r in 0..RECORDS {
+                        let record = format!("s{w}-{r:03}\n");
+                        stream.write(Bytes::from(record)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let path = named.path().to_path_buf();
+        writers.push(std::thread::spawn(move || {
+            use std::io::Write;
+            let mut host = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for r in 0..RECORDS {
+                host.write_all(format!("host-{r:03}\n").as_bytes()).unwrap();
+            }
+        }));
+        for w in writers {
+            w.join().unwrap();
+        }
+        let log = std::fs::read_to_string(named.path()).unwrap();
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        let mut expected: Vec<String> = ["s0", "s1", "host"]
+            .iter()
+            .flat_map(|tag| (0..RECORDS).map(move |r| format!("{tag}-{r:03}")))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(lines, expected);
+    }
+
     #[test]
     fn test_real_streams_independent_offsets_and_append() {
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let (_named, file) = named_file();
         write_at(&file, b"hello world", 0).unwrap();
         let mut first = RealFileInputStream::new(Arc::clone(&file), 0);
         let mut second = RealFileInputStream::new(Arc::clone(&file), 6);
         let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 6, None);
-        let mut append = RealFileOutputStream::append(Arc::clone(&file), None);
+        let mut append = RealFileOutputStream::append(appender(&file), None);
 
         assert_eq!(&*first.read(5).unwrap(), b"hello");
         output.write(Bytes::from_static(b"Rust")).unwrap();
@@ -507,11 +642,11 @@ mod tests {
 
     #[test]
     fn real_output_stream_respects_max_size() {
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let (_named, file) = named_file();
         let mut output = RealFileOutputStream::write_at(Arc::clone(&file), 0, Some(4));
         output.write(Bytes::from_static(b"1234")).unwrap();
         assert!(output.write(Bytes::from_static(b"5")).is_err());
-        let mut append = RealFileOutputStream::append(Arc::clone(&file), Some(4));
+        let mut append = RealFileOutputStream::append(appender(&file), Some(4));
         assert!(append.write(Bytes::from_static(b"5")).is_err());
         assert_eq!(file.metadata().unwrap().len(), 4);
     }
@@ -639,6 +774,24 @@ mod tests {
 
         let content = storage.read("/test.txt").await.unwrap();
         assert_eq!(&content, b"onetwothree");
+    }
+
+    /// Two append streams open on one file both append; neither turns
+    /// positional after its first write and overwrites the other.
+    #[tokio::test]
+    async fn interleaved_append_streams_do_not_overwrite_each_other() {
+        let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+        let mut streams = [
+            VfsOutputStream::append(storage.clone(), "/log".to_string()),
+            VfsOutputStream::append(storage.clone(), "/log".to_string()),
+        ];
+        for (which, bytes) in [(0, "a1 "), (1, "b1 "), (0, "a2 "), (1, "b2 ")] {
+            streams[which]
+                .blocking_write_and_flush(Bytes::from(bytes))
+                .await
+                .unwrap();
+        }
+        assert_eq!(storage.read("/log").await.unwrap(), b"a1 b1 a2 b2 ");
     }
 
     #[tokio::test]

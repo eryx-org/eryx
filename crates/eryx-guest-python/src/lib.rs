@@ -1,0 +1,953 @@
+//! Eryx WASM Guest Runtime
+//!
+//! This crate implements the wit-dylib interpreter interface for the eryx sandbox.
+//! It replaces `libcomponentize_py_runtime.so` with a purpose-built runtime that
+//! hardcodes the eryx sandbox exports (execute, snapshot-state, restore-state, clear-state).
+//!
+//! # Architecture
+//!
+//! wit-dylib generates bindings that call into an "interpreter" via a C FFI interface.
+//! This crate implements that interface by:
+//!
+//! 1. Implementing the `Interpreter` trait from `wit-dylib-ffi`
+//! 2. Using the `export!` macro to generate the required `#[no_mangle]` exports
+//! 3. Dispatching export calls to hardcoded implementations
+//!
+//! # Exports
+//!
+//! - `execute(code: string) -> result<string, string>` - Run Python code
+//! - `snapshot-state() -> result<state-snapshot, string>` - Pickle globals
+//! - `restore-state(data: list<u8>) -> result<_, string>` - Restore globals
+//! - `clear-state()` - Clear globals
+
+pub mod python;
+
+use eryx_guest_call::{EryxCall, Value};
+use wit_dylib_ffi::{Call, ExportFunction, Interpreter, Resource, Wit};
+
+// =============================================================================
+// Component Model async intrinsics
+// =============================================================================
+//
+// These are imported from the "$root" module and provided by wasmtime's
+// Component Model async support. They enable suspend/resume of async operations.
+
+#[link(wasm_import_module = "$root")]
+unsafe extern "C" {
+    /// Create a new waitable set for tracking pending async operations.
+    #[link_name = "[waitable-set-new]"]
+    pub fn waitable_set_new() -> u32;
+
+    /// Drop a waitable set when no longer needed.
+    #[link_name = "[waitable-set-drop]"]
+    pub fn waitable_set_drop(set: u32);
+
+    /// Add a waitable (subtask) to a waitable set for polling.
+    #[link_name = "[waitable-join]"]
+    pub fn waitable_join(waitable: u32, set: u32);
+
+    /// Store a context value (Python object pointer) for async resumption.
+    #[link_name = "[context-set-0]"]
+    pub fn context_set(ptr: u32);
+
+    /// Retrieve the stored context value.
+    #[link_name = "[context-get-0]"]
+    pub fn context_get() -> u32;
+
+    /// Drop a completed subtask to release resources.
+    #[link_name = "[subtask-drop]"]
+    pub fn subtask_drop(task: u32);
+
+    /// Cancel an in-flight subtask. Synchronous: blocks until the callee has
+    /// stopped and returns its terminal status. The subtask must not be in a
+    /// waitable set.
+    #[link_name = "[subtask-cancel]"]
+    pub fn subtask_cancel(task: u32) -> u32;
+}
+
+/// Our interpreter implementation.
+#[derive(Debug)]
+pub struct EryxInterpreter;
+
+/// Export function indices (must match the order in runtime.wit)
+const EXPORT_EXECUTE: usize = 0;
+const EXPORT_SNAPSHOT_STATE: usize = 1;
+const EXPORT_RESTORE_STATE: usize = 2;
+const EXPORT_CLEAR_STATE: usize = 3;
+const EXPORT_FINALIZE_PREINIT: usize = 4;
+const EXPORT_SET_RESULT_VARIABLE: usize = 5;
+const EXPORT_RUN_COMMAND: usize = 6;
+
+// =============================================================================
+// Invoke callback mechanism
+// =============================================================================
+//
+// This allows Python code to call host functions via the invoke() function.
+// The mechanism works as follows:
+// 1. Python awaits invoke(name, **kwargs), which serializes args to JSON
+// 2. invoke() calls _eryx._eryx_invoke_async(name, args_json) (C extension)
+// 3. That calls python::do_invoke_async(), which uses INVOKE_ASYNC_CALLBACK
+// 4. The callback (set by with_wit) calls the async WIT invoke import
+// 5. The result JSON is returned immediately, or once the subtask completes
+
+// Thread-local storage for the current Wit handle during export execution.
+std::thread_local! {
+    static CURRENT_WIT: std::cell::RefCell<Option<Wit>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Execute a function with the Wit handle available for callbacks.
+/// Sets up the invoke callbacks so Python can call host functions.
+fn with_wit<T>(wit: Wit, f: impl FnOnce() -> T) -> T {
+    CURRENT_WIT.with(|cell| {
+        let old = cell.borrow_mut().replace(wit);
+
+        // Set up the Python invoke callbacks
+        python::set_invoke_async_callback(Some(invoke_async_callback_wrapper));
+        python::set_report_trace_callback(Some(report_trace_callback_wrapper));
+        python::set_report_output_callback(Some(report_output_callback_wrapper));
+
+        let result = f();
+
+        // Clear the Python callbacks
+        python::set_invoke_async_callback(None);
+        python::set_report_trace_callback(None);
+        python::set_report_output_callback(None);
+
+        *cell.borrow_mut() = old;
+        result
+    })
+}
+
+/// Wrapper function that matches the InvokeAsyncCallback signature.
+fn invoke_async_callback_wrapper(name: &str, args_json: &str) -> Result<InvokeResult, String> {
+    call_invoke_async(name, args_json)
+}
+
+/// Result of calling an async invoke - either immediate result or pending
+#[derive(Debug)]
+pub enum InvokeResult {
+    /// Immediate success with JSON result
+    Ok(String),
+    /// Immediate error with error message
+    Err(String),
+    /// Pending - need to wait for callback. Contains (waitable_id, promise_id)
+    Pending(u32, u32),
+}
+
+// =============================================================================
+// Pending async import tracking
+// =============================================================================
+//
+// When an async import is pending, we need to store state so that when the
+// subtask completes, we can lift the result from the buffer.
+
+/// Type of async import, used to determine how to lift the result.
+///
+/// Note: TCP/TLS operations now use fiber-based async (`call_import_sync` with `func_wrap_async`
+/// on the host), so they complete synchronously from the guest's perspective and don't need
+/// to be tracked as pending imports. Only `invoke` and `sleep` use Component Model async.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportType {
+    /// invoke: result<string, string>
+    Invoke,
+    /// sleep: no result
+    Sleep,
+}
+
+/// Stored state for a pending async import call.
+struct PendingImportState {
+    /// Type of import (determines result lifting logic)
+    import_type: ImportType,
+    /// Function to lift the result from buffer onto call stack
+    async_lift_impl: unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void),
+    /// Buffer where the result is stored
+    buffer: *mut u8,
+    /// Keep the call context alive so the buffer isn't deallocated.
+    /// wit-dylib calls `cx.defer_deallocate(buffer, layout)` which means
+    /// the buffer is freed when the cx drops. We need to keep it alive.
+    _cx: Box<EryxCall>,
+}
+
+// Safety: WASM is single-threaded
+unsafe impl Send for PendingImportState {}
+unsafe impl Sync for PendingImportState {}
+
+// Map of subtask -> pending import state
+std::thread_local! {
+    static PENDING_IMPORTS: std::cell::RefCell<std::collections::HashMap<u32, PendingImportState>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Cancel a pending async import (see [`subtask_cancel`]) and discard its
+/// pending state. Returns the subtask's terminal status.
+pub(crate) fn cancel_pending_import(subtask: u32) -> u32 {
+    /// The host finished before the cancel took effect; a result was lowered.
+    const STATUS_RETURNED: u32 = 2;
+
+    let status = unsafe { subtask_cancel(subtask) };
+    if let Some(state) = PENDING_IMPORTS.with(|cell| cell.borrow_mut().remove(&subtask))
+        && status == STATUS_RETURNED
+    {
+        // Lift the result as the normal path would, then discard it.
+        let mut cx = EryxCall::new();
+        // Safety: async_lift_impl and buffer were set by call_import_async
+        unsafe { (state.async_lift_impl)((&raw mut cx).cast(), state.buffer.cast()) };
+    }
+    status
+}
+
+/// Call the invoke import with the given callback name and JSON arguments.
+/// Returns InvokeResult which can be immediate (Ok/Err) or Pending.
+fn call_invoke_async(name: &str, args_json: &str) -> Result<InvokeResult, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "invoke() called outside of execute context".to_string())?;
+
+        // Get the invoke import (async in WIT, but wasmtime 40+ uses plain name)
+        let import_func = wit
+            .get_import(None, "invoke")
+            .ok_or_else(|| "invoke import not found".to_string())?;
+
+        // Create a boxed call context so we can store it if the call is pending.
+        // wit-dylib registers the buffer for deferred deallocation on the cx,
+        // so we must keep the cx alive until we've lifted the result.
+        let mut cx = Box::new(EryxCall::new());
+
+        // Push arguments onto stack - wit-dylib pops in reverse order,
+        // so push args_json first, then name
+        cx.push_string(args_json.to_string());
+        cx.push_string(name.to_string());
+
+        // Call the async import
+        // Safety: we're in a valid execution context
+        let pending = unsafe { import_func.call_import_async(&mut *cx) };
+
+        if let Some(pending_call) = pending {
+            // The operation is pending - we need to wait for a callback
+            // Store the lift function, buffer, and cx so we can get the result when it completes.
+            // Keeping cx alive prevents the buffer from being deallocated.
+            let async_lift_impl = import_func
+                .async_import_lift_impl()
+                .ok_or_else(|| "invoke import has no async lift".to_string())?;
+            PENDING_IMPORTS.with(|cell| {
+                cell.borrow_mut().insert(
+                    pending_call.subtask,
+                    PendingImportState {
+                        import_type: ImportType::Invoke,
+                        async_lift_impl,
+                        buffer: pending_call.buffer,
+                        _cx: cx,
+                    },
+                );
+            });
+            // The subtask is the waitable, and we use 0 as the promise placeholder
+            return Ok(InvokeResult::Pending(pending_call.subtask, 0));
+        }
+
+        // Result is on the stack: result<string, string>
+        // Pop the discriminant first (true = ok, false = err)
+        let is_ok = match cx.stack.pop() {
+            Some(Value::ResultDiscriminant(v)) => v,
+            other => {
+                return Err(format!("unexpected result discriminant: {other:?}"));
+            }
+        };
+
+        // Pop the string value
+        let value = match cx.stack.pop() {
+            Some(Value::String(s)) => s,
+            other => {
+                return Err(format!("unexpected result value: {other:?}"));
+            }
+        };
+
+        if is_ok {
+            Ok(InvokeResult::Ok(value))
+        } else {
+            Ok(InvokeResult::Err(value))
+        }
+    })
+}
+
+/// Call the sleep import, which completes after `duration_ns` nanoseconds.
+/// Returns the subtask to wait on, or `None` if the host completed it immediately.
+pub(crate) fn call_sleep_async(duration_ns: u64) -> Result<Option<u32>, String> {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let wit = wit
+            .as_ref()
+            .ok_or_else(|| "sleep called outside of execute context".to_string())?;
+        let import_func = wit
+            .get_import(None, "sleep")
+            .ok_or_else(|| "sleep import not found".to_string())?;
+
+        // Boxed and kept alive while pending, as for invoke.
+        let mut cx = Box::new(EryxCall::new());
+        cx.push_u64(duration_ns);
+
+        // Safety: we're in a valid execution context
+        let Some(pending_call) = (unsafe { import_func.call_import_async(&mut *cx) }) else {
+            return Ok(None);
+        };
+        let async_lift_impl = import_func
+            .async_import_lift_impl()
+            .ok_or_else(|| "sleep import has no async lift".to_string())?;
+        PENDING_IMPORTS.with(|cell| {
+            cell.borrow_mut().insert(
+                pending_call.subtask,
+                PendingImportState {
+                    import_type: ImportType::Sleep,
+                    async_lift_impl,
+                    buffer: pending_call.buffer,
+                    _cx: cx,
+                },
+            );
+        });
+        Ok(Some(pending_call.subtask))
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionOptions {
+    tracing: bool,
+}
+
+impl ExecutionOptions {
+    const CONSERVATIVE: Self = Self { tracing: true };
+}
+
+/// Read host-controlled behavior for this execution.
+fn call_get_execution_options(wit: Wit) -> ExecutionOptions {
+    let import_func = match wit.get_import(None, "get-execution-options") {
+        Some(f) => f,
+        None => return ExecutionOptions::CONSERVATIVE,
+    };
+
+    // Create a call context to receive the result
+    let mut cx = EryxCall::new();
+
+    // Call the import (synchronous)
+    import_func.call_import_sync(&mut cx);
+
+    match cx.stack.pop() {
+        Some(Value::Record(fields)) if fields.len() == 2 => {
+            let mut fields = fields.into_iter();
+            // The second field, `reuse-empty-callbacks`, is kept in the WIT
+            // for compatibility; the guest now tracks installed callbacks itself.
+            match (fields.next(), fields.next()) {
+                (Some(Value::Bool(tracing)), Some(Value::Bool(_))) => ExecutionOptions { tracing },
+                _ => {
+                    eprintln!("call_get_execution_options: unexpected record fields");
+                    ExecutionOptions::CONSERVATIVE
+                }
+            }
+        }
+        other => {
+            eprintln!("call_get_execution_options: unexpected stack value: {other:?}");
+            ExecutionOptions::CONSERVATIVE
+        }
+    }
+}
+
+/// Call list-callbacks import to get available callbacks from the host.
+fn call_list_callbacks(wit: Wit) -> Vec<python::CallbackInfo> {
+    // Get the list-callbacks import function
+    let import_func = match wit.get_import(None, "list-callbacks") {
+        Some(f) => f,
+        None => {
+            return Vec::new();
+        }
+    };
+
+    // Create a call context to receive the result
+    let mut cx = EryxCall::new();
+
+    // Call the import (synchronous)
+    import_func.call_import_sync(&mut cx);
+
+    // The result is a list<record{name: string, description: string, parameters-schema-json: string}>
+    // With our fixed Call trait, this arrives as a GenericList of Record values.
+    let mut callbacks = Vec::new();
+
+    let list = match cx.stack.pop() {
+        Some(Value::GenericList(items)) => items,
+        Some(other) => {
+            // Shouldn't happen, but handle gracefully
+            eprintln!("call_list_callbacks: unexpected stack value: {other:?}");
+            return Vec::new();
+        }
+        None => return Vec::new(),
+    };
+
+    for item in list {
+        match item {
+            Value::Record(fields) if fields.len() == 3 => {
+                // Fields are in WIT definition order: name, description, parameters_schema_json
+                let mut iter = fields.into_iter();
+                let name = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
+                let description = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
+                let parameters_schema_json = match iter.next() {
+                    Some(Value::String(s)) => s,
+                    _ => continue,
+                };
+                callbacks.push(python::CallbackInfo {
+                    name,
+                    description,
+                    parameters_schema_json,
+                });
+            }
+            _ => {} // Skip malformed items
+        }
+    }
+
+    callbacks
+}
+
+/// Call report-trace import to send a trace event to the host.
+/// This is a synchronous call with no return value.
+fn call_report_trace(lineno: u32, event_json: &str, context_json: &str) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return; // No WIT context - tracing not available
+        };
+
+        // Get the report-trace import function
+        let import_func = match wit.get_import(None, "report-trace") {
+            Some(f) => f,
+            None => return, // Tracing not available
+        };
+
+        // Create a call context and push arguments
+        let mut cx = EryxCall::new();
+
+        // Push arguments in reverse order (wit-dylib pops in reverse)
+        cx.push_string(context_json.to_string());
+        cx.push_string(event_json.to_string());
+        cx.push_u32(lineno);
+
+        // Call the import (synchronous, no return value)
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// Wrapper function that matches the ReportTraceCallback signature.
+fn report_trace_callback_wrapper(lineno: u32, event_json: &str, context_json: &str) {
+    call_report_trace(lineno, event_json, context_json);
+}
+
+/// Call report-output import to stream output to the host in real-time.
+/// This is a synchronous call with no return value.
+fn call_report_output(stream: u32, data: &[u8]) {
+    CURRENT_WIT.with(|cell| {
+        let wit = cell.borrow();
+        let Some(wit) = wit.as_ref() else {
+            return; // No WIT context - output streaming not available
+        };
+
+        // Get the report-output import function
+        let import_func = match wit.get_import(None, "report-output") {
+            Some(f) => f,
+            None => return, // Output streaming not available
+        };
+
+        // Create a call context and push arguments
+        let mut cx = EryxCall::new();
+
+        // Push arguments in reverse declaration order (wit-dylib pops in reverse).
+        // data (list<u8>) is declared last, so push it first.
+        cx.stack.push(Value::Bytes(data.to_vec()));
+        cx.push_u32(stream);
+
+        // Call the import (synchronous, no return value)
+        import_func.call_import_sync(&mut cx);
+    });
+}
+
+/// Wrapper function that matches the ReportOutputCallback signature.
+fn report_output_callback_wrapper(stream: u32, data: &[u8]) {
+    call_report_output(stream, data);
+}
+
+// =============================================================================
+// Network import wrappers (TCP and TLS)
+// =============================================================================
+//
+// The calls themselves are shared with the other guests
+// (`eryx_guest_call::net`); these supply the current execution's `Wit`.
+
+use eryx_guest_call::net;
+pub use eryx_guest_call::net::NetError;
+
+/// The current execution's `Wit`, for a network call named `name`.
+fn net_wit(name: &str) -> Result<Wit, String> {
+    CURRENT_WIT.with(|cell| {
+        (*cell.borrow()).ok_or_else(|| format!("{name} called outside of execute context"))
+    })
+}
+
+/// Connect to `host:port` over TCP, returning the connection handle.
+pub fn tcp_connect(
+    host: &str,
+    port: u16,
+    timeout_ms: u32,
+) -> Result<Result<u32, NetError>, String> {
+    net::tcp_connect(net_wit("connect")?, host, port, timeout_ms)
+}
+
+/// Upgrade a TCP connection to TLS, returning the TLS handle.
+pub fn tls_upgrade(
+    tcp_handle: u32,
+    hostname: &str,
+    timeout_ms: u32,
+) -> Result<Result<u32, NetError>, String> {
+    net::tls_upgrade(net_wit("upgrade")?, tcp_handle, hostname, timeout_ms)
+}
+
+/// Read up to `len` bytes from a TCP (or, with `tls`, TLS) connection.
+pub fn net_read(
+    tls: bool,
+    handle: u32,
+    len: u32,
+    timeout_ms: u32,
+) -> Result<Result<Vec<u8>, NetError>, String> {
+    net::net_read(net_wit("read")?, tls, handle, len, timeout_ms)
+}
+
+/// Write to a TCP (or, with `tls`, TLS) connection, returning bytes written.
+pub fn net_write(
+    tls: bool,
+    handle: u32,
+    data: &[u8],
+    timeout_ms: u32,
+) -> Result<Result<u32, NetError>, String> {
+    net::net_write(net_wit("write")?, tls, handle, data, timeout_ms)
+}
+
+/// Close a TCP (or, with `tls`, TLS) connection. Does nothing outside an execution.
+pub fn net_close(tls: bool, handle: u32) {
+    if let Ok(wit) = net_wit("close") {
+        net::net_close(wit, tls, handle);
+    }
+}
+
+/// Initialize callbacks in Python.
+///
+/// This is called on every execute to ensure callbacks are always in sync
+/// with the host's current per-request state. This is essential for:
+/// - Session reuse: callbacks may change between executions
+/// - Error recovery: a previous failed setup won't prevent future attempts
+///
+/// The host's callback set can change between executions of a persistent
+/// session, so it is fetched every time; `setup_callbacks` only reinstalls
+/// when it differs from what is already installed.
+fn initialize_callbacks(wit: Wit) -> Result<(), String> {
+    let callbacks = call_list_callbacks(wit);
+    python::setup_callbacks(&callbacks)
+        .map_err(|e| format!("{e} ({} callback declarations)", callbacks.len()))
+}
+
+// =============================================================================
+// Async state storage
+// =============================================================================
+//
+// When an async export is pending (waiting for a callback), we store the call
+// context and task_return function so we can resume and complete when the
+// callback finishes.
+
+/// Type for the task_return callback function.
+type TaskReturnFn = unsafe extern "C" fn(*mut std::ffi::c_void);
+
+/// Stored state for a pending async export.
+struct PendingAsyncState {
+    cx: Box<EryxCall>,
+    task_return: Option<TaskReturnFn>,
+    /// The Wit handle needed for subsequent callbacks.
+    /// We need to restore this when resuming async execution.
+    wit: Wit,
+    /// Which export is pending (`execute` or `run-command`), which decides
+    /// what it returns.
+    export: usize,
+}
+
+// Thread-local storage for pending async state.
+// WASM is single-threaded, so only one export can be pending at a time.
+std::thread_local! {
+    static PENDING_ASYNC_STATE: std::cell::RefCell<Option<PendingAsyncState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Result of handling an export call.
+enum HandleExportResult {
+    /// Export completed - result is on the stack.
+    Complete,
+    /// Export is pending - waiting for async callback.
+    /// Contains the raw callback code (WAIT | waitable_set << 4) to return to the host.
+    Pending(u32),
+}
+
+/// Push `result<_, execute-error>`'s error case:
+/// `execute-error { message, exit-code, stdout, stderr }`.
+fn push_execute_error(cx: &mut EryxCall, failure: python::ExecuteFailure) {
+    cx.stack.push(Value::Record(vec![
+        Value::String(failure.message),
+        // `exit-code: none`: a Python script fails by raising, not with a status.
+        Value::OptionDiscriminant(false),
+        Value::Bytes(failure.stdout),
+        Value::Bytes(failure.stderr),
+    ]));
+    cx.stack.push(Value::ResultDiscriminant(false));
+}
+
+/// Handle an export call by dispatching to the appropriate Python function.
+/// Returns whether the export completed or is pending.
+fn handle_export(wit: Wit, func_index: usize, cx: &mut EryxCall) -> HandleExportResult {
+    match func_index {
+        EXPORT_EXECUTE => {
+            // execute(code: string) -> result<execute-output, execute-error>
+            let code = cx.pop_string().to_string();
+
+            // Set up callbacks from the host's current per-request state.
+            // This runs on every execute to stay in sync with the host.
+            let options = call_get_execution_options(wit);
+            // Without its callbacks the script would fail confusingly (a
+            // NameError at the first call), so fail the execution up front.
+            let result = match initialize_callbacks(wit) {
+                Ok(()) => with_wit(wit, || python::execute_python(&code, options.tracing)),
+                Err(e) => python::ExecuteResult::Error(e.into()),
+            };
+
+            match result {
+                python::ExecuteResult::Complete(output) => {
+                    // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
+                    //               result-json: string, result-error: string }
+                    cx.stack.push(Value::Record(vec![
+                        Value::Bytes(output.stdout),
+                        Value::Bytes(output.stderr),
+                        Value::String(output.result),
+                        Value::String(output.result_error),
+                    ]));
+                    cx.stack.push(Value::ResultDiscriminant(true));
+                    HandleExportResult::Complete
+                }
+                python::ExecuteResult::Error(failure) => {
+                    push_execute_error(cx, failure);
+                    HandleExportResult::Complete
+                }
+                python::ExecuteResult::Pending(callback_code) => {
+                    // Execution is suspended, waiting for async callback
+                    HandleExportResult::Pending(callback_code)
+                }
+            }
+        }
+        EXPORT_SNAPSHOT_STATE => {
+            // snapshot-state() -> result<state-snapshot, string>
+            match python::snapshot_state() {
+                Ok((data, skipped)) => {
+                    cx.stack.push(Value::Record(vec![
+                        Value::Bytes(data),
+                        Value::GenericList(skipped.into_iter().map(Value::String).collect()),
+                    ]));
+                    cx.stack.push(Value::ResultDiscriminant(true));
+                }
+                Err(error) => {
+                    cx.push_string(error);
+                    cx.stack.push(Value::ResultDiscriminant(false));
+                }
+            }
+            HandleExportResult::Complete
+        }
+        EXPORT_RESTORE_STATE => {
+            // restore-state(data: list<u8>) -> result<_, string>
+            let data = match cx.stack.pop() {
+                Some(Value::Bytes(bytes)) => bytes,
+                other => panic!("expected Bytes for restore_state data, got {other:?}"),
+            };
+
+            match python::restore_state(&data) {
+                Ok(()) => {
+                    cx.stack.push(Value::ResultDiscriminant(true));
+                }
+                Err(error) => {
+                    cx.push_string(error);
+                    cx.stack.push(Value::ResultDiscriminant(false));
+                }
+            }
+            HandleExportResult::Complete
+        }
+        EXPORT_CLEAR_STATE => {
+            // clear-state() - no return value
+            python::clear_state();
+            HandleExportResult::Complete
+        }
+        EXPORT_FINALIZE_PREINIT => {
+            // finalize-preinit() - no return value
+            // Reset WASI state after all imports are done during pre-init
+            python::finalize_preinit();
+            HandleExportResult::Complete
+        }
+        EXPORT_SET_RESULT_VARIABLE => {
+            // set-result-variable(name: string) - no return value
+            let name = cx.pop_string().to_string();
+            unsafe {
+                python::set_result_variable_name(&name);
+            }
+            HandleExportResult::Complete
+        }
+        EXPORT_RUN_COMMAND => {
+            // run-command(args: list<string>, env: list<tuple<string, string>>,
+            //             cwd: string) -> s32; the last parameter is on top.
+            let cwd = cx.pop_string().to_string();
+            let env = match cx.stack.pop() {
+                Some(Value::GenericList(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::Tuple(pair) => match <[Value; 2]>::try_from(pair) {
+                            Ok([Value::String(k), Value::String(v)]) => (k, v),
+                            other => panic!("expected (string, string) env entry, got {other:?}"),
+                        },
+                        other => panic!("expected tuple env entry, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected list for run-command env, got {other:?}"),
+            };
+            let args = match cx.stack.pop() {
+                Some(Value::GenericList(items)) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::String(s) => s,
+                        other => panic!("expected string arg, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected list for run-command args, got {other:?}"),
+            };
+            // The wit handle is how an asyncio timer reaches the sleep import.
+            match with_wit(wit, || python::run_command(args, env, cwd)) {
+                python::CommandResult::Exited(status) => {
+                    cx.stack.push(Value::S32(status));
+                    HandleExportResult::Complete
+                }
+                python::CommandResult::Pending(code) => HandleExportResult::Pending(code),
+            }
+        }
+        _ => {
+            panic!("unknown export function index: {}", func_index);
+        }
+    }
+}
+
+impl Interpreter for EryxInterpreter {
+    type CallCx<'a> = EryxCall;
+
+    fn initialize(_wit: Wit) {
+        python::initialize_python();
+    }
+
+    fn export_start<'a>(_wit: Wit, _func: ExportFunction) -> Box<Self::CallCx<'a>> {
+        Box::new(EryxCall::new())
+    }
+
+    fn export_call(wit: Wit, func: ExportFunction, cx: &mut Self::CallCx<'_>) {
+        // Synchronous exports don't support pending - must complete
+        let result = handle_export(wit, func.index(), cx);
+        if let HandleExportResult::Pending(_) = result {
+            panic!("synchronous export cannot return pending");
+        }
+    }
+
+    fn export_async_start(
+        wit: Wit,
+        func: ExportFunction,
+        mut cx: Box<Self::CallCx<'static>>,
+    ) -> u32 {
+        let result = handle_export(wit, func.index(), &mut cx);
+
+        match result {
+            HandleExportResult::Complete => {
+                // Call task_return to signal async completion.
+                if let Some(task_return) = func.task_return() {
+                    unsafe {
+                        // Borrow, don't leak: task_return only lifts the return value
+                        // off `cx`; `cx` drops afterwards, freeing its deferred buffers.
+                        task_return((&raw mut *cx).cast());
+                    }
+                }
+                0
+            }
+            HandleExportResult::Pending(callback_code) => {
+                // Store state for later resumption when callback completes
+                PENDING_ASYNC_STATE.with(|cell| {
+                    *cell.borrow_mut() = Some(PendingAsyncState {
+                        cx,
+                        task_return: func.task_return(),
+                        wit,
+                        export: func.index(),
+                    });
+                });
+                // Return the callback code (WAIT | waitable_set << 4) to the host
+                callback_code
+            }
+        }
+    }
+
+    fn export_async_callback(event0: u32, event1: u32, event2: u32) -> u32 {
+        // Event types from Component Model (used by _eryx_async)
+        const EVENT_SUBTASK: u32 = 1;
+        // Status types
+        const STATUS_RETURNED: u32 = 2;
+
+        // Get the Wit handle from pending state (without taking ownership yet).
+        // We need this to restore CURRENT_WIT and callbacks so subsequent invoke() calls work.
+        let wit = PENDING_ASYNC_STATE.with(|cell| cell.borrow().as_ref().map(|s| s.wit));
+        // Returning EXIT without calling task.return would trap anyway; say why.
+        let Some(wit) = wit else {
+            panic!("async callback event ({event0}, {event1}, {event2}) with no pending export");
+        };
+
+        // If this is a SUBTASK event with RETURNED status, lift the async import result
+        // before calling Python's callback so promise_get_result can access it
+        if event0 == EVENT_SUBTASK && event2 == STATUS_RETURNED {
+            let subtask = event1;
+            if let Some(pending_state) =
+                PENDING_IMPORTS.with(|cell| cell.borrow_mut().remove(&subtask))
+            {
+                // Create a call context to receive the lifted result
+                let mut cx = EryxCall::new();
+
+                // Lift the result from the buffer onto the call stack
+                // Safety: async_lift_impl and buffer were set by call_import_async
+                unsafe {
+                    (pending_state.async_lift_impl)(
+                        (&raw mut cx).cast(),
+                        pending_state.buffer.cast(),
+                    );
+                }
+
+                // Handle result based on import type.
+                // Note: Only `invoke` and `sleep` use Component Model async. TCP/TLS operations
+                // now use fiber-based async and complete synchronously from the guest's
+                // perspective, so they don't appear as pending imports.
+                match pending_state.import_type {
+                    ImportType::Invoke => {
+                        // result<string, string>
+                        let is_ok = match cx.stack.pop() {
+                            Some(Value::ResultDiscriminant(v)) => v,
+                            _ => true,
+                        };
+                        let result_value = match cx.stack.pop() {
+                            Some(Value::String(s)) => s,
+                            _ => String::new(),
+                        };
+                        let result_json = if is_ok {
+                            format!(r#"{{"ok": true, "value": {}}}"#, result_value)
+                        } else {
+                            // Error message needs to be JSON-encoded (with quotes and escaping)
+                            let escaped = python::escape_json_string(&result_value);
+                            format!(r#"{{"ok": false, "error": "{}"}}"#, escaped)
+                        };
+                        python::set_async_import_result(subtask, &result_json);
+                    }
+                    ImportType::Sleep => {}
+                }
+            }
+        }
+
+        // Call Python's callback function to resume execution.
+        // Restore CURRENT_WIT and callbacks so any subsequent invoke() calls work.
+        let callback_code = with_wit(wit, || python::call_python_callback(event0, event1, event2));
+        let code = python::callback_code::get_code(callback_code);
+
+        if code == python::callback_code::WAIT {
+            // Still pending - return the full callback code (WAIT | waitable_set << 4)
+            return callback_code;
+        }
+
+        // Execution complete (EXIT) - capture output and call task_return
+        PENDING_ASYNC_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().take() {
+                let mut cx = state.cx;
+
+                if state.export == EXPORT_RUN_COMMAND {
+                    // The command printed its own errors to stderr; an
+                    // exception that escaped it (a failed background task)
+                    // has been printed there too.
+                    let escaped = python::take_last_callback_error().is_some();
+                    let status = python::command_status();
+                    cx.stack
+                        .push(Value::S32(if escaped && status == 0 { 1 } else { status }));
+                } else {
+                    finish_execute(&mut cx);
+                }
+
+                // Call task_return
+                if let Some(task_return) = state.task_return {
+                    unsafe {
+                        // Borrow, don't leak: task_return only lifts the return value
+                        // off `cx`; `cx` drops afterwards, freeing its deferred buffers.
+                        task_return((&raw mut *cx).cast());
+                    }
+                }
+            }
+        });
+
+        0
+    }
+
+    fn resource_dtor(_ty: Resource, _handle: usize) {
+        // No resources to clean up for now
+    }
+}
+
+/// Push the result of an `execute` that suspended and has now finished.
+fn finish_execute(cx: &mut EryxCall) {
+    // Re-capture stdout now that the async execution is complete
+    // The original teardown ran before we suspended, so it captured nothing
+    python::recapture_stdout();
+
+    let stdout = unsafe { python::get_python_variable_bytes("_eryx_output").unwrap_or_default() };
+    let stderr = unsafe { python::get_python_variable_bytes("_eryx_errors").unwrap_or_default() };
+    // Check if there was an uncaught Python exception during the callback
+    if let Some(error) = python::take_last_callback_error() {
+        // Consume the result variable so a value set before the exception
+        // can't leak into a later successful run (mirrors the sync error
+        // path in execute_python).
+        unsafe { python::discard_result() };
+        push_execute_error(
+            cx,
+            python::ExecuteFailure {
+                message: error,
+                stdout,
+                stderr,
+            },
+        );
+    } else {
+        // Capture the user's result variable now that async execution finished.
+        let (result, result_error) = unsafe { python::capture_result() };
+
+        // WIT defines: execute-output { stdout: list<u8>, stderr: list<u8>,
+        //               result-json: string, result-error: string }
+        cx.stack.push(Value::Record(vec![
+            Value::Bytes(stdout),
+            Value::Bytes(stderr),
+            Value::String(result),
+            Value::String(result_error),
+        ]));
+        cx.stack.push(Value::ResultDiscriminant(true));
+    }
+}
+
+// Export the interpreter interface
+mod export {
+    #![allow(missing_docs)]
+    #![allow(clippy::not_unsafe_ptr_arg_deref)]
+    use super::EryxInterpreter;
+    wit_dylib_ffi::export!(EryxInterpreter);
+}

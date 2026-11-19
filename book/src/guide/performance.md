@@ -70,7 +70,7 @@ metadata.
 
 The pool is only used on a multi-threaded Tokio runtime, where the background
 work actually runs in parallel. On a current-thread runtime it would only add to
-the next request's latency, so it stays off. `PythonExecutor::warm_instances_ready()`
+the next request's latency, so it stays off. `Executor::warm_instances_ready()`
 reports how many instances are waiting for that executor's runtime.
 
 ## Instance allocation
@@ -84,7 +84,7 @@ pages the previous instance dirtied are reset.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `ERYX_ALLOCATOR` | `pooling` (`on-demand` on Windows) | `pooling` or `on-demand`. |
-| `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one, and a finished execution keeps its slot until the background task drops it; instantiation fails once the pool is full. Allow at least concurrency + 2 × `ERYX_WARM_INSTANCES` per component. |
+| `ERYX_POOL_INSTANCES` | `1000` | Maximum sandbox instances alive at once. Every running `execute()`, every live session and every warm instance holds one, and a finished execution keeps its slot until the background task drops it; instantiation fails once the pool is full. Allow at least concurrency + 2 × `ERYX_WARM_INSTANCES` per component. A shell's external commands don't count: they run on an on-demand engine of their own. |
 | `ERYX_POOL_KEEP_RESIDENT_MB` | `64` | How much of each linear memory to keep mapped between uses. |
 | `ERYX_POOL_PAGEMAP_SCAN` | `1` | `1`: reset only dirty pages (Linux 6.7+, via `PAGEMAP_SCAN`). `0`: `memcpy` the whole keep-resident budget instead, which trades a larger copy for fewer page faults on the next execution. |
 | `ERYX_POOL_RELEASE_INTERVAL_SECS` | `30` | Every this many seconds, return the memory kept resident for unused slots to the OS. `0` keeps it resident indefinitely. |

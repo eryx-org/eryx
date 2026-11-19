@@ -9,6 +9,11 @@ shellcheck = "0.11.0"
 [tools."cargo:cargo-nextest"]
 version = "0.9.152"
 
+# Third-party notices for the shipped artifacts (`mise run notices`, #837).
+[tools."cargo:cargo-about"]
+# 0.9 knows wasm32-wasip3; 0.7.1 left out every crate only that target uses.
+version = "0.9.3"
+
 [tools."cargo:wasm-tools"]
 version = "1.263.0"
 
@@ -21,6 +26,18 @@ version = "1.12.0"
 # runs in parallel with the rust install above, and rustup's auto-install of the
 # rust-toolchain.toml channel races it ("detected conflict: 'bin/cargo'").
 depends = ["rust"]
+
+# wasmtime CLI for eryx-build: precompiles CLI components to cwasm and runs
+# their smoke tests. Keep it on the same version as the `wasmtime` crate in
+# Cargo.lock, since a cwasm only loads in the wasmtime version that built it:
+# `mise run update-preview1-adapter` sets it to Cargo.lock's.
+[tools."aqua:bytecodealliance/wasmtime"]
+version = "50.0.2"
+
+# `wit-bindgen c`, for the C lane's `[build] wit` (git's eryx:process/run
+# bindings). Same version as the guests' wit-bindgen crate.
+[tools."github:bytecodealliance/wit-bindgen"]
+version = "0.63.0"
 
 [tools."cargo:mdbook"]
 version = "0.5.4"
@@ -53,7 +70,9 @@ run = "cargo build --workspace"
 
 [tasks.test]
 description = "Run tests with embedded WASM"
-depends = ["precompile-eryx-runtime-preinit"]
+# The bundler too: eryx-precompile's default `env` turns on eryx's `env-pack`
+# across the workspace, and the pack tests need a real one.
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = "cargo nextest run --workspace --features embedded"
 
 [tasks.test-python]
@@ -63,7 +82,7 @@ run = "mise run test"
 
 [tasks.test-all]
 description = "Run tests with all features"
-depends = ["precompile-eryx-runtime-preinit"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = "cargo nextest run --workspace --all-features"
 
 [tasks.lint]
@@ -119,7 +138,7 @@ run = "cargo check-all-features"
 
 [tasks.test-all-features]
 description = "Test all feature combinations"
-depends = ["build-eryx-runtime"]
+depends = ["build-runtime-python"]
 run = "cargo test-all-features"
 
 [tasks.clean]
@@ -166,34 +185,34 @@ description = "Check WASM/CWASM artifact timestamps vs source files"
 run = """
 echo "━━━ WASM Artifacts ━━━"
 
-WASM="crates/eryx-runtime/runtime.wasm"
-CWASM="crates/eryx-runtime/runtime.cwasm"
+WASM="crates/eryx-runtime/runtime-python.wasm"
+CWASM="crates/eryx-runtime/runtime-python.cwasm"
 
 if [[ ! -f "$WASM" ]]; then
-    echo "⚠️  runtime.wasm does not exist - run 'mise run build-eryx-runtime'"
+    echo "⚠️  runtime-python.wasm does not exist - run 'mise run build-runtime-python'"
 elif [[ ! -f "$CWASM" ]]; then
-    echo "⚠️  runtime.cwasm does not exist - run 'mise run precompile-eryx-runtime'"
+    echo "⚠️  runtime-python.cwasm does not exist - run 'mise run precompile-runtime-python-no-preinit'"
 else
     WASM_TIME=$(stat -c %Y "$WASM" 2>/dev/null || stat -f %m "$WASM")
     CWASM_TIME=$(stat -c %Y "$CWASM" 2>/dev/null || stat -f %m "$CWASM")
 
-    echo "runtime.wasm:  $(ls -lh "$WASM" | awk '{print $5, $6, $7, $8}')"
-    echo "runtime.cwasm: $(ls -lh "$CWASM" | awk '{print $5, $6, $7, $8}')"
+    echo "runtime-python.wasm:  $(ls -lh "$WASM" | awk '{print $5, $6, $7, $8}')"
+    echo "runtime-python.cwasm: $(ls -lh "$CWASM" | awk '{print $5, $6, $7, $8}')"
 
     # Check if any source file is newer than wasm
-    NEWEST_SRC=$(find crates/eryx-wasm-runtime/src -name "*.rs" -newer "$WASM" 2>/dev/null | head -5)
+    NEWEST_SRC=$(find crates/eryx-guest-python/src -name "*.rs" -newer "$WASM" 2>/dev/null | head -5)
     if [[ -n "$NEWEST_SRC" ]]; then
-        echo "⚠️  Source files newer than runtime.wasm:"
+        echo "⚠️  Source files newer than runtime-python.wasm:"
         echo "$NEWEST_SRC" | sed 's/^/    /'
-        echo "   Run 'mise run build-eryx-runtime' to rebuild"
+        echo "   Run 'mise run build-runtime-python' to rebuild"
     else
-        echo "✓ runtime.wasm is up-to-date with sources"
+        echo "✓ runtime-python.wasm is up-to-date with sources"
     fi
 
     if [[ "$WASM_TIME" -gt "$CWASM_TIME" ]]; then
-        echo "⚠️  runtime.wasm is newer than runtime.cwasm - run 'mise run precompile-eryx-runtime-preinit'"
+        echo "⚠️  runtime-python.wasm is newer than runtime-python.cwasm - run 'mise run precompile-runtime-python'"
     else
-        echo "✓ runtime.cwasm is up-to-date (preinit version)"
+        echo "✓ runtime-python.cwasm is up-to-date (preinit version)"
     fi
 fi
 
@@ -261,16 +280,16 @@ if [[ -n "$ABI3_EXT" && -f "$ABI3_EXT" ]]; then
     echo "Extension: $ABI3_EXT"
     echo "  $(ls -lh "$ABI3_EXT" | awk '{print $5, $6, $7, $8}')"
 
-    # Check if eryx-wasm-runtime sources are newer
-    NEWEST_WASM_SRC=$(find crates/eryx-wasm-runtime/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
+    # Check if eryx-guest-python sources are newer
+    NEWEST_WASM_SRC=$(find crates/eryx-guest-python/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
     NEWEST_ERYX_SRC=$(find crates/eryx/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
     NEWEST_PY_SRC=$(find crates/eryx-python/src -name "*.rs" -newer "$ABI3_EXT" 2>/dev/null | head -3)
 
     if [[ -n "$NEWEST_WASM_SRC" ]]; then
-        echo "⚠️  eryx-wasm-runtime sources newer than extension:"
+        echo "⚠️  eryx-guest-python sources newer than extension:"
         echo "$NEWEST_WASM_SRC" | sed 's/^/    /'
         echo "   The WASM runtime code has changed. Run:"
-        echo "   1. mise run build-eryx-runtime"
+        echo "   1. mise run build-runtime-python"
         echo "   2. cd crates/eryx-python && maturin develop --release"
     elif [[ -n "$NEWEST_ERYX_SRC" || -n "$NEWEST_PY_SRC" ]]; then
         echo "⚠️  Rust sources newer than extension - run 'cd crates/eryx-python && maturin develop --release'"
@@ -291,7 +310,7 @@ echo "━━━ Cargo Cache Timestamps ━━━"
 # Check if any .rlib files in target are newer than their source crates
 ANOMALIES=""
 
-for crate in eryx eryx-runtime eryx-wasm-runtime; do
+for crate in eryx eryx-runtime eryx-guest-python; do
     CRATE_DIR="crates/$crate"
     if [[ ! -d "$CRATE_DIR" ]]; then
         continue
@@ -326,7 +345,7 @@ if [[ -n "$ANOMALIES" ]]; then
     echo ""
     echo "   This can happen after git checkout/pull or CI cache restore."
     echo "   Cargo should handle this correctly, but if you see stale behavior:"
-    echo "   cargo clean -p eryx-wasm-runtime && mise run build-eryx-runtime"
+    echo "   cargo clean -p eryx-guest-python && mise run build-runtime-python"
 else
     echo "✓ No timestamp anomalies detected"
 fi
@@ -394,17 +413,17 @@ fi
 description = "Clean WASM artifacts and extracted stdlibs (simulate CI fresh state)"
 run = """
 echo "Removing WASM artifacts..."
-rm -f crates/eryx-runtime/runtime.wasm
-rm -f crates/eryx-runtime/runtime.cwasm
+rm -f crates/eryx-runtime/runtime-python.wasm
+rm -f crates/eryx-runtime/runtime-python.cwasm
 rm -f crates/eryx-runtime/runtime-no-preinit.cwasm
 
 echo "Removing prebuilt artifacts..."
 rm -rf crates/eryx-runtime/prebuilt/
 
-echo "Removing extracted stdlib for eryx-wasm-runtime tests..."
-rm -rf crates/eryx-wasm-runtime/tests/python-stdlib
-rm -rf crates/eryx-wasm-runtime/tests/site-packages
-rm -f crates/eryx-wasm-runtime/target/liberyx_runtime.so
+echo "Removing extracted stdlib for eryx-guest-python tests..."
+rm -rf crates/eryx-guest-python/tests/python-stdlib
+rm -rf crates/eryx-guest-python/tests/site-packages
+rm -f crates/eryx-guest-python/target/liberyx_runtime.so
 
 echo "Removing system temp extracted resources..."
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/eryx" "${TMPDIR:-/tmp}/eryx-$(id -u)"
@@ -415,30 +434,188 @@ find target -path "*/build/eryx-runtime*/out/*.so.zst" -delete 2>/dev/null || tr
 echo "✓ Artifacts cleaned. Run 'mise run setup' to rebuild."
 """
 
-[tasks.build-eryx-runtime]
-description = "Build the eryx-wasm-runtime and runtime.wasm"
+[tasks.build-runtime-python]
+description = "Build the CPython guest (eryx-guest-python) into runtime-python.wasm"
+alias = "build-eryx-runtime"
 depends = ["ensure-wasi-sdk", "ensure-guest-toolchain"]
 run = """
 export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
 BUILD_ERYX_RUNTIME=1 cargo build --package eryx-runtime --release
 """
 sources = [
-  "crates/eryx-wasm-runtime/src/**/*.rs",
-  "crates/eryx-wasm-runtime/clock_stubs.c",
-  "crates/eryx-wasm-runtime/Cargo.toml",
+  "crates/eryx-guest-python/src/**/*.rs",
+  "crates/eryx-guest-python/clock_stubs.c",
+  "crates/eryx-guest-python/Cargo.toml",
+  "crates/eryx-guest-call/src/**/*.rs",
+  "crates/eryx-guest-call/Cargo.toml",
   "crates/wit-dylib-ffi/src/**/*.rs",
   "crates/wit-dylib-ffi/Cargo.toml",
   "crates/eryx-runtime/wit/**/*.wit",
 ]
-outputs = ["crates/eryx-runtime/runtime.wasm"]
+outputs = ["crates/eryx-runtime/runtime-python.wasm"]
+
+[tasks.build-runtime-javascript]
+description = "Build the QuickJS guest (eryx-guest-js) into runtime-javascript.wasm"
+depends = ["ensure-wasi-sdk", "ensure-guest-toolchain"]
+run = """
+export WASI_SDK_PATH=$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}")
+BUILD_ERYX_JS_RUNTIME=1 cargo build --package eryx-runtime --release
+"""
+sources = [
+  "crates/eryx-guest-js/src/**/*",
+  "crates/eryx-guest-js/Cargo.toml",
+  "crates/eryx-guest-call/src/**/*.rs",
+  "crates/eryx-guest-call/Cargo.toml",
+  "crates/eryx-guest-python/clock_stubs.c",
+  "crates/wit-dylib-ffi/src/**/*.rs",
+  "crates/wit-dylib-ffi/Cargo.toml",
+  "crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["crates/eryx-runtime/runtime-javascript.wasm"]
+
+[tasks.build-runtime-shell]
+description = "Build the brush guest (eryx-guest-shell) for WASI 0.3 into runtime-shell.wasm"
+# The shell guest ships as a wasm32-wasip3 component: the release assets, the
+# pyeryx-runtime-shell companion, the server image and the embedded runtime.
+# js/eryx uses the WASI 0.2 build instead (build-runtime-shell-p2), until it
+# has WASI 0.3 shims (#918).
+dir = "crates/eryx-guest-shell"
+run = """
+rustup target add wasm32-wasip3
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip3 --release
+cp target/wasm32-wasip3/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell.wasm
+"""
+sources = [
+  "{{config_root}}/crates/eryx-guest-shell/src/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/wit/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.toml",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.lock",
+  "{{config_root}}/crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["{{config_root}}/crates/eryx-runtime/runtime-shell.wasm"]
+
+[tasks.build-runtime-shell-p2]
+description = "Build the brush guest for WASI 0.2 into runtime-shell-p2.wasm, for js/eryx"
+dir = "crates/eryx-guest-shell"
+run = """
+rustup target add wasm32-wasip2
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/eryx_guest_shell.wasm ../eryx-runtime/runtime-shell-p2.wasm
+"""
+sources = [
+  "{{config_root}}/crates/eryx-guest-shell/src/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/wit/**/*",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.toml",
+  "{{config_root}}/crates/eryx-guest-shell/Cargo.lock",
+  "{{config_root}}/crates/eryx-runtime/wit/**/*.wit",
+]
+outputs = ["{{config_root}}/crates/eryx-runtime/runtime-shell-p2.wasm"]
+
+[tasks.precompile-runtime-javascript]
+description = "Pre-initialize and pre-compile runtime-javascript.wasm to runtime-javascript.cwasm"
+depends = ["build-runtime-javascript"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# Use ERYX_CPU_FEATURES for portable builds (default: native)
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/runtime-javascript.wasm \
+  --language javascript \
+  --preinit \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/runtime-javascript.cwasm \
+  --no-verify
+"""
+sources = ["crates/eryx-runtime/runtime-javascript.wasm"]
+outputs = ["crates/eryx-runtime/runtime-javascript.cwasm"]
+
+[tasks.precompile-runtime-shell]
+description = "Pre-compile runtime-shell.wasm to runtime-shell.cwasm"
+depends = ["build-runtime-shell"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# Use ERYX_CPU_FEATURES for portable builds (default: native)
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/runtime-shell.wasm \
+  --language shell \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/runtime-shell.cwasm \
+  --no-verify
+"""
+sources = ["crates/eryx-runtime/runtime-shell.wasm"]
+outputs = ["crates/eryx-runtime/runtime-shell.cwasm"]
+
+[tasks.build-coreutils]
+description = "Build uutils coreutils (clis/coreutils.toml) into crates/eryx-runtime/coreutils.wasm"
+run = """
+rustup target add wasm32-wasip2
+cargo run -q -p eryx-build -- coreutils
+cp scratch/coreutils-component/component.wasm crates/eryx-runtime/coreutils.wasm
+"""
+sources = ["clis/coreutils.toml", "clis/patches/patch-uucore-wasip2.sh"]
+outputs = ["crates/eryx-runtime/coreutils.wasm"]
+
+[tasks.precompile-coreutils]
+description = "Pre-compile coreutils.wasm to coreutils.cwasm, the shell's embedded commands"
+depends = ["build-coreutils"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# No --language: a command, not a runtime. Same version stamp and CPU presets.
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/coreutils.wasm \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/coreutils.cwasm
+"""
+sources = ["crates/eryx-runtime/coreutils.wasm"]
+outputs = ["crates/eryx-runtime/coreutils.cwasm"]
+
+[tasks.build-bundler]
+description = "Build the JavaScript bundler (crates/eryx-bundler, rolldown) into crates/eryx-runtime/eryx-bundler.wasm"
+dir = "crates/eryx-bundler"
+run = """
+rustup target add wasm32-wasip2
+CARGO_TARGET_DIR=target cargo build --locked --target wasm32-wasip2 --release
+cp target/wasm32-wasip2/release/eryx-bundler.wasm ../eryx-runtime/eryx-bundler.wasm
+"""
+sources = [
+  "{{config_root}}/crates/eryx-bundler/src/**/*",
+  "{{config_root}}/crates/eryx-bundler/vendor/**/*",
+  "{{config_root}}/crates/eryx-bundler/Cargo.toml",
+  "{{config_root}}/crates/eryx-bundler/Cargo.lock",
+]
+outputs = ["{{config_root}}/crates/eryx-runtime/eryx-bundler.wasm"]
+
+[tasks.precompile-bundler]
+description = "Pre-compile eryx-bundler.wasm to eryx-bundler.cwasm"
+depends = ["build-bundler"]
+env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
+run = """
+# No --language: a command, like coreutils. Same version stamp and CPU presets.
+cargo run -p eryx-precompile --release -- compile \
+  crates/eryx-runtime/eryx-bundler.wasm \
+  --target "${ERYX_CPU_FEATURES:-native}" \
+  --output crates/eryx-runtime/eryx-bundler.cwasm
+"""
+sources = ["crates/eryx-runtime/eryx-bundler.wasm"]
+outputs = ["crates/eryx-runtime/eryx-bundler.cwasm"]
+
+[tasks.test-bundler]
+description = "Lint and test the bundler: fmt, clippy and unit tests natively, then a smoke test of the wasm under wasmtime"
+depends = ["build-bundler"]
+dir = "crates/eryx-bundler"
+run = """
+cargo fmt --check
+CARGO_TARGET_DIR=target cargo clippy --locked --all-targets -- -D warnings
+CARGO_TARGET_DIR=target cargo test --locked
+./smoke.sh ../eryx-runtime/eryx-bundler.wasm
+"""
 
 [tasks.update-prebuilt]
 description = "Rebuild the committed late-linking artifacts in crates/eryx-runtime/prebuilt/"
-depends = ["build-eryx-runtime"]
+depends = ["build-runtime-python"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-# The newest OUT_DIR is the one build-eryx-runtime just wrote. Cargo 1.100+
+# The newest OUT_DIR is the one build-runtime-python just wrote. Cargo 1.100+
 # lays these out as build/eryx-runtime/<hash>/out, older as build/eryx-runtime-<hash>/out.
 OUT_DIR=$(dirname "$(find "${CARGO_TARGET_DIR:-target}"/release/build -path '*/eryx-runtime*/out/liberyx_runtime.so' -exec ls -t {} + | head -1)")
 PREBUILT=crates/eryx-runtime/prebuilt
@@ -453,64 +630,90 @@ echo "Updated $PREBUILT from $OUT_DIR"
 
 [tasks.build-preinit]
 description = "Build preinit artifacts (liberyx_runtime.so.zst, etc.)"
-depends = ["build-eryx-runtime"]
+depends = ["build-runtime-python"]
 run = "cargo build --package eryx-runtime --features preinit --release"
 
 [tasks.build-all]
 description = "Build WASM component and Rust crates"
-depends = ["build-eryx-runtime", "build"]
+depends = ["build-runtime-python", "build"]
 
 [tasks.bench]
 description = "Run benchmarks"
-depends = ["precompile-eryx-runtime-preinit"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = "cargo bench --package eryx --all-features"
 
 [tasks.bench-save]
 description = "Run benchmarks and save baseline"
-depends = ["precompile-eryx-runtime-preinit"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = "cargo bench --package eryx --all-features -- --save-baseline main"
 
-[tasks.precompile-eryx-runtime]
-description = "Pre-compile eryx-runtime WASM to native code (without Python pre-init)"
-depends = ["build-eryx-runtime"]
+[tasks.precompile-runtime-python-no-preinit]
+description = "Pre-compile runtime-python.wasm to native code (without Python pre-init)"
+alias = "precompile-eryx-runtime"
+depends = ["build-runtime-python"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 TARGET="${ERYX_CPU_FEATURES:-native}"
 cargo run -p eryx-precompile --release -- compile \
-  crates/eryx-runtime/runtime.wasm \
+  crates/eryx-runtime/runtime-python.wasm \
   --target "$TARGET" \
   --output crates/eryx-runtime/runtime-no-preinit.cwasm \
   --no-verify
 """
-sources = ["crates/eryx-runtime/runtime.wasm"]
+sources = ["crates/eryx-runtime/runtime-python.wasm"]
 outputs = ["crates/eryx-runtime/runtime-no-preinit.cwasm"]
 
-[tasks.precompile-eryx-runtime-preinit]
-description = "Pre-initialize Python and pre-compile runtime (faster sessions)"
-depends = ["build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+[tasks.precompile-runtime-python]
+description = "Pre-initialize Python and pre-compile runtime-python.cwasm (faster sessions)"
+alias = "precompile-eryx-runtime-preinit"
+depends = ["build-runtime-python", "build-preinit", "setup-eryx-runtime-tests"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 # Use ERYX_CPU_FEATURES for portable builds (default: native)
 # For Fly.io, set ERYX_CPU_FEATURES=x86-64-v3 (no AVX-512)
 TARGET="${ERYX_CPU_FEATURES:-native}"
 cargo run -p eryx-precompile --release -- compile \
-  crates/eryx-runtime/runtime.wasm \
+  crates/eryx-runtime/runtime-python.wasm \
+  --language python \
   --preinit \
-  --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+  --stdlib crates/eryx-guest-python/tests/python-stdlib \
   --target "$TARGET" \
-  --output crates/eryx-runtime/runtime.cwasm \
+  --output crates/eryx-runtime/runtime-python.cwasm \
   --no-verify
 """
 sources = [
-  "crates/eryx-runtime/runtime.wasm",
-  "crates/eryx-wasm-runtime/tests/python-stdlib/encodings/__init__.py",
+  "crates/eryx-runtime/runtime-python.wasm",
+  "crates/eryx-guest-python/tests/python-stdlib/encodings/__init__.py",
 ]
-outputs = ["crates/eryx-runtime/runtime.cwasm"]
+outputs = ["crates/eryx-runtime/runtime-python.cwasm"]
+
+[tasks.update-preview1-adapter]
+description = "Update the vendored WASI preview 1 command adapter (and its notices entry) and the wasmtime CLI pin to the wasmtime in Cargo.lock; check wasmtime's LICENSE and the pins that follow it"
+run = "python3 scripts/update_preview1_adapter.py"
+
+[tasks.notices]
+description = "Write each shipped artifact's third-party notices to target/notices (#837)"
+depends = ["ensure-rust-src"]
+run = "python3 scripts/notices.py generate target/notices"
+
+[tasks.ensure-rust-src]
+description = "Install rust-src for both pinned toolchains, which the notices read the standard library's dependencies from, and the wasm targets whose sysroots they check"
+depends = ["ensure-guest-toolchain"]
+run = "rustup component add rust-src && rustup target add wasm32-wasip2 wasm32-wasip3"
+
+[tasks.update-reserved-names]
+description = "Regenerate the JS SDK's copy of the callback names each guest reserves (#962)"
+run = "ERYX_UPDATE_RESERVED_NAMES=1 cargo test -p eryx --lib reserved::tests::js_sdk_copy_is_current"
+
+[tasks.notices-check]
+description = "Check every shipped crate's licence is accepted and every vendored input has a notices entry"
+depends = ["ensure-rust-src"]
+run = "python3 scripts/notices.py check"
 
 [tasks.setup]
 description = "Set up development environment (build WASM, precompile, etc.)"
-depends = ["precompile-eryx-runtime-preinit"]
+depends = ["precompile-runtime-python", "precompile-runtime-javascript", "precompile-runtime-shell", "precompile-coreutils", "precompile-bundler"]
 run = """
 echo "✓ Development environment ready!"
 echo ""
@@ -522,7 +725,7 @@ echo "  mise run build-all  - Build WASM and Rust crates"
 
 [tasks.build-all-precompiled]
 description = "Build WASM, pre-compile it, and build Rust crates"
-depends = ["build-eryx-runtime", "build"]
+depends = ["build-runtime-python", "build"]
 
 [tasks.msrv]
 description = "Check compilation on minimum supported Rust version"
@@ -530,12 +733,12 @@ run = "cargo +1.91 check --workspace"
 
 [tasks.example-demo]
 description = "Run the demo example"
-depends = ["build-eryx-runtime"]
+depends = ["build-runtime-python"]
 run = "cargo run --example trace_events --features embedded"
 
 [tasks.examples]
 description = "Run all examples"
-depends = ["precompile-eryx-runtime-preinit"]
+depends = ["precompile-runtime-python"]
 run = """
 echo "=== simple ==="
 cargo run --example simple --features embedded --release
@@ -599,10 +802,39 @@ fi
 echo "Using WASI SDK at: $WASI_SDK_PATH"
 """
 
+# =============================================================================
+# CLI components (crates/eryx-build, clis/*.toml)
+# =============================================================================
+
+[tasks.build-cli]
+description = "Build a CLI component from clis/<name>.toml. Usage: mise run build-cli -- <name|path.toml>"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+NAME="${1:?Usage: mise run build-cli -- <name|path.toml> (e.g. coreutils)}"
+# The C lane needs the WASI SDK. Export it if installed, but don't install it
+# for Rust and Go builds; C manifests point at ensure-wasi-sdk when it's missing.
+if SDK="$(mise where "github:WebAssembly/wasi-sdk@{{vars.wasi_sdk_version}}" 2>/dev/null)"; then
+    export WASI_SDK_PATH="$SDK"
+fi
+# Every C and Rust lane build links a rustc-built wasm32-wasip2 object (the
+# start-in-$PWD constructor, #978), so even C builds need the target.
+rustup target add wasm32-wasip2
+cargo run -q -p eryx-build -- "$NAME"
+"""
+
+[tasks.list-clis]
+description = "List the CLI component manifests"
+run = "cargo run -q -p eryx-build -- --list"
+
+[tasks.check-clis]
+description = "Validate the CLI component manifests without building"
+run = "cargo run -q -p eryx-build -- --check"
+
 [tasks.setup-eryx-runtime-tests]
-description = "Extract Python stdlib and copy liberyx_runtime.so for eryx-wasm-runtime tests"
-depends = ["build-eryx-runtime"]
-dir = "crates/eryx-wasm-runtime"
+description = "Extract Python stdlib and copy liberyx_runtime.so for eryx-guest-python tests"
+depends = ["build-runtime-python"]
+dir = "crates/eryx-guest-python"
 run = """
 mkdir -p tests/python-stdlib tests/site-packages target
 
@@ -629,7 +861,7 @@ else
     # Search in both release and debug build directories
     OUT_DIR=$(find ../../target -path "*/eryx-runtime*/out/liberyx_runtime.so" -type f 2>/dev/null | head -1)
     if [[ -z "$OUT_DIR" ]]; then
-        echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-eryx-runtime' first."
+        echo "Error: liberyx_runtime.so not found in target. Run 'mise run build-runtime-python' first."
         exit 1
     fi
     echo "Copying $OUT_DIR to target/"
@@ -657,19 +889,36 @@ run = "mdbook test -L ../target/debug/deps"
 description = "Test Python code blocks in the book"
 depends = ["test-python"]
 dir = "book"
+# The JavaScript example needs the runtime `pip install pyeryx[javascript]`
+# would provide.
+env = { ERYX_RUNTIME_CWASM_JAVASCRIPT = "{{config_root}}/crates/eryx-runtime/runtime-javascript.cwasm" }
 run = "python3 scripts/test_examples.py"
 
 [tasks."book:test-all"]
 description = "Test both Rust and Python code blocks in the book"
 depends = ["book:test", "book:test-python"]
 
+[tasks.ensure-wasm32-unknown-target]
+description = "Install the wasm32-unknown-unknown target for the pinned toolchain (eryx-linker-wasm)"
+run = """
+if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+    rustup target add wasm32-unknown-unknown
+fi
+"""
+
 [tasks.build-linker-wasm]
 description = "Build the eryx-linker-wasm crate for browser use (wasm-bindgen)"
+depends = ["ensure-wasm32-unknown-target"]
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
 cargo build --package eryx-linker-wasm --target wasm32-unknown-unknown --release
-wasm-bindgen target/wasm32-unknown-unknown/release/eryx_linker_wasm.wasm \
+# Wherever cargo put it: CARGO_TARGET_DIR or build.target-dir can move it.
+target_dir=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
+# The pinned wasm-bindgen-cli (it must match the `wasm-bindgen` crate exactly),
+# not whichever `wasm-bindgen` comes first on PATH.
+mise exec cargo:wasm-bindgen-cli -- wasm-bindgen \
+  "$target_dir/wasm32-unknown-unknown/release/eryx_linker_wasm.wasm" \
   --target web \
   --out-dir js/demo/src/lib/linker-wasm \
   --out-name linker
@@ -715,19 +964,19 @@ curl -sL https://github.com/dicej/wasi-wheels/releases/download/v0.0.2/numpy-was
 """
 
 [tasks.build-numpy-runtime]
-description = "Build a custom runtime.cwasm with numpy baked in (demo)"
-depends = ["download-numpy-wasi", "build-eryx-runtime", "build-preinit", "setup-eryx-runtime-tests"]
+description = "Build a custom runtime-python.cwasm with numpy baked in (demo)"
+depends = ["download-numpy-wasi", "build-runtime-python", "build-preinit", "setup-eryx-runtime-tests"]
 env = { ERYX_PRECOMPILE_BOOTSTRAP = "1" }
 run = """
 TARGET="${ERYX_CPU_FEATURES:-native}"
 cargo run -p eryx-precompile --release -- compile \
-    crates/eryx-runtime/runtime.wasm \
+    crates/eryx-runtime/runtime-python.wasm \
     --preinit \
-    --stdlib crates/eryx-wasm-runtime/tests/python-stdlib \
+    --stdlib crates/eryx-guest-python/tests/python-stdlib \
     --package crates/eryx-server/packages/numpy-wasi.tar.gz \
     --import numpy \
     --target "$TARGET" \
-    --output crates/eryx-server/runtime.cwasm \
+    --output crates/eryx-server/runtime-python.cwasm \
     --no-verify
 """
 
@@ -737,25 +986,25 @@ depends = ["build-numpy-runtime"]
 run = """
 docker build -f crates/eryx-server/Dockerfile \
     --build-arg RUNTIME_SOURCE=custom \
-    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime.cwasm \
+    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm \
     -t eryx-server:custom \
     .
 """
 
 [tasks.build-server-image-ci]
-description = "Build Docker image using pre-built runtime.cwasm (simulates CI)"
-depends = ["precompile-eryx-runtime-preinit"]
+description = "Build Docker image using pre-built runtime-python.cwasm (simulates CI)"
+depends = ["precompile-runtime-python"]
 run = """
-cp crates/eryx-runtime/runtime.cwasm crates/eryx-server/runtime.cwasm
+cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 docker build -f crates/eryx-server/Dockerfile \
     --build-arg RUNTIME_SOURCE=custom \
-    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime.cwasm \
+    --build-arg RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm \
     -t eryx-server:ci-test \
     .
-rm -f crates/eryx-server/runtime.cwasm
+rm -f crates/eryx-server/runtime-python.cwasm
 """
 
 [tasks.test-eryx-runtime]
-description = "Run eryx-wasm-runtime integration tests"
-depends = ["build-eryx-runtime", "setup-eryx-runtime-tests"]
-run = "cargo test --package eryx-wasm-runtime --test runtime_test -- --nocapture"
+description = "Run eryx-guest-python integration tests"
+depends = ["build-runtime-python", "setup-eryx-runtime-tests"]
+run = "cargo test --package eryx-guest-python --test runtime_test -- --nocapture"

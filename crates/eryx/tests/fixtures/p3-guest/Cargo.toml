@@ -1,0 +1,20 @@
+# A minimal `wasm32-wasip3` guest exporting the eryx sandbox world, used by
+# tests/p3_guest.rs to check that WASI 0.3 guests run and see the session's
+# VFS. Built by the test itself.
+[package]
+name = "eryx-p3-guest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not part of the eryx workspace: it only builds for wasm32-wasip3.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"

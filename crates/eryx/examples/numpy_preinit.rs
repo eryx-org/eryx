@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let python_stdlib = std::path::PathBuf::from(&manifest_dir)
         .parent()
         .ok_or("Cannot find parent directory")?
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib");
 
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nStep 2: Pre-compiling component...");
     let start = Instant::now();
 
-    let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
+    let precompiled = eryx::Executor::precompile(&preinit_component)?;
     println!(
         "  Pre-compiled in {:?} ({:.1} MB)",
         start.elapsed(),

@@ -7,22 +7,22 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use eryx::{
-    CallbackError, Error, ErrorKind, InProcessSession, PythonExecutor, ResourceLimits, Sandbox,
-    Session, SessionExecutor, TypedCallback,
+    CallbackError, Error, ErrorKind, Executor, InProcessSession, ResourceLimits, Sandbox, Session,
+    SessionExecutor, TypedCallback,
 };
 use serde_json::{Value, json};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
@@ -56,7 +56,7 @@ fn assert_memory_limit_error(error: Error) {
 #[cfg(feature = "unstable-vfs")]
 fn assert_vfs_quota_rejected(error: &Error) {
     assert!(
-        matches!(error.kind(), ErrorKind::PythonException { .. })
+        matches!(error.kind(), ErrorKind::ScriptFailed { .. })
             && error.to_string().contains("OSError"),
         "expected a guest-visible VFS quota rejection, got {error:?}"
     );
@@ -220,7 +220,9 @@ async fn in_process_session_applies_memory_limit_at_instantiation() {
 #[cfg(feature = "unstable-vfs")]
 fn room_for_four_byte_file() -> u64 {
     let entry = |path: &str| eryx::vfs::ENTRY_OVERHEAD_BYTES + path.len() as u64;
-    entry("/data") + entry("/tmp") + entry("/data/file") + 4
+    // A directory's path is charged twice.
+    let dir = |path: &str| entry(path) + path.len() as u64;
+    dir("/data") + dir("/tmp") + entry("/data/file") + 4
 }
 
 #[cfg(feature = "unstable-vfs")]
@@ -378,4 +380,57 @@ async fn session_memory_plateaus_across_executes() {
             "{code:?}: peak memory grew from {before} to {after}"
         );
     }
+}
+
+/// A run that times out leaves no instance behind (a trapped one, or a guest
+/// still suspended on a sleep): the next call starts on a fresh instance and
+/// says so, instead of failing or timing out too.
+#[tokio::test]
+async fn a_timed_out_session_starts_again() {
+    let limits =
+        ResourceLimits::unlimited().with_execution_timeout(std::time::Duration::from_millis(300));
+    for code in [
+        "while True: pass",
+        "import asyncio\nawait asyncio.sleep(60)",
+    ] {
+        let mut session = limited_session(limits.clone()).await;
+        session.execute("kept = 1").run().await.expect("setup");
+        assert!(
+            matches!(
+                session.execute(code).run().await.map_err(Error::into_kind),
+                Err(ErrorKind::Timeout(_))
+            ),
+            "{code}"
+        );
+        let output = session
+            .execute("print('next', 'kept' in globals())")
+            .run()
+            .await
+            .unwrap_or_else(|e| panic!("{code}: {e}"));
+        assert_eq!(output.stdout_text().trim(), "next False", "{code}");
+        assert!(output.state_was_reset, "{code}");
+    }
+}
+
+/// Running out of fuel traps the instance, so it's discarded too: the next
+/// call starts on a fresh one instead of "cannot enter component instance".
+#[tokio::test]
+async fn a_session_out_of_fuel_starts_again() {
+    let limits = ResourceLimits::unlimited().with_max_fuel(50_000_000);
+    let mut session = limited_session(limits).await;
+    assert!(matches!(
+        session
+            .execute("while True: pass")
+            .run()
+            .await
+            .map_err(Error::into_kind),
+        Err(ErrorKind::FuelExhausted { .. })
+    ));
+    let output = session
+        .execute("print('next')")
+        .run()
+        .await
+        .expect("next call");
+    assert_eq!(output.stdout_text().trim(), "next");
+    assert!(output.state_was_reset);
 }

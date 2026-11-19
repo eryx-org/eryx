@@ -79,8 +79,9 @@ world sandbox {
 
     /// Host-controlled behavior for a single execution.
     record execution-options {
-        /// Whether the guest should install Python tracing.
-        python-tracing: bool,
+        /// Whether the guest should report trace events (for Python, line,
+        /// call and return events from `sys.settrace`).
+        tracing: bool,
         /// Historical hint that a fresh instance may keep its pre-initialized
         /// empty callbacks. The guest now compares the host's declarations with
         /// what is installed and ignores this field; it is kept so existing
@@ -108,6 +109,9 @@ world sandbox {
         /// The uncaught exception's traceback, or the reason the guest could
         /// not run the code.
         message: string,
+        /// The script's exit status, for guests that have one (a shell).
+        /// None for a guest whose scripts fail by raising (Python, JavaScript).
+        exit-code: option<s32>,
         /// Captured stdout up to the failure (raw bytes).
         stdout: list<u8>,
         /// Captured stderr up to the failure (raw bytes). For an uncaught
@@ -129,9 +133,9 @@ world sandbox {
     record state-snapshot {
         /// The serialized state (using dill internally).
         data: list<u8>,
-        /// Names of the globals left out because they could not be
-        /// serialized (e.g. open sockets, generators).
-        skipped-globals: list<string>,
+        /// Names of the session variables left out because they could not
+        /// be serialized (e.g. open sockets, generators).
+        skipped: list<string>,
     }
 
     /// Capture a snapshot of the current Python session state.
@@ -184,4 +188,20 @@ world sandbox {
     /// (a synchronous export cannot be called on wasmtime's async store); the
     /// guest work itself is synchronous and completes immediately.
     export set-result-variable: async func(name: string);
+
+    /// Run the guest as a command-line program, the way a shell runs
+    /// `python3 -c CODE` or `sh script.sh`, and return its exit status.
+    ///
+    /// `args` is the full argv, program name first. `env` replaces the
+    /// guest's environment and `cwd` its working directory: both are passed
+    /// here rather than read from WASI, because a pre-initialized guest has
+    /// already captured its environment, and the guest's libc ignores WASI's
+    /// initial working directory.
+    ///
+    /// The program reads WASI stdin and writes WASI stdout and stderr
+    /// directly; nothing is captured. It is meant for a fresh instance that
+    /// runs one command, so it neither reads nor keeps session state, and
+    /// callbacks aren't installed. A guest that can't run as a command
+    /// writes why to stderr and returns 127.
+    export run-command: async func(args: list<string>, env: list<tuple<string, string>>, cwd: string) -> s32;
 }

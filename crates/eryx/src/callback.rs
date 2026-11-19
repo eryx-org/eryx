@@ -576,10 +576,66 @@ impl Callback for DynamicCallback {
 ///
 /// [`PrefixCallback`] takes it out and passes the positional arguments to its
 /// handler separately. A custom prefix callback (a [`Callback`] whose name ends
-/// in `.*`) receives it in its `args` and `raw_args` as is. Any other callback
-/// that receives it fails with [`CallbackError::InvalidArguments`] without
-/// being called.
+/// in `.*`) receives it in its `args` and `raw_args` as is.
+///
+/// For any other callback the host binds them to its parameters before calling
+/// it, the way a Python function would: in the order of the `properties` of its
+/// [`parameters_schema`](Callback::parameters_schema), as the guest sees it in
+/// `list-callbacks`, which is the order the schema declares them in (#860).
+/// More positional arguments than properties, or one that also arrives
+/// by keyword, fail with [`CallbackError::InvalidArguments`] without calling it:
+/// `add() takes 2 positional arguments but 3 were given`, `add() got multiple
+/// values for argument 'a'`.
+///
+/// The Python guest binds positional arguments itself, with the same rules. The
+/// JavaScript and shell guests send them here, as `{"__eryx_args__": [...]}`
+/// plus any keyword arguments. In JavaScript a call with a single plain object
+/// whose keys are all parameter names (or to a callback with no declared
+/// parameters) is keyword arguments; any other call is positional.
 pub const POSITIONAL_ARGS_KEY: &str = "__eryx_args__";
+
+/// Bind the positional arguments in `args` (under [`POSITIONAL_ARGS_KEY`]) to
+/// `schema`'s properties, in order, for a call of `name`. See
+/// [`POSITIONAL_ARGS_KEY`].
+pub(crate) fn bind_positional(
+    name: &str,
+    schema: &crate::schema::Schema,
+    args: &mut serde_json::Value,
+) -> Result<(), CallbackError> {
+    let invalid = |msg: String| Err(CallbackError::InvalidArguments(msg));
+    let Some(kwargs) = args.as_object_mut() else {
+        return invalid(format!("{name}() arguments must be an object"));
+    };
+    let positional = match kwargs.remove(POSITIONAL_ARGS_KEY) {
+        None => return Ok(()),
+        Some(serde_json::Value::Array(positional)) => positional,
+        Some(_) => return invalid(format!("{POSITIONAL_ARGS_KEY} must be a list")),
+    };
+    let schema = serde_json::to_value(schema).unwrap_or_default();
+    let params: Vec<&String> = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| properties.keys().collect())
+        .unwrap_or_default();
+    if positional.len() > params.len() {
+        return invalid(format!(
+            "{name}() takes {} positional argument{} but {} {} given",
+            params.len(),
+            if params.len() == 1 { "" } else { "s" },
+            positional.len(),
+            if positional.len() == 1 { "was" } else { "were" },
+        ));
+    }
+    for (param, value) in params.into_iter().zip(positional) {
+        if kwargs.contains_key(param.as_str()) {
+            return invalid(format!(
+                "{name}() got multiple values for argument '{param}'"
+            ));
+        }
+        kwargs.insert(param.clone(), value);
+    }
+    Ok(())
+}
 
 /// A boxed async handler for a [`PrefixCallback`]: it receives the full name
 /// the guest called, its keyword arguments (an object) and its positional
@@ -899,7 +955,7 @@ impl DynamicCallbackBuilder {
     /// ```rust,ignore
     /// use eryx::schemars::json_schema;
     ///
-    /// DynamicCallback::builder("complex", "A callback with complex schema", handler)
+    /// DynamicCallback::builder("configure", "A callback with complex schema", handler)
     ///     .schema(Schema::try_from_value(json!({
     ///         "type": "object",
     ///         "properties": {

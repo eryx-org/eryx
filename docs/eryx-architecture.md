@@ -31,7 +31,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 - **Pre-initialization** for ~25x faster sandbox creation
 - **State management** (snapshot/restore) for session persistence
 
-**Key innovation:** Custom wit-dylib runtime (`eryx-wasm-runtime`) that replaces componentize-py's runtime, enabling true late-linking of native extensions without requiring componentize-py's pre-build process.
+**Key innovation:** Custom wit-dylib runtime (`eryx-guest-python`) that replaces componentize-py's runtime, enabling true late-linking of native extensions without requiring componentize-py's pre-build process.
 
 ---
 
@@ -44,16 +44,16 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  Application Code                                                        │
 │    └─> Sandbox::builder()                                               │
 │          ├─ .with_callback("func", callback_impl)                       │
-│          ├─ .with_python_stdlib("/path/to/stdlib")                      │
-│          ├─ .with_site_packages("/path/to/packages")  [for numpy etc]   │
+│          ├─ .with_python_stdlib("/path/to/stdlib")                             │
+│          ├─ .with_site_packages("/path/to/packages")  [for numpy etc]    │
 │          ├─ .with_native_extension("numpy/core/*.so", bytes) [optional] │
 │          └─ .build()                                                     │
 │              │                                                           │
 │              ├─ If extensions → late-link with wit_component::Linker    │
-│              └─ Else → load pre-built runtime.wasm                      │
+│              └─ Else → load pre-built runtime-python.wasm                      │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────┐    │
-│  │  PythonExecutor (wasmtime host)                                 │    │
+│  │  Executor (wasmtime host)                                 │    │
 │  │    ├─ Engine (async component model support)                    │    │
 │  │    ├─ Store with ExecutorState                                  │    │
 │  │    │    ├─ WASI context (stdio, preopened dirs)                 │    │
@@ -71,7 +71,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │                    Guest (WASM Component)                                │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────┐    │
-│  │  runtime.wasm (Component Model + WASI Preview 2)                │    │
+│  │  runtime-python.wasm (Component Model + WASI Preview 2)                │    │
 │  │                                                                  │    │
 │  │  Exports (to host):                                             │    │
 │  │    • execute(code: string) -> result<string, string>  [async]   │    │
@@ -79,6 +79,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │  │    • restore-state(state: list<u8>)                             │    │
 │  │    • clear-state()                                              │    │
 │  │    • finalize-preinit()  [for pre-initialization]               │    │
+│  │    • run-command(args, env, cwd) -> s32  [async]                │    │
 │  │                                                                  │    │
 │  │  Imports (from host):                                           │    │
 │  │    • invoke(name, args) -> result<string, string>  [async]      │    │
@@ -95,7 +96,7 @@ Eryx is a Python sandbox built on WebAssembly Component Model. It enables:
 │                              │                                           │
 │                              ▼                                           │
 │  ┌────────────────────────────────────────────────────────────────┐    │
-│  │  liberyx_runtime.so (eryx-wasm-runtime crate)                   │    │
+│  │  liberyx_runtime.so (eryx-guest-python crate)                   │    │
 │  │    • Implements wit-dylib interpreter interface                 │    │
 │  │    • Python execution via CPython FFI (pyo3::ffi)               │    │
 │  │    • Async callback suspend/resume protocol                     │    │
@@ -229,7 +230,7 @@ Python code and packages are made available via WASI filesystem mounting (preope
 ### How Mounting Works
 
 ```rust
-// In PythonExecutor::execute()
+// In Executor::execute()
 let mut wasi_ctx = WasiCtxBuilder::new()
     .inherit_stdio()    // stdout/stderr go to host
     .inherit_env();     // Pass through environment
@@ -330,15 +331,15 @@ When Python calls `dlopen("/site-packages/numpy/core/_multiarray_umath...")`:
 
 ## Build Pipeline
 
-### For Base Runtime (runtime.wasm)
+### For Base Runtime (runtime-python.wasm)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Step 1: Build eryx-wasm-runtime                              │
-│   cd crates/eryx-wasm-runtime                                │
+│ Step 1: Build eryx-guest-python                              │
+│   cd crates/eryx-guest-python                                │
 │   cargo build --target wasm32-wasip1 -Z build-std           │
 │                                                              │
-│   Output: liberyx_wasm_runtime.a (staticlib with PIC)        │
+│   Output: liberyx_guest_python.a (staticlib with PIC)        │
 │   Size: ~800KB                                               │
 └─────────────────────────────────────────────────────────────┘
                         │
@@ -356,7 +357,7 @@ When Python calls `dlopen("/site-packages/numpy/core/_multiarray_umath...")`:
 │ Step 3: Link into shared library                            │
 │   wasi-sdk/bin/clang --target=wasm32-wasip1 -shared         │
 │     -Wl,--allow-undefined                                    │
-│     -Wl,--whole-archive liberyx_wasm_runtime.a               │
+│     -Wl,--whole-archive liberyx_guest_python.a               │
 │     -Wl,--no-whole-archive clock_stubs.o                     │
 │                                                              │
 │   Output: liberyx_runtime.so (with @dylink.0 metadata)       │
@@ -386,7 +387,7 @@ When Python calls `dlopen("/site-packages/numpy/core/_multiarray_umath...")`:
 │     .adapter("wasi_snapshot_preview1", ...)                  │
 │     .encode()                                                │
 │                                                              │
-│   Output: runtime.wasm                                       │
+│   Output: runtime-python.wasm                                       │
 │   Size: ~31MB (includes all libraries)                       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -395,10 +396,10 @@ When Python calls `dlopen("/site-packages/numpy/core/_multiarray_umath...")`:
 
 | Artifact | Stage | Size (uncompressed) | Size (compressed) | Purpose |
 |----------|-------|---------------------|-------------------|---------|
-| `liberyx_wasm_runtime.a` | After rustc | 800KB | - | Rust staticlib |
+| `liberyx_guest_python.a` | After rustc | 800KB | - | Rust staticlib |
 | `liberyx_runtime.so` | After clang link | 1.1MB | 206KB | wit-dylib interpreter |
 | `liberyx_bindings.so` | wit-dylib gen | 50KB | 15KB | WIT marshaling |
-| `runtime.wasm` | Final component | 31MB | - | Complete component |
+| `runtime-python.wasm` | Final component | 31MB | - | Complete component |
 
 ---
 
@@ -507,7 +508,7 @@ The path must match because:
 |-----------|------|-------|
 | `liberyx_runtime.so` | 1.1MB uncompressed, ~206KB compressed | Our custom runtime |
 | `liberyx_bindings.so` | ~50KB uncompressed, ~15KB compressed | WIT bindings |
-| `runtime.wasm` (final) | 31MB | Complete component with all libs |
+| `runtime-python.wasm` (final) | 31MB | Complete component with all libs |
 
 ### Native Extensions (numpy example)
 
@@ -541,7 +542,7 @@ The path must match because:
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  1. Build time:                                              │
-│     componentize-py componentize runtime.py -o runtime.wasm  │
+│     componentize-py componentize runtime.py -o runtime-python.wasm  │
 │     • Generates "symbols" dispatch table                     │
 │     • Pre-initializes Python (imports modules, captures mem) │
 │     • Embeds everything in one component                     │
@@ -569,7 +570,7 @@ The path must match because:
 │     • Time: ~30 seconds (one-time)                           │
 │                                                              │
 │  2. Sandbox creation time:                                   │
-│     • No extensions: Use pre-built runtime.wasm (~16-500ms)  │
+│     • No extensions: Use pre-built runtime-python.wasm (~16-500ms)  │
 │     • With extensions: Late-link with wit_component::Linker  │
 │       - Decompress base libraries                            │
 │       - Add extension .so files                              │
@@ -666,7 +667,7 @@ Pre-initialization captures Python's initialized memory state, enabling ~25x fas
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  Build Time (SandboxPre::new)                                           │
 │                                                                          │
-│  1. Load component (runtime.wasm)                                       │
+│  1. Load component (runtime-python.wasm)                                       │
 │  2. Instantiate and run Python initialization                           │
 │  3. Execute pre-imports (e.g., "import numpy")                          │
 │  4. Call finalize-preinit export:                                       │
@@ -692,7 +693,7 @@ Pre-initialization captures Python's initialized memory state, enabling ~25x fas
 The key innovation is the `finalize-preinit` export, which resets WASI state before the memory snapshot is captured:
 
 ```rust
-// In eryx-wasm-runtime/src/python.rs
+// In eryx-guest-python/src/python.rs
 pub fn finalize_preinit() {
     reset_wasi_state();
 }
@@ -1161,7 +1162,7 @@ Results:
 
 The sandbox builder now automatically searches for Python stdlib in these locations:
 
-1. `ERYX_PYTHON_STDLIB` environment variable
+1. `ERYX_STDLIB` (or the older `ERYX_PYTHON_STDLIB`) environment variable
 2. `./python-stdlib` (current directory)
 3. `<exe_dir>/python-stdlib` (relative to executable)
 4. `<exe_dir>/../python-stdlib` (parent of executable)
@@ -1216,7 +1217,7 @@ eryx/
 ├── crates/eryx/                     (Host crate)
 │   ├── src/
 │   │   ├── sandbox.rs               (8KB) - Sandbox API
-│   │   ├── wasm.rs                  (12KB) - PythonExecutor
+│   │   ├── wasm.rs                  (12KB) - Executor
 │   │   ├── session/                 - Session management
 │   │   └── lib.rs                   - Public exports
 │   └── examples/
@@ -1233,7 +1234,7 @@ eryx/
 │       ├── libpython3.14.so.zst    (7.1MB)
 │       └── ... (all base libraries)
 │
-└── crates/eryx-wasm-runtime/        (Guest runtime crate)
+└── crates/eryx-guest-python/        (Guest runtime crate)
     ├── src/
     │   ├── lib.rs                   (35KB) - wit-dylib impl
     │   └── python.rs                (28KB) - CPython FFI
@@ -1249,10 +1250,10 @@ eryx/
 
 ```
 Build outputs:
-├── liberyx_wasm_runtime.a           (800KB) - Rust staticlib
+├── liberyx_guest_python.a           (800KB) - Rust staticlib
 ├── liberyx_runtime.so               (1.1MB) - Shared library
 ├── liberyx_bindings.so              (50KB) - WIT bindings
-└── runtime.wasm                     (31MB) - Final component
+└── runtime-python.wasm                     (31MB) - Final component
 
 Embedded in eryx-runtime crate:
 ├── Base libraries                   (~10MB compressed)

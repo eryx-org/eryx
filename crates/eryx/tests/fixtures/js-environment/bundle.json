@@ -1,0 +1,11 @@
+{
+  "bundler": "rolldown 1.3.2",
+  "entries": {
+    "date-fns": "date-fns.js",
+    "lodash": "lodash.js",
+    "nanoid": "nanoid.js",
+    "uuid": "uuid.js",
+    "zod": "zod.js"
+  },
+  "warnings": []
+}

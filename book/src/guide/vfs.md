@@ -317,8 +317,9 @@ sandbox.execute("open('/data/output.txt', 'w').write('new')").await?;
 let saved = storage.snapshot().await; // e.g. to persist it
 ```
 
-The storage keeps its own size limit (`InMemoryStorage::with_max_bytes`);
-`max_vfs_bytes` only applies to storage eryx creates. On a pooled sandbox,
+The storage keeps its own size and entry limits
+(`InMemoryStorage::with_max_bytes` and `with_max_entries`); `max_vfs_bytes`
+and `max_vfs_entries` only apply to storage eryx creates. On a pooled sandbox,
 use `PooledSandbox::with_vfs_storage`, which the pool clears when the sandbox
 goes back.
 
@@ -529,6 +530,10 @@ A few more rules apply to volumes:
   [resource limits](./resource-limits.md#open-host-files) to change it. All
   sandboxes in the process also share one total, by default half the soft
   `RLIMIT_NOFILE` (at least 256).
+- **Size** - Volumes are the place for large trees: `max_vfs_bytes` and
+  `max_vfs_entries` (see [resource limits](./resource-limits.md#virtual-filesystem-size))
+  only apply to in-memory storage, and a volume keeps its contents on the host
+  disk rather than in host memory.
 - **File size** - `max_vfs_bytes` doesn't apply to volumes, so by default a
   writable volume can fill the host disk. Give the mount a `max_file_size` to
   cap how large any one file in it may grow; writes past it fail. The cap is
@@ -593,7 +598,7 @@ same guest path (including `/data`) fail the execution.
 4. **Use appropriate mount paths** - Customize for your application's needs
 5. **Handle file errors gracefully** - Files may not exist or paths may be invalid
 6. **Use read-only mounts for input data** - Prevent sandboxed code from modifying source files
-7. **Prefer VFS for ephemeral data** - Use volume mounts only when you need access to real host files
+7. **Prefer VFS for ephemeral data** - Use volume mounts when you need access to real host files, or for large trees (see [resource limits](./resource-limits.md#large-trees-belong-on-a-volume))
 
 ## Next Steps
 

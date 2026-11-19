@@ -223,7 +223,7 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     let python_stdlib = std::path::PathBuf::from(&manifest_dir)
         .parent()
         .ok_or("no parent")?
-        .join("eryx-wasm-runtime/tests/python-stdlib");
+        .join("eryx-guest-python/tests/python-stdlib");
     let site_packages = numpy_dir.parent().ok_or("no parent")?;
 
     let baseline = MemorySnapshot::now();
@@ -289,7 +289,7 @@ async fn run_numpy_benchmark() -> Result<(), Box<dyn std::error::Error>> {
     // Precompile
     println!("Precompiling...");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile(&preinit)?;
+    let precompiled = eryx::Executor::precompile(&preinit)?;
     println!("  Precompiled in {:?}", start.elapsed());
     println!(
         "  Precompiled size: {:.1} MB",

@@ -164,6 +164,33 @@ let sandbox = pool.acquire().await?.with_network(
 `with_network` checks them as `build` does. Create new `SecretConfig`s for each
 lease, so each gets its own placeholder.
 
+A shell pool's commands can reach the network through each lease's network
+too (`with_child_network`, see [External commands](./sandboxes.md#external-commands)).
+`SandboxPool::new` sets this up. Sandboxes built in a `SandboxPool::with_builder`
+closure need `with_network_per_lease()` alongside `with_child_network`, or
+`build` fails asking for `with_network`:
+
+```rust,ignore
+use eryx::{ChildNetwork, PoolConfig, Sandbox, SandboxPool};
+
+let pool = SandboxPool::with_builder(
+    move || {
+        Sandbox::embedded()
+            .shell()
+            .with_command("curl", curl.clone())
+            .with_child_network(ChildNetwork::Inherit)
+            .with_network_per_lease()
+            .build()
+    },
+    PoolConfig::default(),
+)
+.await?;
+```
+
+A lease without a network fails closed: its children get no proxy and no
+network, whatever the child network and the commands' networks say, and the
+execution still runs.
+
 For networking and secrets that every pooled sandbox gets, for the pool's
 lifetime, configure them in the closure passed to `SandboxPool::with_builder`.
 In Python, that's the only way: pass them to `create_pool`:

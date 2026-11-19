@@ -37,6 +37,9 @@ export async function initSandbox(options: SandboxOptions = {}): Promise<void> {
     // An embedder with real data to protect should list allowedHosts instead.
     setNetConfig({ allowAllHosts: true });
     const sandbox = new Sandbox(options);
+    // Wait for it to start (and so for the Python stdlib, which the Packages
+    // tab's native extensions read from `_fileTree`).
+    await sandbox.execute("pass");
     const loadTime = ((performance.now() - start) / 1000).toFixed(1);
     sandboxState = { status: "ready", sandbox, loadTime };
   } catch (e) {
@@ -79,8 +82,37 @@ export async function replaceSandbox(
   }
 }
 
+/** Sandboxes for the Run tab's other languages, created on first use. */
+const otherSandboxes = new Map<string, Promise<Sandbox>>();
+
+/** A no-op that makes a new sandbox fetch and compile its runtime. */
+const WARM_UP = { javascript: "", shell: ":" };
+
+function sandboxFor(language: "javascript" | "shell"): Promise<Sandbox> {
+  if (!otherSandboxes.has(language)) {
+    const sandbox = import("@eryx-org/eryx").then(async ({ Sandbox }) => {
+      const sandbox = new Sandbox({ language });
+      await sandbox.execute(WARM_UP[language]);
+      return sandbox;
+    });
+    sandbox.catch(() => otherSandboxes.delete(language));
+    otherSandboxes.set(language, sandbox);
+  }
+  return otherSandboxes.get(language)!;
+}
+
+/**
+ * Start loading `language`'s sandbox in the background, so its first run
+ * doesn't wait for the runtime. A failure stays quiet here: the sandbox is
+ * dropped, and the next run makes a new one and reports its error.
+ */
+export function warmSandbox(language: "python" | "javascript" | "shell"): void {
+  if (language !== "python") sandboxFor(language).catch(() => {});
+}
+
 export async function runCode(
   code: string,
+  language: "python" | "javascript" | "shell" = "python",
 ): Promise<
   | { ok: true; result: ExecuteResult; elapsed: number }
   | { ok: false; error: string; elapsed: number }
@@ -90,12 +122,24 @@ export async function runCode(
   }
   const start = performance.now();
   try {
-    const result = await sandboxState.sandbox.execute(code);
-    return { ok: true, result, elapsed: performance.now() - start };
+    const sandbox = language === "python" ? sandboxState.sandbox : await sandboxFor(language);
+    try {
+      const result = await sandbox.execute(code);
+      return { ok: true, result, elapsed: performance.now() - start };
+    } catch (e) {
+      // Not the script's failure: the sandbox didn't start, so make a new
+      // one next time.
+      if (language !== "python" && (e as Error).name !== "PythonExceptionError") {
+        otherSandboxes.delete(language);
+      }
+      throw e;
+    }
   } catch (e) {
+    // A shell script's failure is its exit status: show what it printed first.
+    const { exitCode, stdout } = e as { exitCode?: number; stdout?: string };
     return {
       ok: false,
-      error: (e as Error).message,
+      error: (exitCode === undefined ? "" : (stdout ?? "")) + (e as Error).message,
       elapsed: performance.now() - start,
     };
   }

@@ -19,6 +19,7 @@
 - [Resource Limits](./guide/resource-limits.md)
 - [Networking](./guide/networking.md)
 - [Packages](./guide/packages.md)
+- [Environments](./guide/environments.md)
 - [Secrets](./guide/secrets.md)
 - [Output Streaming](./guide/output-streaming.md)
 - [MCP Integration](./guide/mcp.md)
@@ -33,6 +34,7 @@
 - [Rust API](./api/rust.md)
 - [Python API](./api/python.md)
 - [JavaScript API](./api/javascript.md)
+- [Environment Format](./api/environment-format.md)
 
 # Contributing
 

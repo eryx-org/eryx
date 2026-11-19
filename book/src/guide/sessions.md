@@ -316,7 +316,7 @@ print(result.stdout_text)  # "x not defined"
 
 ### Automatic resets
 
-If a call is cancelled mid-run (its future dropped, e.g. by `tokio::select!` or `tokio::time::timeout`), the instance it was running on is lost. The next call on the session, including `snapshot_state()`, `restore_state()` and `clear_state()`, resets the session instead of failing, so its Python state is gone and the preamble runs again. The first successful result after such a reset has `state_was_reset` set to `true` (`ExecuteResult.state_was_reset` in Python and over gRPC, `stateWasReset` in JavaScript), so callers can tell their variables are gone.
+If a call is cancelled mid-run (its future dropped, e.g. by `tokio::select!` or `tokio::time::timeout`, or cancelled through its token) or halts (runs past the execution timeout, runs out of fuel, suspends or traps), the instance it was running on is lost. The next call on the session, including `snapshot_state()`, `restore_state()` and `clear_state()`, resets the session instead of failing, so its Python state is gone and the preamble runs again. The first successful result after such a reset has `state_was_reset` set to `true` (`ExecuteResult.state_was_reset` in Python and over gRPC, `stateWasReset` in JavaScript), so callers can tell their variables are gone.
 
 ## Snapshots
 
@@ -360,9 +360,9 @@ print(f"Snapshot size: {len(snapshot.data)} bytes")
 ```
 <!-- langtabs-end -->
 
-Globals that can't be serialized (open sockets, generators, objects dill rejects) are left out of the snapshot, so they raise `NameError` after a restore. The snapshot names them: `snapshot.skipped_globals()` in Rust, `snapshot.skipped_globals` in Python, `snapshot.skippedGlobals` in JavaScript, and `ExecuteResult.state_skipped_globals` from the gRPC server. The serialized bytes to store are `snapshot.to_bytes()` in Rust and `snapshot.data` in Python and JavaScript. `restore_state()`/`restoreState()` take either the snapshot or those bytes.
+Globals that can't be serialized (open sockets, generators, objects dill rejects) are left out of the snapshot, so they raise `NameError` after a restore. In a JavaScript session that's functions, promises, and values holding a class instance (a `Buffer`, an `EventEmitter`), which would otherwise come back as plain objects. The snapshot names them: `snapshot.skipped()` in Rust, `snapshot.skipped_globals` in Python, `snapshot.skippedGlobals` in JavaScript, and `ExecuteResult.state_skipped_globals` from the gRPC server. The serialized bytes to store are `snapshot.to_bytes()` in Rust and `snapshot.data` in Python and JavaScript. `restore_state()`/`restoreState()` take either the snapshot or those bytes.
 
-The bytes record the eryx version that wrote them: `snapshot.metadata().eryx_version` in Rust, after `PythonStateSnapshot::from_bytes()`. Use it to find stored snapshots that predate a runtime upgrade. Restoring doesn't check it, since whether a snapshot restores depends on the Python runtime and on what the state holds. eryx reads snapshots from any earlier version, but eryx before 0.15.0 can't read snapshots from 0.15.0 or later, and bytes in a format newer than the reader knows fail with `ErrorKind::IncompatibleSnapshot`.
+The bytes record the eryx version that wrote them: `snapshot.metadata().eryx_version` in Rust, after `StateSnapshot::from_bytes()`. Use it to find stored snapshots that predate a runtime upgrade. Restoring doesn't check it, since whether a snapshot restores depends on the Python runtime and on what the state holds. eryx reads snapshots from any earlier version. eryx before 0.15.0 can't read snapshots from 0.15.0 or later. Python snapshots are still written in 0.15's format, so eryx 0.15 reads them and a rolling deploy or a rollback keeps its sessions; JavaScript and shell snapshots use a newer format that needs eryx 0.16 or later. Bytes in a format newer than the reader knows fail with `ErrorKind::IncompatibleSnapshot`.
 
 ### Restoring a Snapshot
 
@@ -453,7 +453,7 @@ server cancels the restore and snapshot when the client disconnects.
 
 ## Session with VFS
 
-Sessions can be configured with a virtual filesystem for persistent file storage. See [VFS and File Persistence](./vfs.md) for details.
+Sessions can be configured with a virtual filesystem for persistent file storage. See [VFS and File Persistence](./vfs.md) for details. The in-memory storage is capped at 64 MiB and 65,536 files and directories by default (see [resource limits](./resource-limits.md#virtual-filesystem-size)); put large trees on a [host-directory volume](./vfs.md#host-volume-mounts).
 
 ```python
 import eryx

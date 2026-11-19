@@ -120,6 +120,61 @@ message ExecuteRequest {
   // FAILED_PRECONDITION before executing the script. An empty, unsigned journal
   // starts a new journaling session and does not require a signature.
   CallbackJournal callback_journal = 14;
+
+  // The guest language `code` is written in. LANGUAGE_UNSPECIFIED is Python.
+  // A language the server doesn't serve (see its --languages flag) is
+  // rejected with INVALID_ARGUMENT.
+  Language language = 15;
+
+  // Shell only: the commands this execution may spawn, out of those the
+  // server registered. Unset allows them all; set with no names allows none.
+  // Names the server doesn't have are ignored. Other commands exit 127, as
+  // if not installed. The shell's grep builtin and nested sh/bash count as
+  // commands here; other builtins and callbacks aren't restricted. Setting it for another
+  // language is INVALID_ARGUMENT.
+  AllowedCommands allowed_commands = 16;
+
+  // Shell only: per-execution options for some of the server's commands, by
+  // name. They can only take away from what a command has: a network no wider
+  // than network_config.child_network, and no tunnels or spawning even if the
+  // server grants them (--shell-command-tunnels, --shell-command-spawn). A name
+  // the server doesn't have, network for a command when child_network gives
+  // children none, or setting it for another language is INVALID_ARGUMENT.
+  map<string, CommandOptions> commands = 17;
+}
+
+// Per-execution options for one of the server's shell commands; see
+// ExecuteRequest.commands.
+message CommandOptions {
+  // The network for this command's children. Unset: the request's
+  // child_network. MODE_NONE: none. MODE_INHERIT: the request's
+  // child_network. MODE_NARROW: only what both `narrow` and the request's
+  // child_network allow; its connections and bytes also count against the
+  // request's limits.
+  ChildNetwork network = 1;
+  // Its children may not open blind tunnels, even if the server allows it
+  // (--shell-command-tunnels).
+  bool no_tunnels = 2;
+  // It may not run commands itself, even if the server allows it
+  // (--shell-command-spawn).
+  bool no_spawn = 3;
+}
+
+// The command names in ExecuteRequest.allowed_commands. A message rather
+// than a bare repeated field, so "unset" (all) and "empty" (none) differ.
+message AllowedCommands {
+  repeated string names = 1;
+}
+
+// A guest language.
+enum Language {
+  // Python, the default.
+  LANGUAGE_UNSPECIFIED = 0;
+  LANGUAGE_PYTHON = 1;
+  // JavaScript, via QuickJS.
+  LANGUAGE_JAVASCRIPT = 2;
+  // A bash-compatible shell.
+  LANGUAGE_SHELL = 3;
 }
 
 // Kind of supporting file — determines where it's placed in the sandbox.
@@ -187,6 +242,19 @@ message ResourceLimits {
 
   // Maximum fuel/instructions (0 = the server's --max-fuel, unlimited if unset).
   uint64 max_fuel = 5;
+
+  // Shell only (ignored for other languages): most host memory the arguments
+  // and environments of the execution's child processes may hold at once
+  // (0 = the server's --max-child-host-bytes). A spawn past it fails, and the
+  // shell reports the command as failed.
+  uint64 max_child_host_bytes = 6;
+
+  // Shell only (ignored for other languages): most memory the execution's
+  // running child processes may hold together, on top of max_memory_bytes
+  // (0 = the server's --max-child-memory-bytes, by default 256 MiB). A
+  // command that doesn't fit isn't started, and the shell's stderr says the
+  // child memory pool is full.
+  uint64 max_child_memory_bytes = 7;
 }
 
 // Network configuration for the sandbox.
@@ -235,6 +303,46 @@ message NetworkConfig {
   // refused, and only HTTP/1.1 may be sent to a host with rules. See the
   // eryx crate's `NetConfig::allow_http` for the matching rules.
   repeated HttpRule http_rules = 11;
+  // Network for the shell's child processes (external commands). Absent =
+  // none: children stay offline. See ChildNetwork.
+  ChildNetwork child_network = 12;
+}
+
+// How a shell's child processes may reach the network. They connect through a
+// proxy on the host, never directly, and never get more than this
+// NetworkConfig allows. Only shell requests may set it (INVALID_ARGUMENT
+// otherwise).
+//
+// The request's max_connections bounds the guest's connections and its
+// children's together, across both proxies (inspecting and tunnelling); a
+// narrow max_connections bounds the children's, below that.
+//
+// Children see secrets only as their placeholders (the shell exports each
+// secret's placeholder as an environment variable). The proxy substitutes a
+// real value only in requests to that secret's allowed_hosts, after a TLS
+// upgrade (or on plain TCP too with allow_plaintext_secrets), as for the
+// guest's own connections. Commands the server allows to tunnel (see its
+// --shell-command-tunnels flag) can instead open blind CONNECT tunnels to
+// allowed hosts: no secret substitution and no HTTP rules there, and hosts
+// with http_rules never get one.
+message ChildNetwork {
+  enum Mode {
+    // No network for children.
+    MODE_NONE = 0;
+    // Exactly this NetworkConfig's policy.
+    MODE_INHERIT = 1;
+    // Only what both this NetworkConfig and `narrow` allow. The connection
+    // limit and timeouts are the smaller of the two; secrets are this
+    // request's.
+    MODE_NARROW = 2;
+  }
+  Mode mode = 1;
+  // Required for MODE_NARROW, refused otherwise. Its own child_network and
+  // allow_plaintext_secrets must be unset. It starts from the same defaults
+  // as any NetworkConfig (blocked_hosts and blocked_networks block localhost
+  // and private ranges), not from this one: repeat any allowed_networks,
+  // internal_hosts or blocked_* overrides children need.
+  NetworkConfig narrow = 2;
 }
 
 // HTTP requests allowed to the hosts matching a pattern.
@@ -256,7 +364,8 @@ message HttpRule {
 // used instead. The real value is substituted transparently in HTTP headers
 // when making requests to allowed_hosts.
 message SecretConfig {
-  // Secret name (becomes the environment variable name in Python).
+  // Secret name: the key of its placeholder in `os.environ` (Python) or
+  // `process.env` (JavaScript). Not supported for the shell.
   string name = 1;
   // The real secret value. Transmitted in plaintext over the gRPC connection —
   // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).
@@ -405,9 +514,9 @@ message ExecuteResult {
 
   // Human-readable message for a *sandbox* failure (timeout, fuel exhaustion,
   // WASM trap, invalid input, etc.). Empty when execution succeeded AND empty
-  // for an uncaught Python exception — in that case the traceback is in
-  // `stderr` (as CPython would print it) and `failure_kind` is
-  // FAILURE_KIND_SCRIPT_EXCEPTION. Use `failure_kind` to branch, not this string.
+  // for a script failure — in that case the traceback is in `stderr` (as
+  // CPython would print it) and `failure_kind` is FAILURE_KIND_SCRIPT_FAILED.
+  // Use `failure_kind` to branch, not this string.
   string error = 4;
 
   // Execution statistics.
@@ -427,8 +536,8 @@ message ExecuteResult {
   string result_error = 8;
 
   // Why execution failed. FAILURE_KIND_UNSPECIFIED when success is true.
-  // Distinguishes a script-level failure (an uncaught Python exception, with
-  // its traceback in `stderr`) from sandbox-level failures (timeout, fuel
+  // Distinguishes a script-level failure (an uncaught exception, with its
+  // traceback in `stderr`) from sandbox-level failures (timeout, fuel
   // exhaustion, traps, invalid input), so callers can branch without parsing
   // the `error` string.
   FailureKind failure_kind = 9;
@@ -474,15 +583,25 @@ message ExecuteResult {
   // (e.g. it hit the execution timeout), which discarded the instance. Also
   // reported in `state_error`. Always false when `success` is false.
   bool state_was_reset = 16;
+
+  // The script's exit status, for LANGUAGE_SHELL only: 0 on success, or the
+  // nonzero status of a script failure (`failure_kind` FAILURE_KIND_SCRIPT_FAILED).
+  // Unset for Python and JavaScript, whose scripts fail by raising, and when
+  // the sandbox itself failed (a timeout, a resource limit) before the script
+  // could exit.
+  optional int32 exit_code = 17;
 }
 
 // Why an execution failed, when success is false.
 enum FailureKind {
+  option allow_alias = true;
   // Execution succeeded; no failure.
   FAILURE_KIND_UNSPECIFIED = 0;
-  // The script raised an uncaught Python exception. The traceback is in
+  // The script failed: it raised an uncaught exception. The traceback is in
   // `stderr` and `error` is empty.
-  FAILURE_KIND_SCRIPT_EXCEPTION = 1;
+  FAILURE_KIND_SCRIPT_FAILED = 1;
+  // Former name of FAILURE_KIND_SCRIPT_FAILED, kept as an alias.
+  FAILURE_KIND_SCRIPT_EXCEPTION = 1 [deprecated = true];
   // Execution exceeded the configured wall-clock timeout.
   FAILURE_KIND_TIMEOUT = 2;
   // Execution exceeded the configured fuel (instruction) limit.
@@ -507,23 +626,37 @@ message TraceEvent {
   // Line number in the source code.
   uint32 lineno = 1;
 
-  // Event type: "line", "call", "return", "exception", "callback_start", "callback_end".
+  // Event type: "line", "call", "return", "exception", "callback_start",
+  // "callback_end", "process_start", "process_end".
   string event_type = 2;
 
   // Function name (for "call" and "return" events).
   string function = 3;
 
-  // Error/exception message (for "exception" events).
+  // Error/exception message (for "exception" events, and "callback_end" and
+  // "process_end" events that failed).
   string message = 4;
 
-  // Callback name (for "callback_start" and "callback_end" events).
+  // Callback or command name (for "callback_*" and "process_*" events).
   string name = 5;
 
-  // Callback duration in milliseconds (for "callback_end" events).
+  // Duration in milliseconds (for "callback_end" and "process_end" events).
   uint64 duration_ms = 6;
 
-  // Optional JSON-encoded context data (e.g., local variables).
+  // JSON-encoded context, with secret placeholders replaced by [REDACTED];
+  // empty when the event has none. A "callback_start" carries the callback's
+  // arguments (the JSON object it's called with), and a "process_start" the
+  // child's arguments as {"args": [...]}, argv[0] excluded. Context counts
+  // against the execution's trace stream budget along with the event.
   string context_json = 7;
+
+  // Numbers an execution's child processes, pairing each "process_start"
+  // with its "process_end".
+  uint32 pid = 8;
+
+  // A child's exit code ("process_end" events); unset if it failed instead
+  // of exiting.
+  optional int32 exit_code = 9;
 }
 
 // Execution statistics.
@@ -534,7 +667,11 @@ message ExecuteStats {
   // Number of callback invocations.
   uint32 callback_invocations = 2;
 
-  // Peak memory usage in bytes (0 if unavailable).
+  // Peak memory usage in bytes (0 if unavailable): the guest instance's
+  // largest linear memory, plus what its child processes held at the same
+  // time (which can take it past the guest's memory limit). In a session
+  // that's the peak so far, not just this execution's growth, since memory
+  // never shrinks between executions.
   uint64 peak_memory_bytes = 3;
 
   // Fuel consumed (0 if unavailable).

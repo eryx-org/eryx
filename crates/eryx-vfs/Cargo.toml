@@ -17,8 +17,10 @@ anyhow.workspace = true
 async-trait.workspace = true
 # Vendored DirPerms/FilePerms; see src/perms.rs.
 bitflags = "2"
-bytes = "1"
+bytes.workspace = true
 cap-primitives = "4"
+# /dev/urandom.
+rand.workspace = true
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
@@ -28,7 +30,7 @@ wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["process"] } #unified
+rustix = { workspace = true, features = ["fs", "process"] } #unified
 
 [features]
 ## Derive serde `Serialize`/`Deserialize` on the snapshot types, enabling

@@ -8,10 +8,10 @@
 //!
 //! The `SessionExecutor` wraps a `Store<ExecutorState>` and the instantiated
 //! component, keeping them alive between executions. This is in contrast to
-//! the regular `PythonExecutor` which creates a fresh Store for each execution.
+//! the regular `Executor` which creates a fresh Store for each execution.
 //!
 //! ```text
-//! Regular PythonExecutor:
+//! Regular Executor:
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   execute() -> new Store -> new Instance -> run -> drop Store
 //!   (Each call pays ~1.5ms Python init overhead)
@@ -34,6 +34,7 @@
 //! `restore_state()`, enabling state transfer between processes or
 //! persistence to storage. The Python runtime uses pickle for serialization.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -43,18 +44,19 @@ use tokio::sync::mpsc;
 use wasmtime::Store;
 use wasmtime::component::{Accessor, ResourceTable};
 // wasmtime 48 collapsed DirPerms/FilePerms into FsPerms; the fine-grained
-// flags the VFS enforces now live in eryx-vfs. Only `build_hybrid_vfs_context`
-// uses them, so the import carries that function's feature gate.
-#[cfg(feature = "unstable-vfs")]
+// flags the VFS enforces now live in eryx-vfs. Only the hybrid VFS contexts
+// use them, so the import carries their feature gate.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 use eryx_vfs::{DirPerms, FilePerms};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder};
 
 use crate::callback::Callback;
 use crate::error::{Error, ErrorKind};
+use crate::language::Language;
 use crate::sandbox::ResourceLimits;
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, ExecutorState, FdOutput, HostCallbackInfo, MemoryTracker,
-    NetRequest, PythonExecutor, Sandbox as SandboxBindings, StreamBudget, TraceRequest,
+    CallbackRequest, ExecutionOutput, Executor, ExecutorState, FdOutput, HostCallbackInfo,
+    MemoryTracker, NetRequest, Sandbox as SandboxBindings, StreamBudget, TraceRequest,
 };
 
 /// Maximum snapshot size in bytes (10 MB).
@@ -68,8 +70,14 @@ pub const MAX_SNAPSHOT_SIZE: usize = 10 * 1024 * 1024;
 /// would be millions of years from now.
 const SNAPSHOT_MAGIC: &[u8; 8] = b"ERYXSNAP";
 
-/// The snapshot format [`PythonStateSnapshot::to_bytes`] writes.
-const SNAPSHOT_FORMAT_VERSION: u8 = 1;
+/// The newest snapshot format: version 2 adds a language byte. Version 1
+/// (eryx 0.15.0) had none; its snapshots are all Python.
+const SNAPSHOT_FORMAT_VERSION: u8 = 2;
+
+/// The format [`StateSnapshot::to_bytes`] writes for Python snapshots, which
+/// need no language byte: 0.15's, so a rolling deploy or a rollback to 0.15
+/// can still read them. Python moves to format 2 in a later release.
+const PYTHON_SNAPSHOT_FORMAT_VERSION: u8 = 1;
 
 /// The writer recorded in new snapshots.
 const SNAPSHOT_WRITER: &str = concat!("eryx ", env!("CARGO_PKG_VERSION"));
@@ -86,10 +94,11 @@ pub const MIN_STATE_OP_TIMEOUT: Duration = Duration::from_secs(5);
 /// loading the serializer costs.
 pub const MIN_STATE_OP_FUEL: u64 = 20_000_000_000;
 
-/// A snapshot of Python session state.
+/// A snapshot of a session's state.
 ///
-/// This captures all user-defined variables from the Python session,
-/// serialized using pickle. The snapshot can be:
+/// This captures the user-defined variables from the session (for Python,
+/// serialized using pickle), stamped with the guest language that wrote it.
+/// The snapshot can be:
 ///
 /// - Persisted to disk or a database
 /// - Sent over the network to another process
@@ -107,21 +116,23 @@ pub const MIN_STATE_OP_FUEL: u64 = 20_000_000_000;
 /// let bytes = snapshot.to_bytes();
 ///
 /// // Later, restore in a new session
-/// let snapshot = PythonStateSnapshot::from_bytes(&bytes)?;
+/// let snapshot = StateSnapshot::from_bytes(&bytes)?;
 /// new_session.restore_state(&snapshot).await?;
 /// new_session.execute("print(x + y)").run().await?; // prints "3"
 /// ```
 #[derive(Debug, Clone)]
-pub struct PythonStateSnapshot {
-    /// Pickled Python state bytes.
+pub struct StateSnapshot {
+    /// The guest's serialized state (for Python, pickle bytes).
     data: Vec<u8>,
 
     /// Metadata about when the snapshot was captured.
     metadata: SnapshotMetadata,
 
-    /// Globals left out because they could not be serialized.
-    skipped_globals: Vec<String>,
+    /// Variables left out because they could not be serialized.
+    skipped: Vec<String>,
 }
+
+pub use super::renamed::*;
 
 /// Metadata about a state snapshot.
 #[derive(Debug, Clone)]
@@ -139,11 +150,18 @@ pub struct SnapshotMetadata {
     /// Restoring doesn't check it: whether a snapshot restores depends on the
     /// Python runtime and the state's contents, not only the eryx version.
     pub eryx_version: Option<String>,
+
+    /// The guest language whose session state this is. Snapshots from before
+    /// eryx 0.16.0 don't record it and are all [`Language::Python`].
+    ///
+    /// [`SessionExecutor::restore_state`] refuses a snapshot from another
+    /// language.
+    pub language: Language,
 }
 
-impl PythonStateSnapshot {
-    /// Create a new snapshot from raw pickle data.
-    fn new(data: Vec<u8>, skipped_globals: Vec<String>) -> Self {
+impl StateSnapshot {
+    /// Create a new snapshot of a `language` session's serialized state.
+    fn new(language: Language, data: Vec<u8>, skipped: Vec<String>) -> Self {
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -157,12 +175,13 @@ impl PythonStateSnapshot {
                 timestamp_ms,
                 size_bytes,
                 eryx_version: Some(SNAPSHOT_WRITER.to_string()),
+                language,
             },
-            skipped_globals,
+            skipped,
         }
     }
 
-    /// Get the raw pickle data.
+    /// Get the guest's serialized state (for Python, pickle bytes).
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
@@ -180,23 +199,42 @@ impl PythonStateSnapshot {
         self.data.len()
     }
 
-    /// Names of the globals left out of the snapshot because they could not
-    /// be serialized (e.g. open sockets, generators). They raise `NameError`
-    /// after a restore.
+    /// The guest language whose session state this is.
+    #[must_use]
+    pub fn language(&self) -> Language {
+        self.metadata.language
+    }
+
+    /// Names of the variables left out of the snapshot because they could
+    /// not be serialized (e.g. open sockets, generators). In Python they
+    /// raise `NameError` after a restore. In JavaScript that's functions,
+    /// promises, and values holding an instance of a class (a `Buffer`, an
+    /// `EventEmitter`), which would otherwise come back as plain objects.
     ///
     /// Not part of [`to_bytes`](Self::to_bytes), so always empty for a
     /// snapshot from [`from_bytes`](Self::from_bytes).
     #[must_use]
+    pub fn skipped(&self) -> &[String] {
+        &self.skipped
+    }
+
+    /// Deprecated name for [`skipped`](Self::skipped).
+    #[deprecated(since = "0.16.0", note = "renamed to `skipped`")]
+    #[must_use]
     pub fn skipped_globals(&self) -> &[String] {
-        &self.skipped_globals
+        self.skipped()
     }
 
     /// Convert the snapshot to bytes for storage or transmission.
     ///
-    /// The format is `ERYXSNAP`, a format version byte, the writer's eryx
-    /// version (a little-endian `u16` length, then UTF-8), the capture time
-    /// (little-endian `u64` milliseconds), then the pickle data. eryx before
-    /// 0.15.0 can't read it.
+    /// The format is `ERYXSNAP`, a format version byte, a byte for the guest
+    /// language (in format 2), the writer's eryx version (a little-endian
+    /// `u16` length, then UTF-8), the capture time (little-endian `u64`
+    /// milliseconds), then the guest's state data.
+    ///
+    /// Python snapshots are written in format 1, without the language byte,
+    /// which eryx 0.15 reads too; JavaScript and shell snapshots in format 2,
+    /// which needs eryx 0.16 or later.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         // Empty for a snapshot that predates the version stamp. A version is
@@ -207,9 +245,14 @@ impl PythonStateSnapshot {
             .as_deref()
             .unwrap_or("")
             .as_bytes();
-        let mut bytes = Vec::with_capacity(8 + 1 + 2 + writer.len() + 8 + self.data.len());
+        let mut bytes = Vec::with_capacity(8 + 1 + 1 + 2 + writer.len() + 8 + self.data.len());
         bytes.extend_from_slice(SNAPSHOT_MAGIC);
-        bytes.push(SNAPSHOT_FORMAT_VERSION);
+        if self.metadata.language == Language::Python {
+            bytes.push(PYTHON_SNAPSHOT_FORMAT_VERSION);
+        } else {
+            bytes.push(SNAPSHOT_FORMAT_VERSION);
+            bytes.push(self.metadata.language.snapshot_tag());
+        }
         bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
         bytes.extend_from_slice(writer);
         bytes.extend_from_slice(&self.metadata.timestamp_ms.to_le_bytes());
@@ -227,27 +270,38 @@ impl PythonStateSnapshot {
     /// [`ErrorKind::Snapshot`] if the data is too short or corrupted.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let truncated = || Error::from(ErrorKind::Snapshot("Snapshot data too short".to_string()));
-        let (eryx_version, rest) = match bytes.strip_prefix(SNAPSHOT_MAGIC) {
+        let (eryx_version, language, rest) = match bytes.strip_prefix(SNAPSHOT_MAGIC) {
             // Before eryx 0.15.0: the timestamp, then the pickle data.
-            None => (None, bytes),
+            None => (None, Language::Python, bytes),
             Some(rest) => {
                 let (&format_version, rest) = rest.split_first().ok_or_else(truncated)?;
                 if format_version > SNAPSHOT_FORMAT_VERSION {
                     return Err(ErrorKind::IncompatibleSnapshot { format_version }.into());
                 }
-                if format_version != SNAPSHOT_FORMAT_VERSION {
-                    return Err(ErrorKind::Snapshot(format!(
-                        "Invalid snapshot format version {format_version}"
-                    ))
-                    .into());
-                }
+                let (language, rest) = match format_version {
+                    // eryx 0.15.0: no language byte, always Python.
+                    1 => (Language::Python, rest),
+                    SNAPSHOT_FORMAT_VERSION => {
+                        let (&tag, rest) = rest.split_first().ok_or_else(truncated)?;
+                        let language = Language::from_snapshot_tag(tag).ok_or_else(|| {
+                            ErrorKind::Snapshot(format!("Unknown snapshot language {tag}"))
+                        })?;
+                        (language, rest)
+                    }
+                    _ => {
+                        return Err(ErrorKind::Snapshot(format!(
+                            "Invalid snapshot format version {format_version}"
+                        ))
+                        .into());
+                    }
+                };
                 let (len, rest) = rest.split_first_chunk::<2>().ok_or_else(truncated)?;
                 let (writer, rest) = rest
                     .split_at_checked(usize::from(u16::from_le_bytes(*len)))
                     .ok_or_else(truncated)?;
                 let writer = String::from_utf8(writer.to_vec())
                     .map_err(|_| ErrorKind::Snapshot("Invalid eryx version".to_string()))?;
-                (Some(writer).filter(|w| !w.is_empty()), rest)
+                (Some(writer).filter(|w| !w.is_empty()), language, rest)
             }
         };
         let (timestamp, data) = rest.split_first_chunk::<8>().ok_or_else(truncated)?;
@@ -260,9 +314,30 @@ impl PythonStateSnapshot {
                 timestamp_ms: u64::from_le_bytes(*timestamp),
                 size_bytes,
                 eryx_version,
+                language,
             },
-            skipped_globals: Vec::new(),
+            skipped: Vec::new(),
         })
+    }
+}
+
+/// Start of a guest's `restore-state` error for a snapshot whose state is in
+/// another format: then the snapshot's format, a tab, and the format the
+/// runtime reads. A guest that versions its state format (the shell guest
+/// does) reports a mismatch this way, so it isn't mistaken for corrupt data.
+const INCOMPATIBLE_STATE_PREFIX: &str = "eryx:incompatible-state-format:";
+
+/// Map a guest's `restore-state` error to an [`ErrorKind`].
+fn restore_error(message: String) -> ErrorKind {
+    match message
+        .strip_prefix(INCOMPATIBLE_STATE_PREFIX)
+        .and_then(|rest| rest.split_once('\t'))
+    {
+        Some((snapshot, runtime)) => ErrorKind::IncompatibleStateFormat {
+            snapshot: snapshot.to_owned(),
+            runtime: runtime.to_owned(),
+        },
+        None => ErrorKind::Snapshot(message),
     }
 }
 
@@ -291,6 +366,10 @@ pub struct SessionExecuteBuilder<'a> {
     output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
     fuel_limit: Option<u64>,
     cancellation_token: Option<CancellationToken>,
+    child_net: Option<crate::process::ChildNet>,
+    allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<Arc<crate::net::Credential>>,
 }
 
 impl std::fmt::Debug for SessionExecuteBuilder<'_> {
@@ -322,7 +401,67 @@ impl<'a> SessionExecuteBuilder<'a> {
             output_tx: None,
             fuel_limit: None,
             cancellation_token: None,
+            child_net: None,
+            allowed_commands: None,
+            command_options: HashMap::new(),
+            credentials: Vec::new(),
         }
+    }
+
+    /// Let this execution spawn only the named host-registered commands
+    /// (shell only): the guest lists just those, and any other spawn fails
+    /// with `command-not-found`. An empty list allows none; names that aren't
+    /// registered are ignored. Without this, every registered command is
+    /// allowed, whatever an earlier execution allowed. The shell's `grep`
+    /// builtin counts as a command here; other builtins and callbacks aren't
+    /// affected.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only); see
+    /// [`ExecuteOptions::with_command_options`](crate::ExecuteOptions::with_command_options).
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's children `credential` too (shell only); see
+    /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
+    unstable_pub! {
+    /// Give this execution's child processes `net`, through proxies that
+    /// live as long as the execution: from
+    /// [`ConnectionManager::child_network`](crate::ConnectionManager::child_network)
+    /// on the manager given to [`with_network`](Self::with_network), so the
+    /// guest and its children share one connection and byte budget.
+    ///
+    /// Make a fresh `ChildNetPolicy` from that manager for every execution.
+    /// The policy carries its manager's budget, so one kept from an earlier
+    /// execution would charge the children to that execution's spent budget
+    /// rather than this one's.
+    #[must_use]
+    fn with_child_network(mut self, net: crate::net::ChildNetPolicy) -> Self {
+        self.child_net = Some(crate::process::ChildNet::new(net));
+        self
+    }
     }
 
     unstable_pub! {
@@ -438,6 +577,10 @@ impl<'a> SessionExecuteBuilder<'a> {
                 self.output_tx,
                 self.fuel_limit,
                 self.cancellation_token,
+                self.child_net,
+                self.allowed_commands.as_deref(),
+                &self.command_options,
+                &self.credentials,
             )
             .await
     }
@@ -551,7 +694,7 @@ impl VolumeMount {
 }
 
 /// Where the VFS storage is also mounted, as a scratch directory.
-#[cfg(feature = "unstable-vfs")]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 const TMP_MOUNT_PATH: &str = "/tmp";
 
 /// Configuration for the virtual filesystem (VFS) in a session.
@@ -629,16 +772,27 @@ impl VfsConfig {
 
 /// A session-aware executor that keeps WASM instances alive between executions.
 ///
-/// Unlike `PythonExecutor` which creates a fresh instance for each execution,
+/// Unlike `Executor` which creates a fresh instance for each execution,
 /// `SessionExecutor` maintains state between calls, enabling:
 ///
 /// - Faster subsequent executions (no Python init overhead)
 /// - Persistent Python variables between calls
 /// - REPL-style interactive execution
 /// - State snapshots for persistence and transfer
+///
+/// It runs on an [`Executor`] (from [`Sandbox::executor`](crate::Sandbox::executor)),
+/// which carries the
+/// [`with_child_network`](crate::SandboxBuilder::with_child_network) setting
+/// but not the [`Sandbox`](crate::Sandbox)'s network
+/// ([`with_network`](crate::SandboxBuilder::with_network)) or secrets, which
+/// are needed to give its children a network. So a `SessionExecutor` has no
+/// network, and its children none either, whatever the sandbox was built
+/// with: the network needs a connection manager running for each execution.
+/// For a session with the sandbox's network, child network and secrets, use
+/// [`InProcessSession`](crate::InProcessSession), which runs them.
 pub struct SessionExecutor {
     /// The parent executor (for engine and instance_pre access).
-    executor: Arc<PythonExecutor>,
+    executor: Arc<Executor>,
 
     /// The store containing the WASM instance state.
     /// This is `Option` so we can take ownership during async execution.
@@ -676,21 +830,25 @@ pub struct SessionExecutor {
     /// The guest's direct fd 1/2 writes, appended to each execution's output.
     fd_output: FdOutput,
 
-    /// VFS storage that persists across resets.
-    #[cfg(feature = "unstable-vfs")]
+    /// VFS storage that persists across resets (without `unstable-vfs`, the
+    /// shell's private `/tmp`).
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
 
     /// VFS configuration that persists across resets.
     #[cfg(feature = "unstable-vfs")]
     vfs_config: Option<VfsConfig>,
 
-    /// Quota used when creating the session's own VFS storage.
-    #[cfg(feature = "unstable-vfs")]
-    vfs_max_bytes: Option<u64>,
+    /// Limits used when creating the session's own VFS storage.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    vfs_limits: VfsLimits,
 
     /// Limit on host files the session may hold open, kept for resets.
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     max_open_host_files: Option<usize>,
+
+    /// Limits on child processes, kept for resets.
+    child_limits: crate::process::ChildLimits,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -719,23 +877,24 @@ fn build_callback_infos(callbacks: &[Arc<dyn Callback>]) -> Vec<HostCallbackInfo
         .collect()
 }
 
-/// Build WASI context with Python stdlib and site-packages mounts.
-fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
+/// Build WASI context with the Python stdlib, site-packages and environment
+/// mounts (the same as a stateless execution's in `wasm.rs`).
+fn build_wasi_context(executor: &Executor, fd_output: &FdOutput) -> Result<WasiCtx, Error> {
     let mut wasi_builder = WasiCtxBuilder::new();
     fd_output.attach(&mut wasi_builder);
 
     // Build PYTHONPATH from stdlib and all site-packages directories
-    let site_packages_paths = executor.python_site_packages_paths();
+    let site_packages_paths = executor.library_paths();
     let mut pythonpath_parts = Vec::new();
-    if executor.python_stdlib_path().is_some() {
+    if executor.stdlib_path().is_some() {
         pythonpath_parts.push("/python-stdlib".to_string());
     }
     for i in 0..site_packages_paths.len() {
         pythonpath_parts.push(crate::wasm::site_packages_mount_path(i));
     }
 
-    // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-    if let Some(stdlib_path) = executor.python_stdlib_path() {
+    // Mount Python stdlib if configured (required for eryx-guest-python)
+    if let Some(stdlib_path) = executor.stdlib_path() {
         wasi_builder.env("PYTHONHOME", "/python-stdlib");
         if !pythonpath_parts.is_empty() {
             wasi_builder.env("PYTHONPATH", pythonpath_parts.join(":"));
@@ -753,6 +912,17 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount {mount_path}: {e}")))?;
     }
 
+    #[cfg(feature = "environment")]
+    if let Some(root) = executor.environment() {
+        wasi_builder
+            .preopened_dir(root, crate::environment::MOUNT_PATH, FsPerms::ReadOnly)
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to mount the environment: {e}")))?;
+    }
+
+    if executor.language() == Language::Shell {
+        crate::wasm::add_shell_env(&mut wasi_builder);
+    }
+
     Ok(wasi_builder.build())
 }
 
@@ -762,7 +932,7 @@ fn build_wasi_context(executor: &PythonExecutor, fd_output: &FdOutput) -> Result
 /// share one set of mounts and limits.
 #[cfg(feature = "unstable-vfs")]
 pub(crate) fn build_hybrid_vfs_context(
-    executor: &PythonExecutor,
+    executor: &Executor,
     vfs_storage: eryx_vfs::ArcStorage,
     vfs_config: &VfsConfig,
     max_open_host_files: Option<usize>,
@@ -805,30 +975,7 @@ pub(crate) fn build_hybrid_vfs_context(
         ctx.add_vfs_preopen(TMP_MOUNT_PATH, vfs_config.dir_perms, vfs_config.file_perms);
     }
 
-    // Add real filesystem preopens that mirror the WASI preopens
-    if let Some(stdlib_path) = executor.python_stdlib_path() {
-        ctx.add_real_preopen_path(
-            "/python-stdlib",
-            stdlib_path,
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .map_err(|e| {
-            ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
-        })?;
-    }
-    for (i, site_packages_path) in executor.python_site_packages_paths().iter().enumerate() {
-        let mount_path = crate::wasm::site_packages_mount_path(i);
-        ctx.add_real_preopen_path(
-            &mount_path,
-            site_packages_path,
-            DirPerms::READ,
-            FilePerms::READ,
-        )
-        .map_err(|e| {
-            ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
-        })?;
-    }
+    add_library_preopens(&mut ctx, executor)?;
 
     // Add user-specified volume mounts
     for volume in &vfs_config.volumes {
@@ -870,11 +1017,137 @@ pub(crate) fn build_hybrid_vfs_context(
         })?;
     }
 
+    if executor.language() == Language::Shell {
+        ctx.add_root();
+    }
+
+    Ok(ctx)
+}
+
+/// The filesystem of `executor`'s guest run as a command: `base` (its
+/// parent's, forked) or an empty one, plus the executor's read-only library
+/// mounts (the Python stdlib and site-packages).
+#[cfg(all(
+    any(feature = "embedded", feature = "preinit"),
+    any(feature = "unstable-vfs", feature = "shell")
+))]
+pub(crate) fn command_vfs_context(
+    executor: &Executor,
+    base: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    let mut ctx = base.unwrap_or_else(|| {
+        eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(Arc::new(
+            eryx_vfs::InMemoryStorage::new(),
+        )))
+    });
+    add_library_preopens(&mut ctx, executor)?;
+    Ok(ctx)
+}
+
+/// Mount the Python stdlib, site-packages and the environment read-only
+/// from the host, as the plain WASI context does.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+fn add_library_preopens(
+    ctx: &mut eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+    executor: &Executor,
+) -> std::result::Result<(), Error> {
+    // Add real filesystem preopens that mirror the WASI preopens
+    if let Some(stdlib_path) = executor.stdlib_path() {
+        ctx.add_real_preopen_path(
+            "/python-stdlib",
+            stdlib_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add Python stdlib to VFS: {e}"))
+        })?;
+    }
+    for (i, site_packages_path) in executor.library_paths().iter().enumerate() {
+        let mount_path = crate::wasm::site_packages_mount_path(i);
+        ctx.add_real_preopen_path(
+            &mount_path,
+            site_packages_path,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add {mount_path} to VFS: {e}"))
+        })?;
+    }
+    #[cfg(feature = "environment")]
+    if let Some(root) = executor.environment() {
+        ctx.add_real_preopen_path(
+            crate::environment::MOUNT_PATH,
+            root,
+            DirPerms::READ,
+            FilePerms::READ,
+        )
+        .map_err(|e| {
+            ErrorKind::Initialization(format!("Failed to add the environment to VFS: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// [`ResourceLimits::max_vfs_bytes`] and
+/// [`max_vfs_entries`](ResourceLimits::max_vfs_entries), which apply to the
+/// in-memory storage eryx creates itself.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VfsLimits {
+    max_bytes: Option<u64>,
+    max_entries: Option<usize>,
+}
+
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+impl VfsLimits {
+    pub(crate) fn of(limits: &ResourceLimits) -> Self {
+        Self {
+            max_bytes: limits.max_vfs_bytes,
+            max_entries: limits.max_vfs_entries,
+        }
+    }
+
+    /// Empty storage under these limits, with the `eryx-vfs` defaults for
+    /// any left unset.
+    pub(crate) fn storage(self) -> eryx_vfs::InMemoryStorage {
+        eryx_vfs::InMemoryStorage::with_max_bytes(
+            self.max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
+        )
+        .with_max_entries(self.max_entries.unwrap_or(eryx_vfs::MAX_ENTRIES))
+    }
+}
+
+/// The storage behind the shell's private `/tmp` when there's no
+/// `unstable-vfs` VFS, under `limits`.
+#[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+pub(crate) fn private_vfs_storage(limits: VfsLimits) -> eryx_vfs::ArcStorage {
+    eryx_vfs::ArcStorage::new(std::sync::Arc::new(limits.storage()))
+}
+
+/// The hybrid VFS context without `unstable-vfs`, which `shell` links it for:
+/// the Python stdlib and site-packages as in the plain WASI context, and for
+/// the shell a writable `/tmp` in `storage`, `/dev` and the read-only root.
+#[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+pub(crate) fn build_private_vfs_context(
+    executor: &Executor,
+    storage: eryx_vfs::ArcStorage,
+    max_open_host_files: Option<usize>,
+) -> std::result::Result<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>, Error> {
+    let mut ctx = eryx_vfs::HybridVfsCtx::new(storage).with_max_open_host_files(
+        max_open_host_files.unwrap_or(eryx_vfs::DEFAULT_MAX_OPEN_HOST_FILES),
+    );
+    add_library_preopens(&mut ctx, executor)?;
+    if executor.language() == Language::Shell {
+        ctx.add_vfs_preopen(TMP_MOUNT_PATH, DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+    }
     Ok(ctx)
 }
 
 impl SessionExecutor {
-    /// Create a new session executor from a `PythonExecutor`.
+    /// Create a new session executor from a `Executor`.
     ///
     /// This instantiates the WASM component and keeps it alive for reuse.
     ///
@@ -892,7 +1165,7 @@ impl SessionExecutor {
         fields(callbacks = callbacks.len())
     )]
     pub async fn new(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
     ) -> Result<Self, Error> {
         Self::new_with_limits(executor, callbacks, &ResourceLimits::unlimited()).await
@@ -911,7 +1184,7 @@ impl SessionExecutor {
     ///
     /// Returns an error if the component cannot be instantiated.
     pub async fn new_with_limits(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
@@ -942,7 +1215,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
     ) -> Result<Self, Error> {
@@ -970,7 +1243,7 @@ impl SessionExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use eryx::{PythonExecutor, SessionExecutor, VfsConfig};
+    /// use eryx::{Executor, SessionExecutor, VfsConfig};
     /// use eryx::vfs::InMemoryStorage;
     /// use std::sync::Arc;
     ///
@@ -989,7 +1262,7 @@ impl SessionExecutor {
     /// Returns an error if the WASM component cannot be instantiated.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
@@ -1007,7 +1280,8 @@ impl SessionExecutor {
     /// Create a session with caller-owned VFS storage and resource limits.
     ///
     /// The supplied storage retains ownership of its own quota and policy;
-    /// `limits.max_vfs_bytes` is only used for storage created by Eryx.
+    /// `limits.max_vfs_bytes` and `limits.max_vfs_entries` are only used for
+    /// storage created by Eryx.
     ///
     /// # Errors
     ///
@@ -1015,7 +1289,7 @@ impl SessionExecutor {
     /// mount cannot be created.
     #[cfg(feature = "unstable-vfs")]
     pub async fn new_with_vfs_config_and_limits(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: eryx_vfs::ArcStorage,
         vfs_config: VfsConfig,
@@ -1034,7 +1308,7 @@ impl SessionExecutor {
     /// Internal constructor with optional VFS storage and config.
     #[cfg(feature = "unstable-vfs")]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         vfs_storage: Option<eryx_vfs::ArcStorage>,
         vfs_config: Option<VfsConfig>,
@@ -1045,13 +1319,9 @@ impl SessionExecutor {
         let wasi = build_wasi_context(&executor, &fd_output)?;
 
         // Use provided storage/config or create defaults. A storage supplied by
-        // the caller owns its own quota; max_vfs_bytes applies only here.
+        // the caller owns its own quota; the VFS limits apply only here.
         let vfs_storage = vfs_storage.unwrap_or_else(|| {
-            eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                eryx_vfs::InMemoryStorage::with_max_bytes(
-                    limits.max_vfs_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                ),
-            ))
+            eryx_vfs::ArcStorage::new(std::sync::Arc::new(VfsLimits::of(limits).storage()))
         });
         let vfs_config = vfs_config.unwrap_or_default();
 
@@ -1070,6 +1340,11 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
             hybrid_vfs_ctx,
+        )
+        .with_commands(
+            executor.commands().clone(),
+            crate::process::ChildLimits::of(limits),
+            &fd_output,
         );
 
         // Create store
@@ -1126,15 +1401,16 @@ impl SessionExecutor {
             fd_output,
             vfs_storage: Some(vfs_storage),
             vfs_config: Some(vfs_config),
-            vfs_max_bytes: limits.max_vfs_bytes,
+            vfs_limits: VfsLimits::of(limits),
             max_open_host_files: limits.max_open_host_files,
+            child_limits: crate::process::ChildLimits::of(limits),
         })
     }
 
     /// Internal constructor without VFS.
     #[cfg(not(feature = "unstable-vfs"))]
     async fn new_internal(
-        executor: Arc<PythonExecutor>,
+        executor: Arc<Executor>,
         callbacks: &[Arc<dyn Callback>],
         limits: &ResourceLimits,
     ) -> Result<Self, Error> {
@@ -1149,7 +1425,20 @@ impl SessionExecutor {
             None,
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
+        )
+        .with_commands(
+            executor.commands().clone(),
+            crate::process::ChildLimits::of(limits),
+            &fd_output,
         );
+        #[cfg(feature = "shell")]
+        let vfs_storage = private_vfs_storage(VfsLimits::of(limits));
+        #[cfg(feature = "shell")]
+        let state = state.with_hybrid_vfs(build_private_vfs_context(
+            &executor,
+            vfs_storage.clone(),
+            limits.max_open_host_files,
+        )?);
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1201,6 +1490,13 @@ impl SessionExecutor {
             state_op_cancellation: None,
             memory_limit: limits.max_memory_bytes,
             fd_output,
+            #[cfg(feature = "shell")]
+            vfs_storage: Some(vfs_storage),
+            #[cfg(feature = "shell")]
+            vfs_limits: VfsLimits::of(limits),
+            #[cfg(feature = "shell")]
+            max_open_host_files: limits.max_open_host_files,
+            child_limits: crate::process::ChildLimits::of(limits),
         })
     }
 
@@ -1276,8 +1572,8 @@ impl SessionExecutor {
     /// Override the name of the variable captured as the structured result for
     /// this session's current instance.
     ///
-    /// Normally the name is configured on the parent [`PythonExecutor`] via
-    /// [`PythonExecutor::with_result_variable`] and applied at instantiation. This
+    /// Normally the name is configured on the parent [`Executor`] via
+    /// [`Executor::with_result_variable`] and applied at instantiation. This
     /// method sets it on the already-instantiated session instance, e.g. to apply a
     /// per-request override. The override persists across `restore_state` (which
     /// reuses the current instance) but is reset to the executor's configured name
@@ -1354,8 +1650,26 @@ impl SessionExecutor {
         output_tx: Option<mpsc::UnboundedSender<crate::wasm::OutputRequest>>,
         per_execute_fuel_limit: Option<u64>,
         cancellation_token: Option<CancellationToken>,
+        child_net: Option<crate::process::ChildNet>,
+        allowed_commands: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        credentials: &[Arc<crate::net::Credential>],
     ) -> Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
+        // From the full set every time, so one execution's narrowing
+        // doesn't carry into the next. Checked before the store is taken.
+        // The execution's first, so they win over the sandbox's for a
+        // header both set (see `PythonExecutor::execute`).
+        let credentials: Vec<_> = (credentials.iter())
+            .chain(self.executor.credentials())
+            .cloned()
+            .collect();
+        let commands = self.executor.commands().for_execution(
+            allowed_commands,
+            command_options,
+            child_net.is_some(),
+            &credentials,
+        )?;
         if crate::wasm::is_already_cancelled(cancellation_token.as_ref()) {
             return Err(ErrorKind::Cancelled.into());
         }
@@ -1392,15 +1706,18 @@ impl SessionExecutor {
             })
             .collect();
 
-        // Update state for this execution and reset memory tracker
+        // Update state for this execution. The memory tracker isn't reset:
+        // linear memory never shrinks, so this store's largest memory so far
+        // is what this execution starts with, and the peak it reports.
         {
             let state = store.data_mut();
             state.set_callback_tx(callback_tx);
             state.set_trace_tx(trace_tx);
             state.set_net_tx(net_tx);
+            state.child_net = child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net)));
+            state.commands = commands;
             state.set_output_tx(output_tx);
             state.set_callbacks(callback_infos);
-            state.reset_memory_tracker();
             state.stream_budget = StreamBudget::default();
             // A reused store keeps its ExecutorState across runs; clear any stale
             // suspension flag so it does not misclassify this run's trap.
@@ -1437,6 +1754,7 @@ impl SessionExecutor {
         } else {
             crate::wasm::arm_epoch_deadline(&mut store, execution_timeout);
         }
+        store.data_mut().deadline = execution_timeout.map(|t| std::time::Instant::now() + t);
 
         // Execute the code.
         // Wrap in tokio::time::timeout so that blocking WASI host calls (e.g. poll_oneoff
@@ -1477,6 +1795,7 @@ impl SessionExecutor {
         // Disarm the deadline so it can't fire during later calls into the
         // instance (snapshot/restore/clear) made after the timeout window.
         crate::wasm::arm_epoch_deadline(&mut store, None);
+        store.data_mut().deadline = None;
 
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
@@ -1495,6 +1814,8 @@ impl SessionExecutor {
             state.set_callback_tx(None);
             state.set_trace_tx(None);
             state.set_net_tx(None);
+            // The children's proxies don't outlive the execution.
+            state.child_net = None;
             state.set_output_tx(None);
             state.peak_memory_bytes()
         };
@@ -1510,15 +1831,16 @@ impl SessionExecutor {
                 .with_output_truncated(output_truncated)
         };
 
-        // A cancelled run was interrupted mid-call, so its instance can't be
-        // reused: leave the store out and the next call resets the session.
+        // A cancelled run was interrupted mid-call, and any other failure of
+        // the call itself (a timeout, running out of fuel, a suspension, a
+        // trap) leaves the instance trapped, so it can't be entered again, or
+        // leaves a guest suspended on a timer or callback, which would wake
+        // into the next call. Either way the instance can't be reused: leave
+        // the store out and the next call resets the session. (A script's
+        // own failure is the inner result, below, and keeps the instance.)
         if was_cancelled.load(Ordering::Relaxed) {
             return Err(with_stats(ErrorKind::Cancelled.into()));
         }
-
-        // Restore store and bindings before handling result
-        self.store = Some(store);
-        self.bindings = Some(bindings);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
@@ -1542,22 +1864,34 @@ impl SessionExecutor {
                 }
             })
             .map_err(|kind| with_stats(kind.into()))?;
+
+        // The call itself completed: the instance is reusable.
+        self.store = Some(store);
+        self.bindings = Some(bindings);
+
         // wasmtime_result is Result<Result<ExecuteOutput, ExecuteError>, wasmtime::Error>
         // The outer Result is from wasmtime, the inner is the WIT-generated result.
         // The inner Err is the guest's logical execution error — for real input
-        // that is always an uncaught Python exception (its traceback).
+        // that is always a script failure (for Python, its traceback).
+        let language = self.executor.language();
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")).into())
             .and_then(|output| {
                 output.map_err(|failure| {
-                    let mut traceback = failure.message;
-                    crate::wasm::append_fd_stderr(&mut traceback, &fd_stderr);
+                    let mut message = failure.message;
+                    crate::wasm::append_fd_stderr(
+                        &mut message,
+                        &fd_stderr,
+                        language,
+                        failure.exit_code,
+                    );
                     let mut stdout = failure.stdout;
                     let mut stderr = failure.stderr;
                     stdout.extend(&fd_stdout);
                     stderr.extend(&fd_stderr);
-                    Error::from(ErrorKind::PythonException {
-                        traceback,
+                    Error::from(ErrorKind::ScriptFailed {
+                        message,
+                        exit_code: failure.exit_code,
                         stdout,
                         stderr,
                     })
@@ -1592,8 +1926,9 @@ impl SessionExecutor {
         Ok(output)
     }
 
-    /// Start over on a fresh instance if a call whose future was dropped
-    /// mid-run took the instance with it, rather than failing every later call.
+    /// Start over on a fresh instance if a call that was cancelled or timed
+    /// out, or whose future was dropped mid-run, took the instance with it,
+    /// rather than failing every later call.
     ///
     /// Returns whether the instance was reset; the next successful execution
     /// then reports [`ExecutionOutput::state_was_reset`].
@@ -1608,7 +1943,9 @@ impl SessionExecutor {
         if self.store.is_some() {
             return Ok(false);
         }
-        tracing::warn!("previous session call was cancelled mid-run; resetting, state lost");
+        tracing::warn!(
+            "previous session call was cancelled or timed out mid-run; resetting, state lost"
+        );
         self.reset(callbacks).await?;
         self.state_was_reset = true;
         Ok(true)
@@ -1652,7 +1989,25 @@ impl SessionExecutor {
             None,
             callback_infos,
             MemoryTracker::new(self.memory_limit),
+        )
+        .with_commands(
+            self.executor.commands().clone(),
+            self.child_limits,
+            &self.fd_output,
         );
+        // The shell's /tmp persists across resets, as the VFS does.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        let state = {
+            let storage = self
+                .vfs_storage
+                .clone()
+                .unwrap_or_else(|| private_vfs_storage(self.vfs_limits));
+            state.with_hybrid_vfs(build_private_vfs_context(
+                &self.executor,
+                storage,
+                self.max_open_host_files,
+            )?)
+        };
 
         #[cfg(feature = "unstable-vfs")]
         let state = {
@@ -1660,11 +2015,7 @@ impl SessionExecutor {
             let vfs_storage = self.vfs_storage.clone().unwrap_or_else(|| {
                 // This is only a defensive fallback (constructors always keep
                 // the storage), but retain the configured quota if it is used.
-                eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(
-                        self.vfs_max_bytes.unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES),
-                    ),
-                ))
+                eryx_vfs::ArcStorage::new(std::sync::Arc::new(self.vfs_limits.storage()))
             });
             let vfs_config = self.vfs_config.clone().unwrap_or_default();
 
@@ -1681,6 +2032,11 @@ impl SessionExecutor {
                     &vfs_config,
                     self.max_open_host_files,
                 )?),
+            )
+            .with_commands(
+                self.executor.commands().clone(),
+                self.child_limits,
+                &self.fd_output,
             )
         };
 
@@ -1853,7 +2209,7 @@ impl SessionExecutor {
     ///
     /// # Returns
     ///
-    /// A `PythonStateSnapshot` that can be serialized and restored later.
+    /// A `StateSnapshot` that can be serialized and restored later.
     ///
     /// # Errors
     ///
@@ -1873,7 +2229,7 @@ impl SessionExecutor {
     /// let snapshot = session.snapshot_state().await?;
     /// println!("Snapshot size: {} bytes", snapshot.size());
     /// ```
-    pub async fn snapshot_state(&mut self) -> Result<PythonStateSnapshot, Error> {
+    pub async fn snapshot_state(&mut self) -> Result<StateSnapshot, Error> {
         tracing::debug!("SessionExecutor: capturing state snapshot");
 
         let snapshot = self
@@ -1896,14 +2252,18 @@ impl SessionExecutor {
 
         tracing::debug!(
             size_bytes = data.len(),
-            skipped_globals = ?snapshot.skipped_globals,
+            skipped = ?snapshot.skipped,
             "State snapshot captured"
         );
 
-        Ok(PythonStateSnapshot::new(data, snapshot.skipped_globals))
+        Ok(StateSnapshot::new(
+            self.executor.language(),
+            data,
+            snapshot.skipped,
+        ))
     }
 
-    /// Restore Python session state from a previously captured snapshot.
+    /// Restore session state from a previously captured snapshot.
     ///
     /// After restore, subsequent `execute()` calls will have access to all
     /// variables that were present when the snapshot was taken.
@@ -1915,6 +2275,7 @@ impl SessionExecutor {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The snapshot is from a session of another guest language
     /// - The WASM call fails
     /// - Deserialization fails (e.g., corrupted data)
     /// - It runs past [`state_op_timeout`](Self::state_op_timeout) or the
@@ -1926,24 +2287,33 @@ impl SessionExecutor {
     ///
     /// ```rust,ignore
     /// // Restore from a previously saved snapshot
-    /// let snapshot = PythonStateSnapshot::from_bytes(&saved_bytes)?;
+    /// let snapshot = StateSnapshot::from_bytes(&saved_bytes)?;
     /// session.restore_state(&snapshot).await?;
     ///
     /// // Variables from the snapshot are now available
     /// session.execute("print(x)", &[], None, None).await?;
     /// ```
-    pub async fn restore_state(&mut self, snapshot: &PythonStateSnapshot) -> Result<(), Error> {
+    pub async fn restore_state(&mut self, snapshot: &StateSnapshot) -> Result<(), Error> {
         tracing::debug!(
             size_bytes = snapshot.size(),
             "SessionExecutor: restoring state snapshot"
         );
+
+        let language = self.executor.language();
+        if snapshot.language() != language {
+            return Err(ErrorKind::Snapshot(format!(
+                "cannot restore a {} snapshot into a {language} session",
+                snapshot.language()
+            ))
+            .into());
+        }
 
         let data = snapshot.data().to_vec();
         self.run_state_op("restore", async |accessor, bindings| {
             bindings.call_restore_state(accessor, data).await
         })
         .await?
-        .map_err(ErrorKind::Snapshot)?;
+        .map_err(restore_error)?;
 
         tracing::debug!("State snapshot restored");
 
@@ -1992,8 +2362,8 @@ impl SessionExecutor {
     /// [state-op cancellation token](Self::set_state_op_cancellation).
     ///
     /// These exports run guest code (e.g. `__reduce__`), so they need a
-    /// bound. If it runs out the instance is discarded and the next call
-    /// resets the session.
+    /// bound. If it runs out, or the guest traps, the instance is discarded
+    /// and the next call resets the session.
     async fn run_state_op<R>(
         &mut self,
         what: &str,
@@ -2076,6 +2446,13 @@ impl SessionExecutor {
             }
             .into());
         }
+        if let Err(e) = &result
+            && e.downcast_ref::<wasmtime::Trap>().is_some()
+        {
+            // Any other trap also leaves the instance unusable ("cannot enter
+            // component instance"): drop it too, so the session resets.
+            return Err(ErrorKind::WasmEngine(format!("WASM {what} error: {e}")).into());
+        }
 
         // Restore store and bindings
         self.store = Some(store);
@@ -2112,9 +2489,17 @@ impl ExecutorState {
             memory_tracker,
             net_tx: None,    // Set via with_network() when network handler is running
             output_tx: None, // Set via set_output_tx() when output handler is running
+            #[cfg(feature = "shell")]
+            hybrid_vfs_ctx: None,
             suspended: None,
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
+            trace_clock: crate::wasm::TraceClock::default(),
+            nested: None,
+            deadline: None,
         }
     }
 
@@ -2142,7 +2527,40 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: false,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
+            trace_clock: crate::wasm::TraceClock::default(),
+            nested: None,
+            deadline: None,
         }
+    }
+
+    /// Run on `ctx`, the shell's private filesystem without `unstable-vfs`.
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    pub(crate) fn with_hybrid_vfs(
+        mut self,
+        ctx: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+    ) -> Self {
+        self.hybrid_vfs_ctx = Some(ctx);
+        self
+    }
+
+    /// The external commands the guest can spawn, their limits (see
+    /// [`ResourceLimits::max_child_host_bytes`] and
+    /// [`ResourceLimits::max_child_memory_bytes`]), and the guest's stderr,
+    /// where refused spawns are reported.
+    pub(crate) fn with_commands(
+        mut self,
+        commands: crate::process::Commands,
+        limits: crate::process::ChildLimits,
+        fd_output: &FdOutput,
+    ) -> Self {
+        self.commands = commands;
+        self.child_budget =
+            crate::process::ChildBudget::new(limits, Some(fd_output.stderr.clone()));
+        self.memory_tracker.set_children(self.child_budget.memory());
+        self
     }
 
     /// Update the callback channel for a new execution.
@@ -2152,7 +2570,11 @@ impl ExecutorState {
 
     /// Update the trace channel for a new execution.
     pub(crate) fn set_trace_tx(&mut self, tx: Option<mpsc::UnboundedSender<TraceRequest>>) {
+        // A child whose `wait` the execution left parked (it timed out) is
+        // reported killed on the old channel before it goes.
+        self.end_running_children();
         self.trace_tx = tx;
+        self.trace_clock = crate::wasm::TraceClock::default();
     }
 
     /// Update the network channel for a new execution.
@@ -2186,17 +2608,30 @@ impl ExecutorState {
     pub(crate) fn peak_memory_bytes(&self) -> u64 {
         self.memory_tracker.peak_memory_bytes()
     }
-
-    /// Reset the memory tracker for a new execution.
-    pub(crate) fn reset_memory_tracker(&self) {
-        self.memory_tracker.reset();
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_errors_name_a_state_format_mismatch() {
+        let err = restore_error(format!("{INCOMPATIBLE_STATE_PREFIX}old\tnew"));
+        assert!(matches!(
+            err,
+            ErrorKind::IncompatibleStateFormat { ref snapshot, ref runtime }
+                if snapshot == "old" && runtime == "new"
+        ));
+        // Anything else, including a mention of the prefix later on, stays a
+        // plain snapshot error.
+        for message in ["bad data", &format!("x {INCOMPATIBLE_STATE_PREFIX}a\tb")] {
+            assert!(matches!(
+                restore_error(message.to_owned()),
+                ErrorKind::Snapshot(_)
+            ));
+        }
+    }
 
     #[test]
     fn test_session_executor_debug() {
@@ -2207,7 +2642,7 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_roundtrip() {
         let data = vec![1, 2, 3, 4, 5];
-        let snapshot = PythonStateSnapshot::new(data.clone(), Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, data.clone(), Vec::new());
 
         assert_eq!(snapshot.data(), &data);
         assert_eq!(snapshot.size(), 5);
@@ -2215,7 +2650,7 @@ mod tests {
 
         // Test serialization roundtrip
         let bytes = snapshot.to_bytes();
-        let restored = PythonStateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
+        let restored = StateSnapshot::from_bytes(&bytes).expect("from_bytes failed");
 
         assert_eq!(restored.data(), &data);
         assert_eq!(
@@ -2227,17 +2662,17 @@ mod tests {
     #[test]
     fn test_python_state_snapshot_from_bytes_too_short() {
         let bytes = vec![1, 2, 3]; // Less than 8 bytes
-        let result = PythonStateSnapshot::from_bytes(&bytes);
+        let result = StateSnapshot::from_bytes(&bytes);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_python_state_snapshot_records_eryx_version() {
-        let snapshot = PythonStateSnapshot::new(vec![1, 2, 3], Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, vec![1, 2, 3], Vec::new());
         let bytes = snapshot.to_bytes();
         assert!(bytes.starts_with(SNAPSHOT_MAGIC));
 
-        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
         assert_eq!(
             restored.metadata().eryx_version.as_deref(),
             Some(concat!("eryx ", env!("CARGO_PKG_VERSION")))
@@ -2251,23 +2686,91 @@ mod tests {
         let mut bytes = 1_700_000_000_000u64.to_le_bytes().to_vec();
         bytes.extend_from_slice(b"pickle");
 
-        let restored = PythonStateSnapshot::from_bytes(&bytes).unwrap();
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
         assert_eq!(restored.data(), b"pickle");
         assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
         assert_eq!(restored.metadata().eryx_version, None);
+        assert_eq!(restored.language(), Language::Python);
 
         // Re-serializing doesn't claim it was written by this version.
-        let again = PythonStateSnapshot::from_bytes(&restored.to_bytes()).unwrap();
+        let again = StateSnapshot::from_bytes(&restored.to_bytes()).unwrap();
         assert_eq!(again.metadata().eryx_version, None);
         assert_eq!(again.data(), b"pickle");
     }
 
     #[test]
+    fn test_state_snapshot_records_language() {
+        for language in [Language::JavaScript, Language::Shell] {
+            let snapshot = StateSnapshot::new(language, vec![1, 2, 3], Vec::new());
+            let bytes = snapshot.to_bytes();
+            assert_eq!(
+                bytes[SNAPSHOT_MAGIC.len()],
+                SNAPSHOT_FORMAT_VERSION,
+                "{language:?}"
+            );
+            let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+            assert_eq!(restored.language(), language);
+            assert_eq!(restored.data(), &[1, 2, 3]);
+        }
+    }
+
+    /// Python snapshots stay in eryx 0.15's format 1 (no language byte), so
+    /// 0.15 can read what this eryx writes: a rolling deploy or a rollback
+    /// keeps its sessions. Byte for byte what 0.15 wrote, and they round-trip.
+    #[test]
+    fn test_python_snapshots_are_format_1() {
+        let mut snapshot = StateSnapshot::new(Language::Python, b"pickle".to_vec(), Vec::new());
+        snapshot.metadata.eryx_version = Some("eryx 0.16.0".to_string());
+        snapshot.metadata.timestamp_ms = 1_700_000_000_000;
+        let bytes = snapshot.to_bytes();
+
+        let writer = b"eryx 0.16.0";
+        let mut expected = SNAPSHOT_MAGIC.to_vec();
+        expected.push(1);
+        expected.extend_from_slice(&(writer.len() as u16).to_le_bytes());
+        expected.extend_from_slice(writer);
+        expected.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        expected.extend_from_slice(b"pickle");
+        assert_eq!(bytes, expected);
+
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.language(), Language::Python);
+        assert_eq!(restored.data(), b"pickle");
+        assert_eq!(
+            restored.metadata().eryx_version.as_deref(),
+            Some("eryx 0.16.0")
+        );
+        assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
+        assert_eq!(restored.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn test_state_snapshot_reads_format_1_as_python() {
+        // eryx 0.15.0: magic, version 1, writer, timestamp, pickle data.
+        let writer = b"eryx 0.15.0";
+        let mut bytes = SNAPSHOT_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&(writer.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(writer);
+        bytes.extend_from_slice(&1_700_000_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(b"pickle");
+
+        let restored = StateSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.language(), Language::Python);
+        assert_eq!(
+            restored.metadata().eryx_version.as_deref(),
+            Some("eryx 0.15.0")
+        );
+        assert_eq!(restored.metadata().timestamp_ms, 1_700_000_000_000);
+        assert_eq!(restored.data(), b"pickle");
+    }
+
+    #[test]
     fn test_python_state_snapshot_rejects_unknown_format_version() {
-        let mut bytes = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+        let mut bytes = StateSnapshot::new(Language::Python, vec![1], Vec::new()).to_bytes();
         bytes[SNAPSHOT_MAGIC.len()] = SNAPSHOT_FORMAT_VERSION + 1;
 
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(
             err.kind(),
             ErrorKind::IncompatibleSnapshot { format_version } if *format_version == SNAPSHOT_FORMAT_VERSION + 1
@@ -2276,39 +2779,46 @@ mod tests {
 
     #[test]
     fn test_python_state_snapshot_rejects_corrupt_header() {
-        let good = PythonStateSnapshot::new(vec![1], Vec::new()).to_bytes();
+        let good = StateSnapshot::new(Language::Python, vec![1], Vec::new()).to_bytes();
 
         // A format version below ours isn't from a newer eryx.
         let mut bytes = good.clone();
         bytes[SNAPSHOT_MAGIC.len()] = 0;
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
 
-        // The writer's first byte isn't valid UTF-8.
+        // A language this eryx doesn't know, in a format 2 snapshot.
+        let mut bytes = StateSnapshot::new(Language::JavaScript, vec![1], Vec::new()).to_bytes();
+        bytes[SNAPSHOT_MAGIC.len() + 1] = 0xFF;
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
+
+        // The writer's first byte isn't valid UTF-8 (format 1: after the
+        // version byte and the length).
         let mut bytes = good;
         bytes[SNAPSHOT_MAGIC.len() + 3] = 0xFF;
-        let err = PythonStateSnapshot::from_bytes(&bytes).unwrap_err();
+        let err = StateSnapshot::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Snapshot(_)), "{err}");
     }
 
     #[test]
     fn test_python_state_snapshot_rejects_truncated_header() {
-        let bytes = PythonStateSnapshot::new(Vec::new(), Vec::new()).to_bytes();
+        let bytes = StateSnapshot::new(Language::Python, Vec::new(), Vec::new()).to_bytes();
         // Every cut inside the header, from just the magic to one byte short
         // of the timestamp.
         for len in SNAPSHOT_MAGIC.len()..bytes.len() {
-            let err = PythonStateSnapshot::from_bytes(&bytes[..len]).unwrap_err();
+            let err = StateSnapshot::from_bytes(&bytes[..len]).unwrap_err();
             assert!(
                 matches!(err.kind(), ErrorKind::Snapshot(_)),
                 "len {len}: {err}"
             );
         }
-        assert!(PythonStateSnapshot::from_bytes(&bytes).is_ok());
+        assert!(StateSnapshot::from_bytes(&bytes).is_ok());
     }
 
     #[test]
     fn test_snapshot_metadata() {
-        let snapshot = PythonStateSnapshot::new(vec![0; 100], Vec::new());
+        let snapshot = StateSnapshot::new(Language::Python, vec![0; 100], Vec::new());
         let meta = snapshot.metadata();
 
         assert_eq!(meta.size_bytes, 100);

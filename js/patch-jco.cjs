@@ -9,8 +9,6 @@
  * Fails if the target pattern is missing so a jco bump can't silently drift.
  */
 const fs = require('fs');
-const path = 'eryx/eryx-sandbox.js';
-let code = fs.readFileSync(path, 'utf8');
 
 // webpack tries to bundle the dynamic node:fs/promises import in fetchWithNode
 // and fails; mark it webpackIgnore and fall back to fetch when unavailable.
@@ -32,12 +30,21 @@ const fsPatched = `	if (context.fileCache.node) {
 		}
 	}`;
 
-if (code.includes(fsOriginal)) {
-  fs.writeFileSync(path, code.replace(fsOriginal, fsPatched));
-  console.log('Patched: webpack compatibility for node:fs/promises');
-} else if (code.includes('webpackIgnore')) {
-  console.log('Already patched: webpack compatibility');
-} else {
-  console.error('Error: could not find fetchCompile pattern to patch; jco output changed');
-  process.exit(1);
+// One per guest language, and the shell's bundled coreutils.
+for (const path of [
+  'eryx/eryx-sandbox.js',
+  'eryx/eryx-sandbox-javascript.js',
+  'eryx/eryx-sandbox-shell.js',
+  'eryx/eryx-coreutils.js',
+]) {
+  const code = fs.readFileSync(path, 'utf8');
+  if (code.includes(fsOriginal)) {
+    fs.writeFileSync(path, code.replace(fsOriginal, fsPatched));
+    console.log(`Patched ${path}: webpack compatibility for node:fs/promises`);
+  } else if (code.includes('webpackIgnore')) {
+    console.log(`Already patched ${path}: webpack compatibility`);
+  } else {
+    console.error(`Error: could not find fetchCompile pattern to patch in ${path}; jco output changed`);
+    process.exit(1);
+  }
 }

@@ -1,0 +1,10 @@
+# A minimal `wasm32-wasip3` command used by tests/p3_filesystem.rs to drive the
+# p3 hybrid VFS through real guest filesystem calls. Built by the test itself.
+[package]
+name = "p3-fs-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not part of the eryx workspace: it only builds for wasm32-wasip3.
+[workspace]

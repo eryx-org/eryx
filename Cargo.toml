@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The shell guest (wasm32-wasip3, plus a wasm32-wasip2 build for js/eryx) and
+# the bundler (wasm32-wasip2) build only for wasm and pin their dependencies
+# (brush, rolldown) with their own locks.
+exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)
@@ -22,6 +26,7 @@ authors = ["Ben Sully <ben.sully88@gmail.com>"]
 anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.23"
+bytes = "1"
 blake3 = "1.8"
 clap = { version = "^4.6.6", features = ["derive", "env"] } #unified
 criterion = { version = "0.8", features = ["async_tokio"] } # benchmarking
@@ -47,22 +52,27 @@ pyo3 = { version = "^0.30.0", features = ["abi3-py312", "extension-module"] } #u
 pyo3-async-runtimes = "0.30" # asyncio awaitables for pyeryx
 pythonize = "0.30"
 rand = "0.10"           # secret placeholder generation
-rcgen = "0.14"          # test certificate generation
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] } # child proxy CA and test certificates
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rmcp = "3.0"            # Model Context Protocol SDK
 rustix = "^1.1.5" #unified
 rustls = "0.23"
 schemars = "1.2" # JSON Schema
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# preserve_order: objects keep their keys in insertion order. Callback schemas
+# keep their parameters in declaration order, which positional arguments bind
+# to (#860).
+serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.11"
 tar = "0.4"
 tempfile = "3.20"
 thiserror = "2.0"
+time = "0.3"                # child proxy certificate validity
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
 tokio-util = "0.7"
+toml = "1.2"
 tonic = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
@@ -82,12 +92,32 @@ wasmparser = "0.263"
 wasmtime = { version = "50.0.0", features = ["component-model", "async"] }
 wasmtime-wasi = "50.0.0"
 wasmtime-wasi-io = "50.0.0"
+# Only for `VMOffsets`, to size children's instance metadata (#942). It
+# must be exactly the version wasmtime itself uses: move this pin with every
+# wasmtime bump (Renovate groups it with wasmtime). A hand bump of wasmtime
+# alone leaves a second wasmtime-environ in the tree, sizing with the old
+# layout; process.rs's instance_metadata_estimates_match_wasmtime test, which
+# checks the estimate against wasmtime's own figure, is what catches that.
+wasmtime-environ = "=50.0.2"
 wasmtime-wizer = { version = "50.0.0", features = ["component-model", "wasmtime"] }
+wat = "1"
 webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhra CAs)
 wit-component = "0.263"
+# The wit-component and wit-parser wasmtime itself builds with (its
+# wasmparser/wasm-encoder), so components they encode are ones wasmtime
+# parses: eryx adapts WASI preview 1 modules with wit-component (#993), and
+# its tests probe the child linker with both. Bump with wasmtime.
+wit-component-wasmtime = { package = "wit-component", version = "=0.261.0" }
+wit-parser-wasmtime = { package = "wit-parser", version = "=0.261.0" }
 wit-dylib = "0.263"
 # wit-dylib FFI for implementing the interpreter interface (inlined from wasm-tools).
 wit-dylib-ffi = { path = "crates/wit-dylib-ffi" }
+# The wit-dylib value stack shared by the guest runtimes.
+eryx-guest-call = { path = "crates/eryx-guest-call" }
+# QuickJS (quickjs-ng) bindings for the JavaScript guest.
+rquickjs = { version = "0.14", default-features = false, features = ["std", "loader"] }
+# HTTP/1.1 for the JS guest's `fetch` (#825).
+httparse = "1.10"
 wit-parser = "0.263"
 zip = "9.0"
 zstd = "0.14"

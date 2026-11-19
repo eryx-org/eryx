@@ -151,11 +151,11 @@ fn runtime_wasm_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
-        .join("runtime.wasm")
+        .join("runtime-python.wasm")
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -167,13 +167,14 @@ fn python_stdlib_path() -> PathBuf {
     PathBuf::from(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib")
 }
 
 /// Create a sandbox builder with networking enabled.
-fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>
+{
     #[cfg(feature = "embedded")]
     {
         Sandbox::embedded()
@@ -181,7 +182,7 @@ fn sandbox_builder_with_network() -> eryx::SandboxBuilder<eryx::state::Has, eryx
 
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
             .with_python_stdlib(&stdlib_path)

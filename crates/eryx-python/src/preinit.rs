@@ -298,16 +298,33 @@ fn build_component(
         // A factory saved by pyeryx records neither; a bundle from
         // `eryx-precompile compile` may.
         let precompiled = match (&recipe.target, recipe.cpu_features) {
-            (None, None) => eryx::PythonExecutor::precompile(&preinit_bytes),
-            (target, cpu_features) => eryx::PythonExecutor::precompile_with_options(
+            (None, None) => eryx::Executor::precompile(&preinit_bytes),
+            (target, cpu_features) => eryx::Executor::precompile_with_options(
                 &preinit_bytes,
                 target.as_deref(),
                 cpu_features.unwrap_or_default(),
             ),
         }
         .map_err(|e| InitializationError::new_err(format!("pre-compilation failed: {e}")))?;
+        // Stamped like `eryx-precompile compile` output, so loading the factory
+        // in an eryx with other guest sources is IncompatiblePrecompiled.
+        let mut precompiled = precompiled;
+        eryx::Executor::stamp_language(&mut precompiled, eryx::Language::Python);
         Ok(make_precompiled_artifact(precompiled, cache))
     })
+}
+
+/// Why a rebuilt factory's baked callbacks won't skip callback setup.
+fn baked_callbacks_warning(path: &Path, count: usize) -> String {
+    format!(
+        "{} bakes {count} callback declaration(s) recorded by another eryx version, \
+         whose schema JSON may be in a different key order than this version sends \
+         (eryx keeps schema key order since #860). If so, the rebuilt factory still \
+         works, but its sandboxes set callbacks up on every execution instead of skipping it. Create \
+         the factory again with SandboxFactory(callbacks=...) to bake them in this \
+         version's order",
+        path.display()
+    )
 }
 
 /// Emit a Python `RuntimeWarning`.
@@ -609,14 +626,14 @@ impl SandboxFactory {
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
     ) -> PyResult<Session> {
-        // SAFETY: the bytes were produced by `PythonExecutor::precompile` or
+        // SAFETY: the bytes were produced by `Executor::precompile` or
         // loaded from a factory file created by this same API.
         let mut executor = unsafe { self.precompiled.to_executor() }.map_err(|e| {
             InitializationError::new_err(format!("failed to load factory runtime: {e}"))
         })?;
-        executor = executor.with_python_stdlib(&self.stdlib_path);
+        executor = executor.with_stdlib(&self.stdlib_path);
         if let Some(path) = &self.site_packages_path {
-            executor = executor.with_site_packages(path);
+            executor = executor.with_library_path(path);
         }
         if let Some(name) = result_variable {
             executor = executor.with_result_variable(name);
@@ -714,7 +731,7 @@ impl SandboxFactory {
 
         // Build sandbox from precompiled bytes. Trace collection (sys.settrace)
         // is always off for Python sandboxes; see `Sandbox::new`.
-        // SAFETY: The precompiled bytes were created by PythonExecutor::precompile()
+        // SAFETY: The precompiled bytes were created by Executor::precompile()
         // from a valid WASM component, so they are safe to deserialize.
         let mut builder = unsafe {
             eryx::Sandbox::builder()
@@ -886,7 +903,7 @@ impl SandboxFactory {
         let scrub_files = scrub_files.unwrap_or(has_secrets);
 
         let builder_fn = move || {
-            // SAFETY: the bytes were produced by `PythonExecutor::precompile`
+            // SAFETY: the bytes were produced by `Executor::precompile`
             // or loaded from a factory file created by the same API.
             let mut builder = unsafe {
                 eryx::Sandbox::builder()
@@ -993,6 +1010,10 @@ impl SandboxFactory {
         };
         let inputs = stored.read(&stored.build_inputs).map_err(read_err)?;
         let data_files = stored.read(&stored.data_files).map_err(read_err)?;
+        let recipe = eryx::bundle::BuildInputs::from_json(&inputs).map_err(read_err)?;
+        if !recipe.callbacks.is_empty() {
+            warn(py, baked_callbacks_warning(path, recipe.callbacks.len()))?;
+        }
         let callbacks = callbacks.map(Bound::unbind);
         let runtime = crate::error::make_runtime()?;
         let embedded = eryx::embedded::EmbeddedResources::get().map_err(eryx_error_to_py)?;
@@ -1019,7 +1040,6 @@ impl SandboxFactory {
         }
 
         // The data files are the site-packages the factory was created with.
-        let recipe = eryx::bundle::BuildInputs::from_json(&inputs).map_err(read_err)?;
         let (_, extensions, _) = process_packages(data_files_path.as_ref(), None)?;
         let precompiled = build_component(
             py,

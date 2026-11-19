@@ -1,6 +1,6 @@
 # @eryx-org/eryx
 
-A Python sandbox powered by WebAssembly, for browser and Node.js.
+A Python (and JavaScript and shell) sandbox powered by WebAssembly, for browser and Node.js.
 
 Eryx runs **CPython 3.14** inside a WASM sandbox with full isolation — no network, no filesystem, no system access unless you explicitly allow it. Variables persist across calls, state can be snapshotted/restored, and execution can be traced line-by-line.
 
@@ -21,6 +21,40 @@ const sandbox = new Sandbox();
 const result = await sandbox.execute('print("Hello from Python!")');
 console.log(result.stdout); // "Hello from Python!"
 ```
+
+### JavaScript and shell
+
+`language` picks the guest: `"python"` (the default), `"javascript"` (QuickJS) or `"shell"` (a bash-compatible shell, brush). Callbacks, the result variable, output streaming, `timeoutMs` and networking work the same way; in the shell, a callback is a command (`add --a 2 --b 3`) that prints its JSON result.
+
+```js
+const js = new Sandbox({ language: "javascript", callbacks: { add: ({ a, b }) => a + b } });
+await js.execute("console.log(await add({ a: 2, b: 3 }))"); // stdout "5\n"
+
+const sh = new Sandbox({ language: "shell", callbacks: { add: ({ a, b }) => a + b } });
+await sh.execute('echo "sum $(add --a 2 --b 3)"'); // stdout "sum 5\n"
+```
+
+Their runtimes are separate files (about 3 MB of WebAssembly each), loaded the first time a sandbox uses them, so an app that only runs Python never downloads them; likewise the Python stdlib is only downloaded for the first Python sandbox. Their sandboxes start with an empty filesystem. An uncaught JavaScript exception or a nonzero exit status rejects with a `PythonExceptionError`, as in the Python SDK; for the shell its `exitCode` is the script's exit status. A JavaScript snapshot keeps top-level variables (`var`, `let`, `const`) whose values hold no functions, with shared and circular objects intact; functions, classes and promises are named in `skippedGlobals`. The shell's own builtins include `grep`.
+
+#### Shell commands
+
+A shell sandbox runs uutils coreutils as external commands (`cat`, `sort`, `head`, `wc`, `ls`, ...; `COREUTILS_TOOLS` lists them). They're another 7.6 MB of WebAssembly, downloaded the first time one runs, and `coreutils: false` leaves them out. Other WASI 0.2 command components can be added by name, each the URL of its `jco transpile --instantiation async` output (absolute in Node.js). A command that waits (`sleep`, polling) also needs `--async-mode jspi --async-imports 'wasi:io/poll#[method]pollable.block' 'wasi:io/poll#poll' --async-exports 'wasi:cli/run#run'`, as the bundled coreutils has; without them its waits return at once:
+
+```js
+const sh = new Sandbox({
+  language: "shell",
+  commands: { rg: new URL("./rg/rg.js", import.meta.url) },
+});
+await sh.execute("printf 'pear\napple\n' | sort | head -n 1"); // "apple\n"
+```
+
+A command runs in batch: it reads all of its stdin, runs to completion, and only then is its output passed on.
+- An endless producer (`yes | head`) runs until `timeoutMs`.
+- A CPU-bound command blocks the thread it runs on, so use `timeoutMs`, which runs the sandbox in a Worker.
+- Each command may write 16 MiB to stdout and to stderr; past that it's stopped (status 134). It's given up to 16 MiB of stdin; past that it fails with `limit-exceeded` (134).
+- A sandbox has at most 64 commands spawned and not finished, holding at most 64 MiB of stdin and unread output between them. Their own memory isn't bounded beyond what the JavaScript engine allows a WebAssembly memory.
+- Commands share the sandbox's filesystem, and have no network.
+- Data moves through pipes at about 4–10 MiB/s, limited by jco's handling of component-model streams.
 
 ### Returning a structured result
 
@@ -228,7 +262,7 @@ export default defineConfig({
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its `callbacks`, `traceHandler`, `outputHandler`, `netConfig` and `timeoutMs` |
+| `new Sandbox(options?)` | `Sandbox` | Create an isolated sandbox; `options` can set its `language`, `callbacks`, `traceHandler`, `outputHandler`, `netConfig` and `timeoutMs` |
 | `execute(code)` | `Promise<ExecuteResult>` | Run Python code: `stdout`, `stderr`, `result`, `durationMs`, `callbackInvocations`, ... |
 | `executeWithJournal(code, { journal? })` | `Promise<ReplayOutcome>` | Run with callback journaling/replay |
 | `setResultVariable(name)` | `Promise<void>` | Change the captured result variable |

@@ -191,10 +191,10 @@ print(result.stdout_text)
 ## Virtual Filesystem Size
 
 `max_vfs_bytes` caps the total bytes the [virtual filesystem](./vfs.md) holds:
-all file contents, plus each file's and directory's path length and a 64-byte
-charge per entry, so empty files and long names aren't free. There are also at
-most 65,536 entries, and names over 255 bytes or paths over 4096 bytes fail
-with `ENAMETOOLONG`. Unlike `max_memory_bytes`, which
+all file contents, plus each file's and directory's path length (twice for a
+directory) and a 64-byte charge per entry, so empty files and long names aren't free. Names over 255
+bytes or paths over 4096 bytes fail with `ENAMETOOLONG`. Unlike
+`max_memory_bytes`, which
 bounds the WebAssembly instance's linear memory, VFS contents live in **host**
 memory - and the script picks its own write offsets, so `f.seek(2**40)` followed
 by a one-byte write would otherwise ask the host to materialize a terabyte of
@@ -235,8 +235,37 @@ session = eryx.Session(vfs=storage)
 ```
 <!-- langtabs-end -->
 
-Because the cap protects host memory rather than the guest, it is not disabled by
-`ResourceLimits::unlimited()`; raise it explicitly if you need more.
+A second limit, `max_vfs_entries`, caps the number of files and directories,
+65,536 by default. Each entry already counts against `max_vfs_bytes`, so this
+mostly bounds operations that visit every entry: listing, removing or renaming
+a directory gets slower as the tree grows. Creating an entry past the limit
+also fails with `ENOSPC`. In Rust:
+
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default()
+    .with_max_vfs_bytes(256 * 1024 * 1024)
+    .with_max_vfs_entries(200_000);
+```
+
+For storage you construct yourself, use
+`InMemoryStorage::with_max_bytes(..).with_max_entries(..)`.
+
+Because both caps protect host memory rather than the guest, neither is
+disabled by `ResourceLimits::unlimited()`; raise them explicitly if you need
+more.
+
+### Large trees belong on a volume
+
+In-memory storage suits scratch files and small working sets. Host memory
+grows faster than the content: about 60 MiB of files added about 97 MiB to the
+host's resident memory in one measurement. For a source checkout, a package
+directory or anything with tens of thousands of files, mount a
+[host-directory volume](./vfs.md#host-volume-mounts) instead. Neither cap
+applies to a volume, which keeps its contents on the host disk; give it a
+`max_file_size` to bound how large a file in it may grow.
 
 ## Open Host Files
 
@@ -269,6 +298,36 @@ sandbox opens a host file, so raise `RLIMIT_NOFILE` before then to get a larger
 default. A forked child starts with its own count. Rust embedders can change it with `eryx::vfs::set_process_max_open_host_files`. The
 gRPC server sets both with `--max-open-host-files` and
 `--max-open-host-files-total`.
+
+## Child Processes
+
+A shell sandbox's commands run as child processes, whose memory is outside
+`max_memory_bytes`. Two limits bound it per execution:
+
+- `max_child_memory_bytes` (default 256 MiB) is the pool of memory the
+  running commands share: their linear memories, tables and instance
+  metadata. Each running command reserves its initial memory, about 4 MiB for
+  a coreutils command and 17 MiB for `python3`, so the default fits about 60
+  concurrent coreutils commands or 15 `python3` runs. A command that doesn't
+  fit isn't started, and the shell's stderr says why:
+  `eryx: not enough memory for sleep (child memory pool full: 14 of 16 MiB in use; 7 commands running)`.
+- `max_child_host_bytes` (default 64 MiB) is the host memory the commands'
+  arguments and environments may hold.
+
+At most 64 commands may be running at once (`eryx: too many commands running
+(limit 64)`), whatever the pool's size. Raising `max_child_memory_bytes` raises
+how much host memory one execution can use, so size it for the host's memory
+and the number of concurrent executions. Neither limit is cleared by
+`ResourceLimits::unlimited()`. pyeryx can't set them yet; the gRPC server takes
+them as `resource_limits.max_child_memory_bytes` and `max_child_host_bytes`,
+capped by `--max-child-memory-bytes` and `--max-child-host-bytes`.
+
+```rust
+# extern crate eryx;
+use eryx::ResourceLimits;
+
+let limits = ResourceLimits::default().with_max_child_memory_bytes(512 * 1024 * 1024);
+```
 
 ## Callback Invocation Limits
 

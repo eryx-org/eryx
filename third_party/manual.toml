@@ -1,0 +1,623 @@
+# Third-party code that ships in eryx's artifacts but isn't a Rust crate in
+# one of the lock files cargo-about reads (see about.toml): C libraries,
+# CPython, vendored JavaScript and the command components. scripts/notices.py
+# appends each entry's licence files to the notices of the artifacts it lists,
+# and its `check` fails when a shipped input below has no entry, or an entry's
+# version no longer matches what's vendored.
+#
+# Each entry:
+#   name, version, license (SPDX), url  - what it is
+#   files     - licence and notice texts, relative to the repo root
+#   artifacts - which notices it goes in (the names in scripts/notices.py)
+#   covers    - vendored files this entry accounts for, as
+#               { path, sha256 }: the check fails on a file in
+#               crates/eryx-runtime/libs/ or prebuilt/ no entry covers, and on
+#               a covered file whose sha256 doesn't match (so re-vendoring
+#               libs/ means updating its entry). prebuilt/ is rebuilt with
+#               the guest, so its entries leave sha256 out.
+#   stdlib    - top-level names in the bundled Python stdlib
+#               (crates/eryx/python-stdlib.tar.*) this entry accounts for;
+#               the check fails on a name no entry lists
+#   version_strings - C strings that must appear in a covered file, as
+#               { path, strings }, so the version recorded here is the one
+#               vendored
+#   rust_toolchain - for code that comes with a Rust toolchain (its standard
+#               library, the libc of its wasm targets): the toolchain, which
+#               must be one rust-toolchain.toml or mise.toml pins, and each
+#               artifact scripts/notices.py's STD lists needs an entry with
+#               its toolchain
+#   sysroot_strings - strings that must appear in files of that toolchain's
+#               sysroot, as { paths, strings }, so the version recorded here
+#               is the one the toolchain ships
+#   crate     - for code that arrives inside a Rust crate: the crate whose
+#               Cargo.lock version `crate_version` must match
+#   npm       - vendored npm package name, matched against the `name@version`
+#               lines in crates/eryx-guest-js/src/node/*.js
+#   update    - the command that brings the entry and what it covers back in
+#               step, named in the check's error when its crate version or a
+#               covered file's sha256 no longer matches
+
+[[component]]
+name = "CPython"
+version = "3.14.0"
+license = "PSF-2.0"
+url = "https://github.com/python/cpython/tree/v3.14.0"
+# The PSF licence, plus the licences of the code CPython incorporates (expat,
+# libmpdec, SipHash, dtoa, ...), from its Doc/license.rst.
+files = [
+    "third_party/licenses/cpython-LICENSE",
+    "third_party/licenses/cpython-incorporated-software.rst",
+]
+artifacts = ["runtime-python"]
+covers = [
+    { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", sha256 = "902081a1bf6572c74e88516fda9fc8e9f2008df003e572727494cf13abdc028a" },
+]
+version_strings = [
+    { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", strings = ["3.14.0"] },
+]
+stdlib = [
+    "abc",
+    "_aix_support",
+    "_android_support",
+    "annotationlib",
+    "antigravity",
+    "_apple_support",
+    "argparse",
+    "ast",
+    "_ast_unparse",
+    "asyncio",
+    "base64",
+    "bdb",
+    "bisect",
+    "build-details.json",
+    "bz2",
+    "calendar",
+    "cmd",
+    "code",
+    "codecs",
+    "codeop",
+    "collections",
+    "_collections_abc",
+    "_colorize",
+    "colorsys",
+    "_compat_pickle",
+    "compileall",
+    "compression",
+    "concurrent",
+    "config-3.14-wasm32-wasi",
+    "configparser",
+    "contextlib",
+    "contextvars",
+    "copy",
+    "copyreg",
+    "cProfile",
+    "csv",
+    "ctypes",
+    "curses",
+    "dataclasses",
+    "datetime",
+    "dbm",
+    "decimal",
+    "difflib",
+    "dis",
+    "doctest",
+    "email",
+    "encodings",
+    "ensurepip",
+    "enum",
+    "filecmp",
+    "fileinput",
+    "fnmatch",
+    "fractions",
+    "ftplib",
+    "functools",
+    "__future__",
+    "genericpath",
+    "getopt",
+    "getpass",
+    "gettext",
+    "glob",
+    "graphlib",
+    "gzip",
+    "hashlib",
+    "heapq",
+    "__hello__",
+    "hmac",
+    "html",
+    "http",
+    "idlelib",
+    "imaplib",
+    "importlib",
+    "inspect",
+    "io",
+    "_ios_support",
+    "ipaddress",
+    "json",
+    "keyword",
+    "LICENSE.txt",
+    "linecache",
+    "locale",
+    "logging",
+    "lzma",
+    "mailbox",
+    "_markupbase",
+    "mimetypes",
+    "modulefinder",
+    "multiprocessing",
+    "netrc",
+    "ntpath",
+    "nturl2path",
+    "numbers",
+    "opcode",
+    "_opcode_metadata",
+    "operator",
+    "optparse",
+    "os",
+    "_osx_support",
+    "pathlib",
+    "pdb",
+    "__phello__",
+    "pickle",
+    "pickletools",
+    "pkgutil",
+    "platform",
+    "plistlib",
+    "poplib",
+    "posixpath",
+    "pprint",
+    "profile",
+    "pstats",
+    "pty",
+    "_py_abc",
+    "pyclbr",
+    "py_compile",
+    "_pydatetime",
+    "_pydecimal",
+    "pydoc",
+    "pydoc_data",
+    "_pyio",
+    "_pylong",
+    "_pyrepl",
+    "_py_warnings",
+    "queue",
+    "quopri",
+    "random",
+    "re",
+    "reprlib",
+    "rlcompleter",
+    "runpy",
+    "sched",
+    "secrets",
+    "selectors",
+    "shelve",
+    "shlex",
+    "shutil",
+    "signal",
+    "site",
+    "_sitebuiltins",
+    "site-packages",
+    "smtplib",
+    "socket",
+    "socketserver",
+    "sqlite3",
+    "sre_compile",
+    "sre_constants",
+    "sre_parse",
+    "ssl",
+    "stat",
+    "statistics",
+    "string",
+    "stringprep",
+    "_strptime",
+    "struct",
+    "subprocess",
+    "symtable",
+    "sysconfig",
+    "_sysconfigdata__wasi_wasm32-wasi",
+    "_sysconfig_vars__wasi_wasm32-wasi.json",
+    "tabnanny",
+    "tarfile",
+    "tempfile",
+    "textwrap",
+    "this",
+    "threading",
+    "_threading_local",
+    "timeit",
+    "tkinter",
+    "token",
+    "tokenize",
+    "tomllib",
+    "trace",
+    "traceback",
+    "tracemalloc",
+    "tty",
+    "turtle",
+    "turtledemo",
+    "types",
+    "typing",
+    "unittest",
+    "urllib",
+    "uuid",
+    "venv",
+    "warnings",
+    "wave",
+    "weakref",
+    "_weakrefset",
+    "webbrowser",
+    "wsgiref",
+    "xml",
+    "xmlrpc",
+    "zipapp",
+    "zipfile",
+    "zipimport",
+    "zoneinfo",
+]
+
+[[component]]
+name = "SQLite"
+version = "3.51.2"
+license = "blessing"
+url = "https://sqlite.org/copyright.html"
+# Public domain; libpython links it for the sqlite3 module. No notice is
+# required, so this entry only records it.
+files = []
+artifacts = ["runtime-python"]
+version_strings = [
+    { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", strings = ["3.51.2"] },
+]
+
+[[component]]
+name = "dill"
+version = "0.4.1"
+license = "BSD-3-Clause"
+url = "https://github.com/uqfoundation/dill/tree/0.4.1"
+# In the bundled stdlib; eryx's Python guest snapshots sessions with it.
+files = ["third_party/licenses/dill-LICENSE"]
+artifacts = ["runtime-python"]
+stdlib = ["dill"]
+
+[[component]]
+name = "componentize-py async support"
+version = "componentize-py 874d8af"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/bytecodealliance/componentize-py/tree/main/bundled/componentize_py_async_support"
+# componentize-py's asyncio glue, in the bundled stdlib.
+files = ["third_party/licenses/componentize-py-LICENSE"]
+artifacts = ["runtime-python"]
+stdlib = ["componentize_py_async_support"]
+
+[[component]]
+name = "eryx's componentize-py shims"
+version = "eryx"
+license = "MIT OR Apache-2.0"
+url = "https://github.com/eryx-org/eryx"
+# eryx's own stand-ins for componentize-py's runtime modules, in the bundled
+# stdlib: eryx's licence, so no third-party notice.
+files = []
+artifacts = []
+stdlib = ["componentize_py_runtime", "componentize_py_types"]
+
+[[component]]
+name = "wasi-libc"
+version = "wasi-sdk-33 (161b3195)"
+license = "Apache-2.0 WITH LLVM-exception AND Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0"
+url = "https://github.com/WebAssembly/wasi-libc/tree/161b3195fc2558d2b1ba3eb9ffae3b2b47407623"
+# wasi-libc itself (its LICENSE lists the parts it derives from), the musl
+# code in it, cloudlibc and musl-fts; dlmalloc is CC0. This is the one in
+# libs/ and the WASI SDK, which the Python and JavaScript guests link; the
+# artifacts built with Rust's own wasm targets link the next entry's.
+files = [
+    "third_party/licenses/wasi-libc-LICENSE",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE-LLVM",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE",
+    "third_party/licenses/wasi-libc-LICENSE-MIT",
+    "third_party/licenses/wasi-libc-musl-COPYRIGHT",
+    "third_party/licenses/wasi-libc-cloudlibc-LICENSE",
+    "third_party/licenses/wasi-libc-musl-fts-COPYING",
+]
+# The libs are built against this WASI SDK (crates/eryx-runtime/README.md),
+# which mise.toml's `wasi_sdk_version` pins.
+wasi_sdk = "wasi-sdk-33"
+artifacts = [
+    "runtime-python",
+    "runtime-javascript",
+]
+covers = [
+    { path = "crates/eryx-runtime/libs/libc.so.zst", sha256 = "55eecf0ff724dbaad24d29abd01f709fa294164152448be657fb9854d5865436" },
+    { path = "crates/eryx-runtime/libs/libwasi-emulated-getpid.so.zst", sha256 = "3a9aabb5b77f622b36b31f6d66e27a80500ddffb793b69eaf12499ee8899bfcb" },
+    { path = "crates/eryx-runtime/libs/libwasi-emulated-mman.so.zst", sha256 = "6bca342a02f99d0581591dd7c0aa69adf91feb846a8a2719eff55a8af5df332b" },
+    { path = "crates/eryx-runtime/libs/libwasi-emulated-process-clocks.so.zst", sha256 = "421ef01ec3b17760417d24aa1106f20c1eca75818270a491bfe58ab7a935ab21" },
+    { path = "crates/eryx-runtime/libs/libwasi-emulated-signal.so.zst", sha256 = "d068a4b77a2a71d0a8c473fac1009a189370bafb407415ae1c5884614273a934" },
+]
+
+[[component]]
+name = "wasi-libc (Rust's wasm targets)"
+version = "wasi-sdk-34 (2e6fb9d8)"
+license = "Apache-2.0 WITH LLVM-exception AND Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0"
+url = "https://github.com/WebAssembly/wasi-libc/tree/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13"
+# The wasi-libc in Rust's self-contained wasm32-wasip2/p3 sysroots, which the
+# artifacts built with the pinned stable toolchain link. Rust 1.100.0 builds
+# those targets with wasi-sdk-34 (src/ci/docker/host-x86_64/dist-various-2/
+# Dockerfile at its tag), whose src/wasi-libc is at the commit above; its
+# libc.a reports clang 23.1.0-wasi-sdk (llvm 895aa2c8). Only musl's COPYRIGHT
+# differs from wasi-sdk-33's. On a toolchain bump, look both up again; the
+# check below fails when the sysroot's libc.a no longer carries that LLVM.
+files = [
+    "third_party/licenses/wasi-libc-LICENSE",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE-LLVM",
+    "third_party/licenses/wasi-libc-LICENSE-APACHE",
+    "third_party/licenses/wasi-libc-LICENSE-MIT",
+    "third_party/licenses/wasi-libc-wasi-sdk-34-musl-COPYRIGHT",
+    "third_party/licenses/wasi-libc-cloudlibc-LICENSE",
+    "third_party/licenses/wasi-libc-musl-fts-COPYING",
+]
+rust_toolchain = "1.100.0"
+sysroot_strings = { paths = [
+    "lib/rustlib/wasm32-wasip2/lib/self-contained/libc.a",
+    "lib/rustlib/wasm32-wasip3/lib/self-contained/libc.a",
+], strings = ["llvm-project 895aa2c896ada719451be2e3673c83da8ddf1141"] }
+artifacts = ["runtime-shell", "eryx-bundler", "coreutils"]
+
+[[component]]
+name = "The Rust standard library"
+version = "1.100.0 (0ef1bc38)"
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+url = "https://github.com/rust-lang/rust/tree/1.100.0"
+# The project's own licence texts for std, core, alloc and the rest of
+# library/, and Unicode-3.0 for core's Unicode tables
+# (library/core/src/unicode/unicode_data.rs, per the project's REUSE.toml);
+# their dependencies (hashbrown, compiler_builtins, ...) are listed per
+# artifact from rust-src (scripts/notices.py, STD).
+files = [
+    "third_party/licenses/rust-COPYRIGHT",
+    "third_party/licenses/rust-LICENSE-MIT",
+    "third_party/licenses/rust-LICENSE-APACHE",
+    "third_party/licenses/rust-Unicode-3.0.txt",
+]
+rust_toolchain = "1.100.0"
+artifacts = ["host", "runtime-shell", "eryx-bundler", "coreutils"]
+
+[[component]]
+name = "The Rust standard library"
+version = "nightly-2026-10-21 (19833af7)"
+license = "(MIT OR Apache-2.0) AND Unicode-3.0"
+url = "https://github.com/rust-lang/rust/tree/19833af7224424e8b53e288097d56b6af43d5bcf"
+# The guests' std, built from source with -Z build-std. Same licence texts
+# (and REUSE.toml annotations) as 1.100.0's, checked when the pin was set.
+files = [
+    "third_party/licenses/rust-COPYRIGHT",
+    "third_party/licenses/rust-LICENSE-MIT",
+    "third_party/licenses/rust-LICENSE-APACHE",
+    "third_party/licenses/rust-Unicode-3.0.txt",
+]
+rust_toolchain = "nightly-2026-10-21"
+artifacts = ["runtime-python", "runtime-javascript"]
+
+[[component]]
+name = "libc++ and libc++abi"
+version = "wasi-sdk-33 (llvm-project 4434dabb)"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/llvm/llvm-project/tree/4434dabb69916856b824f68a64b029c67175e532"
+files = [
+    "third_party/licenses/llvm-libcxx-LICENSE.TXT",
+    "third_party/licenses/llvm-libcxxabi-LICENSE.TXT",
+]
+# Only CPython links them; the JavaScript guest links libc alone.
+artifacts = ["runtime-python"]
+covers = [
+    { path = "crates/eryx-runtime/libs/libc++.so.zst", sha256 = "a334e6a01bb69c1207f240385dc639bfa5603f9048b6d881cc04ac46c4bc4d84" },
+    { path = "crates/eryx-runtime/libs/libc++abi.so.zst", sha256 = "4c30c9aa8163e233476d222eb3737ee07905226463cca6d49bd887299fa964a1" },
+]
+
+[[component]]
+name = "LLVM compiler-rt builtins (WASI SDK)"
+version = "wasi-sdk-33 (llvm-project 4434dabb)"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/llvm/llvm-project/tree/4434dabb69916856b824f68a64b029c67175e532/compiler-rt"
+# clang links libclang_rt.builtins into every library it links: libs/libc.so
+# and libc++.so define its 128-bit integer and long-double helpers (__multi3,
+# __udivti3, __addtf3, __trunctfdf2, ...), and both guests load libc.so. The
+# Rust-built guest libraries get theirs from Rust's compiler_builtins instead.
+files = ["third_party/licenses/llvm-compiler-rt-LICENSE.TXT"]
+wasi_sdk = "wasi-sdk-33"
+artifacts = ["runtime-python", "runtime-javascript"]
+
+[[component]]
+name = "wasi_snapshot_preview1 adapter (Wasmtime)"
+version = "as vendored with libs/ (componentize-py 874d8af)"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/bytecodealliance/wasmtime/tree/main/crates/wasi-preview1-component-adapter"
+files = ["third_party/licenses/wasmtime-LICENSE"]
+artifacts = ["runtime-python", "runtime-javascript"]
+covers = [{ path = "crates/eryx-runtime/libs/wasi_snapshot_preview1.reactor.wasm.zst", sha256 = "8249a5e884b81520258c110ff793260ffce3056ed9dd3fcd22599f8ed811d5d0" }]
+
+[[component]]
+name = "wasi_snapshot_preview1 command adapter (Wasmtime)"
+version = "50.0.2"
+license = "Apache-2.0 WITH LLVM-exception"
+url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.2"
+# Adapts WASI preview 1 command modules into components (#993): the release
+# asset of the wasmtime eryx links, so a wasmtime bump fails this check until
+# the adapter is replaced with the new release's. `mise run
+# update-preview1-adapter` does that (and updates version, url,
+# crate_version and sha256 here, and mise.toml's wasmtime CLI pin), and
+# checks wasmtime's LICENSE and the wit-component-wasmtime and
+# wasmtime-environ pins; CI runs it on PRs into
+# multi-guest that change Cargo.lock (.github/workflows/preview1-adapter.yml).
+files = ["third_party/licenses/wasmtime-LICENSE"]
+artifacts = ["host"]
+crate = "wasmtime"
+crate_version = "50.0.2"
+update = "mise run update-preview1-adapter"
+covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "d708f61fca2f39ad1ad3e0e60787c9e7d66c4789fe4046206afb16eda661c717" }]
+
+[[component]]
+name = "QuickJS-ng"
+version = "0.16.2"
+license = "MIT"
+url = "https://github.com/quickjs-ng/quickjs/tree/v0.16.2"
+# Vendored by rquickjs-sys; cargo-about lists that crate's own licence, not
+# the engine's.
+files = ["third_party/licenses/quickjs-ng-LICENSE"]
+artifacts = ["runtime-javascript"]
+crate = "rquickjs-sys"
+crate_version = "0.14.0"
+
+# The npm packages vendored into the JavaScript guest's Node compatibility
+# modules (crates/eryx-guest-js/src/node/, regenerated by its regen.sh).
+
+[[component]]
+name = "buffer"
+version = "6.0.3"
+license = "MIT"
+url = "https://github.com/feross/buffer"
+files = ["crates/eryx-guest-js/src/node/licenses/buffer-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "buffer"
+
+[[component]]
+name = "base64-js"
+version = "1.5.1"
+license = "MIT"
+url = "https://github.com/beatgammit/base64-js"
+files = ["crates/eryx-guest-js/src/node/licenses/base64-js-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "base64-js"
+
+[[component]]
+name = "ieee754"
+version = "1.2.1"
+license = "BSD-3-Clause"
+url = "https://github.com/feross/ieee754"
+files = ["crates/eryx-guest-js/src/node/licenses/ieee754-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "ieee754"
+
+[[component]]
+name = "events"
+version = "3.3.0"
+license = "MIT"
+url = "https://github.com/browserify/events"
+files = ["crates/eryx-guest-js/src/node/licenses/events-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "events"
+
+[[component]]
+name = "path-browserify"
+version = "1.0.1"
+license = "MIT"
+url = "https://github.com/browserify/path-browserify"
+files = ["crates/eryx-guest-js/src/node/licenses/path-browserify-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "path-browserify"
+
+[[component]]
+name = "string_decoder"
+version = "1.3.0"
+license = "MIT"
+url = "https://github.com/nodejs/string_decoder"
+files = ["crates/eryx-guest-js/src/node/licenses/string_decoder-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "string_decoder"
+
+[[component]]
+name = "safe-buffer"
+version = "5.2.1"
+license = "MIT"
+url = "https://github.com/feross/safe-buffer"
+files = ["crates/eryx-guest-js/src/node/licenses/safe-buffer-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "safe-buffer"
+
+[[component]]
+name = "core-js-pure"
+version = "3.51.0"
+license = "MIT"
+url = "https://github.com/zloirock/core-js"
+# Only its URL and URLSearchParams (src/node/url_globals.js).
+files = ["crates/eryx-guest-js/src/node/licenses/core-js-pure-LICENSE"]
+artifacts = ["runtime-javascript"]
+npm = "core-js-pure"
+
+[[component]]
+name = "uutils coreutils"
+version = "0.9.0 (840c36d3)"
+license = "MIT"
+url = "https://github.com/uutils/coreutils/tree/840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+# The tool itself; the crates it's built from are listed when eryx-build
+# builds it (#837 step 2).
+files = ["third_party/licenses/uutils-coreutils-LICENSE"]
+artifacts = ["coreutils"]
+cli = "clis/coreutils.toml"
+cli_commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+
+[[component]]
+name = "HACL*"
+version = "4ef25b54"
+license = "MIT"
+url = "https://github.com/hacl-star/hacl-star/tree/4ef25b547b377dcef855db4289c6a00580e7221c"
+# Formally verified hashes that CPython 3.14.0 vendors in Modules/_hacl/ (at
+# the hacl-star revision its refresh.sh pins) and compiles into libpython for
+# `hashlib`. Doc/license.rst's incorporated-software section doesn't cover it.
+# The vendored C files carry this MIT notice; hacl-star's repository is
+# Apache-2.0, which covers its F* sources.
+files = ["third_party/licenses/hacl-star-LICENSE"]
+artifacts = ["runtime-python"]
+version_strings = [
+    { path = "crates/eryx-runtime/libs/libpython3.14.so.zst", strings = ["invalid HACL* algorithm"] },
+]
+
+[[component]]
+name = "libgcc_s (GCC runtime library)"
+version = "GCC 12.4.0 (2bada4bc)"
+license = "GPL-3.0-or-later WITH GCC-exception-3.1"
+url = "https://github.com/gcc-mirror/gcc/tree/releases/gcc-12.4.0/libgcc"
+# Only in the musllinux pyeryx wheels: maturin links their extension against
+# the system musl dynamically, so std unwinds through libgcc_s (not LLVM
+# libunwind), and auditwheel bundles that as pyeryx.libs/libgcc_s-*.so.1. Its
+# .comment says GCC 12.4.0 (checked on 0.15.1's x86_64 and aarch64 wheels,
+# #996). musl itself isn't bundled or statically linked: the wheels need the
+# system's libc.so.
+files = [
+    "third_party/licenses/libgcc-COPYING3",
+    "third_party/licenses/libgcc-COPYING.RUNTIME",
+]
+artifacts = ["host"]
+
+[[component]]
+name = "aws-lc-sys (full LICENSE)"
+version = "0.47.0"
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+url = "https://github.com/aws/aws-lc-rs/tree/main/aws-lc-sys"
+# Its LICENSE verbatim, including the OpenSSL and SSLeay notices, which ask
+# to be reproduced; cargo-about only renders the SPDX licences it reports
+# (the expression above, from its Cargo.toml). Shipped in full with the host
+# notices, the only artifact that links aws-lc-sys (decided, #930).
+files = ["third_party/licenses/aws-lc-sys-LICENSE"]
+artifacts = ["host"]
+crate = "aws-lc-sys"
+crate_version = "0.47.0"
+
+[[component]]
+name = "wit-dylib (generated bindings)"
+version = "0.263.0"
+license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+url = "https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wit-dylib"
+# liberyx_bindings.so is code wit-dylib generates for the sandbox world, at
+# eryx-runtime's build time.
+files = ["third_party/licenses/wasm-tools-LICENSE-Apache-2.0_WITH_LLVM-exception"]
+artifacts = ["runtime-python", "runtime-javascript"]
+covers = [{ path = "crates/eryx-runtime/prebuilt/liberyx_bindings.so.zst" }]
+crate = "wit-dylib"
+crate_version = "0.263.0"
+
+[[component]]
+name = "eryx's Python guest"
+version = "eryx"
+license = "MIT OR Apache-2.0"
+url = "https://github.com/eryx-org/eryx"
+# liberyx_runtime.so is eryx-guest-python, eryx's own code; the crates it's
+# built from are in runtime-python's cargo-about section.
+files = []
+artifacts = []
+covers = [{ path = "crates/eryx-runtime/prebuilt/liberyx_runtime.so.zst" }]

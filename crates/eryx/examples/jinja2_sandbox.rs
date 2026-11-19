@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Pre-compile for faster instantiation
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile(&preinit_component)?;
+    let precompiled = eryx::Executor::precompile(&preinit_component)?;
     println!(
         "  Pre-compiled in {:?} ({:.1} MB)",
         start.elapsed(),

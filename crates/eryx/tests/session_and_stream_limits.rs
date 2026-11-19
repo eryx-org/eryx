@@ -5,19 +5,19 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use eryx::{Error, ErrorKind, PythonExecutor, ResourceLimits, Session as _, SessionExecutor};
+use eryx::{Error, ErrorKind, Executor, ResourceLimits, Session as _, SessionExecutor};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
@@ -210,11 +210,19 @@ async fn session_captures_direct_fd_writes_per_execution() {
 const FD_WRITE_THEN_RAISE: &str = "import os\nos.write(2, b'fd-err\\n')\nraise ValueError('boom')";
 
 fn assert_traceback_has_fd_write(err: Error) {
-    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
+    let ErrorKind::ScriptFailed {
+        message: traceback, ..
+    } = err.kind()
+    else {
         panic!("expected a Python exception, got {err:?}");
     };
-    assert!(traceback.contains("ValueError"), "{traceback:?}");
-    assert!(traceback.contains("fd-err"), "{traceback:?}");
+    assert!(traceback.contains("ValueError: boom"), "{traceback:?}");
+    // On a line of its own, once: not glued to the traceback's last line.
+    assert_eq!(
+        traceback.lines().filter(|line| *line == "fd-err").count(),
+        1,
+        "{traceback:?}"
+    );
 }
 
 #[tokio::test]
@@ -281,7 +289,10 @@ async fn python_exception_text_is_redacted() {
     let code = "import os\nraise RuntimeError(os.environ['API_KEY'])";
 
     let err = sandbox.execute(code).await.expect_err("raises");
-    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
+    let ErrorKind::ScriptFailed {
+        message: traceback, ..
+    } = err.kind()
+    else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert_placeholder_redacted(traceback);
@@ -290,7 +301,10 @@ async fn python_exception_text_is_redacted() {
         .await
         .expect("session");
     let err = session.execute(code).await.expect_err("raises");
-    let ErrorKind::PythonException { traceback, .. } = err.kind() else {
+    let ErrorKind::ScriptFailed {
+        message: traceback, ..
+    } = err.kind()
+    else {
         panic!("expected a Python exception, got {err:?}");
     };
     assert_placeholder_redacted(traceback);

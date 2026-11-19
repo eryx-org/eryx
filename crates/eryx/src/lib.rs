@@ -43,11 +43,15 @@
 //   that need wasmtime's unsafe deserialization APIs
 // - With `preinit` feature: deny unsafe code, needed for cranelift CPU feature flags
 //   during precompilation (e.g., disabling AVX-512 for portable builds)
+// - With `env-pack` feature: deny unsafe code, to load the embedded bundler
 #![cfg_attr(
-    not(any(feature = "embedded", feature = "preinit")),
+    not(any(feature = "embedded", feature = "preinit", feature = "env-pack")),
     forbid(unsafe_code)
 )]
-#![cfg_attr(any(feature = "embedded", feature = "preinit"), deny(unsafe_code))]
+#![cfg_attr(
+    any(feature = "embedded", feature = "preinit", feature = "env-pack"),
+    deny(unsafe_code)
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Define a method that is `pub` with the `unstable-internals` feature and
@@ -76,13 +80,18 @@ mod cancel;
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
 pub mod embedded_stdlib;
+#[cfg(feature = "environment")]
+pub mod environment;
 mod error;
 mod fork_local;
+pub mod language;
 mod library;
 pub mod net;
 pub mod package;
 pub mod pool;
+mod process;
 pub mod replay;
+mod reserved;
 mod sandbox;
 mod schema;
 pub mod secrets;
@@ -102,7 +111,8 @@ mod wasm;
 pub mod preinit {
     pub use eryx_runtime::linker::NativeExtension;
     pub use eryx_runtime::preinit::{
-        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_with_options,
+        CallbackDeclaration, PreInitOptions, pre_initialize, pre_initialize_javascript,
+        pre_initialize_with_options,
     };
 
     /// The declaration the guest sees for `callback`, for
@@ -127,13 +137,15 @@ pub use callback::{
     PrefixCallback, PrefixHandler, TypedCallback, empty_schema,
 };
 pub use error::{Error, ErrorKind};
+pub use language::Language;
 pub use library::RuntimeLibrary;
 pub use net::{
-    ConnectionManager, DEFAULT_BLOCKED_NETWORKS, HttpRule, IpNet, NetConfig, NetTraffic, Resolver,
-    TcpError, TlsError,
+    ChildNetwork, ChildProxy, ConnectionManager, Credential, DEFAULT_BLOCKED_NETWORKS, HttpRule,
+    IpNet, NetConfig, NetTraffic, Resolver, TcpError, TlsError,
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
+pub use process::{Command, CommandImport, CommandInfo, CommandOptions, ImportSupport};
 pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
     SuspendedCallback,
@@ -141,26 +153,36 @@ pub use replay::{
 #[cfg(any(feature = "embedded", feature = "preinit"))]
 pub use sandbox::PrecompiledArtifact;
 pub use sandbox::{
-    ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits, Sandbox,
-    SandboxBuilder, state,
+    ExecuteOptions, ExecuteResult, ExecuteStats, ExecutionHandle, ReplayOutcome, ResourceLimits,
+    Sandbox, SandboxBuilder, state,
 };
 pub use secrets::{
     FileScrubPolicy, OutputScrubPolicy, SecretConfig, scrub_placeholders, scrub_placeholders_bytes,
 };
-pub use session::{
-    InProcessSession, PythonStateSnapshot, Session, SessionExecutor, SnapshotMetadata,
-};
+pub use session::{InProcessSession, Session, SessionExecutor, SnapshotMetadata, StateSnapshot};
 #[cfg(feature = "unstable-vfs")]
 pub use session::{VfsConfig, VolumeMount, VolumeSource};
 pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 
 // Re-export precompilation utilities and internal types
 #[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub use sandbox::language_preamble;
+#[cfg(feature = "unstable-internals")]
 pub use wasm::{CallbackHostResult, CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 pub use wasm::{
-    CpuFeatureLevel, ExecutionOutput, InstanceAllocator, PythonExecutor, STREAM_BYTES_LIMIT,
+    CpuFeatureLevel, ExecutionOutput, Executor, InstanceAllocator, STREAM_BYTES_LIMIT,
     SharedEngineConfig, configure_shared_engine,
 };
+
+/// Deprecated name for [`Executor`].
+#[deprecated(
+    since = "0.16.0",
+    note = "renamed to `Executor` now that eryx runs more than one guest language"
+)]
+pub type PythonExecutor = Executor;
+
+pub use session::renamed::*;
 
 // Re-export schema types at top level for convenience
 pub use schema::{JsonSchema, Schema};

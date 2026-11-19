@@ -2,7 +2,7 @@
 //! Eryx Python WASM Runtime
 //!
 //! Contains the WIT definition and builds the eryx sandbox WASM component.
-//! The component uses our custom eryx-wasm-runtime (`liberyx_runtime.so`) for Python
+//! The component uses our custom eryx-guest-python (`liberyx_runtime.so`) for Python
 //! execution via CPython FFI.
 //!
 //! ## Features
@@ -22,7 +22,7 @@
 //!
 //! ## See Also
 //!
-//! - `eryx-wasm-runtime` - The custom runtime that implements the WIT exports
+//! - `eryx-guest-python` - The custom runtime that implements the WIT exports
 
 /// The WIT definition as a string constant.
 pub const WIT_DEFINITION: &str = include_str!("../wit/runtime.wit");

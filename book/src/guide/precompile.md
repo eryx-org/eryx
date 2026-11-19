@@ -22,18 +22,18 @@ eryx-precompile setup
 
 This will:
 
-1. Download `runtime.wasm` from the matching GitHub Release and check it against the release's `runtime.wasm.sha256`
+1. Download `runtime-python.wasm` from the matching GitHub Release and check it against the release's `runtime-python.wasm.sha256`
 2. Pre-compile it to native code for your platform
 3. Cache the result in `~/.cache/eryx/`, with a checksum file next to it
 
 Running `setup` again reuses the cached runtime only if it still matches its checksum, so an interrupted run is repaired by running it again.
 
-After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. The build uses it only if it still matches its checksum file and, on Unix, the file, its checksum file and the cache directory are owned by you and not writable by your group or others. Otherwise it prints a warning, falls back as if no cache existed, and running `setup` again fixes it.
+After this one-time setup, `cargo build` with `features = ["embedded"]` finds the cached runtime automatically. The build uses it only if it still matches its checksum file and, on Unix, the file, its checksum file and the cache directory are owned by you and not writable by your group or others. Otherwise it prints a warning, falls back as if no cache existed, and running `setup` again fixes it. Inside an eryx checkout, a runtime built in the workspace (`crates/eryx-runtime/runtime-<language>.cwasm`, and likewise `coreutils.cwasm` and `eryx-bundler.cwasm`) comes before the cache, so the build embeds the runtime built from those sources rather than the released one.
 
 You can also point to a specific file:
 
 ```bash
-export ERYX_RUNTIME_CWASM=/path/to/runtime.cwasm
+export ERYX_RUNTIME_CWASM=/path/to/runtime-python.cwasm
 ```
 
 A file given through `ERYX_RUNTIME_CWASM` is embedded as is, without those checks, so only point it at a runtime you trust.
@@ -41,12 +41,24 @@ A file given through `ERYX_RUNTIME_CWASM` is embedded as is, without those check
 ### Setup Options
 
 ```bash
+# Set up the JavaScript and shell runtimes as well as Python's
+eryx-precompile setup --language python --language javascript --language shell
+
 # Check the download against a known hash instead of the release's checksum file
 eryx-precompile setup --sha256 <hex>
+
+# Download from a mirror, or a local directory served over HTTP, instead of GitHub
+eryx-precompile setup --release-url http://localhost:8000
 
 # Verbose output for debugging
 eryx-precompile setup --verbose
 ```
+
+With `--release-url`, the URL must serve this eryx version's assets: `setup` stamps what it downloads with its own version, so an older release's assets would be cached as current. The `.sha256` files come from the same URL as the downloads, so they catch corruption but not a hostile mirror; use one you trust. `--sha256` pins only the language runtime: with `--language shell`, coreutils is always checked against the mirror's checksum, so it is only as trustworthy as the mirror.
+
+`--language shell` also sets up the shell's embedded commands: it downloads `coreutils.wasm`, checks it against `coreutils.wasm.sha256`, and caches it as `coreutils-v<version>-<arch>-<os>.cwasm`. The `shell` feature turns on `coreutils`, which embeds them, so a build with `features = ["embedded", "shell"]` needs both. `--sha256` only applies to the runtime; coreutils is always checked against its own checksum file.
+
+`--bundler` sets up the JavaScript bundler that eryx's `env-pack` feature embeds to pack environments: it downloads `eryx-bundler.wasm`, checks it against `eryx-bundler.wasm.sha256`, and caches it as `eryx-bundler-v<version>-<arch>-<os>.cwasm`, so a crates.io build with `env-pack` doesn't need the bundler built from source. Alone (`eryx-precompile setup --bundler`) it sets up only the bundler; with `--language`, both.
 
 A precompiled runtime only loads in the eryx version that built it, so `setup` always sets up its own version. To set up another, install the matching binary, for example `cargo binstall eryx-precompile@0.13.0`.
 
@@ -55,15 +67,17 @@ A precompiled runtime only loads in the eryx version that built it, so `setup` a
 For cross-compilation, custom CPU targets, or bundling packages into the runtime, use `compile`:
 
 ```bash
-eryx-precompile compile <input.wasm> [OPTIONS]
+eryx-precompile compile [input.wasm] [OPTIONS]
 ```
+
+The input is the component to compile. With `--preinit` for Python, `compile` builds from the Python runtime built into `eryx-precompile` instead, so it takes no input (one given is ignored) and needs `-o`.
 
 ### Pre-initialization
 
 Pre-initialization runs Python's interpreter startup and captures the memory state, reducing session creation time from ~450ms to ~1-5ms:
 
 ```bash
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib
 ```
 
@@ -72,8 +86,15 @@ eryx-precompile compile runtime.wasm -o runtime.cwasm \
 To produce an architecture-independent `.wasm` (for later compilation on different targets):
 
 ```bash
-eryx-precompile compile runtime.wasm -o runtime-preinit.wasm \
+eryx-precompile compile -o runtime-preinit.wasm \
   --preinit --stdlib ./python-stdlib --wasm-only
+```
+
+The JavaScript runtime pre-initializes too: it creates the QuickJS runtime and context and evaluates the eryx prelude, cutting a stateless execution from ~0.5ms to ~0.1ms. The embedded `runtime-javascript.cwasm` is built this way. It takes no stdlib, packages, imports, setup code or callbacks:
+
+```bash
+eryx-precompile compile runtime-javascript.wasm -o runtime-javascript.cwasm \
+  --language javascript --preinit
 ```
 
 ### CPU Target Selection
@@ -82,19 +103,19 @@ Control which CPU features the compiled runtime uses:
 
 ```bash
 # Use host CPU features (default, fastest but not portable)
-eryx-precompile compile runtime.wasm -o runtime.cwasm --target native
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target native
 
 # AVX2/FMA — recommended for cloud VMs (Fly.io, AWS, GCP)
-eryx-precompile compile runtime.wasm -o runtime.cwasm --target x86-64-v3
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target x86-64-v3
 
 # Broad compatibility (~2008+ x86 CPUs)
-eryx-precompile compile runtime.wasm -o runtime.cwasm --target x86-64-v2
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target x86-64-v2
 
 # Baseline x86 (maximum compatibility)
-eryx-precompile compile runtime.wasm -o runtime.cwasm --target x86-64
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target x86-64
 
 # Full target triple for cross-compilation
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm \
   --target aarch64-unknown-linux-gnu
 ```
 
@@ -112,19 +133,19 @@ Bundle Python packages into the pre-compiled runtime so they're instantly availa
 
 ```bash
 # Bundle a single package
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-2.2.3-wasi.tar.gz --import numpy
 
 # Bundle multiple packages
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2-3.1.2-py3-none-any.whl \
   --package markupsafe-2.1.3-py3-none-any.whl \
   --import jinja2
 
 # Use a site-packages directory
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --site-packages ./my-site-packages --import jinja2
 ```
@@ -139,7 +160,7 @@ This is useful when your sandboxes all need the same expensive setup that doesn'
 
 ```bash
 # Bake a Jinja2 SandboxedEnvironment with custom filters into the snapshot
-eryx-precompile compile runtime.wasm -o jinja2.cwasm \
+eryx-precompile compile -o jinja2.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2.whl --package markupsafe.whl \
   --import jinja2 --import jinja2.sandbox \
@@ -149,7 +170,7 @@ env = SandboxedEnvironment()
 "
 
 # For longer setup scripts, use --setup-file
-eryx-precompile compile runtime.wasm -o jinja2.cwasm \
+eryx-precompile compile -o jinja2.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package jinja2.whl --package markupsafe.whl \
   --import jinja2 \
@@ -170,31 +191,68 @@ If the set of callbacks is fixed per deployment, declare it at pre-initializatio
 #   {"name": "get_time", "description": "Current time", "parameters": {"type": "object", "properties": {}}},
 #   {"name": "fetch", "description": "HTTP GET", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}
 # ]
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --callbacks callbacks.json
 ```
 
-`parameters` defaults to `{}` when omitted. Setup code cannot invoke the callbacks: there is no host to answer them during pre-initialization. In Rust, pass `PreInitOptions::callbacks` (build the declarations with `eryx::preinit::callback_declaration`); in Python, pass `callbacks=` to `SandboxFactory`.
+`parameters` defaults to `{}` when omitted. The schemas are compared as text, so list each schema's keys (`properties` included) in the same order as the schema the host registers: that order is also the order positional arguments bind in. Setup code cannot invoke the callbacks: there is no host to answer them during pre-initialization. In Rust, pass `PreInitOptions::callbacks` (build the declarations with `eryx::preinit::callback_declaration`); in Python, pass `callbacks=` to `SandboxFactory`.
 
 ### Verification
 
-By default, `compile` verifies the output by creating a test sandbox. You can add custom verification:
+By default, `compile` verifies the output: a runtime by creating a test sandbox (with the same `--site-packages` or `--package` contents mounted, as a sandbox using it would have, so `--verify-code` can reach modules the snapshot didn't import), and a command (no `--language`, a component exporting `wasi:cli/run`) by loading it as a shell sandbox would, which checks its version stamp and that it links. Verification is skipped for a target this machine can't run. For a runtime you can add custom verification (`--verify-code` is Python, so a command refuses it):
 
 ```bash
 # Verify that numpy actually works, not just imports
-eryx-precompile compile runtime.wasm -o numpy.cwasm \
+eryx-precompile compile -o numpy.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-wasi.tar.gz --import numpy \
   --verify-code "import numpy; print(numpy.array([1,2,3]).sum())"
 
 # Skip verification (faster, use when you know the input is good)
-eryx-precompile compile runtime.wasm -o runtime.cwasm --no-verify
+eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --no-verify
 ```
+
+## Checking Shell Commands
+
+`commands inspect` reads a `.wasm` command (it doesn't compile it) and prints its WASI version, each interface it imports with whether shell children get it, its exports, and whether eryx can run it. It exits 1 if eryx can't run the command, and 2 if the file can't be inspected at all (unreadable, a `.cwasm`, or neither a component nor a WASI preview 1 module); with `--json`, that prints `{"error": "..."}`:
+
+```bash
+eryx-precompile commands inspect rg.wasm
+eryx-precompile commands inspect --json rg.wasm
+```
+
+`compile` without `--language` runs the same check on a command (a component exporting `wasi:cli/run`) and refuses one eryx couldn't run. See [External Commands](./sandboxes.md#external-commands) for what children get.
+
+### Commands from a Registry
+
+eryx doesn't fetch commands itself: get the `.wasm` with an OCI client, check it against your pinned digest, then check and precompile it. Commands are published as single-layer Wasm OCI artifacts, so [wkg](https://github.com/bytecodealliance/wasm-pkg-tools) writes one straight to a file:
+
+```bash
+wkg oci pull ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2 -o rg.wasm
+```
+
+With [oras](https://oras.land), fetch the layer by its digest. `oras pull` skips it, because the layer carries no file name, but `oras blob fetch` gets it and checks the digest:
+
+```bash
+oras blob fetch ghcr.io/eryx-org/commands/eryx/rg@sha256:<layer digest> --output rg.wasm
+```
+
+The pin is the digest of the `.wasm` itself, which is the manifest's layer digest and what `wkg.lock` records. It isn't the manifest digest that `wkg oci push` prints. Check it, then check and compile the command:
+
+```bash
+echo "<hex>  rg.wasm" | sha256sum -c
+eryx-precompile commands inspect rg.wasm
+eryx-precompile compile rg.wasm --output rg.cwasm
+```
+
+A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under the first usable of `$XDG_CACHE_HOME/eryx`, the platform cache directory (`~/.cache/eryx` on Linux) and `$TMPDIR/eryx-<uid>`; with none usable, it compiles in memory and warns). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
 
 ## Upgrading to a New eryx Version
 
 A precompiled runtime records the eryx version that built it and only loads in that version. Loading it in any other fails with an error naming both versions, so precompiled runtimes have to be rebuilt after every eryx upgrade, patch releases included.
+
+An eryx built from a git checkout also records the hash of the guest's sources (`eryx-guest-python`, `eryx-guest-js` or `eryx-guest-shell`, and the code and WIT they share) in each runtime it precompiles, and refuses a runtime built from other guest sources, with an error naming the language and its `mise run precompile-runtime-<language>` task. Between releases the version stays the same, so this is what catches a stale runtime in development. Builds from crates.io have no guest sources, so they only check the version.
 
 The output of `compile --preinit` stores what it was built from after the component: its site-packages, imports, setup code, callback declarations, target and CPU feature level. `upgrade` rebuilds it with the installed `eryx-precompile`'s version, without the original packages or flags:
 
@@ -228,7 +286,7 @@ cargo build --features embedded
 
 ```bash
 # Pre-compile for x86-64-v3 (matches Fly.io hardware)
-eryx-precompile compile runtime.wasm -o runtime.cwasm \
+eryx-precompile compile -o runtime-python.cwasm \
   --preinit --stdlib ./python-stdlib \
   --target x86-64-v3
 ```
@@ -239,7 +297,7 @@ Create an architecture-independent snapshot, then compile for each target:
 
 ```bash
 # Stage 1: Pre-initialize (architecture-independent)
-eryx-precompile compile runtime.wasm -o runtime-preinit.wasm \
+eryx-precompile compile -o runtime-preinit.wasm \
   --preinit --stdlib ./python-stdlib --wasm-only
 
 # Stage 2: AOT compile for each target
@@ -253,7 +311,7 @@ eryx-precompile compile runtime-preinit.wasm -o runtime-arm.cwasm \
 
 ```bash
 # Build a runtime with numpy baked in
-eryx-precompile compile runtime.wasm -o numpy-runtime.cwasm \
+eryx-precompile compile -o numpy-runtime.cwasm \
   --preinit --stdlib ./python-stdlib \
   --package numpy-2.2.3-wasi.tar.gz \
   --import numpy \
@@ -323,7 +381,7 @@ The `setup` command caches compiled runtimes at:
 | Linux/macOS | `~/.cache/eryx/` (or `$XDG_CACHE_HOME/eryx/`) |
 | Windows | `%USERPROFILE%\.cache\eryx\` |
 
-Files are named `runtime-v{version}-{arch}-{os}.cwasm`. To force a re-download, delete the cached file and run `setup` again.
+Files are named `runtime-{language}-v{version}-{arch}-{os}.cwasm`. To force a re-download, delete the cached file and run `setup` again.
 
 ## Next Steps
 

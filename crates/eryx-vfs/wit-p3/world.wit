@@ -1,0 +1,12 @@
+// Virtual filesystem for WASI 0.3 guests: the p3 counterpart of
+// `wit/world.wit`, with the same rule. `wit-p3/deps` is copied verbatim from
+// the `src/p3/wit/deps` of the `wasmtime-wasi` release we depend on, and the
+// `wasi:*` versions must match it exactly, or our bindings are registered next
+// to wasmtime-wasi's p3 filesystem instead of shadowing it.
+// `p3_linker_shadows_wasmtime_wasi_filesystem` in `src/linker.rs` guards this.
+package eryx:vfs-p3;
+
+world virtual-filesystem {
+  import wasi:filesystem/types@0.3.0;
+  import wasi:filesystem/preopens@0.3.0;
+}

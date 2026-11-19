@@ -379,9 +379,9 @@ mise run fmt            # Format code
 mise run fmt-check      # Check code formatting
 
 # Wasm
-mise run build-eryx-runtime  # Build the Python Wasm component
+mise run build-runtime-python  # Build the Python Wasm component
 mise run build-all      # Build Wasm + Rust crates
-mise run precompile-eryx-runtime # Pre-compile to native code
+mise run precompile-runtime-python-no-preinit # Pre-compile to native code
 
 # CI & Quality
 mise run ci             # Run all CI checks (fmt-check, lint, test)
@@ -478,7 +478,7 @@ eryx/
 │   │       ├── callback.rs # Callback trait, CallbackError
 │   │       ├── library.rs  # RuntimeLibrary struct
 │   │       ├── trace.rs    # TraceEvent, TraceHandler
-│   │       ├── wasm.rs     # wasmtime setup, PythonExecutor
+│   │       ├── wasm.rs     # wasmtime setup, Executor
 │   │       ├── error.rs    # Error types
 │   │       └── session/    # Session state persistence
 │   │           ├── mod.rs
@@ -486,12 +486,12 @@ eryx/
 │   │           └── in_process.rs # InProcessSession
 │   ├── eryx-runtime/       # Python Wasm runtime packaging
 │   │   ├── Cargo.toml
-│   │   ├── build.rs        # Links eryx-wasm-runtime + libpython + WASI libs
+│   │   ├── build.rs        # Links eryx-guest-python + libpython + WASI libs
 │   │   ├── runtime.wit     # WIT interface definition
-│   │   ├── runtime.wasm    # Built Wasm component (~47MB)
-│   │   ├── runtime.cwasm   # Pre-compiled native code (~52MB)
+│   │   ├── runtime-python.wasm    # Built Wasm component (~47MB)
+│   │   ├── runtime-python.cwasm   # Pre-compiled native code (~52MB)
 │   │   └── libs/           # WASI libraries (zstd compressed)
-│   └── eryx-wasm-runtime/  # Rust runtime implementation (compiled to Wasm)
+│   └── eryx-guest-python/  # Rust runtime implementation (compiled to Wasm)
 │       ├── Cargo.toml
 │       └── src/
 │           ├── lib.rs      # WIT export implementations

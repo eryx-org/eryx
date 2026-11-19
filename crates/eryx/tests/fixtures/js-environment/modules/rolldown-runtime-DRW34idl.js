@@ -1,0 +1,1 @@
+var e=Object.defineProperty,t=(e,t)=>()=>(t||(e((t={exports:{}}).exports,t,t.exports),e=null),t.exports),n=(t,n)=>{let r=Object.setPrototypeOf({},null);for(var i in t)e(r,i,{get:t[i],enumerable:!0});return n&1||e(r,Symbol.toStringTag,{value:`Module`}),n&2?r:Object.preventExtensions(r)};export{n,t};

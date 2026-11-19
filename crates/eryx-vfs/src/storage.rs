@@ -85,6 +85,45 @@ pub trait VfsStorage: Send + Sync {
     /// Write at a specific offset, extending the file if necessary.
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()>;
 
+    /// Append `data` to the end of `path`, creating the file if it doesn't
+    /// exist, and return the file's new size.
+    ///
+    /// Implementations must find the end and write there as one atomic step,
+    /// so concurrent appenders each land intact after one another instead of
+    /// overwriting each other. The default implementation is a separate
+    /// [`stat`](Self::stat) and [`write_at`](Self::write_at), which two
+    /// callers can race; every storage in this crate overrides it.
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        let end = match self.stat(path).await {
+            Ok(meta) => meta.size,
+            Err(VfsError::NotFound(_)) => 0,
+            Err(e) => return Err(e),
+        };
+        self.write_at(path, end, data).await?;
+        Ok(end + data.len() as u64)
+    }
+
+    /// Create `path` as an empty file unless something already exists there,
+    /// returning whether it was created.
+    ///
+    /// With `exclusive`, an existing entry is an
+    /// [`AlreadyExists`](VfsError::AlreadyExists) error instead: this is
+    /// `O_CREAT|O_EXCL`, which lockfile-based tools rely on for mutual
+    /// exclusion, so implementations must make the check and the create one
+    /// atomic step. The default implementation is a separate
+    /// [`exists`](Self::exists) and [`write`](Self::write), which two callers
+    /// can race; every storage in this crate overrides it.
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        if self.exists(path).await? {
+            if exclusive {
+                return Err(VfsError::AlreadyExists(path.to_string()));
+            }
+            return Ok(false);
+        }
+        self.write(path, &[]).await?;
+        Ok(true)
+    }
+
     /// Truncate or extend file to the given size.
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()>;
 
@@ -191,6 +230,14 @@ impl VfsStorage for ArcStorage {
         self.0.write_at(path, offset, data).await
     }
 
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        self.0.create_file(path, exclusive).await
+    }
+
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        self.0.append(path, data).await
+    }
+
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
         self.0.set_size(path, size).await
     }
@@ -249,6 +296,10 @@ struct StorageState {
     files: HashMap<String, FileData>,
     /// Directory markers: set of directory paths
     directories: HashSet<String>,
+    /// Timestamps of each directory in `directories`. Absent from snapshots
+    /// taken before directories had them; applying a snapshot fills them in.
+    #[cfg_attr(feature = "serde", serde(default))]
+    dir_times: HashMap<String, DirTimes>,
     /// Bytes charged against the size limit, kept up to date by every change
     /// so checking the limit doesn't rescan the filesystem. Recomputed when a
     /// snapshot is applied.
@@ -267,12 +318,55 @@ impl StorageState {
         self.directories
             .iter()
             .filter(|path| path.as_str() != "/")
-            .map(|path| entry_cost(path))
+            .map(|path| dir_cost(path))
             .fold(files, u64::saturating_add)
     }
 
     fn entries(&self) -> usize {
         self.files.len() + self.directories.len()
+    }
+
+    /// Add directory `path` (which must not exist), charging for it.
+    fn insert_dir(&mut self, path: String, now: SystemTime) {
+        self.used = self.used.saturating_add(dir_cost(&path));
+        self.touch_parent(&path, now);
+        self.dir_times.insert(path.clone(), DirTimes::at(now));
+        self.directories.insert(path);
+    }
+
+    /// Record that an entry was added to or removed from `path`'s parent
+    /// directory, which updates its modification time as on POSIX.
+    fn touch_parent(&mut self, path: &str, now: SystemTime) {
+        if let Some(times) = parent_dir(path).and_then(|p| self.dir_times.get_mut(p)) {
+            times.modified = now;
+        }
+    }
+
+    /// Metadata for directory `path`, which must exist.
+    fn dir_metadata(&self, path: &str) -> Metadata {
+        // Every directory has times once a snapshot is applied, but don't
+        // panic over a missing one.
+        let times = self
+            .dir_times
+            .get(path)
+            .copied()
+            .unwrap_or_else(|| DirTimes::at(SystemTime::now()));
+        Metadata {
+            is_dir: true,
+            size: 0,
+            created: times.created,
+            modified: times.modified,
+            accessed: times.accessed,
+        }
+    }
+}
+
+/// The parent of a normalized path, or `None` for the root.
+fn parent_dir(path: &str) -> Option<&str> {
+    match path.rfind('/')? {
+        0 if path.len() > 1 => Some("/"),
+        0 => None,
+        idx => Some(&path[..idx]),
     }
 }
 
@@ -284,11 +378,14 @@ impl StorageState {
 /// directories with long names would be free.
 pub const ENTRY_OVERHEAD_BYTES: u64 = 64;
 
-/// Most files and directories an [`InMemoryStorage`] holds, whatever its
-/// size limit.
+/// Default limit on the files and directories an [`InMemoryStorage`] holds,
+/// whatever its size limit. Override with
+/// [`InMemoryStorage::with_max_entries`].
 ///
 /// Some operations (listing, removing or renaming a directory) visit every
-/// entry, so this keeps each of them cheap.
+/// entry, so this keeps each of them cheap. Raising it makes those
+/// operations slower in proportion; a tree much larger than this belongs on a
+/// host-directory volume instead.
 pub const MAX_ENTRIES: usize = 65_536;
 
 /// Longest file or directory name accepted, in bytes (POSIX `NAME_MAX`).
@@ -297,9 +394,15 @@ const MAX_NAME_LEN: usize = 255;
 /// Longest absolute path accepted, in bytes (POSIX `PATH_MAX`).
 const MAX_PATH_LEN: usize = 4096;
 
-/// Bytes charged for a directory, or for a file apart from its content.
+/// Bytes charged for a file apart from its content.
 fn entry_cost(path: &str) -> u64 {
     (path.len() as u64).saturating_add(ENTRY_OVERHEAD_BYTES)
+}
+
+/// Bytes charged for a directory: its path is stored twice, as a directory
+/// and as the key of its times.
+fn dir_cost(path: &str) -> u64 {
+    entry_cost(path).saturating_add(path.len() as u64)
 }
 
 /// Bytes charged for a file holding `len` bytes.
@@ -328,7 +431,8 @@ const MKDIR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// offsets it writes at and the sizes it truncates to. Without a limit, a
 /// one-byte write at a large offset turns into an arbitrarily large host
 /// allocation. Paths count too: each file and directory is charged its path
-/// length plus [`ENTRY_OVERHEAD_BYTES`]. Override with
+/// length (twice for a directory, which stores it twice) plus
+/// [`ENTRY_OVERHEAD_BYTES`]. Override with
 /// [`InMemoryStorage::with_max_bytes`].
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -340,7 +444,8 @@ pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Total size (file contents plus a charge per entry, see
 /// [`ENTRY_OVERHEAD_BYTES`]) is capped at [`DEFAULT_MAX_BYTES`] unless changed
 /// with [`InMemoryStorage::with_max_bytes`], and there are at most
-/// [`MAX_ENTRIES`] files and directories. Operations that would exceed either
+/// [`MAX_ENTRIES`] files and directories unless changed with
+/// [`InMemoryStorage::with_max_entries`]. Operations that would exceed either
 /// fail with [`VfsError::QuotaExceeded`], which guests see as `ENOSPC`. Names
 /// longer than POSIX `NAME_MAX` (255 bytes) or paths longer than `PATH_MAX`
 /// (4096 bytes) fail with [`VfsError::NameTooLong`].
@@ -350,6 +455,8 @@ pub struct InMemoryStorage {
     state: RwLock<StorageState>,
     /// Maximum total bytes charged, across all files and directories.
     max_bytes: u64,
+    /// Maximum number of files and directories, the root included.
+    max_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +466,25 @@ struct FileData {
     created: SystemTime,
     modified: SystemTime,
     accessed: SystemTime,
+}
+
+/// A directory's timestamps.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+struct DirTimes {
+    created: SystemTime,
+    modified: SystemTime,
+    accessed: SystemTime,
+}
+
+impl DirTimes {
+    fn at(now: SystemTime) -> Self {
+        Self {
+            created: now,
+            modified: now,
+            accessed: now,
+        }
+    }
 }
 
 /// A clonable, optionally-serializable snapshot of an [`InMemoryStorage`]'s
@@ -378,11 +504,19 @@ pub struct InMemorySnapshot {
     /// The size limit of the storage the snapshot was taken from.
     #[cfg_attr(feature = "serde", serde(default = "default_max_bytes"))]
     max_bytes: u64,
+    /// The entry limit of the storage the snapshot was taken from.
+    #[cfg_attr(feature = "serde", serde(default = "default_max_entries"))]
+    max_entries: usize,
 }
 
 #[cfg(feature = "serde")]
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES
+}
+
+#[cfg(feature = "serde")]
+fn default_max_entries() -> usize {
+    MAX_ENTRIES
 }
 
 impl Default for InMemoryStorage {
@@ -409,22 +543,42 @@ impl InMemoryStorage {
     /// allocate - keep it well below what the host can afford to lose.
     #[must_use]
     pub fn with_max_bytes(max_bytes: u64) -> Self {
-        let mut directories = HashSet::new();
-        directories.insert("/".to_string());
+        let root = "/".to_string();
         Self {
             state: RwLock::new(StorageState {
                 files: HashMap::new(),
-                directories,
+                directories: HashSet::from([root.clone()]),
+                dir_times: HashMap::from([(root, DirTimes::at(SystemTime::now()))]),
                 used: 0,
             }),
             max_bytes,
+            max_entries: MAX_ENTRIES,
         }
+    }
+
+    /// Change the limit on the number of files and directories, the root
+    /// included (default [`MAX_ENTRIES`]).
+    ///
+    /// Entries are also charged against [`max_bytes`](Self::max_bytes), so
+    /// this mainly bounds the cost of operations that visit every entry:
+    /// listing, removing or renaming a directory. Raise both together for a
+    /// larger tree, or use a host-directory volume.
+    #[must_use]
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     /// The size cap, in bytes.
     #[must_use]
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes
+    }
+
+    /// The cap on the number of files and directories.
+    #[must_use]
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 
     /// Capture the entire contents (files and directories) as a snapshot.
@@ -435,6 +589,7 @@ impl InMemoryStorage {
         InMemorySnapshot {
             state: self.state.read().await.clone(),
             max_bytes: self.max_bytes,
+            max_entries: self.max_entries,
         }
     }
 
@@ -442,20 +597,20 @@ impl InMemoryStorage {
     ///
     /// The storage's identity is preserved, so any `Arc<dyn VfsStorage>` handles
     /// (e.g. those wired into a running sandbox) continue to refer to it and see
-    /// the restored contents. This storage keeps its own size limit.
+    /// the restored contents. This storage keeps its own size and entry limits.
     ///
     /// # Errors
     ///
     /// [`VfsError::QuotaExceeded`] if the snapshot doesn't fit within this
     /// storage's limits; the storage is left unchanged.
     pub async fn restore(&self, snapshot: &InMemorySnapshot) -> VfsResult<()> {
-        let state = Self::checked_state(snapshot, self.max_bytes)?;
+        let state = Self::checked_state(snapshot, self.max_bytes, self.max_entries)?;
         *self.state.write().await = state;
         Ok(())
     }
 
     /// Create a new, independent storage initialized from a snapshot, with
-    /// the size limit of the storage the snapshot was taken from.
+    /// the size and entry limits of the storage the snapshot was taken from.
     ///
     /// Useful for forking a session: the returned storage shares no state with
     /// the original, so the two can diverge freely.
@@ -463,24 +618,44 @@ impl InMemoryStorage {
     /// # Errors
     ///
     /// [`VfsError::QuotaExceeded`] if the snapshot's contents exceed its own
-    /// size limit or [`MAX_ENTRIES`], as a deserialized snapshot might.
+    /// size or entry limit, as a deserialized snapshot might.
     pub fn from_snapshot(snapshot: &InMemorySnapshot) -> VfsResult<Self> {
         Ok(Self {
-            state: RwLock::new(Self::checked_state(snapshot, snapshot.max_bytes)?),
+            state: RwLock::new(Self::checked_state(
+                snapshot,
+                snapshot.max_bytes,
+                snapshot.max_entries,
+            )?),
             max_bytes: snapshot.max_bytes,
+            max_entries: snapshot.max_entries,
         })
     }
 
-    /// The snapshot's state with its usage recomputed, if it fits the limits.
-    fn checked_state(snapshot: &InMemorySnapshot, max_bytes: u64) -> VfsResult<StorageState> {
+    /// The snapshot's state with its usage recomputed and every directory
+    /// given times, if it fits the limits.
+    fn checked_state(
+        snapshot: &InMemorySnapshot,
+        max_bytes: u64,
+        max_entries: usize,
+    ) -> VfsResult<StorageState> {
         let mut state = snapshot.state.clone();
         state.used = state.usage();
-        if state.used > max_bytes || state.entries() > MAX_ENTRIES {
+        if state.used > max_bytes || state.entries() > max_entries {
             return Err(VfsError::QuotaExceeded(format!(
-                "snapshot holds {} entries and {} bytes, over the limit of {MAX_ENTRIES} entries and {max_bytes} bytes",
+                "snapshot holds {} entries and {} bytes, over the limit of {max_entries} entries and {max_bytes} bytes",
                 state.entries(),
                 state.used
             )));
+        }
+        // Times for directories that don't exist would be uncounted memory.
+        state
+            .dir_times
+            .retain(|path, _| state.directories.contains(path));
+        let now = SystemTime::now();
+        for dir in &state.directories {
+            if !state.dir_times.contains_key(dir) {
+                state.dir_times.insert(dir.clone(), DirTimes::at(now));
+            }
         }
         Ok(state)
     }
@@ -580,9 +755,10 @@ impl InMemoryStorage {
     /// Check that a new file or directory at `path` may be created.
     fn check_new_entry(&self, state: &StorageState, path: &str) -> VfsResult<()> {
         check_name_len(path)?;
-        if state.entries() >= MAX_ENTRIES {
+        if state.entries() >= self.max_entries {
             return Err(VfsError::QuotaExceeded(format!(
-                "{path}: the filesystem already holds {MAX_ENTRIES} entries"
+                "{path}: the filesystem already holds {} entries",
+                self.max_entries
             )));
         }
         Ok(())
@@ -596,6 +772,85 @@ impl InMemoryStorage {
             .used
             .saturating_sub(old)
             .saturating_add(file_cost(path, new_len));
+    }
+
+    /// [`VfsStorage::write_at`], with the storage lock already held.
+    fn write_at_locked(
+        &self,
+        state: &mut StorageState,
+        path: String,
+        offset: u64,
+        data: &[u8],
+    ) -> VfsResult<()> {
+        Self::check_parent_exists_with_state(state, &path)?;
+
+        // Check it's not a directory
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
+        }
+
+        // The guest picks the offset, so a one-byte write can ask the host to
+        // materialize gigabytes of zeroes. Compute the end in u64 and check it
+        // against the budget before allocating anything; an offset that
+        // overflows u64 is over the limit by definition.
+        let data_len: u64 = data.len().try_into().unwrap_or(u64::MAX);
+        let end = offset.checked_add(data_len).ok_or_else(|| {
+            VfsError::QuotaExceeded(format!(
+                "{path}: write of {data_len} bytes at offset {offset} overflows the address space"
+            ))
+        })?;
+        let needed_len = self.check_budget(state, &path, end)?;
+
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        let new_len = old_len.unwrap_or(0).max(needed_len);
+        Self::charge_file(state, &path, old_len, new_len);
+        let now = SystemTime::now();
+        if old_len.is_none() {
+            state.touch_parent(&path, now);
+        }
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
+            content: Vec::new(),
+            created: now,
+            modified: now,
+            accessed: now,
+        });
+
+        // Extend file if necessary
+        if file_data.content.len() < needed_len {
+            file_data.content.resize(needed_len, 0);
+        }
+        let start = needed_len - data.len();
+        file_data.content[start..needed_len].copy_from_slice(data);
+        file_data.modified = now;
+        Ok(())
+    }
+
+    /// [`VfsStorage::write`], with the storage lock already held.
+    fn write_locked(&self, state: &mut StorageState, path: String, data: &[u8]) -> VfsResult<()> {
+        Self::check_parent_exists_with_state(state, &path)?;
+
+        // Check it's not a directory
+        if state.directories.contains(&path) {
+            return Err(VfsError::NotFile(path));
+        }
+
+        self.check_budget(state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
+
+        let old_len = state.files.get(&path).map(|f| f.content.len());
+        Self::charge_file(state, &path, old_len, data.len());
+        let now = SystemTime::now();
+        if old_len.is_none() {
+            state.touch_parent(&path, now);
+        }
+        let file_data = state.files.entry(path).or_insert_with(|| FileData {
+            content: Vec::new(),
+            created: now,
+            modified: now,
+            accessed: now,
+        });
+        file_data.content = data.to_vec();
+        file_data.modified = now;
+        Ok(())
     }
 
     /// Hold the storage lock, so tests can exercise contention.
@@ -672,72 +927,37 @@ impl VfsStorage for InMemoryStorage {
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
-
-        Self::check_parent_exists_with_state(&state, &path)?;
-
-        // Check it's not a directory
-        if state.directories.contains(&path) {
-            return Err(VfsError::NotFile(path));
-        }
-
-        self.check_budget(&state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
-
-        let old_len = state.files.get(&path).map(|f| f.content.len());
-        Self::charge_file(&mut state, &path, old_len, data.len());
-        let now = SystemTime::now();
-        let file_data = state.files.entry(path).or_insert_with(|| FileData {
-            content: Vec::new(),
-            created: now,
-            modified: now,
-            accessed: now,
-        });
-        file_data.content = data.to_vec();
-        file_data.modified = now;
-        Ok(())
+        self.write_locked(&mut state, path, data)
     }
 
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        let path = Self::normalize_path(path)?;
+        // One write lock covers the check and the create, so two callers
+        // can't both see the path free.
+        let mut state = self.state.write().await;
+        if state.files.contains_key(&path) || state.directories.contains(&path) {
+            if exclusive {
+                return Err(VfsError::AlreadyExists(path));
+            }
+            return Ok(false);
+        }
+        self.write_locked(&mut state, path, &[])?;
+        Ok(true)
+    }
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
+        self.write_at_locked(&mut state, path, offset, data)
+    }
 
-        Self::check_parent_exists_with_state(&state, &path)?;
-
-        // Check it's not a directory
-        if state.directories.contains(&path) {
-            return Err(VfsError::NotFile(path));
-        }
-
-        // The guest picks the offset, so a one-byte write can ask the host to
-        // materialize gigabytes of zeroes. Compute the end in u64 and check it
-        // against the budget before allocating anything; an offset that
-        // overflows u64 is over the limit by definition.
-        let data_len: u64 = data.len().try_into().unwrap_or(u64::MAX);
-        let end = offset.checked_add(data_len).ok_or_else(|| {
-            VfsError::QuotaExceeded(format!(
-                "{path}: write of {data_len} bytes at offset {offset} overflows the address space"
-            ))
-        })?;
-        let needed_len = self.check_budget(&state, &path, end)?;
-
-        let old_len = state.files.get(&path).map(|f| f.content.len());
-        let new_len = old_len.unwrap_or(0).max(needed_len);
-        Self::charge_file(&mut state, &path, old_len, new_len);
-        let now = SystemTime::now();
-        let file_data = state.files.entry(path).or_insert_with(|| FileData {
-            content: Vec::new(),
-            created: now,
-            modified: now,
-            accessed: now,
-        });
-
-        // Extend file if necessary
-        if file_data.content.len() < needed_len {
-            file_data.content.resize(needed_len, 0);
-        }
-        let start = needed_len - data.len();
-        file_data.content[start..needed_len].copy_from_slice(data);
-        file_data.modified = now;
-        Ok(())
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        let path = Self::normalize_path(path)?;
+        // One write lock covers finding the end and writing there, so
+        // concurrent appends can't land on top of each other.
+        let mut state = self.state.write().await;
+        let end = state.files.get(&path).map_or(0, |f| f.content.len() as u64);
+        self.write_at_locked(&mut state, path, end, data)?;
+        Ok(end + data.len() as u64)
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
@@ -771,6 +991,7 @@ impl VfsStorage for InMemoryStorage {
             state.used = state
                 .used
                 .saturating_sub(file_cost(&path, data.content.len()));
+            state.touch_parent(&path, SystemTime::now());
             Ok(())
         } else if state.directories.contains(&path) {
             Err(VfsError::NotFile(path))
@@ -832,16 +1053,9 @@ impl VfsStorage for InMemoryStorage {
             if let Some(rest) = dir_path.strip_prefix(&prefix) {
                 // Only include direct children
                 if !rest.contains('/') && !rest.is_empty() && !seen_names.contains(rest) {
-                    let now = SystemTime::now();
                     entries.push(DirEntry {
                         name: rest.to_string(),
-                        metadata: Metadata {
-                            is_dir: true,
-                            size: 0,
-                            created: now,
-                            modified: now,
-                            accessed: now,
-                        },
+                        metadata: state.dir_metadata(dir_path),
                     });
                 }
             }
@@ -868,14 +1082,7 @@ impl VfsStorage for InMemoryStorage {
 
         // Check directories
         if state.directories.contains(&path) {
-            let now = SystemTime::now();
-            return Ok(Metadata {
-                is_dir: true,
-                size: 0,
-                created: now,
-                modified: now,
-                accessed: now,
-            });
+            return Ok(state.dir_metadata(&path));
         }
 
         Err(VfsError::NotFound(path))
@@ -896,9 +1103,8 @@ impl VfsStorage for InMemoryStorage {
         }
 
         self.check_new_entry(&state, &path)?;
-        self.check_growth(&state, &path, 0, entry_cost(&path))?;
-        state.used = state.used.saturating_add(entry_cost(&path));
-        state.directories.insert(path);
+        self.check_growth(&state, &path, 0, dir_cost(&path))?;
+        state.insert_dir(path, SystemTime::now());
         Ok(())
     }
 
@@ -936,7 +1142,9 @@ impl VfsStorage for InMemoryStorage {
         }
 
         state.directories.remove(&path);
-        state.used = state.used.saturating_sub(entry_cost(&path));
+        state.dir_times.remove(&path);
+        state.used = state.used.saturating_sub(dir_cost(&path));
+        state.touch_parent(&path, SystemTime::now());
         Ok(())
     }
 
@@ -969,6 +1177,9 @@ impl VfsStorage for InMemoryStorage {
             self.check_growth(&state, &to, current, new)?;
 
             if let Some(data) = state.files.remove(&from) {
+                let now = SystemTime::now();
+                state.touch_parent(&from, now);
+                state.touch_parent(&to, now);
                 state.files.insert(to, data);
                 state.used = state.used.saturating_sub(current).saturating_add(new);
                 return Ok(());
@@ -1036,9 +1247,10 @@ impl VfsStorage for InMemoryStorage {
                     "moving {from} to {to} makes paths longer than {MAX_PATH_LEN} bytes"
                 )));
             }
-            let moved = (files_to_rename.len() + dirs_to_rename.len()) as u64;
+            // A directory's path is charged twice (see `dir_cost`).
+            let moved = (files_to_rename.len() + 2 * dirs_to_rename.len()) as u64;
             let replaced = if state.directories.contains(&to) {
-                entry_cost(&to)
+                dir_cost(&to)
             } else {
                 0
             };
@@ -1056,16 +1268,24 @@ impl VfsStorage for InMemoryStorage {
                 }
             }
 
-            // Rename subdirectories
+            // Rename subdirectories, keeping their times.
+            let now = SystemTime::now();
             for old_path in dirs_to_rename {
                 state.directories.remove(&old_path);
+                let times = state
+                    .dir_times
+                    .remove(&old_path)
+                    .unwrap_or_else(|| DirTimes::at(now));
                 let new_path = if old_path == from {
                     to.clone()
                 } else {
                     old_path.replacen(&from_prefix, &to_prefix, 1)
                 };
+                state.dir_times.insert(new_path.clone(), times);
                 state.directories.insert(new_path);
             }
+            state.touch_parent(&from, now);
+            state.touch_parent(&to, now);
 
             return Ok(());
         }
@@ -1089,9 +1309,15 @@ impl VfsStorage for InMemoryStorage {
                 file.modified = t;
             }
             Ok(())
+        } else if let Some(times) = state.dir_times.get_mut(&path) {
+            if let Some(t) = accessed {
+                times.accessed = t;
+            }
+            if let Some(t) = modified {
+                times.modified = t;
+            }
+            Ok(())
         } else if state.directories.contains(&path) {
-            // Directories don't store timestamps (stat reports none), so
-            // there is nothing to update.
             Ok(())
         } else {
             Err(VfsError::NotFound(path))
@@ -1103,6 +1329,7 @@ impl VfsStorage for InMemoryStorage {
 
         // Creates every missing ancestor, like `mkdir -p`.
         let create_all = |state: &mut StorageState| {
+            let now = SystemTime::now();
             let mut current = String::new();
             for component in path.split('/').filter(|s| !s.is_empty()) {
                 current = format!("{current}/{component}");
@@ -1111,9 +1338,8 @@ impl VfsStorage for InMemoryStorage {
                 }
                 if !state.directories.contains(&current) {
                     self.check_new_entry(state, &current)?;
-                    self.check_growth(state, &current, 0, entry_cost(&current))?;
-                    state.used = state.used.saturating_add(entry_cost(&current));
-                    state.directories.insert(current.clone());
+                    self.check_growth(state, &current, 0, dir_cost(&current))?;
+                    state.insert_dir(current.clone(), now);
                 }
             }
             Ok(())
@@ -1158,6 +1384,82 @@ impl VfsStorage for InMemoryStorage {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Concurrent appenders each land every record intact at the end, rather
+    /// than finding the same end and overwriting each other. The first round
+    /// queues behind a held lock, where a stat-then-write implementation
+    /// (whose stats share a read lock) would see one end for all of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_keep_every_record() {
+        const WRITERS: usize = 8;
+        const RECORDS: usize = 50;
+        let storage = Arc::new(InMemoryStorage::new());
+        let guard = storage.hold_lock().await;
+        let tasks: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let storage = Arc::clone(&storage);
+                tokio::spawn(async move {
+                    for r in 0..RECORDS {
+                        let record = format!("w{w:02}-r{r:03}\n");
+                        storage.append("/log", record.as_bytes()).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        drop(guard);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let log = String::from_utf8(storage.read("/log").await.unwrap()).unwrap();
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        let mut expected: Vec<String> = (0..WRITERS)
+            .flat_map(|w| (0..RECORDS).map(move |r| format!("w{w:02}-r{r:03}")))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(lines, expected);
+    }
+
+    #[tokio::test]
+    async fn append_respects_the_quota() {
+        let storage = InMemoryStorage::with_max_bytes(1024);
+        storage.append("/f", &[b'x'; 512]).await.unwrap();
+        let err = storage.append("/f", &[b'y'; 1024]).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+        assert_eq!(storage.stat("/f").await.unwrap().size, 512);
+        assert_eq!(storage.append("/f", b"z").await.unwrap(), 513);
+    }
+
+    /// `create_file(.., exclusive)` is `O_CREAT|O_EXCL`: of many callers
+    /// racing on one path, exactly one creates it. The callers queue behind a
+    /// held lock first, so a check-then-create implementation (whose existence
+    /// checks share a read lock) would let all of them through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exclusive_create_admits_exactly_one_caller() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let guard = storage.hold_lock().await;
+        let tasks: Vec<_> = (0..16)
+            .map(|_| {
+                let storage = Arc::clone(&storage);
+                tokio::spawn(async move { storage.create_file("/lock", true).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        drop(guard);
+        let mut created = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(true) => created += 1,
+                Err(VfsError::AlreadyExists(_)) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(created, 1);
+        // Without `exclusive`, an existing file is opened, not an error.
+        assert!(!storage.create_file("/lock", false).await.unwrap());
+        assert!(storage.create_file("/other", false).await.unwrap());
+    }
 
     /// Every offset here used to turn a one-byte write into a multi-gigabyte
     /// host allocation: 2^31 and 2^32 succeeded (2 GiB and 4 GiB of zeroes),
@@ -1323,7 +1625,8 @@ mod tests {
     /// they can't grow host memory past the limit for free.
     #[tokio::test]
     async fn entries_and_names_count_towards_the_limit() {
-        let storage = InMemoryStorage::with_max_bytes(10 * (ENTRY_OVERHEAD_BYTES + 3));
+        // Room for ten directories, each charged its three-byte path twice.
+        let storage = InMemoryStorage::with_max_bytes(10 * (ENTRY_OVERHEAD_BYTES + 2 * 3));
         for i in 0..10 {
             storage.mkdir(&format!("/d{i}")).await.unwrap();
         }
@@ -1384,6 +1687,84 @@ mod tests {
         storage.mkdir("/one-more").await.unwrap();
     }
 
+    #[tokio::test]
+    async fn entry_cap_is_configurable_and_kept_by_snapshots() {
+        // The root plus two more.
+        let storage = InMemoryStorage::new().with_max_entries(3);
+        assert_eq!(storage.max_entries(), 3);
+        storage.mkdir("/d").await.unwrap();
+        storage.write("/d/f", b"").await.unwrap();
+        let err = storage.write("/d/g", b"").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+
+        let snap = storage.snapshot().await;
+        let forked = InMemoryStorage::from_snapshot(&snap).unwrap();
+        assert_eq!(forked.max_entries(), 3);
+        let err = forked.mkdir("/e").await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+
+        let smaller = InMemoryStorage::new().with_max_entries(2);
+        let err = smaller.restore(&snap).await.unwrap_err();
+        assert!(matches!(err, VfsError::QuotaExceeded(_)), "{err:?}");
+    }
+
+    /// A directory has its own times, and its mtime changes when an entry is
+    /// added, removed or renamed in it.
+    #[tokio::test]
+    async fn directory_mtime_tracks_its_entries() {
+        let storage = InMemoryStorage::new();
+        let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mtime = |path: &'static str| {
+            let storage = &storage;
+            async move { storage.stat(path).await.unwrap().modified }
+        };
+        let age = |path: &'static str| {
+            let storage = &storage;
+            async move { storage.set_times(path, None, Some(old)).await.unwrap() }
+        };
+
+        let before = SystemTime::now();
+        storage.mkdir("/d").await.unwrap();
+        let created = storage.stat("/d").await.unwrap();
+        assert!(created.created >= before && created.modified >= before);
+        // Times are stored, not made up on each call.
+        assert_eq!(mtime("/d").await, created.modified);
+
+        age("/d").await;
+        assert_eq!(mtime("/d").await, old);
+        storage.write("/d/f", b"x").await.unwrap();
+        assert!(mtime("/d").await > old, "create");
+
+        age("/d").await;
+        storage.write("/d/f", b"changed").await.unwrap();
+        assert_eq!(mtime("/d").await, old, "a write to an existing file");
+
+        storage.mkdir("/d/sub").await.unwrap();
+        age("/d").await;
+        storage.rmdir("/d/sub").await.unwrap();
+        assert!(mtime("/d").await > old, "rmdir");
+
+        age("/d").await;
+        age("/").await;
+        storage.rename("/d/f", "/f").await.unwrap();
+        assert!(mtime("/d").await > old, "rename out");
+        assert!(mtime("/").await > old, "rename in");
+
+        age("/d").await;
+        storage.delete("/f").await.unwrap();
+        assert!(mtime("/").await > old, "delete");
+        assert_eq!(mtime("/d").await, old);
+
+        // A moved directory keeps its own times, and listings report them.
+        storage.rename("/d", "/e").await.unwrap();
+        assert_eq!(mtime("/e").await, old);
+        let listed = storage.list("/").await.unwrap();
+        assert_eq!(listed[0].name, "e");
+        assert_eq!(listed[0].metadata.modified, old);
+        storage.mkdir_sync("/e/x/y").unwrap();
+        assert!(mtime("/e").await > old, "mkdir_sync");
+    }
+
     /// The running total must match a recount after every kind of change.
     #[tokio::test]
     async fn running_usage_matches_recount() {
@@ -1414,7 +1795,7 @@ mod tests {
             storage.state.read().await.used,
             ["/x", "/x/y", "/x/y/z", "/x/y/z/w"]
                 .iter()
-                .map(|p| entry_cost(p))
+                .map(|p| dir_cost(p))
                 .sum::<u64>()
         );
     }
@@ -1480,6 +1861,31 @@ mod tests {
         let restored: InMemorySnapshot = serde_json::from_slice(&bytes).unwrap();
 
         let fresh = InMemoryStorage::from_snapshot(&restored).unwrap();
+        assert_eq!(fresh.read("/d/f.txt").await.unwrap(), b"payload");
+    }
+
+    /// Snapshots serialized before directory times and the entry limit were
+    /// stored still load, with defaults for both.
+    #[cfg(feature = "serde")]
+    #[tokio::test]
+    async fn snapshots_without_dir_times_or_entry_limit_load() {
+        let storage = InMemoryStorage::with_max_bytes(1 << 20).with_max_entries(10);
+        storage.mkdir("/d").await.unwrap();
+        storage.write("/d/f.txt", b"payload").await.unwrap();
+        let mut json = serde_json::to_value(storage.snapshot().await).unwrap();
+        json.as_object_mut().unwrap().remove("max_entries").unwrap();
+        json["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dir_times")
+            .unwrap();
+
+        let old: InMemorySnapshot = serde_json::from_value(json).unwrap();
+        let before = SystemTime::now();
+        let fresh = InMemoryStorage::from_snapshot(&old).unwrap();
+        assert_eq!(fresh.max_entries(), MAX_ENTRIES);
+        assert_eq!(fresh.max_bytes(), 1 << 20);
+        assert!(fresh.stat("/d").await.unwrap().modified >= before);
         assert_eq!(fresh.read("/d/f.txt").await.unwrap(), b"payload");
     }
 

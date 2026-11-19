@@ -19,18 +19,21 @@ import {
   TimeoutError,
 } from "@eryx-org/eryx-run/shared";
 import { createCallbackHost } from "./shims/callbacks.js";
+import { COREUTILS_TOOLS } from "./shims/process.js";
+import { RESERVED_CALLBACK_NAMES } from "./shims/reserved-names.js";
 import { createNet, setNetConfig as setDefaultNetConfig } from "./shims/net.js";
 import {
-  _fileTree,
   decodeError,
   encodeError,
-  forkTree,
   getCoreModule,
   instantiateSandbox,
   isNode,
+  languages,
+  newFileTree,
 } from "./instance.js";
 
 export { _fileTree } from "./instance.js";
+export { COREUTILS_TOOLS } from "./shims/process.js";
 
 // The errors a run throws, shared with eryx.run's client (@eryx-org/eryx-run),
 // so one `instanceof` handles both
@@ -46,19 +49,27 @@ export {
  * Start a sandbox instance in its own Worker and return a proxy with the
  * instance's methods, plus `terminate()`. The handlers, journal and network
  * stay on this thread; the Worker forwards to them (see worker.js).
+ * @param {string} language
  * @param {ReturnType<typeof createCallbackHost>} host
  * @param {ReturnType<typeof createNet>} net - The sandbox's connection table
+ * @param {{ coreutils?: boolean, commands?: Record<string, string> }} commands - The
+ *   shell's external commands
  */
-async function instantiateInWorker(host, net) {
+async function instantiateInWorker(language, host, net, commands) {
   const url = new URL("./worker.js", import.meta.url);
+  // Both plain data, so the Worker gets them as it starts.
+  const config = { language, commands };
   const worker = isNode
     ? // Not the parent's execArgv, which can hold `-e`/`--input-type` a Worker
       // rejects. V8 flags such as --experimental-wasm-jspi are process-wide,
       // so the Worker keeps them.
       new (await import(/* webpackIgnore: true */ "node:worker_threads")).Worker(url, {
         execArgv: [],
+        workerData: config,
       })
-    : new Worker(url, { type: "module" });
+    : // Not a message: a browser drops one that reaches a module Worker
+      // before its (top-level-await delayed) listener exists.
+      new Worker(url, { type: "module", name: JSON.stringify(config) });
   const targets = {
     module: getCoreModule,
     invoke: host.imports.invoke,
@@ -156,7 +167,8 @@ async function instantiateInWorker(host, net) {
 
   await started;
   return {
-    execute: (code) => call("execute", code),
+    // The deadline lets the shell stop its background jobs in time.
+    execute: (code, deadline) => call("execute", code, deadline),
     snapshotState: () => call("snapshotState"),
     restoreState: (data) => call("restoreState", data),
     clearState: () => call("clearState"),
@@ -272,10 +284,72 @@ function _toResult(output, stateWasReset, stats) {
  */
 
 /**
+ * Refuse callbacks the guest would never install under their name, as the
+ * Rust host does (#962): a JavaScript global or the first part of a dotted
+ * name, a Python builtin, a shell builtin, or a shell command the callback
+ * would hide. Reports the first by name.
+ * @param {string} language
+ * @param {string[]} names - The callbacks' names
+ * @param {string[]} commands - The shell's command names
+ */
+function checkCallbackNames(language, names, commands) {
+  const reserved = new Set(RESERVED_CALLBACK_NAMES[language] ?? []);
+  const what = { javascript: "the JavaScript global", shell: "the shell builtin or reserved word" }[language] ?? "the Python builtin";
+  for (const name of [...names].sort()) {
+    const root = language === "shell" ? name : name.split(".")[0];
+    let message;
+    if (reserved.has(root)) {
+      message =
+        `callback '${name}' collides with ${what} '${root}': the guest keeps its own, ` +
+        "so the callback could only be reached through invoke(); give it another name";
+    } else if (language === "shell" && commands.includes(root)) {
+      message = `callback '${name}' collides with the command '${root}', which it would hide; give one of them another name`;
+    } else {
+      continue;
+    }
+    throw new TypeError(message);
+  }
+}
+
+/**
+ * A sandbox's external commands, checked: names with the URLs they load from.
+ * @param {string} language
+ * @param {SandboxOptions} options
+ * @returns {{ coreutils: boolean, commands: Record<string, string> }}
+ */
+function shellCommands(language, options) {
+  const { commands = {}, coreutils = true } = options;
+  if (language !== "shell" && (options.commands !== undefined || options.coreutils !== undefined)) {
+    throw new TypeError(`commands and coreutils are only for language "shell", not ${JSON.stringify(language)}`);
+  }
+  if (typeof commands !== "object" || commands === null) {
+    throw new TypeError("commands must be an object of URLs by command name");
+  }
+  const urls = {};
+  for (const [name, url] of Object.entries(commands)) {
+    if (!(typeof url === "string" || url instanceof URL)) {
+      throw new TypeError(`commands.${name} must be a URL (a string or URL) of a jco-transpiled command`);
+    }
+    // Resolved now: a relative one would otherwise resolve against this
+    // package. Node.js has no page to resolve against, so takes absolute ones.
+    try {
+      urls[name] = new URL(url, globalThis.location?.href).href;
+    } catch {
+      throw new TypeError(`commands.${name} is not an absolute URL: ${String(url)}`);
+    }
+  }
+  return { coreutils: coreutils !== false, commands: urls };
+}
+
+/**
  * Options for a {@link Sandbox}. `traceHandler` and `outputHandler` override,
  * for this sandbox only, the module-wide default set by the setter of the
  * same name; an omitted one follows that default.
  * @typedef {Object} SandboxOptions
+ * @property {"python" | "javascript" | "shell"} [language] - The guest
+ *   language, `"python"` by default. The JavaScript and shell runtimes are
+ *   downloaded the first time a sandbox uses them; their sandboxes start with
+ *   an empty filesystem.
  * @property {import("@eryx-org/eryx-run/shared").Callbacks} [callbacks] -
  *   Functions the code can `await`, by name, as for eryx.run's client: each a
  *   function of the code's keyword arguments, or `{ handler, description }`.
@@ -291,6 +365,16 @@ function _toResult(output, stateWasReset, stats) {
  *   sandbox's Python state is lost. The deadline is wall-clock time, including
  *   callbacks; instantiation doesn't count. The Worker costs about 70 MB.
  *   Without it, nothing interrupts a call.
+ * @property {Record<string, string | URL>} [commands] - The shell only: more
+ *   external commands, by name, each the URL of a WASI 0.2 command component
+ *   transpiled with `jco transpile --instantiation async` (its `.js`, with its
+ *   core `.wasm` files beside it; see the README for the flags a command that
+ *   waits needs). One URL may serve several names, for a
+ *   multicall binary that picks its tool by `argv[0]`. They replace bundled
+ *   coreutils tools of the same name.
+ * @property {boolean} [coreutils] - The shell only: whether to include the
+ *   bundled uutils coreutils (`cat`, `sort`, `head`, ...; see
+ *   {@link COREUTILS_TOOLS}), downloaded the first time one runs. Default `true`.
  */
 
 /**
@@ -326,8 +410,12 @@ export class Sandbox {
   #host;
   /** @type {ReturnType<typeof createNet>} */
   #net = createNet();
+  /** @type {string} */
+  #language;
   /** @type {number | undefined} */
   #timeoutMs;
+  /** @type {{ coreutils: boolean, commands: Record<string, string> }} */
+  #commands;
   /** @type {Promise<any>} */
   #instance;
   /** The Worker of a `timeoutMs` sandbox, and why the sandbox was closed. */
@@ -349,24 +437,35 @@ export class Sandbox {
    * @param {SandboxOptions} [options]
    */
   constructor(options = {}) {
-    const { timeoutMs } = options;
+    const { timeoutMs, language = "python" } = options;
+    if (!languages.includes(language)) {
+      throw new TypeError(
+        `unknown language ${JSON.stringify(language)}; expected one of ${languages.map((l) => JSON.stringify(l)).join(", ")}`,
+      );
+    }
+    this.#language = language;
     if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
       throw new TypeError("timeoutMs must be a positive number of milliseconds");
     }
     this.#timeoutMs = timeoutMs;
+    this.#commands = shellCommands(language, options);
     /**
      * This sandbox's own file tree (a copy of the module's `_fileTree`).
      * Changes to it are visible to the sandbox's next filesystem access.
      * Undefined for a sandbox with `timeoutMs`, whose files live in its Worker.
      * @internal For the demo app and advanced integrations.
      */
-    this._fileTree = timeoutMs === undefined ? forkTree(_fileTree) : undefined;
+    this._fileTree = timeoutMs === undefined ? newFileTree(language) : undefined;
     if ("callbackHandler" in options) {
       throw new TypeError(
         "callbackHandler is gone: pass callbacks as an object of functions by name, " +
           "e.g. { get_user: async ({ id }) => ... }",
       );
     }
+    checkCallbackNames(language, Object.keys(options.callbacks ?? {}), [
+      ...(this.#commands.coreutils ? COREUTILS_TOOLS : []),
+      ...Object.keys(this.#commands.commands),
+    ]);
     this.#host = createCallbackHost(options);
     if (options.netConfig !== undefined) this.#net.setNetConfig(options.netConfig);
     if (timeoutMs !== undefined) _workerReaper.register(this, this.#slot, this.#slot);
@@ -375,17 +474,26 @@ export class Sandbox {
 
   #start() {
     if (this.#timeoutMs === undefined) {
-      this.#instance = instantiateSandbox(this._fileTree, this.#host.imports, this.#net);
+      this.#instance = instantiateSandbox(
+        this.#language,
+        this._fileTree,
+        this.#host.imports,
+        this.#net,
+        undefined,
+        this.#commands,
+      );
     } else {
       const slot = this.#slot;
       const name = this.#resultVariable;
-      this.#instance = instantiateInWorker(this.#host, this.#net).then(async (worker) => {
-        slot.worker = worker;
-        if (slot.closed) worker.terminate(slot.closed);
-        // A restarted Worker starts with the default result variable.
-        else if (name !== undefined) await worker.setResultVariable(name);
-        return worker;
-      });
+      this.#instance = instantiateInWorker(this.#language, this.#host, this.#net, this.#commands).then(
+        async (worker) => {
+          slot.worker = worker;
+          if (slot.closed) worker.terminate(slot.closed);
+          // A restarted Worker starts with the default result variable.
+          else if (name !== undefined) await worker.setResultVariable(name);
+          return worker;
+        },
+      );
     }
     // Surfaced by the first call instead.
     this.#instance.catch(() => {});
@@ -480,7 +588,10 @@ export class Sandbox {
     try {
       // Frame the code with an empty preamble (see the guest's PREAMBLE_HEADER),
       // so a leading header-like line in user code isn't misparsed.
-      const output = await instance.execute(`#eryx-preamble:0\n${code}`);
+      // The deadline lets the shell stop its background jobs in time.
+      const deadline =
+        this.#timeoutMs === undefined ? undefined : Date.now() + this.#timeoutMs;
+      const output = await instance.execute(`#eryx-preamble:0\n${code}`, deadline);
       const result = _toResult(output, this.#stateWasReset, stats());
       this.#stateWasReset = false;
       return result;
@@ -489,12 +600,17 @@ export class Sandbox {
       // traceback as the message, with the output captured before it failed.
       const payload = e?.payload;
       if (payload && typeof payload.message === "string") {
-        // As eryx.run's client tells them apart: an exception in the code has
-        // its traceback as the message
-        const failed = payload.message.startsWith("Traceback (most recent call last)")
+        // As eryx.run's client tells them apart: an exception in Python code
+        // has its traceback as the message. The other guests report only
+        // script failures (an uncaught exception, a nonzero exit status).
+        const failed =
+          this.#language !== "python" ||
+          payload.message.startsWith("Traceback (most recent call last)")
           ? Object.assign(new PythonExceptionError(payload.message, { cause: e }), {
               stdout: _decoder.decode(payload.stdout),
               stderr: _decoder.decode(payload.stderr),
+              // A shell script's exit status; the other guests have none.
+              ...(payload.exitCode != null && { exitCode: payload.exitCode }),
             })
           : new ExecutionError(payload.message, { cause: e });
         throw Object.assign(failed, stats());
@@ -587,7 +703,10 @@ export class Sandbox {
    * @throws {Error} If serialization fails
    */
   async snapshotState() {
-    return this.#serialized((instance) => instance.snapshotState());
+    const { data, skipped } = await this.#serialized((instance) =>
+      instance.snapshotState(),
+    );
+    return { data, skippedGlobals: skipped };
   }
 
   /**

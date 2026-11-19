@@ -1,0 +1,52 @@
+# Build and test the @eryx-org/eryx npm package.
+#
+# Called by js-release.yml (which then publishes) and the release dry run;
+# it publishes nothing. Uploads the `js-package` artifact.
+
+name: Build JS Package
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# No GitHub Actions caches anywhere in this workflow (no WASM, rust-cache, mise
+# or npm caching). Everything here ships to users, and a cache entry written by
+# any earlier run on main is restored as-is, so a poisoned entry would flow
+# straight into the published package. See zizmor's cache-poisoning audit.
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install mise
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
+        with:
+          cache: false
+
+      - name: Build and test JS bindings
+        working-directory: js
+        run: mise run test
+
+      - name: Upload JS package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: js-package
+          path: js/eryx/
+          retention-days: 5

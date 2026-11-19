@@ -38,6 +38,7 @@ mod host;
 mod hybrid;
 mod hybrid_bindings;
 mod hybrid_host;
+mod hybrid_p3;
 mod linker;
 mod perms;
 pub mod scrubbing;
@@ -50,7 +51,10 @@ pub use hybrid::{
     DEFAULT_MAX_OPEN_HOST_FILES, HybridVfsCtx, HybridVfsState, RealDir,
     process_max_open_host_files, set_process_max_open_host_files,
 };
-pub use linker::{HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_vfs_to_linker};
+pub use linker::{
+    HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_hybrid_vfs_to_linker_p3,
+    add_vfs_to_linker,
+};
 pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
 };

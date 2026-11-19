@@ -86,6 +86,49 @@ print(f"pickle:  {len(pickled)} bytes")`,
   },
 };
 
+/** Run-tab examples for the other guest languages. */
+export const JS_EXAMPLES: Record<string, { label: string; code: string }> = {
+  hello: {
+    label: "Hello World",
+    code: `console.log("Hello from eryx!");
+console.log("JavaScript (QuickJS) in WebAssembly!");`,
+  },
+  data: {
+    label: "Data",
+    code: `// \`var\`, not \`const\`: the sandbox keeps its state between runs.
+var words = "the quick brown fox".split(" ");
+console.log(words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" "));
+console.log("longest:", words.reduce((a, b) => (b.length > a.length ? b : a)));`,
+  },
+  async: {
+    label: "Async",
+    code: `var square = async (x) => x * x;
+var squares = await Promise.all([1, 2, 3, 4].map(square));
+console.log("squares:", squares);`,
+  },
+};
+
+export const SHELL_EXAMPLES: Record<string, { label: string; code: string }> = {
+  hello: {
+    label: "Hello World",
+    code: `echo "Hello from eryx!"
+echo "A bash-compatible shell (brush) in WebAssembly"`,
+  },
+  loops: {
+    label: "Loops",
+    code: `greet() { echo "hello, $1"; }
+for name in Ada Grace Linus; do greet "$name"; done
+total=0 i=1
+while [ "$i" -le 10 ]; do total=$((total + i)); i=$((i + 1)); done
+echo "1 + ... + 10 = $total"`,
+  },
+  failure: {
+    label: "Exit status",
+    code: `echo "about to fail"
+exit 3`,
+  },
+};
+
 export const SESSION_EXAMPLES: Record<string, { label: string; code: string }> =
   {
     define: {

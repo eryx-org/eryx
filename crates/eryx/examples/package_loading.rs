@@ -18,7 +18,7 @@
 //! # Running
 //!
 //! ```bash
-//! cargo run --example package_loading --features packages,native-extensions,embedded-stdlib --release
+//! cargo run --example package_loading --features native-extensions,embedded-stdlib --release
 //! ```
 
 use std::path::Path;

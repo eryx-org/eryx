@@ -1,6 +1,6 @@
 //! gRPC service implementation for the Eryx Execute RPC.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,8 +11,8 @@ use eryx::callback_handler::{run_callback_handler, run_net_handler};
 use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
 use eryx::{
     Callback, CallbackJournal, CallbackRequest, ConnectionManager, Error, ErrorKind, HttpRule,
-    NetConfig, NetRequest, OutputRequest, PythonStateSnapshot, ReplayState, ResourceLimits,
-    SandboxPool, SecretConfig, SessionExecutor, TraceRequest, VfsConfig, scrub_placeholders,
+    NetConfig, NetRequest, OutputRequest, ReplayState, ResourceLimits, SandboxPool, SecretConfig,
+    SessionExecutor, StateSnapshot, TraceRequest, VfsConfig, scrub_placeholders,
     scrub_placeholders_bytes,
 };
 use futures::FutureExt;
@@ -81,7 +81,8 @@ pub struct ServerLimits {
     pub max_fuel: Option<u64>,
     /// Most callback invocations a request may allow.
     pub max_callback_invocations: u32,
-    /// Most concurrent network connections a request may allow.
+    /// Most concurrent network connections a request may allow, its guest's
+    /// and its children's together.
     pub max_connections: u32,
     /// Longest network connect or I/O timeout a request may set.
     pub max_io_timeout: Duration,
@@ -97,6 +98,14 @@ pub struct ServerLimits {
     /// hold open at once. Not client-controllable: descriptors are a shared
     /// process resource.
     pub max_open_host_files: usize,
+    /// Most host memory a shell execution's child processes' arguments and
+    /// environments may hold at once, and the value for requests that set
+    /// none (`resource_limits.max_child_host_bytes`).
+    pub max_child_host_bytes: u64,
+    /// Most memory a shell execution's running child processes may hold
+    /// together, and the value for requests that set none
+    /// (`resource_limits.max_child_memory_bytes`).
+    pub max_child_memory_bytes: u64,
     /// Whether a request may set `network_config.allow_plaintext_secrets`,
     /// which sends real secret values over unencrypted connections. Off by
     /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
@@ -116,12 +125,141 @@ impl Default for ServerLimits {
             max_io_timeout: Duration::from_secs(300),
             max_output_bytes: 16 * 1024 * 1024,
             max_open_host_files: eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES,
+            max_child_host_bytes: 64 * 1024 * 1024,
+            max_child_memory_bytes: 256 * 1024 * 1024,
             allow_plaintext_secrets: false,
         }
     }
 }
 
 impl ServerLimits {
+    /// Parse a request's `network_config`, clamped to these limits, and the
+    /// network it gives the shell's children.
+    fn network_with_children(
+        &self,
+        mut nc: crate::proto::eryx::v1::NetworkConfig,
+    ) -> Result<(NetConfig, eryx::net::ChildNetwork), Status> {
+        let child = *nc.child_network.take().unwrap_or_default();
+        let config = self.network(nc)?;
+        let child = self.child_network("network_config.child_network", child)?;
+        Ok((config, child))
+    }
+
+    /// Parse a `ChildNetwork` (at `field`), its narrow config clamped to
+    /// these limits.
+    fn child_network(
+        &self,
+        field: &str,
+        child: crate::proto::eryx::v1::ChildNetwork,
+    ) -> Result<eryx::net::ChildNetwork, Status> {
+        use crate::proto::eryx::v1::child_network::Mode;
+        let invalid = |msg: &str| Err(Status::invalid_argument(format!("{field}: {msg}")));
+        Ok(match (child.mode(), child.narrow) {
+            (Mode::None, None) => eryx::net::ChildNetwork::None,
+            (Mode::Inherit, None) => eryx::net::ChildNetwork::Inherit,
+            (Mode::Narrow, Some(narrow)) => {
+                if narrow.child_network.is_some() || narrow.allow_plaintext_secrets {
+                    return invalid("narrow can't set child_network or allow_plaintext_secrets");
+                }
+                eryx::net::ChildNetwork::Narrow(Box::new(self.network(*narrow)?))
+            }
+            (Mode::Narrow, None) => return invalid("MODE_NARROW needs narrow"),
+            (_, Some(_)) => return invalid("narrow is only for MODE_NARROW"),
+        })
+    }
+
+    /// Parse a shell request's `commands`: each must be one of `known` (when
+    /// the server knows its commands), and may only take away from what it
+    /// has, so no network when `children` (the request's child network) is
+    /// none.
+    fn command_options(
+        &self,
+        commands: HashMap<String, crate::proto::eryx::v1::CommandOptions>,
+        known: Option<&HashSet<String>>,
+        children: &eryx::net::ChildNetwork,
+    ) -> Result<HashMap<String, eryx::CommandOptions>, Status> {
+        let mut parsed = HashMap::new();
+        for (name, options) in commands {
+            if known.is_some_and(|known| !known.contains(&name)) {
+                return Err(Status::invalid_argument(format!(
+                    "commands: {name} isn't one of this server's shell commands"
+                )));
+            }
+            let mut command = eryx::CommandOptions::new();
+            if let Some(network) = options.network {
+                let network = self.child_network(&format!("commands[{name}].network"), network)?;
+                if matches!(children, eryx::net::ChildNetwork::None)
+                    && !matches!(network, eryx::net::ChildNetwork::None)
+                {
+                    return Err(Status::invalid_argument(format!(
+                        "commands[{name}].network: can't give a command network when \
+                         network_config.child_network gives children none"
+                    )));
+                }
+                command = command.with_network(network);
+            }
+            if options.no_tunnels {
+                command = command.without_tunnels();
+            }
+            if options.no_spawn {
+                command = command.without_spawn();
+            }
+            parsed.insert(name, command);
+        }
+        Ok(parsed)
+    }
+
+    /// Parse one `NetworkConfig`, clamped to these limits.
+    fn network(&self, nc: crate::proto::eryx::v1::NetworkConfig) -> Result<NetConfig, Status> {
+        if nc.allow_plaintext_secrets && !self.allow_plaintext_secrets {
+            return Err(Status::invalid_argument(
+                "network_config.allow_plaintext_secrets is not enabled on this server \
+                 (start it with --allow-plaintext-secrets)",
+            ));
+        }
+        let base = NetConfig::default();
+        let max_connections = if nc.max_connections > 0 {
+            nc.max_connections
+        } else {
+            base.max_connections()
+        };
+        let connect_timeout = if nc.connect_timeout_ms > 0 {
+            Duration::from_millis(nc.connect_timeout_ms)
+        } else {
+            base.connect_timeout()
+        };
+        let io_timeout = if nc.io_timeout_ms > 0 {
+            Duration::from_millis(nc.io_timeout_ms)
+        } else {
+            base.io_timeout()
+        };
+        let mut config = base
+            .allow_all_hosts(nc.allow_all_hosts)
+            .with_allowed_hosts(nc.allowed_hosts)
+            .with_max_connections(max_connections.min(self.max_connections))
+            .with_connect_timeout(connect_timeout.min(self.max_io_timeout))
+            .with_io_timeout(io_timeout.min(self.max_io_timeout))
+            .with_allowed_networks(parse_networks("allowed_networks", &nc.allowed_networks)?)
+            .with_internal_hosts(nc.internal_hosts)
+            .with_http_rules(nc.http_rules.into_iter().map(|r| {
+                HttpRule::new(r.host)
+                    .with_methods(r.methods)
+                    .with_paths(r.paths)
+            }))
+            .allow_plaintext_secrets(nc.allow_plaintext_secrets);
+        if !nc.blocked_hosts.is_empty() {
+            config = config.with_blocked_hosts(nc.blocked_hosts);
+        }
+        if !nc.blocked_networks.is_empty() {
+            config = config
+                .with_blocked_networks(parse_networks("blocked_networks", &nc.blocked_networks)?);
+        }
+        config
+            .validate()
+            .map_err(|e| Status::invalid_argument(format!("network_config: {e}")))?;
+        Ok(config)
+    }
+
     /// Resolve a request's limits: zero fields take the defaults, then every
     /// value is clamped to its ceiling.
     fn resource_limits(
@@ -164,26 +302,92 @@ impl ServerLimits {
                 (fuel, ceiling) => fuel.or(ceiling),
             })
             .with_max_open_host_files(self.max_open_host_files)
+            .with_max_child_host_bytes(
+                nonzero(request.max_child_host_bytes)
+                    .unwrap_or(self.max_child_host_bytes)
+                    .min(self.max_child_host_bytes),
+            )
+            .with_max_child_memory_bytes(
+                nonzero(request.max_child_memory_bytes)
+                    .unwrap_or(self.max_child_memory_bytes)
+                    .min(self.max_child_memory_bytes),
+            )
     }
 }
 
 /// Default for how long a signed callback journal can be replayed (7 days).
 pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// Why a request for `language`, which has no pool, is rejected.
+fn unserved_language(language: eryx::Language) -> String {
+    let feature = match language {
+        eryx::Language::JavaScript if !cfg!(feature = "javascript") => Some("javascript"),
+        eryx::Language::Shell if !cfg!(feature = "shell") => Some("shell"),
+        _ => None,
+    };
+    match feature {
+        Some(feature) => format!(
+            "this server was built without {language} support (the `{feature}` cargo feature)"
+        ),
+        None => format!("this server doesn't serve {language} (see --languages)"),
+    }
+}
+
+/// Creates a language's sandbox pool on its first request.
+pub type PoolFactory = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, Result<Arc<SandboxPool>, eryx::PoolError>>
+        + Send
+        + Sync,
+>;
+
+/// A language's sandbox pool, created up front or on first use.
+enum LanguagePool {
+    Ready(Arc<SandboxPool>),
+    Lazy {
+        pool: tokio::sync::OnceCell<Arc<SandboxPool>>,
+        create: PoolFactory,
+    },
+}
+
+impl LanguagePool {
+    /// The pool, created now if this is its first use. A failed creation is
+    /// retried on the next request.
+    async fn get(&self) -> Result<Arc<SandboxPool>, eryx::PoolError> {
+        match self {
+            Self::Ready(pool) => Ok(Arc::clone(pool)),
+            Self::Lazy { pool, create } => pool.get_or_try_init(|| create()).await.cloned(),
+        }
+    }
+}
+
+impl std::fmt::Debug for LanguagePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(pool) => f.debug_tuple("Ready").field(pool).finish(),
+            Self::Lazy { pool, .. } => f.debug_struct("Lazy").field("pool", pool).finish(),
+        }
+    }
+}
+
 /// The Eryx gRPC service.
 ///
-/// Holds a shared [`SandboxPool`] for efficient sandbox reuse across requests.
+/// Holds a shared [`SandboxPool`] per guest language for efficient sandbox
+/// reuse across requests.
 #[derive(Debug)]
 pub struct EryxService {
-    pool: Arc<SandboxPool>,
+    pools: HashMap<eryx::Language, LanguagePool>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
     journal_ttl: Duration,
+    /// The shell's commands, which `ExecuteRequest.commands` may name;
+    /// `None` if not given (see [`Self::with_shell_commands`]).
+    shell_commands: Option<Arc<HashSet<String>>>,
 }
 
 impl EryxService {
-    /// Create a new service instance with the given pool and journal signer.
+    /// Create a new service instance with the given Python pool and journal
+    /// signer. Add pools for other languages with [`Self::with_pool`].
     ///
     /// The `signer` should use a stable key shared across all replicas (see
     /// [`JournalSigner::from_key`](crate::replay::JournalSigner::from_key))
@@ -192,12 +396,34 @@ impl EryxService {
     #[must_use]
     pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
         Self {
-            pool,
+            pools: HashMap::from([(eryx::Language::Python, LanguagePool::Ready(pool))]),
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
             journal_ttl: DEFAULT_JOURNAL_TTL,
+            shell_commands: None,
         }
+    }
+
+    /// Serve `language` from `pool`, replacing any pool it had.
+    #[must_use]
+    pub fn with_pool(mut self, language: eryx::Language, pool: Arc<SandboxPool>) -> Self {
+        self.pools.insert(language, LanguagePool::Ready(pool));
+        self
+    }
+
+    /// Serve `language` from a pool that `create` makes on the language's
+    /// first request, so a language nobody uses costs nothing.
+    #[must_use]
+    pub fn with_lazy_pool(mut self, language: eryx::Language, create: PoolFactory) -> Self {
+        self.pools.insert(
+            language,
+            LanguagePool::Lazy {
+                pool: tokio::sync::OnceCell::new(),
+                create,
+            },
+        );
+        self
     }
 
     /// Set the ceilings applied to every request's limits. Defaults to
@@ -205,6 +431,15 @@ impl EryxService {
     #[must_use]
     pub fn with_limits(mut self, limits: ServerLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The shell's command names, so a request's `commands` naming another
+    /// is refused up front with `INVALID_ARGUMENT`. Without it, such a
+    /// request still fails, when its execution starts.
+    #[must_use]
+    pub fn with_shell_commands(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.shell_commands = Some(Arc::new(names.into_iter().collect()));
         self
     }
 
@@ -277,6 +512,29 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         };
 
+        let language = match crate::proto::eryx::v1::Language::try_from(execute_req.language) {
+            Ok(
+                crate::proto::eryx::v1::Language::Unspecified
+                | crate::proto::eryx::v1::Language::Python,
+            ) => eryx::Language::Python,
+            Ok(crate::proto::eryx::v1::Language::Javascript) => eryx::Language::JavaScript,
+            Ok(crate::proto::eryx::v1::Language::Shell) => eryx::Language::Shell,
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown language {}",
+                    execute_req.language
+                )));
+            }
+        };
+        let pool = self
+            .pools
+            .get(&language)
+            .ok_or_else(|| Status::invalid_argument(unserved_language(language)))?
+            .get()
+            .await
+            .map_err(|e| {
+                Status::unavailable(format!("failed to create the {language} pool: {e}"))
+            })?;
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
@@ -310,71 +568,40 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .transpose()?;
 
         // Parse network config: present = networking enabled, absent = disabled.
-        let net_config = execute_req
-            .network_config
-            .map(|nc| -> Result<NetConfig, Status> {
-                if nc.allow_plaintext_secrets && !self.limits.allow_plaintext_secrets {
-                    return Err(Status::invalid_argument(
-                        "network_config.allow_plaintext_secrets is not enabled on this server \
-                         (start it with --allow-plaintext-secrets)",
-                    ));
-                }
-                let base = NetConfig::default();
-                let max_connections = if nc.max_connections > 0 {
-                    nc.max_connections
-                } else {
-                    base.max_connections()
-                };
-                let connect_timeout = if nc.connect_timeout_ms > 0 {
-                    Duration::from_millis(nc.connect_timeout_ms)
-                } else {
-                    base.connect_timeout()
-                };
-                let io_timeout = if nc.io_timeout_ms > 0 {
-                    Duration::from_millis(nc.io_timeout_ms)
-                } else {
-                    base.io_timeout()
-                };
-                let mut config = base
-                    .allow_all_hosts(nc.allow_all_hosts)
-                    .with_allowed_hosts(nc.allowed_hosts)
-                    .with_max_connections(max_connections.min(self.limits.max_connections))
-                    .with_connect_timeout(connect_timeout.min(self.limits.max_io_timeout))
-                    .with_io_timeout(io_timeout.min(self.limits.max_io_timeout))
-                    .with_allowed_networks(parse_networks(
-                        "allowed_networks",
-                        &nc.allowed_networks,
-                    )?)
-                    .with_internal_hosts(nc.internal_hosts)
-                    .with_http_rules(nc.http_rules.into_iter().map(|r| {
-                        HttpRule::new(r.host)
-                            .with_methods(r.methods)
-                            .with_paths(r.paths)
-                    }))
-                    .allow_plaintext_secrets(nc.allow_plaintext_secrets);
-                if !nc.blocked_hosts.is_empty() {
-                    config = config.with_blocked_hosts(nc.blocked_hosts);
-                }
-                if !nc.blocked_networks.is_empty() {
-                    config = config.with_blocked_networks(parse_networks(
-                        "blocked_networks",
-                        &nc.blocked_networks,
-                    )?);
-                }
-                config
-                    .validate()
-                    .map_err(|e| Status::invalid_argument(format!("network_config: {e}")))?;
-                Ok(config)
-            })
-            .transpose()?;
-
-        // Parse and validate secrets: generate placeholders and build env preamble.
-        let (secrets, secrets_preamble) = {
-            let mut map = HashMap::new();
-            let mut preamble = String::new();
-            if !execute_req.secrets.is_empty() {
-                preamble.push_str("import os\n");
+        let (net_config, child_network) = match execute_req.network_config {
+            Some(nc) => {
+                let (config, child) = self.limits.network_with_children(nc)?;
+                (Some(config), child)
             }
+            None => (None, eryx::net::ChildNetwork::None),
+        };
+        if language != eryx::Language::Shell
+            && !matches!(child_network, eryx::net::ChildNetwork::None)
+        {
+            return Err(Status::invalid_argument(format!(
+                "network_config.child_network is only for shell requests, not {language}"
+            )));
+        }
+        if language != eryx::Language::Shell && execute_req.allowed_commands.is_some() {
+            return Err(Status::invalid_argument(format!(
+                "allowed_commands is only for the shell, not {language}"
+            )));
+        }
+        let allowed_commands = execute_req.allowed_commands.map(|allowed| allowed.names);
+        if language != eryx::Language::Shell && !execute_req.commands.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "commands is only for the shell, not {language}"
+            )));
+        }
+        let command_options = self.limits.command_options(
+            execute_req.commands,
+            self.shell_commands.as_deref(),
+            &child_network,
+        )?;
+
+        // Parse and validate secrets, generating their placeholders.
+        let secrets = {
+            let mut map = HashMap::new();
             for s in &execute_req.secrets {
                 // Validate secret name: must be a valid Python env var name.
                 if !is_identifier(&s.name) {
@@ -390,14 +617,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     )));
                 }
                 let secret = SecretConfig::new(s.value.clone(), s.allowed_hosts.clone());
-                preamble.push_str(&format!(
-                    "os.environ[{:?}] = {:?}\n",
-                    s.name,
-                    secret.placeholder()
-                ));
                 map.insert(s.name.clone(), secret);
             }
-            (map, preamble)
+            map
         };
         // A secret with no host to go to would never be substituted; say so
         // now rather than letting the script fail later.
@@ -418,6 +640,21 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         } else {
             Some(create_vfs_with_files(&files, VFS_MOUNT_PATH).await?)
         };
+
+        // The secrets' placeholders (`os.environ`, `process.env`, or exported
+        // to the shell's children), then the Python builtins injection, so
+        // callbacks are reachable from imported modules, and the sys.path
+        // setup for supporting files. As a preamble, it doesn't shift the
+        // user code's line numbers.
+        let library_preamble = match language {
+            eryx::Language::Python if vfs_storage.is_some() => {
+                format!("{SYS_PATH_INJECT}{BUILTINS_INJECT}")
+            }
+            eryx::Language::Python => BUILTINS_INJECT.to_owned(),
+            _ => String::new(),
+        };
+        let preamble = eryx::language_preamble(language, &secrets, &library_preamble)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let has_secrets = !secrets.is_empty();
         let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
@@ -479,10 +716,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
-        let mut sandbox = match self.pool.acquire().await {
+        let mut sandbox = match pool.acquire().await {
             Ok(s) => s,
             Err(e) => {
-                let stats = self.pool.stats();
+                let stats = pool.stats();
                 span.in_scope(|| {
                     tracing::warn!(
                         error = %e,
@@ -501,7 +738,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .with_callbacks(cbs)
             .map_err(|e| Status::invalid_argument(e.to_string()))?
             .with_resource_limits(resource_limits.clone());
-        let pool_stats = self.pool.stats();
+        let pool_stats = pool.stats();
         span.in_scope(|| {
             tracing::info!(
                 acquire_ms = acquire_start.elapsed().as_millis() as u64,
@@ -603,13 +840,15 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             async move {
                 let params = SessionParams {
                     code: &code,
+                    language,
                     vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
                     resource_limits,
                     net_config,
+                    child_network,
                     secrets,
-                    secrets_preamble,
+                    preamble,
                     scrub_stdout,
                     scrub_stderr,
                     scrub_result,
@@ -619,6 +858,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_ttl,
                     declarations: &declarations,
                     max_output_bytes,
+                    allowed_commands,
+                    command_options,
                 };
 
                 // Race execution against client disconnection: either the
@@ -835,14 +1076,20 @@ async fn create_vfs_with_files(
 /// Parameters for a single session execution.
 struct SessionParams<'a> {
     code: &'a str,
+    /// The guest language: only Python gets the (Python) preamble.
+    language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
     vfs_storage: Option<ArcStorage>,
     state: Option<&'a [u8]>,
     enable_tracing: bool,
     resource_limits: ResourceLimits,
     net_config: Option<NetConfig>,
+    /// The network for the shell's children, under `net_config`.
+    child_network: eryx::net::ChildNetwork,
     secrets: HashMap<String, SecretConfig>,
-    secrets_preamble: String,
+    /// The secrets' placeholders, then (for Python) the builtins and
+    /// sys.path setup.
+    preamble: String,
     scrub_stdout: bool,
     scrub_stderr: bool,
     /// Enable scrubbing of the structured result/result_error. Default OFF (opt-in).
@@ -860,7 +1107,15 @@ struct SessionParams<'a> {
     declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
     /// Cap on stdout plus stderr bytes kept and streamed.
     max_output_bytes: usize,
+    /// The commands the execution may spawn (shell); `None` allows all.
+    allowed_commands: Option<Vec<String>>,
+    /// Per-command options for this execution (shell).
+    command_options: HashMap<String, eryx::CommandOptions>,
 }
+
+/// Longest an execution waits for its trace events to reach the client
+/// before sending its result.
+const TRACE_RELAY_DRAIN: Duration = Duration::from_secs(1);
 
 /// Execute Python code using a session executor.
 ///
@@ -880,7 +1135,7 @@ async fn execute_with_session(
 ) -> ExecuteResult {
     let start = Instant::now();
 
-    // Get the shared PythonExecutor and clone the configured callbacks from the sandbox.
+    // Get the shared Executor and clone the configured callbacks from the sandbox.
     let executor = sandbox.executor();
     let callbacks_ref = sandbox.callbacks();
 
@@ -960,7 +1215,7 @@ async fn execute_with_session(
     let mut state_errors = Vec::new();
     if let Some(state_snapshot) = params.state.filter(|s| !s.is_empty()) {
         let restore_start = Instant::now();
-        let restored = match PythonStateSnapshot::from_bytes(state_snapshot) {
+        let restored = match StateSnapshot::from_bytes(state_snapshot) {
             Ok(snapshot) => session.restore_state(&snapshot).await,
             Err(e) => Err(e),
         };
@@ -1014,7 +1269,7 @@ async fn execute_with_session(
 
     // Set up trace channel if tracing is enabled.
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
-    if params.enable_tracing {
+    let trace_relay = params.enable_tracing.then(|| {
         let trace_server_tx = server_tx.clone();
         let trace_secrets = params.secrets.clone();
         tokio::spawn(async move {
@@ -1029,8 +1284,8 @@ async fn execute_with_session(
                     break;
                 }
             }
-        });
-    }
+        })
+    });
 
     // Stream output to the client as it arrives, and keep the raw (pre-scrub)
     // bytes for the final ExecuteResult. Both stop at `max_output_bytes`.
@@ -1081,37 +1336,44 @@ async fn execute_with_session(
     });
 
     // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
-    let (net_tx, _net_handler) = if let Some(config) = params.net_config.clone() {
+    let (net_tx, _net_handler, child_net) = if let Some(config) = params.net_config.clone() {
         let (tx, rx) = mpsc::channel::<NetRequest>(32);
         let allowed_hosts = config.allowed_hosts().len();
         let max_connections = config.max_connections();
-        let manager = ConnectionManager::new(config, params.secrets.clone());
+        // Validated with the request, so this is only the policy's own
+        // guarantee; the handlers spawned above stop once their channels
+        // drop.
+        let net = ConnectionManager::new(config, params.secrets.clone()).and_then(|manager| {
+            // The shell's children share the guest's connection and byte budget.
+            let child_net = manager.child_network(params.child_network.clone())?;
+            Ok((manager, child_net))
+        });
+        let (manager, child_net) = match net {
+            Ok(net) => net,
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid network config");
+                return ExecuteResult {
+                    success: false,
+                    error: format!("invalid network config: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
+                    ..Default::default()
+                };
+            }
+        };
         tracing::info!(allowed_hosts, max_connections, "network handler started");
         let handler = tokio::spawn(async move {
             let result = run_net_handler(rx, manager).await;
             tracing::info!("network handler stopped");
             result
         });
-        (Some(tx), Some(handler))
+        (Some(tx), Some(handler), child_net)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
-    // Run builtins injection before the user code so callbacks are accessible
-    // from imported modules. Also add sys.path setup when supporting files are
-    // present — merged here to avoid a separate WASM execution cycle. As a
-    // preamble, it doesn't shift the user code's line numbers.
-    let preamble = if params.vfs_storage.is_some() {
-        format!(
-            "{}{SYS_PATH_INJECT}{BUILTINS_INJECT}",
-            params.secrets_preamble
-        )
-    } else {
-        format!("{}{BUILTINS_INJECT}", params.secrets_preamble)
-    };
     let mut builder = session
         .execute(params.code)
-        .with_preamble(preamble)
+        .with_preamble(params.preamble.as_str())
         .with_callbacks(&callbacks_arc, callback_tx)
         .with_output_streaming(output_tx)
         // Lets a disconnect interrupt CPU-bound code too; without a token the
@@ -1126,10 +1388,27 @@ async fn execute_with_session(
     if let Some(tx) = net_tx {
         builder = builder.with_network(tx);
     }
+    if let Some(net) = child_net {
+        builder = builder.with_child_network(net);
+    }
+    if let Some(names) = &params.allowed_commands {
+        builder = builder.with_allowed_commands(names.iter().cloned());
+    }
+    for (name, options) in &params.command_options {
+        builder = builder.with_command_options(name, options.clone());
+    }
     let exec_result = builder.run().await;
 
     // Wait for callback handler to finish.
     let callback_invocations = callback_handler.await.unwrap_or(0);
+
+    // The execution's trace senders are gone, so the relay ends once it has
+    // forwarded what's queued. Let it, so the last events (such as a killed
+    // child's `process_end`) reach the client before the ExecuteResult; bounded,
+    // in case the client has stopped reading.
+    if let Some(relay) = trace_relay {
+        let _ = tokio::time::timeout(TRACE_RELAY_DRAIN, relay).await;
+    }
 
     // The output channel sender is dropped once execution completes, so the
     // accumulator task has now (or will shortly) finish draining. Its captured
@@ -1208,10 +1487,10 @@ async fn execute_with_session(
                 tracing::info!(
                     snapshot_bytes = bytes.len(),
                     snapshot_ms = snapshot_start.elapsed().as_millis() as u64,
-                    skipped_globals = ?snapshot.skipped_globals(),
+                    skipped_globals = ?snapshot.skipped(),
                     "state snapshot captured"
                 );
-                (bytes, snapshot.skipped_globals().to_vec())
+                (bytes, snapshot.skipped().to_vec())
             }
             Err(e) => {
                 tracing::warn!(
@@ -1284,6 +1563,7 @@ async fn execute_with_session(
                 output_truncated,
                 state_skipped_globals,
                 state_was_reset: exec_output.state_was_reset,
+                exit_code: (params.language == eryx::Language::Shell).then_some(0),
             }
         }
         Err(e) => {
@@ -1303,7 +1583,7 @@ async fn execute_with_session(
             // error string ever interpolates user-derived input. (Secrets reach
             // Python only as placeholders, so this scrubs placeholders, never
             // real values; it is a no-op when no secrets are configured.)
-            let error = if failure_kind == FailureKind::ScriptException {
+            let error = if failure_kind == FailureKind::ScriptFailed {
                 String::new()
             } else {
                 scrub_placeholders(&e.to_string(), &params.secrets)
@@ -1339,6 +1619,10 @@ async fn execute_with_session(
                 output_truncated,
                 state_skipped_globals,
                 state_was_reset: false,
+                exit_code: match e.kind() {
+                    ErrorKind::ScriptFailed { exit_code, .. } => *exit_code,
+                    _ => None,
+                },
             }
         }
     }
@@ -1398,15 +1682,15 @@ impl CappedOutput {
 
 /// Classify a library [`Error`] into the proto [`FailureKind`].
 ///
-/// [`ErrorKind::PythonException`] is a *script* failure — its traceback is surfaced
-/// in `stderr` — so it maps to [`FailureKind::ScriptException`].
+/// [`ErrorKind::ScriptFailed`] is a *script* failure — its traceback is surfaced
+/// in `stderr` — so it maps to [`FailureKind::ScriptFailed`].
 /// [`ErrorKind::Suspended`] is an expected control outcome (a callback deferred), not
 /// a failure, so it maps to [`FailureKind::Suspended`]; callers should branch on
 /// the `suspended` flag first. Everything else is a sandbox-level failure whose
 /// message belongs in the `error` field.
 fn classify_failure(error: &Error) -> FailureKind {
     match error.kind() {
-        ErrorKind::PythonException { .. } => FailureKind::ScriptException,
+        ErrorKind::ScriptFailed { .. } => FailureKind::ScriptFailed,
         ErrorKind::Timeout(_) => FailureKind::Timeout,
         ErrorKind::FuelExhausted { .. } => FailureKind::FuelExhausted,
         ErrorKind::Cancelled => FailureKind::Cancelled,
@@ -1416,108 +1700,61 @@ fn classify_failure(error: &Error) -> FailureKind {
 }
 
 /// Convert a guest trace event to its proto form, scrubbing secret
-/// placeholders from its text fields.
+/// placeholders from its text fields and context.
+///
+/// The event JSON uses serde's internally-tagged format with a `"type"` key
+/// (`{"type":"line"}`, `{"type":"call","function":"foo"}`, ...); each proto
+/// field is read from the key of the same name, and `message` also from
+/// `error`. JSON that doesn't parse becomes the event type as is.
 fn trace_event(
     req: &TraceRequest,
     secrets: &HashMap<String, SecretConfig>,
 ) -> crate::proto::eryx::v1::TraceEvent {
-    let (event_type, function, message, name, duration_ms) =
-        parse_trace_event_json(&req.event_json);
-    let scrub = |s: String| {
+    let scrub = |s: &str| {
         if secrets.is_empty() {
-            s
+            s.to_owned()
         } else {
-            scrub_placeholders(&s, secrets)
+            scrub_placeholders(s, secrets)
         }
+    };
+    let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_str::<serde_json::Value>(&req.event_json)
+    else {
+        return crate::proto::eryx::v1::TraceEvent {
+            lineno: req.lineno,
+            event_type: scrub(&req.event_json),
+            context_json: scrub(&req.context_json),
+            ..Default::default()
+        };
+    };
+    let text = |key: &str| scrub(map.get(key).and_then(|v| v.as_str()).unwrap_or(""));
+    let number = |key: &str| map.get(key).and_then(serde_json::Value::as_u64);
+    let event_type = match map.get("type").and_then(|v| v.as_str()) {
+        Some(
+            kind @ ("line" | "call" | "return" | "exception" | "callback_start" | "callback_end"
+            | "process_start" | "process_end"),
+        ) => kind.to_owned(),
+        _ => "unknown".to_owned(),
+    };
+    let message = match text("message") {
+        message if message.is_empty() => text("error"),
+        message => message,
     };
     crate::proto::eryx::v1::TraceEvent {
         lineno: req.lineno,
-        event_type: scrub(event_type),
-        function: scrub(function),
-        message: scrub(message),
-        name: scrub(name),
-        duration_ms,
-        context_json: String::new(),
-    }
-}
-
-/// Parse a trace event JSON string into its proto components.
-///
-/// The event_json uses serde's internally-tagged format with a `"type"` key:
-/// `{"type":"line"}`, `{"type":"call","function":"foo"}`, etc.
-fn parse_trace_event_json(event_json: &str) -> (String, String, String, String, u64) {
-    let str_or = |map: &serde_json::Map<String, serde_json::Value>, key: &str| -> String {
-        map.get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(event_json)
-    else {
-        return (
-            event_json.to_string(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        );
-    };
-
-    let event_type = str_or(&map, "type");
-    match event_type.as_str() {
-        "line" => (
-            "line".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "call" => (
-            "call".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "return" => (
-            "return".into(),
-            str_or(&map, "function"),
-            String::new(),
-            String::new(),
-            0,
-        ),
-        "exception" => (
-            "exception".into(),
-            String::new(),
-            str_or(&map, "message"),
-            String::new(),
-            0,
-        ),
-        "callback_start" => (
-            "callback_start".into(),
-            String::new(),
-            String::new(),
-            str_or(&map, "name"),
-            0,
-        ),
-        "callback_end" => {
-            let duration_ms = map.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            (
-                "callback_end".into(),
-                String::new(),
-                String::new(),
-                str_or(&map, "name"),
-                duration_ms,
-            )
-        }
-        _ => (
-            "unknown".into(),
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-        ),
+        event_type,
+        function: text("function"),
+        message,
+        name: text("name"),
+        duration_ms: number("duration_ms").unwrap_or(0),
+        context_json: scrub(&req.context_json),
+        pid: number("pid")
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or(0),
+        exit_code: map
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok()),
     }
 }
 
@@ -1544,6 +1781,55 @@ mod tests {
         assert_eq!(event.event_type, "exception");
         assert!(!event.message.contains(&placeholder), "{}", event.message);
         assert!(event.message.starts_with("bad "), "{}", event.message);
+    }
+
+    #[test]
+    fn trace_context_is_forwarded_and_scrubbed() {
+        let secret = SecretConfig::new("real", vec![]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+        let req = TraceRequest {
+            lineno: 0,
+            event_json: serde_json::json!({"type": "process_start", "name": "curl", "pid": 1})
+                .to_string(),
+            context_json: serde_json::json!({"args": ["-H", format!("token: {placeholder}")]})
+                .to_string(),
+        };
+        let event = trace_event(&req, &secrets);
+        let context: serde_json::Value = serde_json::from_str(&event.context_json).unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!({"args": ["-H", "token: [REDACTED]"]})
+        );
+    }
+
+    #[test]
+    fn process_events_carry_pid_exit_code_and_error() {
+        let event = |json: serde_json::Value| {
+            trace_event(
+                &TraceRequest {
+                    lineno: 0,
+                    event_json: json.to_string(),
+                    context_json: String::new(),
+                },
+                &HashMap::new(),
+            )
+        };
+        let exited = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 2, "exit_code": 1, "duration_ms": 7,
+        }));
+        assert_eq!(
+            (exited.event_type.as_str(), exited.name.as_str(), exited.pid),
+            ("process_end", "ls", 2)
+        );
+        assert_eq!((exited.exit_code, exited.duration_ms), (Some(1), 7));
+        let killed = event(serde_json::json!({
+            "type": "process_end", "name": "ls", "pid": 3, "error": "killed",
+        }));
+        assert_eq!(
+            (killed.exit_code, killed.message.as_str()),
+            (None, "killed")
+        );
     }
 
     #[test]
@@ -1589,6 +1875,88 @@ mod tests {
         assert_eq!(
             no_fuel_ceiling.max_memory_bytes,
             ResourceLimits::default().max_memory_bytes
+        );
+    }
+
+    /// `max_child_host_bytes` and `max_child_memory_bytes` default to their
+    /// ceilings and are clamped to them.
+    #[test]
+    fn child_limits_are_clamped() {
+        let ceilings = ServerLimits {
+            max_child_host_bytes: 1000,
+            max_child_memory_bytes: 2000,
+            ..Default::default()
+        };
+        let bytes = |requested: u64| {
+            let request = crate::proto::eryx::v1::ResourceLimits {
+                max_child_host_bytes: requested,
+                max_child_memory_bytes: requested,
+                ..Default::default()
+            };
+            let limits = ceilings.resource_limits(Some(&request));
+            (limits.max_child_host_bytes, limits.max_child_memory_bytes)
+        };
+        assert_eq!(bytes(0), (Some(1000), Some(2000)));
+        assert_eq!(bytes(10), (Some(10), Some(10)));
+        assert_eq!(bytes(5000), (Some(1000), Some(2000)));
+    }
+
+    /// A request's per-command options are checked against the server's
+    /// commands and the request's child network, and parsed like it.
+    #[test]
+    fn command_options_only_take_away() {
+        use crate::proto::eryx::v1::{
+            ChildNetwork, CommandOptions, NetworkConfig, child_network::Mode,
+        };
+        let limits = ServerLimits::default();
+        let known: HashSet<String> = ["cat".to_owned()].into();
+        let with_network = |mode: Mode, narrow: Option<NetworkConfig>| CommandOptions {
+            network: Some(ChildNetwork {
+                mode: mode as i32,
+                narrow: narrow.map(Box::new),
+            }),
+            ..Default::default()
+        };
+        let parse = |options: CommandOptions, children: &eryx::net::ChildNetwork| {
+            limits.command_options([("cat".to_owned(), options)].into(), Some(&known), children)
+        };
+        let none = eryx::net::ChildNetwork::None;
+        let inherit = eryx::net::ChildNetwork::Inherit;
+
+        assert!(parse(with_network(Mode::None, None), &none).is_ok());
+        assert!(parse(with_network(Mode::Inherit, None), &inherit).is_ok());
+        let narrow = Some(NetworkConfig::default());
+        assert!(parse(with_network(Mode::Narrow, narrow.clone()), &inherit).is_ok());
+        for (options, children) in [
+            (with_network(Mode::Inherit, None), &none),
+            (with_network(Mode::Narrow, narrow.clone()), &none),
+            (with_network(Mode::Narrow, None), &inherit),
+            (with_network(Mode::Inherit, narrow), &inherit),
+        ] {
+            let err = parse(options, children).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
+            assert!(
+                err.message().starts_with("commands[cat].network: "),
+                "{err:?}"
+            );
+        }
+        let unknown = limits
+            .command_options(
+                [("rg".to_owned(), CommandOptions::default())].into(),
+                Some(&known),
+                &none,
+            )
+            .unwrap_err();
+        assert_eq!(unknown.code(), tonic::Code::InvalidArgument, "{unknown:?}");
+        // Without the server's command list, the execution checks names.
+        assert!(
+            limits
+                .command_options(
+                    [("rg".to_owned(), CommandOptions::default())].into(),
+                    None,
+                    &none
+                )
+                .is_ok()
         );
     }
 

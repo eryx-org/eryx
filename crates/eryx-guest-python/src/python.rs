@@ -1,0 +1,4521 @@
+//! CPython FFI bindings for eryx-guest-python.
+//!
+//! This module re-exports pyo3::ffi for CPython C API bindings where available
+//! in the stable ABI (abi3), with manual declarations for functions not exposed there.
+//!
+//! These symbols are resolved at component link time when we link against libpython.
+
+#![allow(missing_docs)]
+#![allow(missing_debug_implementations)]
+
+use std::ffi::c_char;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Re-export pyo3::ffi types and functions available in the stable ABI
+pub use pyo3::ffi::{
+    // Reference counting
+    Py_DecRef,
+    // Interpreter lifecycle
+    Py_FinalizeEx,
+    Py_IncRef,
+    Py_Initialize,
+    Py_InitializeEx,
+    Py_IsInitialized,
+    // Bool
+    PyBool_FromLong,
+    // Bytes operations
+    PyBytes_AsString,
+    PyBytes_AsStringAndSize,
+    PyBytes_FromStringAndSize,
+    PyBytes_Size,
+    // Dict operations
+    PyDict_Clear,
+    PyDict_Copy,
+    PyDict_GetItem,
+    PyDict_GetItemString,
+    PyDict_New,
+    PyDict_SetItem,
+    PyDict_SetItemString,
+    PyDict_Update,
+    // Exception handling
+    PyErr_Clear,
+    PyErr_DisplayException,
+    PyErr_GetRaisedException,
+    PyErr_Occurred,
+    PyErr_SetString,
+    // Exception types
+    PyExc_AttributeError,
+    PyExc_BaseException,
+    PyExc_Exception,
+    PyExc_IndexError,
+    PyExc_KeyError,
+    PyExc_MemoryError,
+    PyExc_RuntimeError,
+    PyExc_SystemExit,
+    PyExc_TypeError,
+    PyExc_ValueError,
+    // Module operations
+    PyImport_AddModule,
+    PyImport_AppendInittab,
+    PyImport_ImportModule,
+    // List operations
+    PyList_Append,
+    PyList_New,
+    // Long (int) operations
+    PyLong_AsLong,
+    PyLong_FromLong,
+    PyModule_AddObject,
+    PyModule_AddObjectRef,
+    PyModule_GetDict,
+    // Core type
+    PyObject,
+    // Object protocol
+    PyObject_Call,
+    PyObject_CallNoArgs,
+    PyObject_GetAttrString,
+    PyObject_Repr,
+    PyObject_SetAttrString,
+    PyObject_Str,
+    // Tuple operations
+    PyTuple_GetItem,
+    PyTuple_New,
+    PyTuple_SetItem,
+    PyTuple_Size,
+    // String/Unicode operations
+    PyUnicode_AsUTF8AndSize,
+    PyUnicode_FromString,
+    PyUnicode_FromStringAndSize,
+};
+
+// Functions not available in pyo3-ffi stable ABI (abi3)
+unsafe extern "C" {
+    pub fn PyRun_String(
+        str: *const c_char,
+        start: std::ffi::c_int,
+        globals: *mut PyObject,
+        locals: *mut PyObject,
+    ) -> *mut PyObject;
+    pub fn PyUnicode_AsUTF8(unicode: *mut PyObject) -> *const c_char;
+    pub fn PyObject_CallMethod(
+        obj: *mut PyObject,
+        name: *const c_char,
+        format: *const c_char,
+        ...
+    ) -> *mut PyObject;
+}
+
+/// `Py_file_input`: compile `PyRun_String` source as a sequence of statements.
+const PY_FILE_INPUT: std::ffi::c_int = 257;
+
+/// Run `code` in `__main__`'s namespace.
+///
+/// Unlike `PyRun_SimpleString` this never calls `PyErr_Print`, which handles
+/// `SystemExit` by finalizing the interpreter and exiting the instance. A raised
+/// exception is cleared and returned as its message instead.
+///
+/// # Safety
+/// Python must be initialized.
+unsafe fn run_in_main(code: &std::ffi::CStr) -> Result<(), String> {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return Err(get_last_error_message());
+        }
+        let main_dict = PyModule_GetDict(main_module);
+        let ret = PyRun_String(code.as_ptr(), PY_FILE_INPUT, main_dict, main_dict);
+        if ret.is_null() {
+            return Err(get_last_error_message());
+        }
+        Py_DecRef(ret);
+        Ok(())
+    }
+}
+
+/// Print the raised exception's traceback to `sys.stderr` and clear it.
+///
+/// Used instead of `PyErr_Print`, which exits the process for `SystemExit`.
+///
+/// # Safety
+/// Python must be initialized and an exception must be set.
+unsafe fn print_raised_exception() {
+    unsafe {
+        let exc = PyErr_GetRaisedException();
+        if !exc.is_null() {
+            PyErr_DisplayException(exc);
+            Py_DecRef(exc);
+        }
+    }
+}
+
+// =============================================================================
+// Invoke callback mechanism
+// =============================================================================
+
+/// Type for the async invoke callback function.
+/// Takes (name, args_json) and returns InvokeResult (Ok/Err/Pending).
+pub type InvokeAsyncCallback = fn(&str, &str) -> Result<crate::InvokeResult, String>;
+
+/// Type for the report_trace callback function.
+/// Takes (lineno, event_json, context_json) and sends to host.
+pub type ReportTraceCallback = fn(u32, &str, &str);
+
+/// Type for the report_output callback function.
+/// Takes (stream, data) and sends to host for real-time output streaming.
+/// stream: 0 = stdout, 1 = stderr
+pub type ReportOutputCallback = fn(u32, &[u8]);
+
+use std::cell::RefCell;
+
+// Thread-local storage for the callbacks.
+// These are set by lib.rs during export execution.
+// Note: WASM is single-threaded, so RefCell is sufficient and avoids lock overhead.
+thread_local! {
+    static INVOKE_ASYNC_CALLBACK: RefCell<Option<InvokeAsyncCallback>> = const { RefCell::new(None) };
+    static REPORT_TRACE_CALLBACK: RefCell<Option<ReportTraceCallback>> = const { RefCell::new(None) };
+    static REPORT_OUTPUT_CALLBACK: RefCell<Option<ReportOutputCallback>> = const { RefCell::new(None) };
+    /// Stores the last callback error if Python callback execution failed.
+    /// This allows export_async_callback to detect uncaught exceptions.
+    static LAST_CALLBACK_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Set the async invoke callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_invoke_async_callback(callback: Option<InvokeAsyncCallback>) {
+    INVOKE_ASYNC_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Set the report_trace callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_report_trace_callback(callback: Option<ReportTraceCallback>) {
+    REPORT_TRACE_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Get and clear the last callback error, if any.
+/// This is called by export_async_callback to detect uncaught Python exceptions.
+pub fn take_last_callback_error() -> Option<String> {
+    LAST_CALLBACK_ERROR.with(|cell| cell.borrow_mut().take())
+}
+
+/// Store a callback error.
+fn set_last_callback_error(error: String) {
+    LAST_CALLBACK_ERROR.with(|cell| *cell.borrow_mut() = Some(error));
+}
+
+/// Call the registered async invoke callback.
+/// Returns the InvokeResult (Ok/Err/Pending) or an error if no callback is registered.
+pub fn do_invoke_async(name: &str, args_json: &str) -> Result<crate::InvokeResult, String> {
+    INVOKE_ASYNC_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        let callback = callback.as_ref().ok_or_else(|| {
+            "invoke() called outside of execute context - callbacks can only be called during code execution".to_string()
+        })?;
+        callback(name, args_json)
+    })
+}
+
+/// Call the registered report_trace callback.
+/// Silently does nothing if no callback is registered (tracing disabled).
+pub fn do_report_trace(lineno: u32, event_json: &str, context_json: &str) {
+    REPORT_TRACE_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        if let Some(cb) = callback.as_ref() {
+            cb(lineno, event_json, context_json);
+        }
+        // If no callback registered, tracing is simply disabled - not an error
+    });
+}
+
+/// Set the report_output callback function.
+/// This should be called by lib.rs before executing Python code.
+pub fn set_report_output_callback(callback: Option<ReportOutputCallback>) {
+    REPORT_OUTPUT_CALLBACK.with(|cell| *cell.borrow_mut() = callback);
+}
+
+/// Call the registered report_output callback.
+/// Silently does nothing if no callback is registered (output streaming disabled).
+pub fn do_report_output(stream: u32, data: &[u8]) {
+    REPORT_OUTPUT_CALLBACK.with(|cell| {
+        let callback = cell.borrow();
+        if let Some(cb) = callback.as_ref() {
+            cb(stream, data);
+        }
+        // If no callback registered, output streaming is simply disabled - not an error
+    });
+}
+
+// =============================================================================
+// Execute result type for async support
+// =============================================================================
+
+/// Callback codes from the Component Model async protocol (used by _eryx_async)
+pub mod callback_code {
+    pub const EXIT: u32 = 0;
+    pub const YIELD: u32 = 1;
+    pub const WAIT: u32 = 2;
+    pub const POLL: u32 = 3;
+
+    /// Extract the callback code from a first_poll/callback return value.
+    pub fn get_code(value: u32) -> u32 {
+        value & 0xF
+    }
+
+    /// Extract the waitable_set handle from a WAIT return value.
+    pub fn get_waitable_set(value: u32) -> u32 {
+        value >> 4
+    }
+}
+
+/// Output from executing Python code.
+#[derive(Debug, Clone)]
+pub struct ExecuteOutput {
+    /// Captured stdout from the Python execution (raw bytes).
+    pub stdout: Vec<u8>,
+    /// Captured stderr from the Python execution (raw bytes).
+    pub stderr: Vec<u8>,
+    /// JSON-serialized value of the user's result variable, or "" if unset.
+    pub result: String,
+    /// Reason result capture failed (e.g. not JSON-serializable), or "" on success.
+    pub result_error: String,
+}
+
+/// A failed execution: the message plus the output captured before it failed.
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteFailure {
+    /// The traceback, or why the code could not run.
+    pub message: String,
+    /// Captured stdout up to the failure (raw bytes).
+    pub stdout: Vec<u8>,
+    /// Captured stderr up to the failure (raw bytes), including any traceback.
+    pub stderr: Vec<u8>,
+}
+
+impl From<String> for ExecuteFailure {
+    /// A failure before any user code ran, so there is no output.
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            ..Self::default()
+        }
+    }
+}
+
+/// Result of executing Python code.
+#[derive(Debug)]
+pub enum ExecuteResult {
+    /// Execution completed successfully with output (stdout and stderr).
+    Complete(ExecuteOutput),
+    /// Execution completed with an error.
+    Error(ExecuteFailure),
+    /// Execution is pending, waiting for async callback.
+    /// Contains the raw callback code from first_poll (WAIT | waitable_set << 4).
+    Pending(u32),
+}
+
+/// Read the `_eryx_callback_code` global variable from Python.
+///
+/// This is set by `_eryx_run_async` after calling `first_poll`.
+/// Returns 0 (EXIT) if the variable doesn't exist or can't be read.
+fn get_python_callback_code() -> u32 {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return 0;
+        }
+
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return 0;
+        }
+
+        let var_name = c"_eryx_callback_code";
+        let var = PyDict_GetItemString(main_dict, var_name.as_ptr());
+        if var.is_null() {
+            return 0;
+        }
+
+        // Get the integer value
+        let value = PyLong_AsLong(var);
+        if value < 0 && !PyErr_Occurred().is_null() {
+            PyErr_Clear();
+            return 0;
+        }
+
+        value as u32
+    }
+}
+
+/// Call Python's `_eryx_async.resume(event0, event1, event2)`.
+///
+/// This is called from `export_async_callback` to resume a suspended async operation.
+/// Returns the callback code (EXIT or WAIT | waitable_set).
+///
+/// If Python raises an uncaught exception, the error is stored and can be retrieved
+/// with `take_last_callback_error()`.
+pub fn call_python_callback(event0: u32, event1: u32, event2: u32) -> u32 {
+    unsafe {
+        let module = PyImport_ImportModule(c"_eryx_async".as_ptr());
+        let ret = if module.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let ret = PyObject_CallMethod(
+                module,
+                c"resume".as_ptr(),
+                c"III".as_ptr(),
+                std::ffi::c_uint::from(event0),
+                std::ffi::c_uint::from(event1),
+                std::ffi::c_uint::from(event2),
+            );
+            Py_DecRef(module);
+            ret
+        };
+        if ret.is_null() {
+            // Python callback raised an uncaught exception. Print the traceback
+            // into the captured stderr and report that as the error.
+            print_raised_exception();
+            set_last_callback_error(get_captured_stderr_error());
+            return callback_code::EXIT;
+        }
+        let code = PyLong_AsLong(ret);
+        Py_DecRef(ret);
+        if code < 0 && !PyErr_Occurred().is_null() {
+            set_last_callback_error(get_last_error_message());
+            return callback_code::EXIT;
+        }
+        code as u32
+    }
+}
+
+/// Get the error message from captured stderr.
+///
+/// [`print_raised_exception`] prints the traceback to `sys.stderr`. Since we
+/// redirect stderr to `_eryx_stderr`, the traceback is captured there. This
+/// function reads it.
+///
+/// Falls back to `get_last_error_message()` if stderr is empty.
+///
+/// # Safety
+///
+/// Python must be initialized.
+unsafe fn get_captured_stderr_error() -> String {
+    // Try to get the error from _eryx_stderr (where the traceback was printed)
+    let stderr_content = unsafe {
+        // Read _eryx_stderr.getvalue() directly
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if !main_module.is_null() {
+            let main_dict = PyModule_GetDict(main_module);
+            if !main_dict.is_null() {
+                let stderr_obj = PyDict_GetItemString(main_dict, c"_eryx_stderr".as_ptr());
+                if !stderr_obj.is_null() {
+                    let getvalue =
+                        PyObject_CallMethod(stderr_obj, c"getvalue".as_ptr(), std::ptr::null());
+                    if !getvalue.is_null() {
+                        // getvalue() returns bytes (after the surrogateescape migration)
+                        let ptr = PyBytes_AsString(getvalue);
+                        let msg = if !ptr.is_null() {
+                            let size = PyBytes_Size(getvalue);
+                            if size < 0 {
+                                PyErr_Clear();
+                                None
+                            } else {
+                                let slice =
+                                    std::slice::from_raw_parts(ptr as *const u8, size as usize);
+                                Some(String::from_utf8_lossy(slice).into_owned())
+                            }
+                        } else {
+                            PyErr_Clear();
+                            None
+                        };
+                        Py_DecRef(getvalue);
+                        msg
+                    } else {
+                        PyErr_Clear();
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            PyErr_Clear();
+            None
+        }
+    };
+
+    if let Some(content) = stderr_content
+        && !content.is_empty()
+    {
+        // The traceback is in stderr. Return it trimmed.
+        return content.trim().to_string();
+    }
+
+    // Fallback: try get_last_error_message (may still return "Unknown error")
+    unsafe { get_last_error_message() }
+}
+
+/// Re-capture stdout after async execution completes.
+///
+/// This is called from `export_async_callback` when the async execution finishes.
+/// When execution returned Pending, we kept the capture variables (_eryx_stdout, etc.)
+/// with stdout still redirected so that async code could still print. Now we capture
+/// the final output and restore original stdout/stderr.
+pub fn recapture_stdout() {
+    // Capture the output and restore original stdout/stderr using our helper
+    unsafe {
+        let _ = run_in_main(c"_eryx_output, _eryx_errors = _eryx_get_output()");
+    }
+}
+
+/// Capture the user's result variable after execution.
+///
+/// Runs `_eryx_capture_result()` in the guest and reads back the JSON-serialized
+/// value and any serialization-error message. Returns `(result, result_error)`,
+/// each `""` when absent. Never fails the execution: capture is a soft side channel.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn capture_result() -> (String, String) {
+    unsafe {
+        if run_in_main(c"_eryx_capture_result()").is_err() {
+            return (String::new(), String::new());
+        }
+        let result = get_python_variable_string("_eryx_result").unwrap_or_default();
+        let result_error = get_python_variable_string("_eryx_result_error").unwrap_or_default();
+        (result, result_error)
+    }
+}
+
+/// Consume the user's result variable without capturing it.
+///
+/// Used on the execution error path so a value assigned before an exception can't
+/// leak into a later successful run of a persistent session. Runs
+/// `_eryx_discard_result()` in the guest. Never fails.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn discard_result() {
+    unsafe {
+        let _ = run_in_main(c"_eryx_discard_result()");
+    }
+}
+
+/// Store the result of an async import for Python's promise_get_result to read.
+///
+/// This is called from `export_async_callback` after lifting the result from the buffer.
+/// The result is stored in `_eryx_async_import_results[subtask]` in Python.
+///
+/// Uses the CPython C API directly (PyDict_SetItem) to avoid fragile string
+/// interpolation. The old approach embedded the result in a Python triple-quoted
+/// string literal, which broke when the result contained `'''` or certain
+/// escape sequences.
+pub fn set_async_import_result(subtask: u32, result_json: &str) {
+    unsafe {
+        // Get __main__._eryx_async_import_results dict
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            eprintln!("ERROR: set_async_import_result: __main__ not found");
+            PyErr_Clear();
+            return;
+        }
+
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            eprintln!("ERROR: set_async_import_result: __main__.__dict__ not found");
+            return;
+        }
+
+        let results_dict = PyDict_GetItemString(main_dict, c"_eryx_async_import_results".as_ptr());
+        if results_dict.is_null() {
+            eprintln!("ERROR: set_async_import_result: _eryx_async_import_results not found");
+            PyErr_Clear();
+            return;
+        }
+
+        // Create Python key (int) and value (str)
+        let py_key = PyLong_FromLong(subtask as std::ffi::c_long);
+        if py_key.is_null() {
+            eprintln!("ERROR: set_async_import_result: failed to create key");
+            PyErr_Clear();
+            return;
+        }
+
+        let py_value =
+            PyUnicode_FromStringAndSize(result_json.as_ptr().cast(), result_json.len() as isize);
+        if py_value.is_null() {
+            eprintln!("ERROR: set_async_import_result: failed to create value string");
+            Py_DecRef(py_key);
+            PyErr_Clear();
+            return;
+        }
+
+        // Set dict[subtask] = result_json
+        let ret = PyDict_SetItem(results_dict, py_key, py_value);
+        Py_DecRef(py_key);
+        Py_DecRef(py_value);
+
+        if ret != 0 {
+            eprintln!("ERROR: set_async_import_result: PyDict_SetItem failed");
+            PyErr_Clear();
+        }
+    }
+}
+
+// =============================================================================
+// _eryx built-in module (PyO3-based)
+// =============================================================================
+//
+// This module provides the low-level `_eryx_invoke_async` function that Python
+// code uses to call host callbacks. It uses PyO3 macros to generate a proper C
+// extension module that works correctly in WASM.
+//
+// Note: We use PyO3 instead of manual CPython FFI because manual PyModuleDef
+// structures have WASM memory compatibility issues - Python can't read memory
+// allocated by our .so module.
+
+use pyo3::prelude::*;
+
+/// Report a trace event to the host.
+/// This is called by sys.settrace to report line/call/return/exception events.
+/// Python signature: _eryx_report_trace(lineno: int, event_json: str, context_json: str) -> None
+#[pyfunction]
+fn _eryx_report_trace(lineno: u32, event_json: String, context_json: String) {
+    do_report_trace(lineno, &event_json, &context_json);
+}
+
+/// Report output to the host for real-time streaming.
+/// Called by _EryxStreamingWriter.write() on every sys.stdout/stderr write.
+/// Python signature: _eryx_report_output(stream: int, data: bytes) -> None
+#[pyfunction]
+fn _eryx_report_output(stream: u32, data: &[u8]) {
+    do_report_output(stream, data);
+}
+
+/// Async-aware invoke function exposed to Python.
+/// Returns a tuple: (result_type, value)
+/// - result_type 0: Ok - value is the JSON result string
+/// - result_type 1: Err - value is the error message string
+/// - result_type 2: Pending - value is a tuple (waitable_id, promise_id)
+///
+/// Python signature: _eryx_invoke_async(name: str, args_json: str) -> tuple[int, Any]
+#[pyfunction]
+fn _eryx_invoke_async(
+    py: Python<'_>,
+    name: String,
+    args_json: String,
+) -> PyResult<(i32, Py<PyAny>)> {
+    match do_invoke_async(&name, &args_json) {
+        Ok(crate::InvokeResult::Ok(result)) => {
+            Ok((0, result.into_pyobject(py)?.into_any().unbind()))
+        }
+        Ok(crate::InvokeResult::Err(error)) => {
+            Ok((1, error.into_pyobject(py)?.into_any().unbind()))
+        }
+        Ok(crate::InvokeResult::Pending(waitable, promise)) => {
+            let tuple = (waitable, promise);
+            Ok((2, tuple.into_pyobject(py)?.into_any().unbind()))
+        }
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Start a host timer for the event loop.
+/// Returns the subtask to wait on, or `None` if it completed immediately.
+///
+/// Python signature: _eryx_sleep_async(duration_ns: int) -> int | None
+#[pyfunction]
+fn _eryx_sleep_async(duration_ns: u64) -> PyResult<Option<u32>> {
+    crate::call_sleep_async(duration_ns).map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+// =============================================================================
+// Async support FFI functions
+// =============================================================================
+//
+// These functions expose Component Model async intrinsics to Python.
+// They are used by the embedded _eryx_async module.
+
+/// Create a new waitable set for tracking pending async operations.
+/// Returns the waitable set handle.
+#[pyfunction]
+fn waitable_set_new_() -> u32 {
+    unsafe { crate::waitable_set_new() }
+}
+
+/// Drop a waitable set when no longer needed.
+#[pyfunction]
+fn waitable_set_drop_(set: u32) {
+    unsafe { crate::waitable_set_drop(set) }
+}
+
+/// Add a waitable (subtask) to a waitable set for polling.
+#[pyfunction]
+fn waitable_join_(waitable: u32, set: u32) {
+    unsafe { crate::waitable_join(waitable, set) }
+}
+
+/// Store a context value (Python object) for async resumption.
+/// The slot holds its own reference, which `context_get_` hands back.
+#[pyfunction]
+fn context_set_(value: Py<PyAny>) {
+    unsafe { crate::context_set(value.into_ptr() as u32) }
+}
+
+/// Take the stored context value, leaving the slot empty.
+/// Returns None if no context was stored (ptr was 0).
+#[pyfunction]
+fn context_get_(py: Python<'_>) -> Option<Py<PyAny>> {
+    let ptr = unsafe { crate::context_get() };
+    if ptr == 0 {
+        return None;
+    }
+    unsafe { crate::context_set(0) };
+    // Take over the reference `context_set_` stored with the pointer.
+    Some(unsafe { Bound::from_owned_ptr(py, ptr as *mut pyo3::ffi::PyObject) }.unbind())
+}
+
+/// Drop a completed subtask to release resources.
+#[pyfunction]
+fn subtask_drop_(task: u32) {
+    unsafe { crate::subtask_drop(task) }
+}
+
+/// Cancel an in-flight subtask, blocking until the host has stopped it.
+/// Remove it from its waitable set first, and drop it afterwards.
+#[pyfunction]
+fn subtask_cancel_(task: u32) -> u32 {
+    crate::cancel_pending_import(task)
+}
+
+/// Get result from a completed async promise.
+///
+/// This retrieves the result JSON stored in `__main__._eryx_async_import_results[subtask]`
+/// when the Rust layer completed an async import callback.
+///
+/// The subtask ID is used to look up the correct result when multiple callbacks
+/// are in flight concurrently.
+#[pyfunction]
+fn promise_get_result_(py: Python<'_>, subtask: u32) -> PyResult<String> {
+    // Get the result from __main__._eryx_async_import_results[subtask]
+    let main_module = py.import("__main__")?;
+    match main_module.getattr("_eryx_async_import_results") {
+        Ok(results_dict) => {
+            // Try to pop the result (removes it from the dict)
+            match results_dict.call_method1("pop", (subtask, py.None())) {
+                Ok(result) => {
+                    if result.is_none() {
+                        Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Async import result not found for subtask {subtask}"
+                        )))
+                    } else {
+                        result.extract()
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(_) => {
+            // Dict not found - this means initialization failed
+            Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Async import results dict not available - initialization may have failed",
+            ))
+        }
+    }
+}
+
+// =============================================================================
+// TCP/TLS functions exposed to Python
+// =============================================================================
+//
+// These call the WIT network interface for the socket and ssl shims. They
+// return the operation's value, or raise the exception CPython's own socket
+// and ssl modules would raise for the host's error.
+
+/// Convert a host network error to the matching Python exception.
+fn net_error_to_py(py: Python<'_>, err: crate::NetError) -> PyErr {
+    let (module, class, errno) = match err.kind {
+        "connection-refused" => ("builtins", "ConnectionRefusedError", Some("ECONNREFUSED")),
+        "connection-reset" => ("builtins", "ConnectionResetError", Some("ECONNRESET")),
+        "timed-out" => ("builtins", "TimeoutError", Some("ETIMEDOUT")),
+        "not-permitted" => ("builtins", "PermissionError", Some("EACCES")),
+        "invalid-handle" => ("builtins", "OSError", Some("EBADF")),
+        "host-not-found" => ("socket", "gaierror", None),
+        "handshake-failed" => ("ssl", "SSLError", None),
+        "certificate-error" => ("ssl", "SSLCertVerificationError", None),
+        _ => ("builtins", "OSError", None),
+    };
+    // urllib3 and friends match on CPython's "timed out" text as well as the type.
+    let kind = if err.kind == "timed-out" {
+        "timed out"
+    } else {
+        err.kind
+    };
+    let message = match err.message {
+        Some(m) => format!("{kind}: {m}"),
+        None => kind.to_string(),
+    };
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import(module)?.getattr(class)?;
+        let exc = match errno {
+            Some(name) => {
+                let errno = py.import("errno")?.getattr(name)?;
+                cls.call1((errno, message.clone()))?
+            }
+            None => cls.call1((message.clone(),))?,
+        };
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|_| pyo3::exceptions::PyOSError::new_err(message))
+}
+
+/// Flatten a network call result into a value or a raised exception.
+fn net_result<T>(
+    py: Python<'_>,
+    result: Result<Result<T, crate::NetError>, String>,
+) -> PyResult<T> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(net_error_to_py(py, err)),
+        Err(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+    }
+}
+
+/// Connect to a host:port over TCP and return the TCP handle.
+///
+/// `timeout_ms` is the guest-requested connect timeout in milliseconds, or `0`
+/// to defer to the host's configured timeout. The host always clamps it to its
+/// own ceiling.
+///
+/// Python signature: _eryx_tcp_connect(host: str, port: int, timeout_ms: int = 0) -> int
+#[pyfunction]
+#[pyo3(signature = (host, port, timeout_ms=0))]
+fn _eryx_tcp_connect(py: Python<'_>, host: String, port: u16, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::tcp_connect(&host, port, timeout_ms))
+}
+
+/// Read up to `length` bytes from a TCP connection.
+///
+/// Python signature: _eryx_tcp_read(handle: int, length: int, timeout_ms: int = 0) -> bytes
+#[pyfunction]
+#[pyo3(signature = (handle, length, timeout_ms=0))]
+fn _eryx_tcp_read(py: Python<'_>, handle: u32, length: u32, timeout_ms: u32) -> PyResult<Vec<u8>> {
+    net_result(py, crate::net_read(false, handle, length, timeout_ms))
+}
+
+/// Write to a TCP connection and return the number of bytes written.
+///
+/// Python signature: _eryx_tcp_write(handle: int, data: bytes, timeout_ms: int = 0) -> int
+#[pyfunction]
+#[pyo3(signature = (handle, data, timeout_ms=0))]
+fn _eryx_tcp_write(py: Python<'_>, handle: u32, data: Vec<u8>, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::net_write(false, handle, &data, timeout_ms))
+}
+
+/// Close a TCP connection.
+/// Python signature: _eryx_tcp_close(handle: int) -> None
+#[pyfunction]
+fn _eryx_tcp_close(handle: u32) {
+    crate::net_close(false, handle);
+}
+
+/// Upgrade a TCP connection to TLS and return the TLS handle.
+///
+/// Python signature: _eryx_tls_upgrade(tcp_handle: int, hostname: str, timeout_ms: int = 0) -> int
+#[pyfunction]
+#[pyo3(signature = (tcp_handle, hostname, timeout_ms=0))]
+fn _eryx_tls_upgrade(
+    py: Python<'_>,
+    tcp_handle: u32,
+    hostname: String,
+    timeout_ms: u32,
+) -> PyResult<u32> {
+    net_result(py, crate::tls_upgrade(tcp_handle, &hostname, timeout_ms))
+}
+
+/// Read up to `length` bytes from a TLS connection.
+///
+/// Python signature: _eryx_tls_read(handle: int, length: int, timeout_ms: int = 0) -> bytes
+#[pyfunction]
+#[pyo3(signature = (handle, length, timeout_ms=0))]
+fn _eryx_tls_read(py: Python<'_>, handle: u32, length: u32, timeout_ms: u32) -> PyResult<Vec<u8>> {
+    net_result(py, crate::net_read(true, handle, length, timeout_ms))
+}
+
+/// Write to a TLS connection and return the number of bytes written.
+///
+/// Python signature: _eryx_tls_write(handle: int, data: bytes, timeout_ms: int = 0) -> int
+#[pyfunction]
+#[pyo3(signature = (handle, data, timeout_ms=0))]
+fn _eryx_tls_write(py: Python<'_>, handle: u32, data: Vec<u8>, timeout_ms: u32) -> PyResult<u32> {
+    net_result(py, crate::net_write(true, handle, &data, timeout_ms))
+}
+
+/// Close a TLS connection.
+/// Python signature: _eryx_tls_close(handle: int) -> None
+#[pyfunction]
+fn _eryx_tls_close(handle: u32) {
+    crate::net_close(true, handle);
+}
+
+/// The _eryx module definition.
+/// This generates a `PyInit__eryx` function that can be registered with Python.
+#[pymodule]
+#[pyo3(name = "_eryx")]
+fn eryx_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(_eryx_invoke_async, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_report_trace, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_report_output, m)?)?;
+    // Async support functions
+    m.add_function(wrap_pyfunction!(waitable_set_new_, m)?)?;
+    m.add_function(wrap_pyfunction!(waitable_set_drop_, m)?)?;
+    m.add_function(wrap_pyfunction!(waitable_join_, m)?)?;
+    m.add_function(wrap_pyfunction!(context_set_, m)?)?;
+    m.add_function(wrap_pyfunction!(context_get_, m)?)?;
+    m.add_function(wrap_pyfunction!(subtask_drop_, m)?)?;
+    m.add_function(wrap_pyfunction!(subtask_cancel_, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_sleep_async, m)?)?;
+    m.add_function(wrap_pyfunction!(promise_get_result_, m)?)?;
+    // TCP networking functions
+    m.add_function(wrap_pyfunction!(_eryx_tcp_connect, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_read, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_write, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tcp_close, m)?)?;
+    // TLS networking functions
+    m.add_function(wrap_pyfunction!(_eryx_tls_upgrade, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_read, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_write, m)?)?;
+    m.add_function(wrap_pyfunction!(_eryx_tls_close, m)?)?;
+    Ok(())
+}
+
+// =============================================================================
+// Embedded _eryx_async module
+// =============================================================================
+//
+// This is eryx's native async runtime for Python. It provides a minimal
+// asyncio event loop implementation for the Component Model's async callback
+// protocol.
+
+/// Python code to inject the _eryx_async module into sys.modules.
+///
+/// This creates a new module object and executes the module code in its
+/// namespace, then registers it so `import _eryx_async` works.
+///
+/// The module provides:
+/// - `_EryxLoop`: Minimal asyncio event loop for Component Model async
+/// - `run_async(coro)`: Entry point for async execution, returns callback code
+/// - `resume(e0, e1, e2)`: Resume suspended execution after callback completes
+/// - `await_invoke(name, args_json)`: Invoke a callback and await its result
+const ERYX_ASYNC_INJECT_CODE: &std::ffi::CStr = cr#"
+import sys, types
+
+_eryx_async = types.ModuleType('_eryx_async')
+_eryx_async.__doc__ = 'Eryx async runtime - minimal asyncio event loop for Component Model async.'
+
+# Note: _eryx_async_import_results is initialized in ERYX_EXEC_INFRASTRUCTURE
+# (which runs after this) to ensure it's in __main__ for PyO3 getattr to find it.
+
+exec(compile(r'''
+"""Eryx async runtime - minimal asyncio event loop for Component Model async."""
+
+import asyncio
+import math
+import sys
+import time as _time
+import _eryx
+from contextvars import ContextVar, Context, copy_context
+from dataclasses import dataclass
+from typing import Any, Optional
+
+# Callback codes (returned from run_async/resume)
+EXIT = 0   # Execution complete
+WAIT = 2   # Execution pending, need to wait
+
+# Event types (from Component Model)
+_EVENT_NONE = 0
+_EVENT_SUBTASK = 1
+_EVENT_TASK_CANCELLED = 6
+
+# Status codes (for subtask events)
+_STATUS_RETURNED = 2
+
+@dataclass
+class _AsyncState:
+    """State for tracking pending async operations."""
+    waitable_set: Optional[int]
+    futures: dict[int, asyncio.Future]
+    handles: list[asyncio.Handle]
+    pending_count: int
+
+
+class _EryxTimerHandle(asyncio.TimerHandle):
+    """A TimerHandle backed by an in-flight host `sleep` subtask."""
+    __slots__ = ('_eryx_state', '_eryx_subtask', '_eryx_future')
+
+
+class _EryxLoop(asyncio.AbstractEventLoop):
+    """Minimal event loop for Component Model async.
+
+    Only implements the methods actually needed by asyncio.Task, timers and
+    our async runtime. All other methods raise NotImplementedError.
+
+    Timers (call_later/call_at) are host `sleep` subtasks in the waitable set,
+    so they fire only when the loop regains control: blocking code delays them.
+    """
+
+    def __init__(self):
+        self.running = True
+        self.exception = None
+
+    def poll(self, state: _AsyncState):
+        """Run pending callbacks until none remain."""
+        while True:
+            handles, state.handles = state.handles, []
+            for h in handles:
+                if not h._cancelled:
+                    h._run()
+            if self.exception is not None:
+                # Clear before raising: the loop outlives the execution, and a
+                # retained exception would be re-raised by every later poll.
+                exc, self.exception = self.exception, None
+                raise exc
+            if not handles and not state.handles:
+                return
+
+    # Required methods for asyncio.Task to work
+    def call_soon(self, callback, *args, context=None):
+        if context is None:
+            context = copy_context()
+        handle = asyncio.Handle(callback, args, self, context)
+        context[_async_state].handles.append(handle)
+        return handle
+
+    def create_task(self, coro, *, name=None, context=None):
+        return asyncio.Task(coro, loop=self, context=context)
+
+    def create_future(self):
+        return asyncio.Future(loop=self)
+
+    def is_running(self):
+        return self.running
+
+    def is_closed(self):
+        return not self.running
+
+    def get_debug(self):
+        return False
+
+    def call_exception_handler(self, context):
+        self.exception = context.get('exception')
+
+    def time(self):
+        return _time.monotonic()
+
+    def call_later(self, delay, callback, *args, context=None):
+        return self.call_at(self.time() + delay, callback, *args, context=context)
+
+    def call_at(self, when, callback, *args, context=None):
+        try:
+            state = _async_state.get()
+        except LookupError:
+            raise RuntimeError("timers can only be scheduled while async code is running") from None
+        handle = _EryxTimerHandle(when, callback, args, self, context)
+        handle._eryx_state = state
+        handle._eryx_subtask = None
+        handle._eryx_future = None
+        # Round up so the timer never fires before `when`; clamp to the u64 range.
+        delay_ns = (when - self.time()) * 1e9
+        delay_ns = 2**64 - 1 if delay_ns >= 2**64 else max(0, math.ceil(delay_ns))
+        subtask = _eryx._eryx_sleep_async(delay_ns)
+        if subtask is None:  # completed immediately
+            state.handles.append(handle)
+            return handle
+        future = self.create_future()
+        future.add_done_callback(lambda f: f.cancelled() or state.handles.append(handle))
+        handle._eryx_subtask = subtask
+        handle._eryx_future = future
+        state.futures[subtask] = future
+        if state.waitable_set is None:
+            state.waitable_set = _eryx.waitable_set_new_()
+        _eryx.waitable_join_(subtask, state.waitable_set)
+        return handle
+
+    def _timer_handle_cancelled(self, handle):
+        # Free the host sleeper now. The identity check skips a timer that has
+        # already fired, whose subtask id may since have been reused.
+        state, subtask = handle._eryx_state, handle._eryx_subtask
+        if subtask is not None and state.futures.get(subtask) is handle._eryx_future:
+            _cancel_subtask(state, subtask)
+
+    # Stub methods required by AbstractEventLoop
+    def run_forever(self): raise NotImplementedError
+    def run_until_complete(self, future): raise NotImplementedError
+    def stop(self): self.running = False
+    def close(self): self.running = False
+    def shutdown_asyncgens(self): return _noop()
+
+
+async def _noop():
+    pass
+
+
+# Module-level state
+_async_state: ContextVar[_AsyncState] = ContextVar("_async_state")
+_loop = _EryxLoop()
+asyncio.set_event_loop(_loop)
+_loop.running = True
+asyncio.events._set_running_loop(_loop)
+
+
+def _asyncio_run(main, *, debug=None, loop_factory=None):
+    """Stand-in for asyncio.run(), which can't start a loop inside the sandbox.
+
+    Top-level `asyncio.run(coro)` statements are rewritten to `await coro`
+    before they run (see _eryx_compile), so this is only reached from places
+    that can't await, such as a plain function body.
+    """
+    if asyncio.iscoroutine(main):
+        main.close()
+    raise RuntimeError(
+        "asyncio.run() only works as a top-level statement in the eryx sandbox, "
+        "whose event loop is already running; use `await` instead"
+    )
+
+
+asyncio.run = _asyncio_run
+
+
+def _set_async_state(state: _AsyncState) -> None:
+    _async_state.set(state)
+
+
+def is_success_exit(e: SystemExit) -> bool:
+    """Whether `sys.exit()` was called with a successful status (None or 0).
+
+    `sys.exit()` ends the script, not the interpreter: a successful status
+    completes the execution normally, any other is reported as an error.
+    """
+    return e.code is None or e.code == 0
+
+
+async def _return_result(coroutine: Any) -> None:
+    """Wrapper that decrements pending_count when coroutine completes."""
+    global _async_state
+    try:
+        await coroutine
+    except SystemExit as e:
+        if not is_success_exit(e):
+            _loop.exception = e
+    except BaseException as e:
+        _loop.exception = e
+    _async_state.get().pending_count -= 1
+
+
+def run_async(coro) -> int:
+    """Run a coroutine, return callback code (EXIT or WAIT|waitable_set<<4)."""
+    # Drop anything reported via call_exception_handler outside a poll (e.g. a
+    # never-retrieved task exception collected after a previous execution).
+    _loop.exception = None
+    ctx = Context()
+    state = _AsyncState(None, {}, [], 1)
+    ctx.run(_set_async_state, state)
+    asyncio.create_task(_return_result(coro), context=ctx)
+    return _poll(state)
+
+
+def resume(event0: int, event1: int, event2: int) -> int:
+    """Resume suspended execution after callback completes."""
+    state = _eryx.context_get_()
+
+    # Handle subtask completion
+    if event0 == _EVENT_SUBTASK and event2 == _STATUS_RETURNED:
+        _eryx.waitable_join_(event1, 0)
+        _eryx.subtask_drop_(event1)
+        future = state.futures.pop(event1)
+        # The awaiting task may have been cancelled since the callback returned.
+        if not future.cancelled():
+            future.set_result(event2)
+    elif event0 == _EVENT_NONE:
+        pass  # Just poll again
+    elif event0 == _EVENT_TASK_CANCELLED:
+        # The host cancelled the execution: unwind it like a cancelled task,
+        # so it finishes (with a CancelledError) instead of waiting forever.
+        for task in asyncio.all_tasks(_loop):
+            task.cancel()
+    # Other events (streams, futures) would go here if we supported them
+
+    return _poll(state)
+
+
+def _cancel_subtask(state: _AsyncState, waitable: int) -> None:
+    """Cancel an in-flight subtask and release it. No-op once it has resolved."""
+    if state.futures.pop(waitable, None) is None:
+        return
+    _eryx.waitable_join_(waitable, 0)
+    _eryx.subtask_cancel_(waitable)
+    _eryx.subtask_drop_(waitable)
+
+
+def _finish(state: _AsyncState) -> None:
+    """Release the execution's async resources once it is over.
+
+    Subtasks still in flight were abandoned (a never-awaited task, or a
+    `gather` sibling of a failure). They must be cancelled before the waitable
+    set can be dropped, and must not outlive this execution.
+    """
+    for waitable in list(state.futures):
+        _cancel_subtask(state, waitable)
+    if state.waitable_set is not None:
+        _eryx.waitable_set_drop_(state.waitable_set)
+        state.waitable_set = None
+    # Python tracing (if enabled) spans the whole execution, suspensions included.
+    sys.settrace(None)
+
+
+def _poll(state: _AsyncState) -> int:
+    """Poll the event loop and return callback code."""
+    done = True  # stays True if poll raises: the execution is over either way
+    try:
+        _loop.poll(state)
+        done = state.pending_count == 0
+    finally:
+        if done:
+            _finish(state)
+    if done:
+        return EXIT
+    assert state.waitable_set is not None, "pending but no waitable_set"
+    _eryx.context_set_(state)
+    return WAIT | (state.waitable_set << 4)
+
+
+async def await_invoke(name: str, args_json: str) -> str:
+    """Invoke a callback and await its result. Returns result JSON."""
+    import json
+
+    result_type, value = _eryx._eryx_invoke_async(name, args_json)
+
+    if result_type == 0:  # Ok - immediate completion
+        return value
+    elif result_type == 1:  # Err - immediate error
+        raise RuntimeError(value)
+    else:  # Pending - need to wait
+        waitable, promise = value
+        future = _loop.create_future()
+        state = _async_state.get()
+        state.futures[waitable] = future
+
+        if state.waitable_set is None:
+            state.waitable_set = _eryx.waitable_set_new_()
+        _eryx.waitable_join_(waitable, state.waitable_set)
+
+        try:
+            await future
+        except asyncio.CancelledError:
+            _cancel_subtask(state, waitable)
+            raise
+
+        # Get the result wrapper and parse it.
+        # Use waitable (the subtask ID) as the key, not promise (which is always 0).
+        result_json = _eryx.promise_get_result_(waitable)
+        try:
+            result = json.loads(result_json)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to parse callback result JSON: {e}. Raw: {result_json[:200]}") from e
+        if result.get('ok', False):
+            # Return the value as a JSON string
+            value = result.get('value', '')
+            # Always JSON-encode so invoke() can call json.loads()
+            return json.dumps(value)
+        else:
+            error = result.get('error')
+            if error is None:
+                raise RuntimeError(f"Callback failed with no error message. Result: {result}")
+            raise RuntimeError(error)
+
+
+# Network functions. The host completes these synchronously (on a fiber), so
+# the coroutines never suspend; they raise OSError subclasses on failure.
+async def await_tcp_connect(host: str, port: int) -> int:
+    """Connect to a host over TCP and return the handle."""
+    return _eryx._eryx_tcp_connect(host, port)
+
+
+async def await_tcp_read(handle: int, length: int) -> bytes:
+    """Read from a TCP connection."""
+    return _eryx._eryx_tcp_read(handle, length)
+
+
+async def await_tcp_write(handle: int, data: bytes) -> int:
+    """Write to a TCP connection, return bytes written."""
+    return _eryx._eryx_tcp_write(handle, data)
+
+
+def tcp_close(handle: int):
+    """Close a TCP connection."""
+    _eryx._eryx_tcp_close(handle)
+
+
+async def await_tls_upgrade(tcp_handle: int, hostname: str) -> int:
+    """Upgrade a TCP connection to TLS and return the TLS handle."""
+    return _eryx._eryx_tls_upgrade(tcp_handle, hostname)
+
+
+async def await_tls_read(handle: int, length: int) -> bytes:
+    """Read from a TLS connection."""
+    return _eryx._eryx_tls_read(handle, length)
+
+
+async def await_tls_write(handle: int, data: bytes) -> int:
+    """Write to a TLS connection, return bytes written."""
+    return _eryx._eryx_tls_write(handle, data)
+
+
+def tls_close(handle: int):
+    """Close a TLS connection."""
+    _eryx._eryx_tls_close(handle)
+''', '_eryx_async', 'exec'), _eryx_async.__dict__)
+
+sys.modules['_eryx_async'] = _eryx_async
+"#;
+
+// =============================================================================
+// Python interpreter state
+// =============================================================================
+
+/// Track whether we've initialized Python.
+static PYTHON_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// The callback declarations whose wrappers are currently installed, in the
+/// JSON form handed to `_eryx_install_callbacks`.
+///
+/// `None` means the installation is unknown or may have been disturbed, so
+/// the next [`setup_callbacks`] reinstalls unconditionally. Pre-initialization
+/// installs the empty set, and that value is carried in the snapshot, so a
+/// fresh instance with no callbacks never reinstalls.
+static INSTALLED_CALLBACKS: Mutex<Option<String>> = Mutex::new(None);
+
+/// Forget which callbacks are installed so the next setup reinstalls them.
+fn invalidate_installed_callbacks() {
+    if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
+        *installed = None;
+    }
+}
+
+/// Initialize Python interpreter.
+///
+/// This should be called once during `wit_dylib_initialize`.
+/// Subsequent calls are no-ops.
+///
+/// Prerequisites:
+/// - PYTHONPATH environment variable must be set to include stdlib paths
+///   (e.g., "/python-stdlib:/site-packages")
+/// - WASI preopened directories must be configured for those paths
+///
+/// Sets up:
+/// - The _eryx built-in module (for invoke() callback support)
+/// - Python interpreter (without signal handlers - not useful in WASM)
+/// - The _eryx_async module (embedded async runtime)
+/// - Ensures __main__ module exists for code execution
+///
+/// # `ERYX_EXEC_INFRASTRUCTURE`
+///
+/// Python code to set up execution infrastructure.
+/// This is run ONCE during `initialize_python()` and sets up:
+/// - Persistent stdout/stderr capture (reused across executions)
+/// - Socket patching for asyncio compatibility
+/// - The _eryx_exec() function that runs user code efficiently
+/// - The _eryx_install_callbacks() and _eryx_clear_state() helpers
+/// - User globals namespace (isolated from infrastructure)
+const ERYX_EXEC_INFRASTRUCTURE: &std::ffi::CStr = cr#"
+import sys as _sys
+import ast as _ast
+import types as _types
+
+# Patch socket.socketpair before importing asyncio
+# WASI doesn't support socketpair, so we create a dummy that works for asyncio's self-pipe
+import socket as _socket
+
+class _DummySocket:
+    '''Dummy socket for asyncio self-pipe in WASI.'''
+    def __init__(self):
+        self._buffer = []
+        self._closed = False
+    def fileno(self):
+        return -1
+    def setblocking(self, flag):
+        pass
+    def send(self, data):
+        self._buffer.append(data)
+        return len(data)
+    def recv(self, n):
+        if self._buffer:
+            return self._buffer.pop(0)
+        return b''
+    def close(self):
+        self._closed = True
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.close()
+
+def _dummy_socketpair(family=None, type=None, proto=0):
+    return (_DummySocket(), _DummySocket())
+
+_socket.socketpair = _dummy_socketpair
+
+# Streaming writer that both accumulates text and streams each write to the host.
+# Replaces StringIO for stdout/stderr capture so output appears in real-time.
+# Uses duck typing (plain class) rather than inheriting from _io.TextIOBase
+# because _io.TextIOBase may not be available in all WASI Python builds.
+class _EryxStreamingWriter:
+    def __init__(self, stream_id):
+        self._stream_id = stream_id
+        self._buffer = []
+        self.encoding = 'utf-8'
+        self.errors = 'surrogateescape'
+        self.newlines = None
+        self.name = '<stderr>' if stream_id else '<stdout>'
+        self.mode = 'w'
+        self.buffer = _EryxStreamingBuffer(self)
+    def _emit(self, data):
+        self._buffer.append(data)
+        _eryx_mod._eryx_report_output(self._stream_id, data)
+    def write(self, s):
+        if not isinstance(s, str):
+            raise TypeError("write() argument must be str")
+        if s:
+            self._emit(s.encode('utf-8', 'surrogateescape'))
+        return len(s)
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+    def getvalue(self):
+        return b''.join(self._buffer)
+    def reset(self):
+        self._buffer.clear()
+    def writable(self):
+        return True
+    def seekable(self):
+        return False
+    def readable(self):
+        return False
+    def isatty(self):
+        return False
+    def fileno(self):
+        import io
+        raise io.UnsupportedOperation("fileno")
+    def flush(self):
+        pass
+    @property
+    def closed(self):
+        return False
+
+# Binary view of a streaming writer, like sys.stdout.buffer.
+class _EryxStreamingBuffer:
+    def __init__(self, writer):
+        self._writer = writer
+    def write(self, b):
+        data = bytes(b)
+        if data:
+            self._writer._emit(data)
+        return len(data)
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+    def writable(self):
+        return True
+    def seekable(self):
+        return False
+    def readable(self):
+        return False
+    def isatty(self):
+        return False
+    def fileno(self):
+        return self._writer.fileno()
+    def flush(self):
+        pass
+    @property
+    def closed(self):
+        return False
+
+# Persistent stdout/stderr capture - created once, reused across executions
+_eryx_stdout = _EryxStreamingWriter(0)
+_eryx_stderr = _EryxStreamingWriter(1)
+_eryx_old_stdout = _sys.stdout
+_eryx_old_stderr = _sys.stderr
+
+# User globals namespace, kept separate from the infrastructure's module globals
+# so _eryx_* names don't appear in it (they remain reachable via `import __main__`)
+_eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
+
+# Async import results storage - keyed by subtask ID
+# Used by set_async_import_result/promise_get_result_ for concurrent callback safety
+# This MUST be in __main__ for PyO3 getattr to find it
+_eryx_async_import_results = {}
+
+# Import async infrastructure
+import _eryx_async
+import _eryx as _eryx_mod
+import json as _json
+
+# Callback code storage
+_eryx_callback_code = 0
+
+# Name of the user variable captured as the structured result (configurable via
+# the set-result-variable export). Defaults to 'result'.
+_eryx_result_var_name = 'result'
+# Capture slots populated by _eryx_capture_result() after each execution. Both use
+# the empty string as the "absent" sentinel (a JSON value is never the empty string,
+# so this is unambiguous). _eryx_result holds the JSON-serialized value; on a
+# serialization failure it stays '' and _eryx_result_error holds the reason.
+_eryx_result = ''
+_eryx_result_error = ''
+
+def _eryx_run_async(coro):
+    '''Run a coroutine using _eryx_async runtime.'''
+    global _eryx_callback_code
+    _eryx_callback_code = _eryx_async.run_async(coro)
+    return None
+
+# Trace function for sys.settrace
+def _eryx_trace_func(frame, event, arg):
+    '''Trace function called by Python for each execution event.'''
+    filename = frame.f_code.co_filename
+    if filename != '<user>':
+        return _eryx_trace_func
+
+    lineno = frame.f_lineno
+    func_name = frame.f_code.co_name
+
+    if func_name.startswith('_') and func_name != '<module>':
+        return _eryx_trace_func
+
+    if event == 'line':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "line"}), "")
+    elif event == 'call':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "call", "function": func_name}), "")
+    elif event == 'return':
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({"type": "return", "function": func_name}), "")
+    elif event == 'exception':
+        exc_type, exc_value, _ = arg
+        if exc_type is StopIteration:
+            return _eryx_trace_func
+        _eryx_mod._eryx_report_trace(lineno, _json.dumps({
+            "type": "exception",
+            "exception_type": exc_type.__name__ if exc_type else "Unknown",
+            "message": str(exc_value) if exc_value else ""
+        }), "")
+
+    return _eryx_trace_func
+
+# Whether this instance's site-packages mounts have been put on sys.path.
+_eryx_site_packages_added = False
+
+def _eryx_add_site_packages():
+    '''Put the site-packages directories mounted on this instance on sys.path.
+
+    The host mounts them at /site-packages, /site-packages-1, ... and lists them
+    in PYTHONPATH, but an instance restored from the pre-init snapshot keeps the
+    snapshot's sys.path (and environment), so PYTHONPATH never takes effect.
+    Mounts are fixed for an instance's lifetime, so this runs once per instance.
+    '''
+    global _eryx_site_packages_added
+    _eryx_site_packages_added = True
+    import os
+    mounts = []
+    while True:
+        path = '/site-packages-%d' % len(mounts) if mounts else '/site-packages'
+        if not os.path.isdir(path):
+            break
+        mounts.append(path)
+    # Where the host's PYTHONPATH puts them: right after /python-stdlib, so a
+    # package can't shadow the standard library.
+    new = [p for p in mounts if p not in _sys.path]
+    at = _sys.path.index('/python-stdlib') + 1 if '/python-stdlib' in _sys.path else 0
+    _sys.path[at:at] = new
+
+class _EryxAsyncioRunRewriter(_ast.NodeTransformer):
+    '''Rewrite top-level `asyncio.run(coro)` calls into `await coro`.
+
+    The sandbox's event loop is already running, so the real asyncio.run()
+    refuses to start. At the top level, where await is allowed, the call can
+    simply await the coroutine on the running loop instead. Function, class,
+    lambda and comprehension bodies are left alone: asyncio.run() there hits
+    the shim in _eryx_async, which explains the limitation.
+    '''
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        func = node.func
+        if (isinstance(func, _ast.Attribute) and func.attr == 'run'
+                and isinstance(func.value, _ast.Name) and func.value.id == 'asyncio'
+                and len(node.args) == 1 and not isinstance(node.args[0], _ast.Starred)
+                and all(k.arg == 'debug' for k in node.keywords)):
+            return _ast.copy_location(_ast.Await(node.args[0]), node)
+        return node
+
+    def _skip(self, node):
+        return node
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = _skip
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = _skip
+
+def _eryx_compile(code, filename):
+    '''Compile a unit of code with top-level await support.'''
+    source = code
+    # Only parse ahead of compile() for code that might call asyncio.run().
+    if 'asyncio' in code and '.run' in code:
+        source = _EryxAsyncioRunRewriter().visit(_ast.parse(code, filename))
+    return compile(source, filename, 'exec', flags=_ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+
+def _eryx_start(compiled):
+    '''Run a compiled unit in the user namespace, returning a coroutine if it awaits.'''
+    if compiled.co_flags & 0x80:  # CO_COROUTINE
+        return _types.FunctionType(compiled, _eryx_user_globals)()
+    exec(compiled, _eryx_user_globals, _eryx_user_globals)
+
+async def _eryx_run_units(units):
+    '''Run compiled units in order on the event loop.'''
+    for compiled in units:
+        coro = _eryx_start(compiled)
+        if coro is not None:
+            await coro
+
+def _eryx_exec(code, trace_enabled, preamble):
+    '''Execute user code efficiently. Called once per execute().
+
+    This function is pre-compiled and runs user code in its own namespace, so
+    infrastructure variables (_eryx_*) don't clutter the user's globals. They
+    are not hidden: user code can still reach them via `import __main__`.
+
+    The host's preamble (libraries, secrets) is compiled as its own unit and
+    runs first, so line numbers in the user code's tracebacks match the code
+    the user wrote.
+    '''
+    global _eryx_callback_code
+    _eryx_callback_code = 0
+
+    if not _eryx_site_packages_added:
+        _eryx_add_site_packages()
+
+    # Clear async results from any previous execution (critical for preinit)
+    _eryx_async_import_results.clear()
+
+    # Clear and redirect stdout/stderr
+    _eryx_stdout.reset()
+    _eryx_stderr.reset()
+    _sys.stdout = _eryx_stdout
+    _sys.stderr = _eryx_stderr
+
+    units = [_eryx_compile(code, '<user>')]
+    if preamble:
+        units.insert(0, _eryx_compile(preamble, '<preamble>'))
+
+    # Callback trace events are emitted independently by invoke and are
+    # unaffected by this Python line/call/return/exception tracing switch.
+    if trace_enabled:
+        _sys.settrace(_eryx_trace_func)
+
+    if any(c.co_flags & 0x80 for c in units):  # CO_COROUTINE
+        # _eryx_async stops tracing once the execution finishes, which is after
+        # this returns if it suspends on a callback.
+        _eryx_run_async(_eryx_start(units[0]) if len(units) == 1 else _eryx_run_units(units))
+        return
+    try:
+        # Regular synchronous code - execute in user namespace
+        for compiled in units:
+            exec(compiled, _eryx_user_globals, _eryx_user_globals)
+    except SystemExit as e:
+        if not _eryx_async.is_success_exit(e):
+            raise
+    finally:
+        if trace_enabled:
+            _sys.settrace(None)
+
+# The run-command export: `python3 ARGS...` on a fresh instance, reading and
+# writing the real fds 0/1/2. Its exit status, read by the export once the
+# command finishes (which may be after it suspends on an asyncio timer).
+_eryx_command_status = 0
+_eryx_infra_globals = globals()
+
+class _EryxUsage(Exception):
+    '''A command line python3 can't run: exits 2 with the message.'''
+
+# Flags with no effect here: unbuffered (the command flushes on exit), no
+# bytecode, quiet, and the isolation flags (there's nothing to isolate from).
+_ERYX_IGNORED_FLAGS = frozenset('uBIEsq')
+
+def _eryx_parse_command(argv):
+    '''Split python3's argv into (mode, target, sys.argv).
+
+    mode is 'c' (target is the code), 'm' (the module), 'file' (the path),
+    'stdin', or 'version'. Only what scripts and agents actually type.
+    '''
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ('-c', '-m'):
+            if i + 1 == len(argv):
+                raise _EryxUsage('Argument expected for the %s option' % arg)
+            return arg[1], argv[i + 1], [arg] + argv[i + 2:]
+        if arg in ('-V', '--version'):
+            return 'version', None, None
+        if arg == '-':
+            return 'stdin', None, argv[i:]
+        if arg == '--':
+            i += 1
+            break
+        if not arg.startswith('-'):
+            break
+        if len(arg) > 1 and arg[1] != '-' and set(arg[1:]) <= _ERYX_IGNORED_FLAGS:
+            i += 1
+            continue
+        raise _EryxUsage('unsupported option %s (supported: -c, -m, -, a script, -V and -u, -B, -I, -E, -s, -q)' % arg)
+    if i < len(argv):
+        return 'file', argv[i], argv[i:]
+    return 'stdin', None, ['']
+
+def _eryx_exit_status(code):
+    '''The exit status `SystemExit(code)` ends a process with, as CPython does.'''
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code & 0xff
+    print(code, file=_sys.stderr)
+    return 1
+
+def _eryx_print_command_error(e):
+    '''Print an uncaught exception's traceback, minus the eryx frames above the user's.'''
+    import traceback
+    tb = e.__traceback__
+    while tb is not None and tb.tb_frame.f_globals is _eryx_infra_globals:
+        tb = tb.tb_next
+    traceback.print_exception(type(e), e, tb, file=_sys.stderr)
+
+def _eryx_command_source(mode, target):
+    '''The (source, filename, globals) a command other than -m runs.'''
+    user_globals = {'__builtins__': __builtins__, '__name__': '__main__',
+                    '__package__': None, '__spec__': None}
+    if mode == 'c':
+        return target, '<string>', user_globals
+    if mode == 'stdin':
+        return _sys.stdin.read(), '<stdin>', user_globals
+    import tokenize
+    try:
+        with tokenize.open(target) as f:
+            source = f.read()
+    except OSError as e:
+        raise _EryxUsage("can't open file %r: [Errno %s] %s" % (target, e.errno, e.strerror)) from None
+    user_globals['__file__'] = target
+    return source, target, user_globals
+
+async def _eryx_command_main(argv):
+    '''Run python3's command line, leaving its exit status in _eryx_command_status.'''
+    global _eryx_command_status
+    status = 0
+    try:
+        mode, target, new_argv = _eryx_parse_command(argv)
+        if mode == 'version':
+            print('Python ' + _sys.version.split()[0])
+        elif mode == 'm':
+            import runpy
+            _sys.argv = new_argv
+            _sys.path.insert(0, '')
+            runpy.run_module(target, run_name='__main__', alter_sys=True)
+        else:
+            source, filename, user_globals = _eryx_command_source(mode, target)
+            _sys.argv = new_argv
+            if mode == 'file':
+                import os
+                _sys.path.insert(0, os.path.dirname(os.path.abspath(target)))
+            else:
+                _sys.path.insert(0, '')
+            # The execute export's compile, so a top-level `asyncio.run(main())`
+            # (or await) runs on the guest's own event loop.
+            compiled = _eryx_compile(source, filename)
+            if compiled.co_flags & 0x80:  # CO_COROUTINE
+                await _types.FunctionType(compiled, user_globals)()
+            else:
+                exec(compiled, user_globals)
+    except _EryxUsage as e:
+        print('python3: %s' % e, file=_sys.stderr)
+        status = 2
+    except SystemExit as e:
+        status = _eryx_exit_status(e.code)
+    except BaseException as e:
+        _eryx_print_command_error(e)
+        status = 1
+    for stream in (_sys.stdout, _sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    _eryx_command_status = status
+
+def _eryx_run_command(argv, env, cwd):
+    '''Start python3's command line (the run-command export).
+
+    Sets _eryx_callback_code like _eryx_exec: WAIT while an asyncio timer is
+    pending. The exit status is in _eryx_command_status once it's done.
+    '''
+    global _eryx_callback_code, _eryx_command_status
+    import os
+    if not _eryx_site_packages_added:
+        _eryx_add_site_packages()
+    # Commands write straight to the real fds, not the execute capture.
+    _sys.stdout, _sys.stderr = _eryx_old_stdout, _eryx_old_stderr
+    os.environ.clear()
+    os.environ.update(env)
+    _eryx_callback_code = 0
+    _eryx_command_status = 0
+    try:
+        os.chdir(cwd)
+    except OSError as e:
+        print("python3: can't change to %r: %s" % (cwd, e.strerror), file=_sys.stderr)
+        _eryx_command_status = 1
+        return
+    _eryx_callback_code = _eryx_async.run_async(_eryx_command_main(list(argv)))
+
+def _eryx_get_output():
+    '''Get captured stdout and restore original streams.'''
+    _sys.stdout = _eryx_old_stdout
+    _sys.stderr = _eryx_old_stderr
+    return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
+
+def _eryx_get_output_keep_capture():
+    '''Get captured stdout without restoring streams (for pending async).'''
+    return _eryx_stdout.getvalue(), _eryx_stderr.getvalue()
+
+def _eryx_capture_result():
+    '''JSON-serialize the user's result variable, if present.
+
+    Sets module globals _eryx_result (JSON string, or '' if the variable is unset)
+    and _eryx_result_error (a message when the variable exists but is not
+    JSON-serializable, else ''). Never raises: serialization failure is a soft side
+    channel, not an execution error.
+
+    The variable is *consumed* (deleted from the user namespace) after reading, so
+    the result is genuinely per-execution: in a persistent session, a later run that
+    does not set it reports no result rather than re-reporting a stale value.
+
+    Uses allow_nan=False so non-finite floats (nan/inf) are reported via
+    _eryx_result_error instead of emitting the invalid-JSON tokens NaN/Infinity.
+    '''
+    global _eryx_result, _eryx_result_error
+    _eryx_result = ''
+    _eryx_result_error = ''
+    name = _eryx_result_var_name
+    if name in _eryx_user_globals:
+        value = _eryx_user_globals.pop(name)
+        try:
+            _eryx_result = _json.dumps(value, allow_nan=False)
+        except Exception as e:
+            _eryx_result_error = (
+                'result is not JSON-serializable: ' + type(value).__name__
+                + ' (' + type(e).__name__ + ')'
+            )
+
+def _eryx_discard_result():
+    '''Consume the result variable without capturing it.
+
+    Called on the execution error path: when user code raises, _eryx_capture_result()
+    never runs, so the result variable would otherwise linger in the user namespace
+    and leak into the *next* successful run of a persistent session. Popping it here
+    preserves the per-execution guarantee (an erroring run reports no result, and the
+    stale value is gone). Also resets the capture slots so a prior run's value is not
+    re-reported. Never raises.
+    '''
+    global _eryx_result, _eryx_result_error
+    _eryx_result = ''
+    _eryx_result_error = ''
+    _eryx_user_globals.pop(_eryx_result_var_name, None)
+
+def _eryx_install_callbacks(callbacks_json):
+    '''Install the callback API and wrappers for the host's callback set.
+
+    Called by the host's setup_callbacks() whenever the declared set differs
+    from the installed one. Everything is defined fresh on each call, so user
+    changes to a previous install (e.g. invoke.__code__, class attributes) do
+    not survive a reinstall, and nothing is compiled per call.
+    '''
+    global _eryx_installed
+    import asyncio as _asyncio
+    import json as _json
+    import _eryx
+    import _eryx_async
+
+    # Remove the wrappers installed for the previous callback set, so a callback
+    # the host no longer provides is not left callable. A name the user has since
+    # rebound to something else is theirs and stays.
+    for _name, _obj in globals().get('_eryx_installed', {}).items():
+        if _eryx_user_globals.get(_name) is _obj:
+            del _eryx_user_globals[_name]
+        if globals().get(_name) is _obj:
+            del globals()[_name]
+    # Wrappers and namespaces installed below, by name.
+    _eryx_installed = {}
+
+    # The payload key positional args are sent under (see invoke)
+    _eryx_args_key = '__eryx_args__'
+
+    # Callbacks metadata from host
+    _eryx_callbacks = _json.loads(callbacks_json)
+
+    async def invoke(_callback_name, *args, **kwargs):
+        """Invoke a host callback by name (async).
+
+        Args:
+            _callback_name: Name of the callback (e.g., "sleep", "http.get")
+            *args: Positional arguments. The host binds them to the
+                callback's parameters in the order of its schema (a prefix
+                callback gets them unbound)
+            **kwargs: Arguments to pass to the callback
+
+        Returns:
+            The callback result (parsed from JSON)
+
+        Example:
+            result = await invoke("get_time")
+            data = await invoke("http.get", url="https://example.com")
+        """
+        # Positional args travel under a reserved key, since the payload is
+        # one JSON object; a kwarg of that name would be mistaken for them
+        if _eryx_args_key in kwargs:
+            raise TypeError(
+                f"{_callback_name}() got the keyword argument '{_eryx_args_key}', "
+                f"which is reserved for positional arguments"
+            )
+        if args:
+            kwargs[_eryx_args_key] = list(args)
+
+        # Serialize kwargs to canonical JSON (sorted keys, compact, no NaN/inf).
+        # Hosts key callback replay journals on this text verbatim, so it must be
+        # deterministic for equal arguments.
+        # Dict keys that can't be compared with each other (e.g. int with str,
+        # None with anything) can't be sorted; then the whole payload
+        # goes unsorted. Insertion order still keeps the text deterministic per
+        # script, as args were before #529. The retry runs outside the handler so
+        # a real error (e.g. not JSON serializable) raises once, unchained.
+        _sortable = True
+        try:
+            args_json = _json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except TypeError:
+            _sortable = False
+        if not _sortable:
+            args_json = _json.dumps(kwargs, sort_keys=False, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+        # Report callback start trace event
+        _eryx._eryx_report_trace(0, _json.dumps({"type": "callback_start", "name": _callback_name}), args_json)
+
+        # Exactly one callback_end per start, however the call ends: the
+        # host times calls by pairing them by name, so a missing or extra end
+        # shifts every later duration for that name. A cancelled call
+        # (asyncio.wait_for, a TaskGroup whose sibling failed) raises
+        # CancelledError, a BaseException, so `except Exception` misses it.
+        # GeneratorExit is the exception: it means a call abandoned in an
+        # earlier execution is being closed (by a later garbage collection),
+        # and an end now would land in that later execution's trace.
+        _error = None
+        _report = True
+        try:
+            # Use _eryx_async.await_invoke for proper async handling
+            result_json = await _eryx_async.await_invoke(_callback_name, args_json)
+        except BaseException as e:
+            if isinstance(e, GeneratorExit):
+                _report = False
+            elif isinstance(e, _asyncio.CancelledError):
+                _error = "cancelled"
+            elif isinstance(e, Exception):
+                _error = str(e)
+            else:
+                _error = type(e).__name__
+            raise
+        finally:
+            if _report:
+                _end = {"type": "callback_end", "name": _callback_name}
+                if _error is not None:
+                    _end["error"] = _error
+                _eryx._eryx_report_trace(0, _json.dumps(_end), "")
+        # Outside the try: the call itself succeeded even if its result
+        # doesn't parse, and that mustn't report a second end.
+        if result_json:
+            return _json.loads(result_json)
+        return None
+
+    def list_callbacks():
+        """List all available callbacks for introspection.
+
+        Returns:
+            List of callback info dicts with 'name', 'description',
+            and 'parameters_schema' keys.
+        """
+        return [
+            {
+                'name': cb['name'],
+                'description': cb['description'],
+                'parameters_schema': _json.loads(cb['parameters_schema_json']) if cb['parameters_schema_json'] else None
+            }
+            for cb in _eryx_callbacks
+        ]
+
+    # Reserved names that shouldn't be shadowed by callbacks
+    _eryx_reserved = set(dir(__builtins__)) | {
+        'invoke', 'list_callbacks', 'asyncio', 'json', 'math', 're',
+        'os', 'subprocess', 'socket', '__import__'
+    }
+
+    # Callback declarations by name. A name ending in `.*` declares a prefix
+    # callback: the host routes every name under the part before it to that one
+    # callback, so nothing is known here about the names under it.
+    _eryx_by_name = {_cb['name']: _cb for _cb in _eryx_callbacks}
+    _eryx_param_cache = {}
+
+    # Ordered parameter names from a callback's schema, parsed on first use
+    def _eryx_param_names(_name):
+        _names = _eryx_param_cache.get(_name)
+        if _names is None:
+            _names = []
+            _cb = _eryx_by_name.get(_name)
+            if _cb is not None and _cb.get('parameters_schema_json'):
+                _s = _json.loads(_cb['parameters_schema_json'])
+                if isinstance(_s, dict):
+                    _names = list(_s.get('properties', {}).keys())
+            _eryx_param_cache[_name] = _names
+        return _names
+
+    # Map positional args onto schema parameter names, like a Python function would
+    def _eryx_bind_positional(_name, _param_names, _args, _kwargs):
+        if len(_args) > len(_param_names):
+            raise TypeError(
+                f"{_name}() takes {len(_param_names)} positional argument"
+                f"{'' if len(_param_names) == 1 else 's'} but {len(_args)} "
+                f"{'was' if len(_args) == 1 else 'were'} given"
+            )
+        for _p, _a in zip(_param_names, _args):
+            if _p in _kwargs:
+                raise TypeError(f"{_name}() got multiple values for argument '{_p}'")
+            _kwargs[_p] = _a
+
+    # Bind positional args for a call of `_name`, returning those left unbound.
+    # A name under a prefix callback that isn't also its own callback has no
+    # schema here, so its positional args go to the host, which binds them.
+    def _eryx_bind_args(_name, _args, _kwargs, _under_prefix):
+        if not _args or (_under_prefix and _name not in _eryx_by_name):
+            return _args
+        _eryx_bind_positional(_name, _eryx_param_names(_name), _args, _kwargs)
+        return ()
+
+    # Helper to create async callback wrappers
+    def _eryx_make_callback(_cb_name):
+        async def callback(*args, **kwargs):
+            _eryx_bind_args(_cb_name, args, kwargs, False)
+            return await invoke(_cb_name, **kwargs)
+        callback.__name__ = _cb_name
+        callback.__doc__ = f"Invoke the '{_cb_name}' callback (async)."
+        return callback
+
+    # Namespace class for dotted callbacks like http.get. Under a prefix
+    # callback (`_under_prefix`), any child resolves to another namespace, so
+    # names of any depth can be called.
+    class _EryxNamespace:
+        def __init__(self, invoke_fn, prefix='', under_prefix=False):
+            self._invoke = invoke_fn
+            self._prefix = prefix
+            self._children = {}
+            self._under_prefix = under_prefix
+
+        def _add_callback(self, parts):
+            if len(parts) == 1:
+                pass  # Leaf - handled by __getattr__
+            else:
+                child = parts[0]
+                if child not in self._children:
+                    new_prefix = f"{self._prefix}{child}." if self._prefix else f"{child}."
+                    self._children[child] = _EryxNamespace(self._invoke, new_prefix)
+                self._children[child]._add_callback(parts[1:])
+
+        def _mark_prefix(self, parts):
+            # Mark the namespace `parts` names, and everything below it, as
+            # handled by a prefix callback
+            if parts:
+                self._children[parts[0]]._mark_prefix(parts[1:])
+                return
+            self._under_prefix = True
+            for _c in self._children.values():
+                _c._mark_prefix(())
+
+        def _resolve(self, name):
+            if name in self._children:
+                return self._children[name]
+            full_name = f"{self._prefix}{name}"
+            if self._under_prefix:
+                return _EryxNamespace(self._invoke, full_name + '.', True)
+            return _EryxCallbackLeaf(self._invoke, full_name)
+
+        def __getattr__(self, name):
+            if name.startswith('_'):
+                raise AttributeError(name)
+            return self._resolve(name)
+
+        def __getitem__(self, name):
+            return self._resolve(name)
+
+        async def __call__(self, *args, **kwargs):
+            if self._prefix:
+                _full = self._prefix.rstrip('.')
+                # A namespace like `a.b` binds positional args only when it is
+                # also a callback; otherwise let invoke() report it unknown
+                if self._under_prefix or _full in _eryx_by_name:
+                    args = _eryx_bind_args(_full, args, kwargs, self._under_prefix)
+                return await self._invoke(_full, *args, **kwargs)
+            raise TypeError("Cannot call root namespace")
+
+        def __repr__(self):
+            return f"<EryxNamespace '{self._prefix.rstrip('.')}'>"
+
+    class _EryxCallbackLeaf:
+        def __init__(self, invoke_fn, name):
+            self._invoke = invoke_fn
+            self._name = name
+
+        async def __call__(self, *args, **kwargs):
+            _eryx_bind_args(self._name, args, kwargs, False)
+            return await self._invoke(self._name, **kwargs)
+
+        def __repr__(self):
+            return f"<EryxCallback '{self._name}'>"
+
+    # Generate callback wrappers - add to both module globals and user globals
+    _eryx_namespaces = {}
+    _eryx_prefix_parts = []
+    for _cb in _eryx_callbacks:
+        _name = _cb['name']
+        if '.' in _name:
+            _parts = _name.split('.')
+            _root = _parts[0]
+            if _root not in _eryx_reserved:
+                if _root not in _eryx_namespaces:
+                    # Create root namespace with prefix=root+'.' so children get full path
+                    _eryx_namespaces[_root] = _EryxNamespace(invoke, _root + '.')
+                # Skip the root part since we've already accounted for it in the prefix
+                _eryx_namespaces[_root]._add_callback(_parts[1:])
+                if _parts[-1] == '*':
+                    _eryx_prefix_parts.append(_parts[:-1])
+        else:
+            if _name not in _eryx_reserved:
+                _wrapper = _eryx_make_callback(_name)
+                globals()[_name] = _wrapper
+                _eryx_user_globals[_name] = _wrapper
+                _eryx_installed[_name] = _wrapper
+    # Mark prefixes once the tree is built, so namespaces created for other
+    # callbacks under a prefix are marked too
+    for _parts in _eryx_prefix_parts:
+        _eryx_namespaces[_parts[0]]._mark_prefix(_parts[1:])
+
+    # Add namespaces to both module globals and user globals
+    globals().update(_eryx_namespaces)
+    _eryx_user_globals.update(_eryx_namespaces)
+    _eryx_installed.update(_eryx_namespaces)
+
+    # Inject core API into user globals so user code can access callbacks
+    _eryx_user_globals['invoke'] = invoke
+    _eryx_user_globals['list_callbacks'] = list_callbacks
+    _eryx_user_globals['_EryxNamespace'] = _EryxNamespace
+    _eryx_user_globals['_EryxCallbackLeaf'] = _EryxCallbackLeaf
+
+def _eryx_clear_state():
+    '''Remove all user-defined state from _eryx_user_globals.
+
+    Keeps builtins, module metadata and the callback infrastructure; the host
+    reinstalls the callbacks on the next execution regardless.
+    '''
+    # Items to keep (builtins and metadata)
+    _eryx_keep = {
+        '__builtins__', '__name__', '__doc__', '__package__',
+        '__loader__', '__spec__', '__cached__', '__file__',
+        # Preserve callback infrastructure
+        'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
+    }
+
+    # Also keep callback wrappers and namespace objects
+    def _eryx_should_keep(k, v):
+        if k in _eryx_keep:
+            return True
+        # Keep callback wrappers under the name they were installed as; a user
+        # alias of one is user state.
+        if k in _eryx_installed and _eryx_installed[k] is v:
+            return True
+        # Keep namespace objects
+        if type(v).__name__ in ('_EryxNamespace', '_EryxCallbackLeaf'):
+            return True
+        return False
+
+    # Collect keys to delete (can't modify dict during iteration), then delete
+    for _k in [k for k, v in list(_eryx_user_globals.items()) if not _eryx_should_keep(k, v)]:
+        del _eryx_user_globals[_k]
+"#;
+
+// =============================================================================
+// Socket shim module for TLS networking
+// =============================================================================
+//
+// This provides a minimal socket module replacement that works with HTTP client
+// libraries like requests and httpx. The socket itself doesn't do networking -
+// it just holds connection parameters until ssl.wrap_socket() is called.
+
+// =============================================================================
+// SSL shim module for TLS networking
+// =============================================================================
+//
+// This provides a minimal ssl module replacement that performs TLS connections
+// via the WIT TLS interface. The ssl module is where actual networking happens -
+// ssl.wrap_socket() or SSLContext.wrap_socket() triggers the TLS connection.
+
+/// Python code to create and inject the ssl_eryx shim module.
+/// This replaces sys.modules['ssl'] with our TLS-backed implementation.
+pub const SSL_SHIM_CODE: &std::ffi::CStr = cr#"
+import sys as _sys
+import types as _types
+
+# Create ssl_eryx module
+_ssl_eryx = _types.ModuleType('ssl')
+_ssl_eryx.__doc__ = 'Eryx ssl shim - minimal ssl module backed by eryx TLS imports.'
+
+exec(compile(r'''
+"""Eryx ssl shim - minimal ssl module backed by eryx TLS imports.
+
+This module provides the ssl API that HTTP client libraries need. Actual
+TLS connections are performed via the _eryx module's TLS functions which
+call the WIT TLS interface.
+"""
+
+import _eryx
+
+# Protocol constants (for compatibility checks)
+PROTOCOL_TLS = 2
+PROTOCOL_TLS_CLIENT = 16
+PROTOCOL_TLS_SERVER = 17
+PROTOCOL_SSLv23 = PROTOCOL_TLS  # Alias
+
+# Verification modes
+CERT_NONE = 0
+CERT_OPTIONAL = 1
+CERT_REQUIRED = 2
+
+# Feature flags that urllib3/httpx check
+HAS_SNI = True
+HAS_ALPN = True
+HAS_NPN = False
+HAS_NEVER_CHECK_COMMON_NAME = True
+HAS_SSLv2 = False
+HAS_SSLv3 = False
+HAS_TLSv1 = False
+HAS_TLSv1_1 = False
+HAS_TLSv1_2 = True
+HAS_TLSv1_3 = True
+
+# Options (ignored - host handles TLS config)
+OP_NO_SSLv2 = 0x01000000
+OP_NO_SSLv3 = 0x02000000
+OP_NO_TLSv1 = 0x04000000
+OP_NO_TLSv1_1 = 0x10000000
+OP_NO_TLSv1_2 = 0x08000000
+OP_NO_COMPRESSION = 0x00020000
+OP_NO_TICKET = 0x00004000
+OP_ALL = 0x80000FFF
+OP_SINGLE_DH_USE = 0x100000
+OP_SINGLE_ECDH_USE = 0x80000
+OP_CIPHER_SERVER_PREFERENCE = 0x400000
+
+# Alert descriptions
+ALERT_DESCRIPTION_HANDSHAKE_FAILURE = 40
+ALERT_DESCRIPTION_CERTIFICATE_UNKNOWN = 46
+
+# Verify flags
+VERIFY_DEFAULT = 0
+VERIFY_CRL_CHECK_LEAF = 4
+VERIFY_CRL_CHECK_CHAIN = 12
+VERIFY_X509_STRICT = 32
+VERIFY_X509_TRUSTED_FIRST = 64
+VERIFY_X509_PARTIAL_CHAIN = 0x80000
+
+
+class SSLError(OSError):
+    """SSL/TLS error."""
+    pass
+
+
+class SSLCertVerificationError(SSLError):
+    """Certificate verification failed."""
+    pass
+
+
+class CertificateError(SSLError):
+    """Certificate error."""
+    pass
+
+
+class SSLWantReadError(SSLError):
+    """Non-blocking operation would block on read."""
+    pass
+
+
+class SSLWantWriteError(SSLError):
+    """Non-blocking operation would block on write."""
+    pass
+
+
+class SSLContext:
+    """SSL context for configuring TLS connections.
+
+    Most settings are ignored - the host controls actual TLS configuration.
+    This exists for API compatibility with urllib3/httpx.
+    """
+
+    def __init__(self, protocol=PROTOCOL_TLS_CLIENT):
+        self.protocol = protocol
+        self.verify_mode = CERT_REQUIRED
+        self.check_hostname = True
+        self.options = OP_ALL | OP_NO_SSLv2 | OP_NO_SSLv3
+        self._alpn_protocols = None
+        self.minimum_version = None
+        self.maximum_version = None
+        self.hostname_checks_common_name = False
+        self.post_handshake_auth = False  # Python 3.8+ attribute, ignored in sandbox
+
+    @property
+    def verify_flags(self):
+        return VERIFY_DEFAULT
+
+    @verify_flags.setter
+    def verify_flags(self, value):
+        pass  # Ignored
+
+    def set_alpn_protocols(self, protocols):
+        self._alpn_protocols = protocols
+
+    def set_ciphers(self, ciphers):
+        pass  # Host controls ciphers
+
+    def set_default_verify_paths(self):
+        pass  # Host uses system certs
+
+    def load_default_certs(self, purpose=None):
+        pass  # Host uses system certs
+
+    def load_cert_chain(self, certfile, keyfile=None, password=None):
+        pass  # Client certs not supported yet
+
+    def load_verify_locations(self, cafile=None, capath=None, cadata=None):
+        pass  # Host handles cert verification
+
+    def wrap_socket(self, sock, server_side=False, do_handshake_on_connect=True,
+                    suppress_ragged_eofs=True, server_hostname=None,
+                    session=None):
+        if server_side:
+            raise SSLError("Server-side TLS not supported in sandbox")
+        return SSLSocket(sock, self, server_hostname, do_handshake_on_connect)
+
+    def wrap_bio(self, incoming, outgoing, server_side=False,
+                 server_hostname=None, session=None):
+        raise SSLError("wrap_bio not supported in sandbox")
+
+
+class SSLSocket:
+    """TLS-wrapped socket.
+
+    Performs the actual TLS connection via _eryx TLS functions.
+    """
+
+    def __init__(self, sock, context, server_hostname, do_handshake_on_connect):
+        self._sock = sock
+        self._context = context
+        self._server_hostname = server_hostname
+        self._connected = False
+        self._closed = False
+
+        if do_handshake_on_connect and sock._tcp_handle is not None:
+            self.do_handshake()
+
+    def do_handshake(self):
+        """Perform TLS handshake by upgrading the TCP connection."""
+        if self._connected:
+            return
+
+        # Socket must already have a TCP connection
+        if self._sock._tcp_handle is None:
+            raise SSLError("Socket not connected - call connect() before wrap_socket()")
+
+        hostname = self._server_hostname
+        if not hostname and self._sock._pending_address:
+            hostname = self._sock._pending_address[0]
+        if not hostname:
+            raise SSLError("No hostname available for TLS handshake")
+
+        import _eryx
+        # Raises SSLError/SSLCertVerificationError, or an OSError subclass for
+        # a failure of the underlying connection.
+        self._sock._tls_handle = _eryx._eryx_tls_upgrade(
+            self._sock._tcp_handle, hostname, self._sock._timeout_ms()
+        )
+        self._connected = True
+
+    def read(self, length=1024, buffer=None):
+        if self._closed:
+            raise SSLError("SSL socket is closed")
+        if not self._connected:
+            raise SSLError("SSL socket not connected")
+        data = self._sock.recv(length)
+        if buffer is not None:
+            n = len(data)
+            buffer[:n] = data
+            return n
+        return data
+
+    def write(self, data):
+        if self._closed:
+            raise SSLError("SSL socket is closed")
+        if not self._connected:
+            raise SSLError("SSL socket not connected")
+        return self._sock.send(data)
+
+    def recv(self, bufsize, flags=0):
+        return self.read(bufsize)
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        return self.read(nbytes or len(buffer), buffer)
+
+    def send(self, data, flags=0):
+        return self.write(data)
+
+    def sendall(self, data, flags=0):
+        self._sock.sendall(data)
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._sock.close()
+            self._connected = False
+
+    def shutdown(self, how):
+        pass  # TLS shutdown happens on close
+
+    def unwrap(self):
+        """Remove the SSL layer and return the underlying socket."""
+        sock = self._sock
+        self._connected = False
+        return sock
+
+    def makefile(self, mode='r', buffering=-1, **kwargs):
+        return self._sock.makefile(mode, buffering, **kwargs)
+
+    def getpeercert(self, binary_form=False):
+        """Return peer certificate info.
+
+        Returns minimal info - actual cert verification happens on host.
+        """
+        if not self._connected:
+            return None
+        # Return empty dict/bytes - cert is verified by host
+        return b'' if binary_form else {}
+
+    def version(self):
+        return "TLSv1.3"
+
+    def cipher(self):
+        return ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
+
+    def selected_alpn_protocol(self):
+        return "http/1.1"  # Could expose from host if needed
+
+    def selected_npn_protocol(self):
+        return None
+
+    def compression(self):
+        return None
+
+    def pending(self):
+        return 0
+
+    @property
+    def _sslobj(self):
+        # httpcore reads sock._sslobj as the connection's "ssl_object" (via
+        # SyncStream.get_extra_info("ssl_object")) and then calls
+        # selected_alpn_protocol() on it to detect HTTP/2. We already implement
+        # that API (plus version()/cipher()/getpeercert()), so expose self.
+        # Without this, every httpx HTTPS request fails with AttributeError.
+        return self
+
+    @property
+    def server_hostname(self):
+        return self._server_hostname
+
+    @property
+    def context(self):
+        return self._context
+
+    @property
+    def server_side(self):
+        return False
+
+    def settimeout(self, timeout):
+        self._sock.settimeout(timeout)
+
+    def gettimeout(self):
+        return self._sock.gettimeout()
+
+    def setblocking(self, flag):
+        self._sock.setblocking(flag)
+
+    def fileno(self):
+        return self._sock.fileno()
+
+    def getpeername(self):
+        return self._sock.getpeername()
+
+    def getsockname(self):
+        return self._sock.getsockname()
+
+    def dup(self):
+        raise SSLError("dup() not supported in sandbox")
+
+    def detach(self):
+        return self._sock.detach()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class Purpose:
+    """Purpose for certificate verification."""
+    SERVER_AUTH = "SERVER_AUTH"
+    CLIENT_AUTH = "CLIENT_AUTH"
+
+
+class TLSVersion:
+    """TLS version enumeration."""
+    SSLv3 = 0x0300
+    TLSv1 = 0x0301
+    TLSv1_1 = 0x0302
+    TLSv1_2 = 0x0303
+    TLSv1_3 = 0x0304
+    MINIMUM_SUPPORTED = TLSv1_2
+    MAXIMUM_SUPPORTED = TLSv1_3
+
+
+def create_default_context(purpose=Purpose.SERVER_AUTH, cafile=None, capath=None, cadata=None):
+    """Create a default SSL context (used by urllib3/httpx)."""
+    ctx = SSLContext(PROTOCOL_TLS_CLIENT)
+    ctx.verify_mode = CERT_REQUIRED
+    ctx.check_hostname = True
+    if purpose == Purpose.SERVER_AUTH:
+        ctx.verify_mode = CERT_REQUIRED
+        ctx.check_hostname = True
+    return ctx
+
+
+def _create_unverified_context(protocol=PROTOCOL_TLS_CLIENT, cert_reqs=None,
+                               check_hostname=False, purpose=None,
+                               certfile=None, keyfile=None, cafile=None,
+                               capath=None, cadata=None):
+    """Create an unverified context (verification still happens on host)."""
+    ctx = SSLContext(protocol)
+    ctx.verify_mode = cert_reqs if cert_reqs is not None else CERT_NONE
+    ctx.check_hostname = check_hostname
+    return ctx
+
+
+_create_default_https_context = create_default_context
+
+
+def wrap_socket(sock, keyfile=None, certfile=None, server_side=False,
+                cert_reqs=CERT_NONE, ssl_version=PROTOCOL_TLS,
+                ca_certs=None, do_handshake_on_connect=True,
+                suppress_ragged_eofs=True, ciphers=None,
+                server_hostname=None):
+    """Wrap a socket in SSL."""
+    ctx = SSLContext(ssl_version)
+    ctx.verify_mode = cert_reqs
+    return ctx.wrap_socket(sock, server_side=server_side,
+                           do_handshake_on_connect=do_handshake_on_connect,
+                           server_hostname=server_hostname)
+
+
+def match_hostname(cert, hostname):
+    """Match hostname (deprecated but some libs still use it)."""
+    pass  # Host already verified hostname
+
+
+def get_server_certificate(addr, ssl_version=PROTOCOL_TLS, ca_certs=None, timeout=None):
+    """Retrieve a server's certificate."""
+    raise SSLError("get_server_certificate not supported in sandbox")
+
+
+def DER_cert_to_PEM_cert(der_cert_bytes):
+    """Convert DER to PEM format."""
+    import base64
+    pem = base64.standard_b64encode(der_cert_bytes).decode('ascii')
+    return f"-----BEGIN CERTIFICATE-----\n{pem}\n-----END CERTIFICATE-----\n"
+
+
+def PEM_cert_to_DER_cert(pem_cert_string):
+    """Convert PEM to DER format."""
+    import base64
+    lines = pem_cert_string.strip().split('\n')
+    lines = [l for l in lines if not l.startswith('-----')]
+    return base64.standard_b64decode(''.join(lines))
+
+
+# RAND functions (no-op, host has good entropy)
+def RAND_status():
+    return 1
+
+def RAND_add(string, entropy):
+    pass
+
+def RAND_bytes(n):
+    import os
+    return os.urandom(n)
+
+def RAND_pseudo_bytes(n):
+    return (RAND_bytes(n), True)
+
+
+# OpenSSL version info (fake but compatible)
+OPENSSL_VERSION = "OpenSSL 3.0.0 (eryx TLS shim)"
+OPENSSL_VERSION_INFO = (3, 0, 0, 0, 0)
+OPENSSL_VERSION_NUMBER = 0x30000000
+
+def get_default_verify_paths():
+    """Return default certificate paths."""
+    class DefaultVerifyPaths:
+        cafile = None
+        capath = None
+        openssl_cafile_env = 'SSL_CERT_FILE'
+        openssl_cafile = None
+        openssl_capath_env = 'SSL_CERT_DIR'
+        openssl_capath = None
+    return DefaultVerifyPaths()
+
+def enum_certificates(store_name):
+    """Enumerate certificates (Windows only, not supported)."""
+    return []
+
+def enum_crls(store_name):
+    """Enumerate CRLs (Windows only, not supported)."""
+    return []
+
+''', '<ssl_eryx>', 'exec'), _ssl_eryx.__dict__)
+
+# Register the module
+_sys.modules['ssl'] = _ssl_eryx
+_sys.modules['_ssl'] = _ssl_eryx
+"#;
+
+/// Python code to create and inject the socket_eryx shim module.
+/// This replaces sys.modules['socket'] with our TLS-backed implementation.
+pub const SOCKET_SHIM_CODE: &std::ffi::CStr = cr#"
+import sys as _sys
+import types as _types
+
+# Create socket_eryx module
+_socket_eryx = _types.ModuleType('socket')
+_socket_eryx.__doc__ = 'Eryx socket shim - minimal socket module for HTTP client compatibility.'
+
+exec(compile(r'''
+"""Eryx socket shim - minimal socket module for HTTP client compatibility.
+
+This module provides just enough socket API for HTTP client libraries (requests,
+httpx, urllib3) to work. Actual networking is deferred to the ssl module which
+uses eryx's TLS WIT imports.
+"""
+
+# Socket constants that libraries check for
+AF_INET = 2
+AF_INET6 = 10
+AF_UNIX = 1
+SOCK_STREAM = 1
+SOCK_DGRAM = 2
+IPPROTO_TCP = 6
+IPPROTO_UDP = 17
+SOL_SOCKET = 1
+SO_KEEPALIVE = 9
+SO_REUSEADDR = 2
+TCP_NODELAY = 1
+SHUT_RD = 0
+SHUT_WR = 1
+SHUT_RDWR = 2
+
+# Feature flags
+has_ipv6 = False
+has_dualstack_ipv6 = lambda: False
+
+# Global default timeout sentinel (used by http.client)
+_GLOBAL_DEFAULT_TIMEOUT = object()
+
+
+# As in CPython: socket.error is OSError and socket.timeout is TimeoutError.
+error = OSError
+timeout = TimeoutError
+
+
+class herror(error):
+    """Host error exception."""
+    pass
+
+
+class gaierror(error):
+    """getaddrinfo error exception."""
+    pass
+
+
+class SocketIO:
+    """File-like wrapper for socket (used by http.client)."""
+
+    def __init__(self, sock, mode):
+        self._sock = sock
+        self._mode = mode
+        self._closed = False
+        self._sock._io_refs += 1
+
+    def read(self, size=-1):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        if size < 0:
+            # Read all available data
+            chunks = []
+            while True:
+                chunk = self._sock.recv(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks)
+        return self._sock.recv(size)
+
+    def readinto(self, b):
+        data = self.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+    def readline(self, limit=-1):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        # Simple line reading - HTTP headers are typically small
+        result = b''
+        while True:
+            c = self._sock.recv(1)
+            if not c:
+                break
+            result += c
+            if c == b'\n':
+                break
+            if limit > 0 and len(result) >= limit:
+                break
+        return result
+
+    def readlines(self, hint=-1):
+        lines = []
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+        return lines
+
+    def write(self, data):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        return self._sock.send(data)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        sock = self._sock
+        self._sock = None
+        sock._decref_socketios()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def readable(self):
+        return 'r' in self._mode or '+' in self._mode
+
+    def writable(self):
+        return 'w' in self._mode or '+' in self._mode
+
+    def seekable(self):
+        return False
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class socket:
+    """Minimal socket implementation for HTTP client compatibility.
+
+    Supports both plain TCP connections (for http://) and TLS connections
+    (for https:// via ssl.wrap_socket).
+    """
+
+    def __init__(self, family=AF_INET, type=SOCK_STREAM, proto=0, fileno=None):
+        self._family = family
+        self._type = type
+        self._proto = proto
+        self._timeout = None
+        self._blocking = True
+        self._pending_address = None
+        self._tcp_handle = None   # TCP connection handle
+        self._tls_handle = None   # TLS handle (set when upgraded via ssl.wrap_socket)
+        self._closed = False
+        self._io_refs = 0
+
+    @property
+    def family(self):
+        return self._family
+
+    @property
+    def type(self):
+        return self._type
+
+    @property
+    def proto(self):
+        return self._proto
+
+    def settimeout(self, timeout):
+        # http.client passes socket._GLOBAL_DEFAULT_TIMEOUT (an object() sentinel,
+        # not None) when no explicit timeout was set. Normalize it to None here so
+        # downstream code (_timeout_ms) never compares the sentinel with `<=`.
+        if timeout is _GLOBAL_DEFAULT_TIMEOUT:
+            timeout = None
+        self._timeout = timeout
+        self._blocking = timeout is None
+
+    def gettimeout(self):
+        return self._timeout
+
+    def setblocking(self, flag):
+        self._blocking = bool(flag)
+        self._timeout = None if flag else 0.0
+
+    def getblocking(self):
+        return self._blocking
+
+    def _timeout_ms(self):
+        """Current timeout as integer milliseconds for the host net calls.
+
+        Returns 0 when no timeout is set (blocking mode), which tells the host
+        to use its own configured timeout. A positive Python timeout is rounded
+        up to at least 1ms so a small but non-zero timeout is never silently
+        treated as "use the host default". The host clamps the result to its own
+        configured ceiling, so this can only shorten a timeout, never extend it.
+        """
+        t = self._timeout
+        if t is None or t is _GLOBAL_DEFAULT_TIMEOUT or t <= 0:
+            return 0
+        ms = int(t * 1000)
+        return ms if ms > 0 else 1
+
+    def setsockopt(self, level, optname, value, optlen=None):
+        pass  # Ignore socket options
+
+    def getsockopt(self, level, optname, buflen=None):
+        return 0  # Return dummy value
+
+    def connect(self, address):
+        """Connect to address over TCP."""
+        if self._closed:
+            raise error("Socket is closed")
+        if self._tcp_handle is not None:
+            raise error("Socket is already connected")
+
+        host, port = address
+        import _eryx
+        self._tcp_handle = _eryx._eryx_tcp_connect(host, port, self._timeout_ms())
+        self._pending_address = (host, port)
+
+    def connect_ex(self, address):
+        """Connect and return error code instead of raising."""
+        try:
+            self.connect(address)
+            return 0
+        except OSError as e:
+            return e.errno or 1
+
+    def bind(self, address):
+        raise error("bind() not supported in sandbox")
+
+    def listen(self, backlog=None):
+        raise error("listen() not supported in sandbox")
+
+    def accept(self):
+        raise error("accept() not supported in sandbox")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        # Keep the handles alive while a makefile() wrapper may still be reading.
+        # Once all wrappers are closed, release the handles immediately.
+        if self._io_refs == 0:
+            self._force_close()
+
+    def _decref_socketios(self):
+        if self._io_refs > 0:
+            self._io_refs -= 1
+        if self._closed and self._io_refs == 0:
+            self._force_close()
+
+    def _force_close(self):
+        """Actually close the underlying handles."""
+        import _eryx
+        if self._tls_handle is not None:
+            try:
+                _eryx._eryx_tls_close(self._tls_handle)
+            except Exception:
+                pass
+            self._tls_handle = None
+        if self._tcp_handle is not None:
+            try:
+                _eryx._eryx_tcp_close(self._tcp_handle)
+            except Exception:
+                pass
+            self._tcp_handle = None
+
+    def __del__(self):
+        self._force_close()
+
+    def shutdown(self, how):
+        pass  # Shutdown happens on close
+
+    def detach(self):
+        tcp_handle = self._tcp_handle
+        self._tcp_handle = None
+        self._tls_handle = None
+        return -1  # No real fd
+
+    def recv(self, bufsize, flags=0):
+        """Receive data from the socket."""
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+
+        # If no handle available, return empty bytes (EOF)
+        # Allow reads after close() while a makefile() wrapper still owns the
+        # underlying handles.
+        if handle is None:
+            return b""
+
+        import _eryx
+        timeout_ms = self._timeout_ms()
+        if self._tls_handle is not None:
+            return _eryx._eryx_tls_read(handle, bufsize, timeout_ms)
+        return _eryx._eryx_tcp_read(handle, bufsize, timeout_ms)
+
+    def recv_into(self, buffer, nbytes=0, flags=0):
+        """Receive data into a buffer."""
+        length = nbytes if nbytes > 0 else len(buffer)
+        data = self.recv(length)
+        n = len(data)
+        buffer[:n] = data
+        return n
+
+    def send(self, data, flags=0):
+        """Send data to the socket."""
+        if self._closed:
+            raise error("Socket is closed")
+
+        # Use TLS handle if upgraded, otherwise TCP handle
+        handle = self._tls_handle if self._tls_handle is not None else self._tcp_handle
+        if handle is None:
+            raise error("Socket is not connected")
+
+        if isinstance(data, memoryview):
+            data = bytes(data)
+
+        import _eryx
+        timeout_ms = self._timeout_ms()
+        if self._tls_handle is not None:
+            return _eryx._eryx_tls_write(handle, data, timeout_ms)
+        return _eryx._eryx_tcp_write(handle, data, timeout_ms)
+
+    def sendall(self, data, flags=0):
+        if isinstance(data, memoryview):
+            data = bytes(data)
+        sent = 0
+        while sent < len(data):
+            n = self.send(data[sent:], flags)
+            if n == 0:
+                raise error("Connection closed")
+            sent += n
+
+    def makefile(self, mode='r', buffering=-1, **kwargs):
+        """Return a file-like object for the socket."""
+        return SocketIO(self, mode)
+
+    def getpeername(self):
+        if self._pending_address:
+            return self._pending_address
+        raise error("Socket not connected")
+
+    def getsockname(self):
+        return ('0.0.0.0', 0)
+
+    def fileno(self):
+        return -1  # No real file descriptor
+
+    def dup(self):
+        raise error("dup() not supported in sandbox")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def __repr__(self):
+        return f"<socket.socket fd={self.fileno()}, family={self._family}, type={self._type}>"
+
+
+def create_connection(address, timeout=None, source_address=None, *, all_errors=False):
+    """Create a connected socket (used by urllib3)."""
+    host, port = address
+    sock = socket(AF_INET, SOCK_STREAM)
+    if timeout is not None:
+        sock.settimeout(timeout)
+    sock.connect((host, port))
+    return sock
+
+
+def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Minimal getaddrinfo for HTTP clients.
+
+    Returns fake results - actual DNS happens on host during TLS connect.
+    """
+    # Normalize port to int
+    if isinstance(port, str):
+        port = int(port) if port else 0
+    elif port is None:
+        port = 0
+
+    # Return IPv4 TCP result - this is what HTTP clients need
+    return [(AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (str(host), port))]
+
+
+def gethostbyname(hostname):
+    """Return hostname as-is - DNS happens on host."""
+    return str(hostname)
+
+
+def gethostbyname_ex(hostname):
+    """Extended gethostbyname - return hostname as-is."""
+    return (str(hostname), [], [str(hostname)])
+
+
+def gethostbyaddr(ip_address):
+    """Reverse DNS lookup - not supported."""
+    return (str(ip_address), [], [str(ip_address)])
+
+
+def getfqdn(name=''):
+    """Get fully qualified domain name."""
+    return name if name else 'localhost'
+
+
+def gethostname():
+    """Get local hostname."""
+    return 'sandbox'
+
+
+def getservbyname(servicename, protocolname=None):
+    """Get port number for service name."""
+    services = {'http': 80, 'https': 443, 'ftp': 21, 'ssh': 22}
+    return services.get(servicename.lower(), 0)
+
+
+def getservbyport(port, protocolname=None):
+    """Get service name for port."""
+    services = {80: 'http', 443: 'https', 21: 'ftp', 22: 'ssh'}
+    return services.get(port, str(port))
+
+
+def getprotobyname(protocolname):
+    """Get protocol number by name."""
+    protocols = {'tcp': IPPROTO_TCP, 'udp': IPPROTO_UDP}
+    return protocols.get(protocolname.lower(), 0)
+
+
+def getdefaulttimeout():
+    """Get default socket timeout."""
+    return None
+
+
+def setdefaulttimeout(timeout):
+    """Set default socket timeout (ignored)."""
+    pass
+
+
+def socketpair(family=AF_UNIX, type=SOCK_STREAM, proto=0):
+    """Create a pair of connected sockets (dummy for asyncio)."""
+    # Return dummy sockets for asyncio's self-pipe trick
+    class _DummySocket:
+        def __init__(self):
+            self._buffer = []
+            self._closed = False
+        def fileno(self):
+            return -1
+        def setblocking(self, flag):
+            pass
+        def send(self, data):
+            self._buffer.append(data)
+            return len(data)
+        def recv(self, n):
+            if self._buffer:
+                return self._buffer.pop(0)
+            return b''
+        def close(self):
+            self._closed = True
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+    return (_DummySocket(), _DummySocket())
+
+
+def inet_aton(ip_string):
+    """Convert IPv4 address to packed binary."""
+    parts = ip_string.split('.')
+    return bytes(int(p) for p in parts)
+
+
+def inet_ntoa(packed_ip):
+    """Convert packed binary to IPv4 address string."""
+    return '.'.join(str(b) for b in packed_ip)
+
+
+def inet_pton(address_family, ip_string):
+    """Convert IP address to packed binary."""
+    if address_family == AF_INET:
+        return inet_aton(ip_string)
+    raise error(f"Address family {address_family} not supported")
+
+
+def inet_ntop(address_family, packed_ip):
+    """Convert packed binary to IP address string."""
+    if address_family == AF_INET:
+        return inet_ntoa(packed_ip)
+    raise error(f"Address family {address_family} not supported")
+
+
+def ntohs(x):
+    """Network to host short."""
+    return ((x & 0xff) << 8) | ((x >> 8) & 0xff)
+
+
+def ntohl(x):
+    """Network to host long."""
+    return (((x & 0xff) << 24) | ((x & 0xff00) << 8) |
+            ((x >> 8) & 0xff00) | ((x >> 24) & 0xff))
+
+
+def htons(x):
+    """Host to network short."""
+    return ntohs(x)
+
+
+def htonl(x):
+    """Host to network long."""
+    return ntohl(x)
+
+''', '<socket_eryx>', 'exec'), _socket_eryx.__dict__)
+
+# Register the module
+_sys.modules['socket'] = _socket_eryx
+_sys.modules['_socket'] = _socket_eryx
+"#;
+
+pub fn initialize_python() {
+    if PYTHON_INITIALIZED.swap(true, Ordering::SeqCst) {
+        // Already initialized
+        return;
+    }
+
+    // Register the PyO3-generated _eryx module BEFORE Py_Initialize.
+    // This is how componentize-py does it - using the pyo3 macro.
+    pyo3::append_to_inittab!(eryx_module);
+
+    unsafe {
+        // Initialize Python without registering signal handlers.
+        // Signal handlers don't make sense in a WASM sandbox.
+        // Note: PYTHONPATH must be set before this call for Python to find stdlib.
+        Py_InitializeEx(0);
+
+        // Install the guest infrastructure. Every step is required: a failure
+        // here would otherwise leave a half-initialized interpreter that is
+        // baked into the pre-init snapshot, so abort instead.
+        // sys.path is already configured via PYTHONPATH environment variable.
+        for (what, code) in [
+            ("__main__", c"import __main__"),
+            ("_eryx_async module", ERYX_ASYNC_INJECT_CODE),
+            ("execution infrastructure", ERYX_EXEC_INFRASTRUCTURE),
+            ("socket shim", SOCKET_SHIM_CODE),
+            ("ssl shim", SSL_SHIM_CODE),
+        ] {
+            if let Err(e) = run_in_main(code) {
+                panic!("failed to install {what}: {e}");
+            }
+        }
+
+        // Resolve the execute-path helpers once so execute() calls them
+        // directly instead of compiling wrapper snippets per request.
+        init_exec_helpers();
+
+        // Install the empty callback infrastructure once so fresh instances
+        // with no callbacks do not have to recreate it for every execution.
+        if let Err(e) = setup_callbacks(&[]) {
+            panic!("failed to install callback infrastructure: {e}");
+        }
+
+        // Note: We do NOT call reset_wasi_state() here!
+        //
+        // The reset must happen AFTER all imports are done, not here during
+        // Python initialization. If we reset here, any file handles opened
+        // during `execute("import numpy")` etc. would still get captured.
+        //
+        // Instead, the host calls `finalize-preinit` export after imports
+        // are complete, which calls `finalize_preinit()` -> `reset_wasi_state()`.
+    }
+}
+
+/// Finalize pre-initialization by resetting WASI state.
+///
+/// This MUST be called at the end of pre-initialization, after all imports
+/// are done but before the memory snapshot is captured. It clears file handles
+/// from the WASI adapter and wasi-libc so they don't get captured in the
+/// snapshot (which would cause "unknown handle index" errors at runtime).
+///
+/// This is only meant to be called during wasmtime-wizer
+/// pre-initialization. Only the first call has any effect, so an instance
+/// restored from the snapshot can't be made to drop its live WASI handles.
+pub fn finalize_preinit() {
+    static FINALIZED: AtomicBool = AtomicBool::new(false);
+    if !FINALIZED.swap(true, Ordering::SeqCst) {
+        // Session snapshots and restores use dill: import it into the snapshot
+        // so a fresh instance's first state operation doesn't spend ~20ms
+        // importing it. Before the WASI reset, which forgets the files the
+        // import opened. Best effort: a custom stdlib may not have dill, and
+        // then state operations fail with a clearer error of their own.
+        // Importing dill caches tempfile's directory from the pre-init `/tmp`,
+        // which restored sandboxes don't have, so forget it again (as the host
+        // does after pre-init's imports) so `TMPDIR` is honoured at runtime.
+        let _ = unsafe {
+            run_in_main(
+                c"__import__('dill')
+(lambda m: m and setattr(m, 'tempdir', None))(__import__('sys').modules.get('tempfile'))",
+            )
+        };
+        reset_wasi_state();
+        // Pre-init executions ran with the pre-init mounts; each instance
+        // restored from the snapshot must look for its own.
+        let _ = unsafe { run_in_main(c"_eryx_site_packages_added = False") };
+    }
+}
+
+/// Reset WASI adapter and wasi-libc state.
+///
+/// This clears any file handles that were opened during initialization,
+/// which is necessary for pre-initialization to work correctly.
+///
+/// - `reset_adapter_state`: Tells the WASI Preview 1 adapter to forget open handles
+/// - `__wasilibc_reset_preopens`: Tells wasi-libc to forget preopen state
+fn reset_wasi_state() {
+    // Import reset_adapter_state from the WASI adapter.
+    // This tells the WASI Preview 1 adapter to forget about any open handles.
+    #[link(wasm_import_module = "wasi_snapshot_preview1")]
+    unsafe extern "C" {
+        #[link_name = "reset_adapter_state"]
+        fn reset_adapter_state();
+    }
+
+    // __wasilibc_reset_preopens is in wasi-libc. When compiling as a dynamic library,
+    // it becomes an import from "env" which is resolved to libc.so during component linking.
+    #[link(wasm_import_module = "env")]
+    unsafe extern "C" {
+        fn __wasilibc_reset_preopens();
+    }
+
+    unsafe {
+        reset_adapter_state();
+        __wasilibc_reset_preopens();
+    }
+}
+
+/// Check if Python is initialized.
+pub fn is_python_initialized() -> bool {
+    PYTHON_INITIALIZED.load(Ordering::SeqCst)
+}
+
+// =============================================================================
+// Safe wrappers for common operations
+// =============================================================================
+
+/// Get the last Python error message.
+///
+/// Clears the error indicator.
+///
+/// # Safety
+///
+/// Python must be initialized.
+pub unsafe fn get_last_error_message() -> String {
+    unsafe {
+        if PyErr_Occurred().is_null() {
+            return "Unknown error".to_string();
+        }
+
+        // Get the current exception (clears PyErr state)
+        let exc = PyErr_GetRaisedException();
+
+        if exc.is_null() {
+            return "Unknown error (no exception)".to_string();
+        }
+
+        // Try to get string representation of the exception
+        let str_obj = PyObject_Str(exc);
+        let result = if str_obj.is_null() {
+            "Error converting exception to string".to_string()
+        } else {
+            let utf8 = PyUnicode_AsUTF8(str_obj);
+            let msg = if utf8.is_null() {
+                "Error getting UTF-8 from exception".to_string()
+            } else {
+                std::ffi::CStr::from_ptr(utf8)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            Py_DecRef(str_obj);
+            msg
+        };
+
+        Py_DecRef(exc);
+
+        result
+    }
+}
+
+/// Get a Python variable's string value from __main__.
+///
+/// # Safety
+///
+/// Python must be initialized.
+pub unsafe fn get_python_variable_string(name: &str) -> Result<String, String> {
+    use std::ffi::CString;
+
+    let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
+
+    unsafe {
+        // Get __main__ module
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return Err("Failed to get __main__ module".to_string());
+        }
+
+        // Get __main__.__dict__
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return Err("Failed to get __main__.__dict__".to_string());
+        }
+
+        // Get the variable
+        let var = PyDict_GetItemString(main_dict, name_cstr.as_ptr());
+        if var.is_null() {
+            return Err(format!("Variable '{name}' not found"));
+        }
+
+        // Convert to string
+        let str_obj = PyObject_Str(var);
+        if str_obj.is_null() {
+            let err = get_last_error_message();
+            return Err(format!("Failed to convert '{name}' to string: {err}"));
+        }
+
+        let utf8 = PyUnicode_AsUTF8(str_obj);
+        let result = if utf8.is_null() {
+            Py_DecRef(str_obj);
+            return Err("Failed to get UTF-8 from string".to_string());
+        } else {
+            std::ffi::CStr::from_ptr(utf8)
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        Py_DecRef(str_obj);
+        Ok(result)
+    }
+}
+
+// =============================================================================
+// Execute Python code with output capture
+// =============================================================================
+
+/// `__main__` objects the execute path calls directly.
+///
+/// Resolved once by [`init_exec_helpers`] after the execution infrastructure
+/// is installed. The pointers are owned references into the interpreter heap,
+/// so they survive the pre-init snapshot along with everything else in linear
+/// memory and are valid in every instance restored from it.
+struct ExecHelpers {
+    /// `__main__.__dict__` (owned reference).
+    main_dict: *mut PyObject,
+    /// `_eryx_exec(code, trace_enabled)`.
+    exec: *mut PyObject,
+    /// `_eryx_get_output() -> (stdout, stderr)`.
+    get_output: *mut PyObject,
+    /// `_eryx_capture_result()`; results are read from `main_dict`.
+    capture_result: *mut PyObject,
+    /// `_eryx_discard_result()`.
+    discard_result: *mut PyObject,
+    /// `_eryx_install_callbacks(callbacks_json)`.
+    install_callbacks: *mut PyObject,
+    /// `_eryx_clear_state()`.
+    clear_state: *mut PyObject,
+}
+
+// SAFETY: the guest is single-threaded; these are plain pointers into the
+// interpreter heap that are never mutated after initialization.
+unsafe impl Send for ExecHelpers {}
+unsafe impl Sync for ExecHelpers {}
+
+static EXEC_HELPERS: std::sync::OnceLock<ExecHelpers> = std::sync::OnceLock::new();
+
+/// Look up the execute-path helpers in `__main__` and keep owned references.
+///
+/// # Safety
+/// Python must be initialized and `ERYX_EXEC_INFRASTRUCTURE` must have run.
+unsafe fn init_exec_helpers() {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        assert!(!main_module.is_null(), "__main__ module missing");
+        let main_dict = PyModule_GetDict(main_module);
+        let lookup = |name: &std::ffi::CStr| -> *mut PyObject {
+            let obj = PyDict_GetItemString(main_dict, name.as_ptr());
+            assert!(
+                !obj.is_null(),
+                "execute helper {name:?} missing from __main__"
+            );
+            Py_IncRef(obj);
+            obj
+        };
+        Py_IncRef(main_dict);
+        let _ = EXEC_HELPERS.set(ExecHelpers {
+            main_dict,
+            exec: lookup(c"_eryx_exec"),
+            get_output: lookup(c"_eryx_get_output"),
+            capture_result: lookup(c"_eryx_capture_result"),
+            discard_result: lookup(c"_eryx_discard_result"),
+            install_callbacks: lookup(c"_eryx_install_callbacks"),
+            clear_state: lookup(c"_eryx_clear_state"),
+        });
+    }
+}
+
+/// Copy a `str` object's UTF-8 contents, or `""` if it is not a string.
+///
+/// # Safety
+/// `obj` must be a valid object pointer or null.
+unsafe fn unicode_to_string(obj: *mut PyObject) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let utf8 = PyUnicode_AsUTF8(obj);
+        if utf8.is_null() {
+            PyErr_Clear();
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Copy a `bytes` object's contents, or `b""` if it is not a bytes object.
+///
+/// # Safety
+/// `obj` must be a valid object pointer or null.
+unsafe fn bytes_to_vec(obj: *mut PyObject) -> Vec<u8> {
+    if obj.is_null() {
+        return Vec::new();
+    }
+    unsafe {
+        let ptr = PyBytes_AsString(obj);
+        if ptr.is_null() {
+            PyErr_Clear();
+            return Vec::new();
+        }
+        let size = PyBytes_Size(obj);
+        if size < 0 {
+            PyErr_Clear();
+            return Vec::new();
+        }
+        std::slice::from_raw_parts(ptr.cast::<u8>(), size as usize).to_vec()
+    }
+}
+
+impl ExecHelpers {
+    /// Call `_eryx_get_output()` and return `(stdout, stderr)` as raw bytes.
+    unsafe fn get_output(&self) -> (Vec<u8>, Vec<u8>) {
+        unsafe {
+            let tuple = PyObject_CallNoArgs(self.get_output);
+            if tuple.is_null() {
+                PyErr_Clear();
+                return (Vec::new(), Vec::new());
+            }
+            let out = (
+                bytes_to_vec(PyTuple_GetItem(tuple, 0)),
+                bytes_to_vec(PyTuple_GetItem(tuple, 1)),
+            );
+            Py_DecRef(tuple);
+            out
+        }
+    }
+
+    /// Call `_eryx_capture_result()` and read back `(result, result_error)`.
+    unsafe fn capture_result(&self) -> (String, String) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.capture_result);
+            if ret.is_null() {
+                PyErr_Clear();
+                return (String::new(), String::new());
+            }
+            Py_DecRef(ret);
+            (
+                unicode_to_string(PyDict_GetItemString(
+                    self.main_dict,
+                    c"_eryx_result".as_ptr(),
+                )),
+                unicode_to_string(PyDict_GetItemString(
+                    self.main_dict,
+                    c"_eryx_result_error".as_ptr(),
+                )),
+            )
+        }
+    }
+
+    /// Call `_eryx_discard_result()`.
+    unsafe fn discard_result(&self) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.discard_result);
+            if ret.is_null() {
+                PyErr_Clear();
+            } else {
+                Py_DecRef(ret);
+            }
+        }
+    }
+
+    /// Call `_eryx_install_callbacks(callbacks_json)`.
+    unsafe fn install_callbacks(&self, callbacks_json: &str) -> Result<(), String> {
+        unsafe {
+            let json_obj = PyUnicode_FromStringAndSize(
+                callbacks_json.as_ptr().cast(),
+                callbacks_json.len() as isize,
+            );
+            if json_obj.is_null() {
+                return Err(get_last_error_message());
+            }
+            let args = PyTuple_New(1);
+            if args.is_null() {
+                Py_DecRef(json_obj);
+                return Err(get_last_error_message());
+            }
+            // PyTuple_SetItem steals the reference.
+            PyTuple_SetItem(args, 0, json_obj);
+            let ret = PyObject_Call(self.install_callbacks, args, std::ptr::null_mut());
+            Py_DecRef(args);
+            if ret.is_null() {
+                return Err(get_last_error_message());
+            }
+            Py_DecRef(ret);
+            Ok(())
+        }
+    }
+
+    /// Call `_eryx_clear_state()`, ignoring any error.
+    unsafe fn clear_state(&self) {
+        unsafe {
+            let ret = PyObject_CallNoArgs(self.clear_state);
+            if ret.is_null() {
+                PyErr_Clear();
+            } else {
+                Py_DecRef(ret);
+            }
+        }
+    }
+
+    /// Call `_eryx_exec(code, trace_enabled, preamble)`. Returns `false` if it
+    /// raised, in which case the traceback has been printed to the (redirected)
+    /// stderr.
+    unsafe fn exec(&self, code: &str, trace_enabled: bool, preamble: &str) -> Result<bool, String> {
+        unsafe {
+            let code_obj = PyUnicode_FromStringAndSize(code.as_ptr().cast(), code.len() as isize);
+            if code_obj.is_null() {
+                PyErr_Clear();
+                return Err("Invalid code string".to_string());
+            }
+            let preamble_obj =
+                PyUnicode_FromStringAndSize(preamble.as_ptr().cast(), preamble.len() as isize);
+            if preamble_obj.is_null() {
+                Py_DecRef(code_obj);
+                PyErr_Clear();
+                return Err("Invalid preamble string".to_string());
+            }
+            let trace_obj = PyBool_FromLong(std::ffi::c_long::from(trace_enabled));
+            let args = PyTuple_New(3);
+            if args.is_null() {
+                Py_DecRef(code_obj);
+                Py_DecRef(preamble_obj);
+                Py_DecRef(trace_obj);
+                PyErr_Clear();
+                return Err("Failed to allocate arguments".to_string());
+            }
+            // PyTuple_SetItem steals the references.
+            PyTuple_SetItem(args, 0, code_obj);
+            PyTuple_SetItem(args, 1, trace_obj);
+            PyTuple_SetItem(args, 2, preamble_obj);
+            let ret = PyObject_Call(self.exec, args, std::ptr::null_mut());
+            Py_DecRef(args);
+            if ret.is_null() {
+                print_raised_exception();
+                return Ok(false);
+            }
+            Py_DecRef(ret);
+            Ok(true)
+        }
+    }
+}
+
+fn format_execution_error(stderr_output: &[u8], exception_msg: String) -> String {
+    let stderr_str = String::from_utf8_lossy(stderr_output);
+    if !stderr_output.is_empty() && exception_msg != "Unknown error" {
+        format!("{stderr_str}\n{exception_msg}")
+    } else if !stderr_output.is_empty() {
+        stderr_str.into_owned()
+    } else {
+        exception_msg
+    }
+}
+
+/// First line of framed code: `#eryx-preamble:<len>`, followed by the host
+/// preamble (`<len>` bytes, possibly none) and then the user code. Compiling
+/// the two separately keeps the user code's line numbers. Hosts frame every
+/// execution and only one leading header is split off, so a header-like first
+/// line in user code stays user code. Must match the host's framing.
+const PREAMBLE_HEADER: &str = "#eryx-preamble:";
+
+/// Split `code` into `(preamble, user_code)` per [`PREAMBLE_HEADER`].
+///
+/// Only one leading header is split off; code without a well-formed header
+/// (from a host that doesn't frame) is all user code, with no preamble.
+fn split_preamble(code: &str) -> (&str, &str) {
+    code.strip_prefix(PREAMBLE_HEADER)
+        .and_then(|rest| {
+            let (len, rest) = rest.split_once('\n')?;
+            let len: usize = len.parse().ok()?;
+            Some((rest.get(..len)?, rest.get(len..)?))
+        })
+        .unwrap_or(("", code))
+}
+
+/// [`execute_python`] without re-parsing any Python source except the user's.
+///
+/// # Safety
+/// Python must be initialized.
+unsafe fn execute_python_direct(
+    helpers: &ExecHelpers,
+    code: &str,
+    trace_enabled: bool,
+) -> ExecuteResult {
+    let (preamble, code) = split_preamble(code);
+    unsafe {
+        match helpers.exec(code, trace_enabled, preamble) {
+            Err(e) => return ExecuteResult::Error(e.into()),
+            Ok(false) => {
+                let (stdout, stderr) = helpers.get_output();
+                let exception_msg = get_last_error_message();
+                helpers.discard_result();
+                return ExecuteResult::Error(ExecuteFailure {
+                    message: format_execution_error(&stderr, exception_msg),
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(true) => {}
+        }
+
+        let callback_code_value = get_python_callback_code();
+        if callback_code::get_code(callback_code_value) == callback_code::WAIT {
+            return ExecuteResult::Pending(callback_code_value);
+        }
+
+        let (stdout, stderr) = helpers.get_output();
+        let (result, result_error) = helpers.capture_result();
+        ExecuteResult::Complete(ExecuteOutput {
+            stdout,
+            stderr,
+            result,
+            result_error,
+        })
+    }
+}
+
+/// Execute Python code and capture stdout.
+///
+/// This is the main entry point for the `execute` WIT export.
+/// It runs the provided code in `__main__` and returns captured stdout,
+/// or an error message if execution fails.
+///
+/// Supports top-level `await` by detecting async code and wrapping it
+/// in an async function executed via `asyncio.run()`.
+///
+/// # Returns
+/// - `Complete(stdout)` - The captured stdout output (may be empty)
+/// - `Error(message)` - Error message if execution failed
+/// - `Pending(waitable_set)` - Execution suspended, waiting for async callback
+pub fn execute_python(code: &str, trace_enabled: bool) -> ExecuteResult {
+    if !is_python_initialized() {
+        return ExecuteResult::Error("Python not initialized".to_string().into());
+    }
+
+    // compile() rejects source containing NUL bytes; report it plainly.
+    if code.contains('\0') {
+        return ExecuteResult::Error(
+            "Invalid code string: contains null bytes"
+                .to_string()
+                .into(),
+        );
+    }
+
+    let Some(helpers) = EXEC_HELPERS.get() else {
+        return ExecuteResult::Error("execute helpers not initialized".to_string().into());
+    };
+    // SAFETY: Python is initialized (checked above).
+    unsafe { execute_python_direct(helpers, code, trace_enabled) }
+}
+
+/// How a `run-command` call went.
+#[derive(Debug)]
+pub enum CommandResult {
+    /// The command finished with this exit status.
+    Exited(i32),
+    /// The command is waiting on an asyncio timer; resume it with the
+    /// callback code (WAIT | waitable_set << 4).
+    Pending(u32),
+}
+
+/// Run `python3 ARGS...` with `env` as the environment and `cwd` as the
+/// working directory, reading and writing the real fds 0/1/2.
+///
+/// Backs the `run-command` WIT export.
+pub fn run_command(args: Vec<String>, env: Vec<(String, String)>, cwd: String) -> CommandResult {
+    if !is_python_initialized() {
+        eprintln!("python3: the interpreter isn't initialized");
+        return CommandResult::Exited(127);
+    }
+    let started = Python::attach(|py| -> PyResult<()> {
+        py.import("__main__")?
+            .getattr("_eryx_run_command")?
+            .call1((args, env, cwd))?;
+        Ok(())
+    });
+    if let Err(e) = started {
+        Python::attach(|py| e.print(py));
+        return CommandResult::Exited(1);
+    }
+    let code = get_python_callback_code();
+    if callback_code::get_code(code) == callback_code::WAIT {
+        CommandResult::Pending(code)
+    } else {
+        CommandResult::Exited(command_status())
+    }
+}
+
+/// The exit status the last `run-command` left, once it has finished.
+pub fn command_status() -> i32 {
+    Python::attach(|py| {
+        py.import("__main__")
+            .and_then(|main| main.getattr("_eryx_command_status"))
+            .and_then(|status| status.extract())
+            .unwrap_or(1)
+    })
+}
+
+/// Set the name of the user variable captured as the structured result.
+///
+/// Backs the `set-result-variable` WIT export. The name is stored as a `str` in
+/// the guest's `_eryx_result_var_name` global, which defaults to `"result"`.
+///
+/// # Safety
+/// Must be called with the Python interpreter initialized.
+pub unsafe fn set_result_variable_name(name: &str) {
+    unsafe {
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            PyErr_Clear();
+            return;
+        }
+        let value = PyUnicode_FromStringAndSize(name.as_ptr().cast(), name.len() as isize);
+        if value.is_null() {
+            PyErr_Clear();
+            return;
+        }
+        if PyDict_SetItemString(
+            PyModule_GetDict(main_module),
+            c"_eryx_result_var_name".as_ptr(),
+            value,
+        ) != 0
+        {
+            PyErr_Clear();
+        }
+        Py_DecRef(value);
+    }
+}
+
+// =============================================================================
+// State management functions
+// =============================================================================
+
+/// Get a Python variable's bytes value from __main__.
+///
+/// # Safety
+///
+/// Python must be initialized.
+pub unsafe fn get_python_variable_bytes(name: &str) -> Result<Vec<u8>, String> {
+    use std::ffi::CString;
+
+    let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
+
+    unsafe {
+        // Get __main__ module
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return Err("Failed to get __main__ module".to_string());
+        }
+
+        // Get __main__.__dict__
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return Err("Failed to get __main__.__dict__".to_string());
+        }
+
+        // Get the variable
+        let var = PyDict_GetItemString(main_dict, name_cstr.as_ptr());
+        if var.is_null() {
+            return Err(format!("Variable '{name}' not found"));
+        }
+
+        // Get bytes from the bytes object
+        let ptr = PyBytes_AsString(var);
+        if ptr.is_null() {
+            let err = get_last_error_message();
+            return Err(format!("Failed to get bytes from '{name}': {err}"));
+        }
+
+        let size = PyBytes_Size(var);
+        if size < 0 {
+            return Err("Failed to get bytes size".to_string());
+        }
+
+        // Copy bytes to a Vec
+        let slice = std::slice::from_raw_parts(ptr as *const u8, size as usize);
+        Ok(slice.to_vec())
+    }
+}
+
+/// Set a Python bytes variable in __main__.
+///
+/// # Safety
+///
+/// Python must be initialized.
+unsafe fn set_python_variable_bytes(name: &str, data: &[u8]) -> Result<(), String> {
+    use std::ffi::CString;
+
+    let name_cstr = CString::new(name).map_err(|e| format!("Invalid variable name: {e}"))?;
+
+    unsafe {
+        // Get __main__ module
+        let main_module = PyImport_AddModule(c"__main__".as_ptr());
+        if main_module.is_null() {
+            return Err("Failed to get __main__ module".to_string());
+        }
+
+        // Get __main__.__dict__
+        let main_dict = PyModule_GetDict(main_module);
+        if main_dict.is_null() {
+            return Err("Failed to get __main__.__dict__".to_string());
+        }
+
+        // Create a bytes object
+        let bytes_obj = PyBytes_FromStringAndSize(data.as_ptr() as *const i8, data.len() as isize);
+        if bytes_obj.is_null() {
+            let err = get_last_error_message();
+            return Err(format!("Failed to create bytes object: {err}"));
+        }
+
+        // Set the variable in __main__
+        let result = PyDict_SetItemString(main_dict, name_cstr.as_ptr(), bytes_obj);
+        Py_DecRef(bytes_obj); // SetItem increments ref, so we decrement ours
+
+        if result != 0 {
+            let err = get_last_error_message();
+            return Err(format!("Failed to set variable '{name}': {err}"));
+        }
+
+        Ok(())
+    }
+}
+
+/// Snapshot the current Python state by serializing `_eryx_user_globals` with dill.
+///
+/// Returns the serialized state as bytes, which can be restored later with `restore_state`.
+///
+/// Uses [dill](https://pypi.org/project/dill/) instead of pickle for serialization.
+/// Dill can serialize functions, classes, lambdas, closures, and other objects that
+/// standard pickle cannot handle (e.g., objects defined via `exec()`).
+///
+/// # What is preserved
+/// - All user-defined variables in the user namespace
+/// - Simple types (int, float, str, list, dict, tuple, set, etc.)
+/// - User-defined functions (including lambdas and closures)
+/// - User-defined classes and their instances
+/// - Most standard library objects
+///
+/// # What is NOT preserved
+/// - Open file handles, sockets, etc.
+/// - Imported modules (they remain in the session, but aren't serialized)
+/// - Callback infrastructure (re-created on each session)
+/// - Generator/coroutine objects (live iterators with frame state)
+///
+/// Variables that cannot be serialized are left out, and their names are
+/// returned alongside the serialized state.
+pub fn snapshot_state() -> Result<(Vec<u8>, Vec<String>), String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    unsafe {
+        // Serialize _eryx_user_globals with dill, excluding infrastructure items
+        let pickle_code = c"
+import dill as _eryx_dill
+
+# Items to exclude from snapshot (builtins and metadata)
+_eryx_exclude = {
+    '__builtins__', '__name__', '__doc__', '__package__',
+    '__loader__', '__spec__', '__cached__', '__file__',
+    # Exclude callback infrastructure (set up fresh on each run)
+    'invoke', 'list_callbacks', '_EryxNamespace', '_EryxCallbackLeaf',
+}
+
+# Check if an object is part of the callback infrastructure
+def _eryx_is_callback_obj(name, obj):
+    # Check for callback wrappers under the name they were installed as; a
+    # user alias of one is user state
+    if name in _eryx_installed and _eryx_installed[name] is obj:
+        return True
+    # Check for namespace objects
+    obj_type = type(obj).__name__
+    if obj_type in ('_EryxNamespace', '_EryxCallbackLeaf'):
+        return True
+    return False
+
+# Take a snapshot of the keys first to avoid 'dictionary changed size during iteration'
+_eryx_keys = list(_eryx_user_globals.keys())
+
+# Build dict of serializable items. Names that can't be serialized are kept in
+# _eryx_snapshot_skipped and returned to the host (not printed: no execution's
+# output is being captured here).
+_eryx_state_dict = {}
+_eryx_snapshot_skipped = []
+for _k in _eryx_keys:
+    if _k not in _eryx_exclude and not _k.startswith('_eryx_'):
+        _v = _eryx_user_globals.get(_k)
+        # Skip callback infrastructure objects
+        if _eryx_is_callback_obj(_k, _v):
+            continue
+        try:
+            # Test if item is serializable with dill
+            _eryx_dill.dumps(_v, recurse=True)
+            _eryx_state_dict[_k] = _v
+        except Exception:
+            # Skip items dill can't serialize (modules, open handles, etc.)
+            _eryx_snapshot_skipped.append(_k)
+
+# Serialize the filtered dict with dill. recurse=True saves only the globals a
+# function uses: by default dill saves a function's whole globals dict (the user
+# namespace), so one unserializable global would drop every function, or the
+# whole snapshot. Restoring rebinds functions to the user namespace anyway.
+_eryx_state_bytes = _eryx_dill.dumps(_eryx_state_dict, recurse=True)
+_eryx_snapshot_skipped = '\\x00'.join(_eryx_snapshot_skipped)
+
+# Clean up local helpers
+del _eryx_exclude, _eryx_is_callback_obj, _eryx_keys, _eryx_state_dict, _eryx_dill
+";
+
+        run_in_main(pickle_code).map_err(|err| format!("Failed to snapshot state: {err}"))?;
+
+        // Get the serialized bytes and the NUL-separated skipped names
+        let state_bytes = get_python_variable_bytes("_eryx_state_bytes")?;
+        let skipped = get_python_variable_string("_eryx_snapshot_skipped")?;
+
+        // Clean up
+        let _ = run_in_main(c"del _eryx_state_bytes, _eryx_snapshot_skipped");
+
+        let skipped = if skipped.is_empty() {
+            Vec::new()
+        } else {
+            skipped.split('\0').map(str::to_string).collect()
+        };
+        Ok((state_bytes, skipped))
+    }
+}
+
+/// Restore Python state from a previous snapshot.
+///
+/// This deserializes the data with dill and updates `_eryx_user_globals` with the
+/// restored values. Existing variables that aren't in the snapshot are preserved.
+///
+/// After deserialization, function and method globals are re-bound to `_eryx_user_globals`
+/// so restored functions can access other user-defined names in the session.
+pub fn restore_state(data: &[u8]) -> Result<(), String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    if data.is_empty() {
+        // Empty snapshot = nothing to restore
+        return Ok(());
+    }
+
+    unsafe {
+        // Set the bytes in Python
+        set_python_variable_bytes("_eryx_restore_bytes", data)?;
+
+        // Deserialize with dill and update _eryx_user_globals. The snapshot may
+        // reference packages, so they must be importable even before the
+        // instance's first execution.
+        let restore_code = c"
+if not _eryx_site_packages_added:
+    _eryx_add_site_packages()
+import dill as _eryx_dill
+import types as _eryx_types
+
+# Deserialize the state
+_eryx_restored_dict = _eryx_dill.loads(_eryx_restore_bytes)
+
+# Re-bind function globals to _eryx_user_globals so restored functions
+# can access other user-defined names (dill creates isolated globals dicts).
+def _eryx_rebind_globals(obj):
+    '''Recursively fix up function/method globals to use _eryx_user_globals.'''
+    if isinstance(obj, _eryx_types.FunctionType):
+        return _eryx_types.FunctionType(
+            obj.__code__, _eryx_user_globals, obj.__name__,
+            obj.__defaults__, obj.__closure__
+        )
+    return obj
+
+for _k in list(_eryx_restored_dict):
+    _v = _eryx_restored_dict[_k]
+    # Fix standalone functions/lambdas
+    if isinstance(_v, _eryx_types.FunctionType):
+        _eryx_restored_dict[_k] = _eryx_rebind_globals(_v)
+    # Fix methods inside classes
+    elif isinstance(_v, type):
+        for _attr_name in list(vars(_v)):
+            _attr = vars(_v).get(_attr_name)
+            if isinstance(_attr, _eryx_types.FunctionType):
+                setattr(_v, _attr_name, _eryx_rebind_globals(_attr))
+
+# Update user globals with restored values
+_eryx_user_globals.update(_eryx_restored_dict)
+
+# Clean up
+del _eryx_restore_bytes, _eryx_restored_dict, _eryx_dill, _eryx_types, _eryx_rebind_globals
+";
+
+        if let Err(err) = run_in_main(restore_code) {
+            let _ = run_in_main(c"del _eryx_restore_bytes");
+            return Err(format!("Failed to restore state: {err}"));
+        }
+    }
+
+    // The restored globals may have replaced callback wrappers.
+    invalidate_installed_callbacks();
+    Ok(())
+}
+
+/// Clear all user-defined state from `_eryx_user_globals`.
+///
+/// This removes all variables except Python builtins and module metadata,
+/// effectively resetting to a fresh interpreter state.
+pub fn clear_state() {
+    if !is_python_initialized() {
+        return;
+    }
+
+    if let Some(helpers) = EXEC_HELPERS.get() {
+        // Best effort - ignore errors and continue
+        // SAFETY: Python is initialized (checked above).
+        unsafe { helpers.clear_state() };
+    }
+
+    // The keep-list is a heuristic; make the next execution reinstall.
+    invalidate_installed_callbacks();
+}
+
+// =============================================================================
+// Callback support
+// =============================================================================
+
+/// Information about a callback available from the host.
+#[derive(Debug, Clone)]
+pub struct CallbackInfo {
+    pub name: String,
+    pub description: String,
+    pub parameters_schema_json: String,
+}
+
+/// Set up callback wrapper functions in Python.
+///
+/// This injects:
+/// 1. An `invoke(name, **kwargs)` function that calls host callbacks via `_eryx`
+/// 2. A `list_callbacks()` function for introspection
+/// 3. Direct wrapper functions for each callback (e.g., `sleep(ms=100)`)
+/// 4. Namespace objects for dotted callbacks (e.g., `http.get(url="...")`),
+///    and for prefix callbacks (`mcp.grafana.*`), whose namespace resolves any
+///    child to a call of its full dotted name
+///
+/// The setup is `_eryx_install_callbacks`, defined once with the execution
+/// infrastructure, so installing compiles nothing. It is skipped while these
+/// declarations remain installed; clear or restore invalidates the
+/// installation so wrappers are restored.
+pub fn setup_callbacks(callbacks: &[CallbackInfo]) -> Result<(), String> {
+    if !is_python_initialized() {
+        return Err("Python not initialized".to_string());
+    }
+
+    // Serialize callbacks to JSON for Python to parse
+    let callbacks_json = serde_json_mini_serialize_callbacks(callbacks);
+
+    let already_installed = INSTALLED_CALLBACKS
+        .lock()
+        .is_ok_and(|installed| installed.as_deref() == Some(callbacks_json.as_str()));
+    if already_installed {
+        return Ok(());
+    }
+    invalidate_installed_callbacks();
+
+    let Some(helpers) = EXEC_HELPERS.get() else {
+        return Err("execute helpers not initialized".to_string());
+    };
+    // SAFETY: Python is initialized (checked above).
+    unsafe { helpers.install_callbacks(&callbacks_json) }
+        .map_err(|err| format!("Failed to set up callbacks: {err}"))?;
+
+    if let Ok(mut installed) = INSTALLED_CALLBACKS.lock() {
+        *installed = Some(callbacks_json);
+    }
+    Ok(())
+}
+
+/// Simple JSON serialization for callbacks (avoiding serde dependency in WASM)
+fn serde_json_mini_serialize_callbacks(callbacks: &[CallbackInfo]) -> String {
+    let items: Vec<String> = callbacks
+        .iter()
+        .map(|cb| {
+            format!(
+                r#"{{"name": "{}", "description": "{}", "parameters_schema_json": "{}"}}"#,
+                escape_json_string(&cb.name),
+                escape_json_string(&cb.description),
+                escape_json_string(&cb.parameters_schema_json)
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// Escape a string for JSON
+pub fn escape_json_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+    // Copy runs of printable ASCII other than `"` and `\` in one go, and
+    // escape the rest a char at a time. Callback metadata is mostly such runs,
+    // and copying it char by char costs guest fuel on every install.
+    while let Some(i) = rest
+        .bytes()
+        .position(|b| !(0x20..0x7f).contains(&b) || b == b'"' || b == b'\\')
+    {
+        result.push_str(&rest[..i]);
+        // `i` is a char boundary: every byte before it is ASCII.
+        let Some(c) = rest[i..].chars().next() else {
+            break;
+        };
+        match c {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            c if c.is_control() => {
+                result.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => result.push(c),
+        }
+        rest = &rest[i + c.len_utf8()..];
+    }
+    result.push_str(rest);
+    result
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests fail loudly on malformed output")]
+mod tests {
+    use super::{escape_json_string, split_preamble};
+
+    #[test]
+    fn split_preamble_reads_the_host_framing() {
+        assert_eq!(
+            split_preamble("#eryx-preamble:5\nx = 1y = 2"),
+            ("x = 1", "y = 2")
+        );
+        assert_eq!(
+            split_preamble("#eryx-preamble:0\nprint(1)"),
+            ("", "print(1)")
+        );
+        // Only one header is split off: a second one is user code.
+        assert_eq!(
+            split_preamble("#eryx-preamble:0\n#eryx-preamble:1\nx"),
+            ("", "#eryx-preamble:1\nx")
+        );
+        // Anything malformed is plain user code.
+        for code in [
+            "print(1)",
+            "#eryx-preamble:99\nshort",
+            "#eryx-preamble:x\ncode",
+            "#eryx-preamble:1",
+            "#eryx-preamble:1\n\u{e9}",
+        ] {
+            assert_eq!(split_preamble(code), ("", code));
+        }
+    }
+
+    #[test]
+    fn test_escape_json_string_basic() {
+        assert_eq!(escape_json_string("hello"), "hello");
+        assert_eq!(escape_json_string(""), "");
+        assert_eq!(escape_json_string(" "), " ");
+    }
+
+    #[test]
+    fn test_escape_json_string_quotes() {
+        assert_eq!(escape_json_string(r#"say "hello""#), r#"say \"hello\""#);
+        // Three quotes -> three escaped quotes
+        assert_eq!(escape_json_string("\"\"\""), r#"\"\"\""#);
+        // Single quotes don't need escaping in JSON
+        assert_eq!(escape_json_string("it's"), "it's");
+    }
+
+    #[test]
+    fn test_escape_json_string_backslash() {
+        assert_eq!(escape_json_string(r"path\to\file"), r"path\\to\\file");
+        assert_eq!(escape_json_string(r"\\"), r"\\\\");
+        assert_eq!(escape_json_string(r"\"), r"\\");
+    }
+
+    #[test]
+    fn test_escape_json_string_control_chars() {
+        assert_eq!(escape_json_string("line1\nline2"), r"line1\nline2");
+        assert_eq!(escape_json_string("col1\tcol2"), r"col1\tcol2");
+        assert_eq!(escape_json_string("text\r\n"), r"text\r\n");
+        // Multiple in a row
+        assert_eq!(escape_json_string("\n\n\n"), r"\n\n\n");
+        assert_eq!(escape_json_string("\t\t"), r"\t\t");
+    }
+
+    #[test]
+    fn test_escape_json_string_all_control_chars() {
+        // Null byte and other control characters should be \uXXXX escaped
+        assert_eq!(escape_json_string("a\x00b"), r"a\u0000b");
+        assert_eq!(escape_json_string("\x1f"), r"\u001f");
+        // Test all ASCII control characters (0x00-0x1F except \t, \n, \r)
+        assert_eq!(escape_json_string("\x01"), r"\u0001");
+        assert_eq!(escape_json_string("\x02"), r"\u0002");
+        assert_eq!(escape_json_string("\x07"), r"\u0007"); // bell
+        assert_eq!(escape_json_string("\x08"), r"\u0008"); // backspace
+        assert_eq!(escape_json_string("\x0b"), r"\u000b"); // vertical tab
+        assert_eq!(escape_json_string("\x0c"), r"\u000c"); // form feed
+        assert_eq!(escape_json_string("\x1b"), r"\u001b"); // escape
+        assert_eq!(escape_json_string("\x7f"), r"\u007f"); // DEL
+    }
+
+    #[test]
+    fn test_escape_json_string_combined() {
+        // A realistic error message with quotes and newlines
+        let input = "ValueError: \"bad input\"\n  at line 5";
+        let expected = r#"ValueError: \"bad input\"\n  at line 5"#;
+        assert_eq!(escape_json_string(input), expected);
+    }
+
+    #[test]
+    fn test_escape_json_string_unicode() {
+        // Unicode should pass through unchanged
+        assert_eq!(escape_json_string("héllo wörld 你好"), "héllo wörld 你好");
+        assert_eq!(escape_json_string("emoji: 🎉"), "emoji: 🎉");
+        // Various unicode categories
+        assert_eq!(escape_json_string("αβγδ"), "αβγδ"); // Greek
+        assert_eq!(escape_json_string("日本語"), "日本語"); // Japanese
+        assert_eq!(escape_json_string("🎉🎊🎁"), "🎉🎊🎁"); // Emoji
+        assert_eq!(escape_json_string("→←↑↓"), "→←↑↓"); // Arrows
+    }
+
+    // === Security-relevant edge cases ===
+
+    #[test]
+    fn test_escape_json_string_injection_attempts() {
+        // Attempt to break out of JSON string with unescaped quote
+        // Input: foo", "injected": "bar
+        // Output: foo\", \"injected\": \"bar
+        assert_eq!(
+            escape_json_string("foo\", \"injected\": \"bar"),
+            r#"foo\", \"injected\": \"bar"#
+        );
+
+        // Attempt to inject via backslash-quote sequence
+        // Input: foo\", "x": "y  (backslash then quote then rest)
+        // Output: foo\\\", \"x\": \"y
+        assert_eq!(
+            escape_json_string("foo\\\", \"x\": \"y"),
+            r#"foo\\\", \"x\": \"y"#
+        );
+
+        // Nested escaping attempts
+        // Input: \\" (two backslashes and a quote) -> \\\\" (four backslashes, escaped quote)
+        assert_eq!(escape_json_string("\\\\\""), "\\\\\\\\\\\"");
+        // Input: \\\" (three backslashes and a quote) -> \\\\\\" (six backslashes, escaped quote)
+        assert_eq!(escape_json_string("\\\\\\\""), "\\\\\\\\\\\\\\\"");
+    }
+
+    #[test]
+    fn test_escape_json_string_newline_injection() {
+        // Attempt to inject via newlines (could break JSON parsers)
+        assert_eq!(
+            escape_json_string("line1\n\"injected\": true"),
+            r#"line1\n\"injected\": true"#
+        );
+
+        // CRLF injection
+        assert_eq!(
+            escape_json_string("line1\r\n\"injected\": true"),
+            r#"line1\r\n\"injected\": true"#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_null_byte_injection() {
+        // Null bytes could cause issues with C-style string handling
+        assert_eq!(escape_json_string("before\x00after"), r"before\u0000after");
+        assert_eq!(escape_json_string("\x00\x00\x00"), r"\u0000\u0000\u0000");
+        assert_eq!(escape_json_string("data\x00"), r"data\u0000");
+    }
+
+    #[test]
+    fn test_escape_json_string_unicode_escapes() {
+        // Literal \uXXXX in input (should escape the backslash)
+        assert_eq!(escape_json_string(r"\u0000"), r"\\u0000");
+        assert_eq!(escape_json_string(r"\u003c"), r"\\u003c");
+
+        // This prevents attackers from using literal \uXXXX to bypass escaping
+        assert_eq!(escape_json_string(r#"\u0022"#), r#"\\u0022"#); // \u0022 = "
+    }
+
+    #[test]
+    fn test_escape_json_string_html_in_json() {
+        // HTML/script injection (JSON inside HTML context)
+        // Note: JSON spec doesn't require escaping < > & but we pass them through
+        // The consumer should HTML-escape if needed
+        assert_eq!(
+            escape_json_string("<script>alert(1)</script>"),
+            "<script>alert(1)</script>"
+        );
+        assert_eq!(escape_json_string("</script><script>"), "</script><script>");
+
+        // But quotes are still escaped
+        assert_eq!(
+            escape_json_string(r#"<img onerror="alert(1)">"#),
+            r#"<img onerror=\"alert(1)\">"#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_long_strings() {
+        // Very long string
+        let long_input = "a".repeat(10000);
+        let result = escape_json_string(&long_input);
+        assert_eq!(result.len(), 10000);
+        assert_eq!(result, long_input);
+
+        // Long string with characters that need escaping
+        let long_with_escapes = "a\nb".repeat(1000);
+        let result = escape_json_string(&long_with_escapes);
+        assert_eq!(result, r"a\nb".repeat(1000));
+    }
+
+    #[test]
+    fn test_escape_json_string_only_special_chars() {
+        // String of only special characters
+        assert_eq!(escape_json_string("\"\"\"\n\n\n"), r#"\"\"\"\n\n\n"#);
+        assert_eq!(escape_json_string("\\\\\\\t\t\t"), r"\\\\\\\t\t\t");
+    }
+
+    #[test]
+    fn test_escape_json_string_realistic_error_messages() {
+        // Python traceback
+        let traceback = r#"Traceback (most recent call last):
+  File "test.py", line 10, in <module>
+    raise ValueError("invalid \"input\"")
+ValueError: invalid "input""#;
+        let escaped = escape_json_string(traceback);
+        assert!(escaped.contains(r#"\"input\""#));
+        assert!(escaped.contains(r"\n"));
+        assert!(!escaped.contains('\n')); // No literal newlines
+
+        // Error with file paths (Windows-style)
+        let win_path = r#"Error: Cannot open "C:\Users\test\file.txt""#;
+        let escaped = escape_json_string(win_path);
+        assert_eq!(
+            escaped,
+            r#"Error: Cannot open \"C:\\Users\\test\\file.txt\""#
+        );
+    }
+
+    #[test]
+    fn test_escape_json_string_result_is_valid_json() {
+        // Verify that wrapping the result in quotes produces valid JSON
+        let test_cases = [
+            "hello",
+            "with \"quotes\"",
+            "with\nnewlines",
+            "with\ttabs",
+            "with\\backslashes",
+            "\x00null\x00bytes",
+            "unicode: 🎉",
+            r#"complex: "foo\nbar""#,
+        ];
+
+        for input in test_cases {
+            let escaped = escape_json_string(input);
+            let json_string = format!("\"{}\"", escaped);
+
+            // This should be valid JSON that parses back to the original
+            // We can't use serde_json here (not a dependency), but we can
+            // at least verify basic structure
+            assert!(json_string.starts_with('"'));
+            assert!(json_string.ends_with('"'));
+            // No unescaped quotes in the middle
+            let inner = &json_string[1..json_string.len() - 1];
+            let mut chars = inner.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    panic!("Unescaped quote in JSON string: {}", json_string);
+                }
+                if c == '\\' {
+                    // Must be followed by a valid escape character
+                    let next = chars.next().expect("Trailing backslash");
+                    assert!(
+                        matches!(next, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u'),
+                        "Invalid escape sequence: \\{} in {}",
+                        next,
+                        json_string
+                    );
+                    if next == 'u' {
+                        // Must be followed by 4 hex digits
+                        for _ in 0..4 {
+                            let hex = chars.next().expect("Incomplete \\uXXXX");
+                            assert!(hex.is_ascii_hexdigit(), "Invalid hex in \\uXXXX");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_serde_json_mini_serialize_preserves_schema() {
+        use super::{CallbackInfo, serde_json_mini_serialize_callbacks};
+
+        let schema = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
+        let callbacks = vec![CallbackInfo {
+            name: "add".to_string(),
+            description: "Adds two numbers".to_string(),
+            parameters_schema_json: schema.to_string(),
+        }];
+
+        let json_str = serde_json_mini_serialize_callbacks(&callbacks);
+        eprintln!("Serialized JSON: {json_str}");
+
+        // The JSON should contain the schema string with escaped quotes
+        assert!(
+            json_str.contains("parameters_schema_json"),
+            "should have psj field"
+        );
+        // The schema's double-quotes are escaped as \"
+        assert!(
+            json_str.contains(r#"\"type\""#),
+            "should have escaped schema: {json_str}"
+        );
+
+        // Simulate the Python embedding pipeline:
+        // 1. .replace('\\', "\\\\") doubles backslashes for Python string literal
+        let python_embedded = json_str.replace('\\', "\\\\").replace('\'', "\\'");
+        eprintln!("Python embedded: {python_embedded}");
+
+        // 2. Python triple-quoted string interprets \\ as \
+        let after_python = python_embedded.replace("\\\\", "\\");
+        eprintln!("After Python unescape: {after_python}");
+
+        // after_python should equal the original json_str
+        assert_eq!(
+            after_python, json_str,
+            "Python roundtrip should preserve JSON"
+        );
+
+        // Verify the psj field value is non-empty by checking the JSON structure
+        // Find "parameters_schema_json": "<value>" and verify <value> is non-empty
+        let marker = r#""parameters_schema_json": ""#;
+        let start = json_str.find(marker).expect("should find psj field") + marker.len();
+        // The value starts after the opening quote and ends at the next unescaped quote
+        let value = &json_str[start..];
+        assert!(
+            !value.starts_with('"'),
+            "parameters_schema_json should not be empty: {json_str}"
+        );
+    }
+}

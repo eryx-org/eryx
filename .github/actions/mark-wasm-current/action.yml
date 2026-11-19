@@ -7,18 +7,6 @@ runs:
     - name: Mark WASM as up-to-date
       shell: bash
       run: |
-        # Touch WASM artifacts with a future timestamp so mise reliably skips
-        # rebuild. A plain `touch` uses the current second which can collide
-        # with checkout timestamps, causing mise to consider sources as
-        # equal-or-newer and trigger a full wasm-build from source.
-        FUTURE=$(date -d "+5 minutes" +%Y%m%d%H%M.%S)
-        touch -t "$FUTURE" crates/eryx-runtime/runtime.wasm crates/eryx-runtime/runtime.cwasm
-
-        # Touch prebuilt artifacts if they exist
-        if [ -d crates/eryx-runtime/prebuilt ]; then
-          touch -t "$FUTURE" crates/eryx-runtime/prebuilt/*
-        fi
-
         # Check if prebuilt artifacts changed by comparing checksums
         # This is critical: eryx-runtime's build.rs caches .so.zst files in OUT_DIR
         # If the prebuilt artifacts changed (e.g., new WIT interface), we must
@@ -51,7 +39,7 @@ runs:
 
         # Check if cwasm changed by comparing checksums
         # This invalidates cached binaries that have old cwasm embedded
-        CWASM_HASH=$(sha256sum crates/eryx-runtime/runtime.cwasm | cut -d' ' -f1)
+        CWASM_HASH=$(sha256sum crates/eryx-runtime/runtime-*.cwasm | sha256sum | cut -d' ' -f1)
         CACHED_HASH=""
         if [ -f target/.cwasm-hash ]; then
           CACHED_HASH=$(cat target/.cwasm-hash)
@@ -83,4 +71,21 @@ runs:
           echo "$WIT_HASH" > target/.wit-hash
         else
           echo "WIT interface unchanged ($WIT_HASH)"
+        fi
+
+        # Touch the WASM and prebuilt artifacts last, so mise sees them as
+        # newer than their sources (including the files touched above) and
+        # skips rebuilding them. Sleeping first puts them in a later second
+        # than the checkout: on the same second mise treats the sources as
+        # newer (#92).
+        #
+        # Not a future timestamp: cargo's rerun-if-changed (eryx-runtime's
+        # build.rs on prebuilt/, eryx's on the cwasms) sees a path dated
+        # after the build script's last run as changed, so every cargo
+        # invocation until that time reran eryx-runtime's build script and
+        # rebuilt the workspace from it (#1008).
+        sleep 1
+        touch crates/eryx-runtime/runtime-*.wasm crates/eryx-runtime/runtime-*.cwasm
+        if [ -d crates/eryx-runtime/prebuilt ]; then
+          touch crates/eryx-runtime/prebuilt/*
         fi

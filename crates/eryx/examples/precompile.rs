@@ -67,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str())
-        .unwrap_or("crates/eryx-runtime/runtime.cwasm");
+        .unwrap_or("crates/eryx-runtime/runtime-python.cwasm");
 
     // Parse --target argument (falls back to ERYX_TARGET env var in the library)
     let target = args
@@ -76,8 +76,18 @@ fn main() -> anyhow::Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
+    // The guest language of the component: ERYX_LANGUAGE, default python.
+    // It is stamped into the output. Python and JavaScript are pre-initialized.
+    // `command` precompiles a shell command component (e.g. coreutils), which
+    // gets the version stamp and its instance-metadata stamp, but no language.
+    let language: Option<eryx::Language> = match std::env::var("ERYX_LANGUAGE").as_deref() {
+        Ok("command") => None,
+        Ok(name) => Some(name.parse().map_err(|e: String| std::io::Error::other(e))?),
+        Err(_) => Some(eryx::Language::Python),
+    };
+
     let wasm_path = std::env::var("ERYX_WASM_PATH")
-        .unwrap_or_else(|_| "crates/eryx-runtime/runtime.wasm".to_string());
+        .unwrap_or_else(|_| "crates/eryx-runtime/runtime-python.wasm".to_string());
 
     println!("=== Pre-compilation Example ===\n");
     println!("WASM path: {wasm_path}");
@@ -100,7 +110,19 @@ fn main() -> anyhow::Result<()> {
 
     // With preinit: do pre-initialization for faster session creation
     #[cfg(feature = "preinit")]
-    let component_bytes = {
+    let component_bytes = if language == Some(eryx::Language::JavaScript) {
+        println!("\n--- Step 1: Pre-initializing JavaScript ---");
+        let start = Instant::now();
+        let rt = tokio::runtime::Runtime::new()?;
+        let preinit_bytes = rt.block_on(eryx::preinit::pre_initialize_javascript(&wasm_bytes))?;
+        println!("Pre-init time: {:?}", start.elapsed());
+        preinit_bytes
+    } else if language != Some(eryx::Language::Python) {
+        println!(
+            "\n--- Step 1: Skipping pre-initialization (not supported for this component) ---"
+        );
+        wasm_bytes
+    } else {
         let python_stdlib = find_python_stdlib()?;
         println!("Python stdlib: {}\n", python_stdlib.display());
 
@@ -143,7 +165,18 @@ fn main() -> anyhow::Result<()> {
     // Step 2: Pre-compile to native code
     println!("\n--- Step 2: Pre-compiling to native code ---");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile_with_target(&component_bytes, target)?;
+    let mut precompiled = eryx::Executor::precompile_with_target(&component_bytes, target)?;
+    match language {
+        Some(language) => eryx::Executor::stamp_language(&mut precompiled, language),
+        // Precompiling stamps a command with its instance metadata. Without
+        // it each running child is charged a conservative 4 MiB of the child
+        // memory pool, so CI and release builds fail rather than ship one.
+        None if !eryx::Command::is_stamped(&precompiled) => anyhow::bail!(
+            "ERYX_LANGUAGE=command, but the precompiled output has no instance-metadata \
+             stamp: is {wasm_path} a WASI command (exporting wasi:cli/run)?"
+        ),
+        None => {}
+    }
     let precompile_time = start.elapsed();
     println!("Pre-compile time: {precompile_time:?}");
     println!(
@@ -169,7 +202,7 @@ fn main() -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
 
         // Load the precompiled file we just created
-        // SAFETY: We just created this file from PythonExecutor::precompile()
+        // SAFETY: We just created this file from Executor::precompile()
         #[allow(unsafe_code)]
         let sandbox = unsafe {
             eryx::Sandbox::builder()
@@ -271,9 +304,9 @@ fn find_python_stdlib() -> anyhow::Result<std::path::PathBuf> {
     // Check common locations
     let candidates = [
         // Relative to workspace root (when running from workspace)
-        "crates/eryx-wasm-runtime/tests/python-stdlib",
+        "crates/eryx-guest-python/tests/python-stdlib",
         // Relative to example directory
-        "../eryx-wasm-runtime/tests/python-stdlib",
+        "../eryx-guest-python/tests/python-stdlib",
     ];
 
     for candidate in &candidates {

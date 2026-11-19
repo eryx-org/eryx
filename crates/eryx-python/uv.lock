@@ -1184,6 +1184,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "pyeryx-runtime-javascript" },
+    { name = "pyeryx-runtime-shell" },
+]
 dev = [
     { name = "httpx" },
     { name = "mcp" },
@@ -1193,8 +1197,14 @@ dev = [
     { name = "pytest-xdist" },
     { name = "requests" },
 ]
+javascript = [
+    { name = "pyeryx-runtime-javascript" },
+]
 serve = [
     { name = "mcp" },
+]
+shell = [
+    { name = "pyeryx-runtime-shell" },
 ]
 
 [package.metadata]
@@ -1204,12 +1214,26 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=2,<2.4" },
     { name = "mcp", marker = "extra == 'serve'", specifier = ">=2,<2.4" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "pyeryx-runtime-javascript", marker = "extra == 'all'", directory = "runtimes/javascript" },
+    { name = "pyeryx-runtime-javascript", marker = "extra == 'javascript'", directory = "runtimes/javascript" },
+    { name = "pyeryx-runtime-shell", marker = "extra == 'all'", directory = "runtimes/shell" },
+    { name = "pyeryx-runtime-shell", marker = "extra == 'shell'", directory = "runtimes/shell" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
     { name = "requests", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev", "serve"]
+provides-extras = ["all", "dev", "javascript", "serve", "shell"]
+
+[[package]]
+name = "pyeryx-runtime-javascript"
+version = "0.15.2"
+source = { directory = "runtimes/javascript" }
+
+[[package]]
+name = "pyeryx-runtime-shell"
+version = "0.15.2"
+source = { directory = "runtimes/shell" }
 
 [[package]]
 name = "pygments"

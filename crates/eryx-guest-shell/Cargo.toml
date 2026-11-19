@@ -1,0 +1,72 @@
+[package]
+name = "eryx-guest-shell"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "WASM guest runtime for eryx sandbox - implements the eryx WIT exports with brush (bash)"
+publish = false
+
+# A standalone workspace, so brush's git dependency stays out of eryx's
+# Cargo.lock and native `cargo clippy --workspace` never builds it. Built
+# straight to a component with `mise run build-runtime-shell`.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Upstream main (6a688f19: the host process-launcher hook #1508, wasm
+# pipelines #1489, printf on WASI #1567, none released yet) plus two draft
+# PRs, on sd2k/brush's wasi-embedding-pin branch until they merge:
+# reubeno/brush#1739 (read/mapfile wait on a pipe that isn't ready) and
+# reubeno/brush#1740 (pipes report unread bytes, for backpressure); and, on
+# sd2k/brush's feat/wasm-background-jobs, job IDs for `$!`, abortable jobs,
+# `wait PID`/`wait -n` and `jobs -l` (#1091), and `test -c`/`-b`/`-S` on
+# WASI; not yet proposed upstream.
+brush-core = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = ["serde"] }
+brush-builtins = { git = "https://github.com/sd2k/brush", rev = "ed2d9a0c", default-features = false, features = [
+    "builtin.echo",
+    "builtin.printf",
+    "builtin.true",
+    "builtin.false",
+    "builtin.test",
+    "builtin.pwd",
+    "builtin.cd",
+    "builtin.export",
+    "builtin.set",
+    "builtin.unset",
+    "builtin.read",
+    "builtin.declare",
+    "builtin.shift",
+    "builtin.return",
+    "builtin.exit",
+    "builtin.break",
+    "builtin.continue",
+    "builtin.colon",
+    "builtin.dot",
+    "builtin.eval",
+    "builtin.exec",
+    "builtin.type",
+    "builtin.command",
+    "builtin.alias",
+    "builtin.unalias",
+    "builtin.let",
+    "builtin.getopts",
+    "builtin.trap",
+    "builtin.shopt",
+    "builtin.wait",
+    "builtin.jobs",
+] }
+# `preserve_order`: positional callback arguments are typed by the property
+# at their position, in the order the host serialized the schema.
+serde_json = { version = "1", features = ["preserve_order"] }
+# The `grep` builtin.
+regex-lite = "0.1"
+tokio = { version = "1", features = ["rt", "sync"] }
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

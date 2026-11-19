@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["python", "sandbox", "wasm", "webassembly", "async"]
 categories = ["development-tools", "wasm"]
 # Only the JS package uses the .gz copy; leaving it out keeps the crate under the 10 MB crates.io limit.
-exclude = ["python-stdlib.tar.gz"]
+exclude = ["python-stdlib.tar.gz", "tests/fixtures/js-environment"]
 
 [[bench]]
 name = "execution"
@@ -102,6 +102,7 @@ required-features = ["native-extensions", "embedded"]
 async-trait.workspace = true
 # Secrets in `Authorization: Basic` headers
 base64.workspace = true
+bytes.workspace = true
 blake3 = { workspace = true, optional = true }
 eryx-macros = { workspace = true, optional = true } #unified
 eryx-runtime = { workspace = true, optional = true } #unified
@@ -116,6 +117,8 @@ ipnet.workspace = true
 # Secrets support
 rand.workspace = true
 # TLS networking
+# Child proxy (net/proxy.rs): its CA and leaf certificates
+rcgen.workspace = true
 rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -126,6 +129,7 @@ tar.workspace = true
 target-lexicon = "0.13"
 tempfile.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["sync", "net", "io-util", "time", "rt"] }
 tokio-rustls.workspace = true
 tokio-util.workspace = true
@@ -134,7 +138,10 @@ walkdir.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wasmtime-wasi-io.workspace = true
+wasmtime-environ.workspace = true
+wasmparser.workspace = true
 webpki-roots.workspace = true
+wit-component-wasmtime.workspace = true
 # Package support (always enabled)
 zip.workspace = true
 # Embedded runtime/stdlib (optional)
@@ -143,31 +150,48 @@ zstd = { workspace = true, optional = true }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] } #unified
 
-# build.rs checks a cached runtime against its checksum file (build/cached_runtime.rs).
+# build.rs hashes what it embeds and checks a cached runtime against its
+# checksum file (build/cached_runtime.rs), only for the features that embed
+# something: embedded-stdlib, embedded and env-pack.
 [build-dependencies]
-hex.workspace = true
-sha2.workspace = true
+hex = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.build-dependencies]
-rustix = { workspace = true, features = ["process"] } #unified
+rustix = { workspace = true, features = ["process"], optional = true } #unified
 
 [features]
-default = []
+default = ["python"]
+# Guest languages. With `embedded`, each enabled language's precompiled
+# runtime is embedded in the binary; without it a language still runs from a
+# runtime supplied with `with_wasm_file()` and friends. `embedded` always
+# includes Python.
+python = []
+javascript = []
+# The shell runs on the hybrid VFS (a private /tmp, /dev and a read-only
+# root; #832), so it pulls in eryx-vfs internally. Its public API stays
+# behind `unstable-vfs`.
+shell = ["coreutils", "dep:eryx-vfs"]
+# The shell's default external commands: uutils coreutils (MIT), embedded
+# precompiled and registered by `Sandbox::embedded().shell()` under each tool's
+# name. Adds ~16 MB to the binary. Needs `embedded` to have any effect.
+coreutils = []
 # Proc macro for simplified callback definitions.
 # Provides #[callback] attribute macro.
 macros = ["dep:eryx-macros"]
 # Embed just the Python stdlib (python-stdlib.tar.zst) in the binary.
 # Enables `with_embedded_stdlib()` on SandboxBuilder for use with custom runtimes.
 # Much smaller than `embedded` (~6MB vs ~36MB added to binary).
-embedded-stdlib = ["dep:zstd"]
-# Zero-config sandboxes: pre-compiled runtime + stdlib embedded in binary.
+embedded-stdlib = ["python", "dep:zstd", "dep:hex", "dep:sha2"]
+# Zero-config sandboxes: pre-compiled runtimes (Python, plus JavaScript and
+# the shell when their features are on) and the Python stdlib embedded in the binary.
 # Enables unsafe code paths for wasmtime's pre-compiled component loading.
 # Without this feature, the crate uses `forbid(unsafe_code)`.
-embedded = ["embedded-stdlib", "dep:blake3"]
+embedded = ["python", "embedded-stdlib", "dep:blake3", "dep:rustix"]
 # Pre-initialization support for capturing Python memory state.
 # Provides ~25x speedup for sandbox creation by snapshotting initialized Python.
 # Works with or without native extensions - can pre-import stdlib modules only.
-preinit = ["dep:eryx-runtime", "eryx-runtime/preinit", "dep:zstd", "dep:blake3"]
+preinit = ["python", "dep:eryx-runtime", "eryx-runtime/preinit", "dep:zstd", "dep:blake3"]
 # Native Python extension support via late-linking.
 # Allows adding extensions like numpy at sandbox creation time.
 # Implies preinit since the linker infrastructure is shared.
@@ -180,11 +204,20 @@ unstable-vfs = ["dep:eryx-vfs"]
 # The low-level execution plumbing: the request/response channels between the
 # guest and the host (`CallbackRequest`, `NetRequest`, `OutputRequest`,
 # `TraceRequest`, `CallbackHostResult`), the `callback_handler` module that
-# serves them, and the `SessionExecuteBuilder`/`PythonExecutor` builder methods
+# serves them, and the `SessionExecuteBuilder`/`Executor` builder methods
 # that take them. `Sandbox` and `InProcessSession` are the stable way to run
 # code; this is for hosts that drive the executor themselves, like eryx-server.
 # Outside semver, like `unstable-vfs`.
 unstable-internals = []
+# Environments (`eryx::environment`): package sets installed and packed
+# ahead of time, which sandboxes mount with `with_environment`. eryx doesn't
+# resolve or fetch packages (the eryx-run service does, or `npm ci`).
+# `environment` loads and mounts them; `env-pack` also packs an installed
+# node_modules tree into one, which embeds the JavaScript bundler
+# (eryx-bundler.cwasm: from `eryx-precompile setup --bundler`, or `mise run
+# precompile-bundler` in the workspace; ERYX_BUNDLER_CWASM names another).
+environment = []
+env-pack = ["environment", "dep:hex", "dep:sha2", "dep:rustix"]
 
 
 [dev-dependencies]
@@ -195,12 +228,13 @@ anyhow.workspace = true
 async-trait.workspace = true
 criterion.workspace = true
 crossterm.workspace = true
-rcgen.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 # `all-arch` pulls in Cranelift's non-host backends so the CPU-feature tests
 # can check aarch64 configuration from an x86 runner (eryx has no ARM test job).
 wasmtime = { workspace = true, features = ["all-arch"] }
-wat = "1"
+wat.workspace = true
+wit-component-wasmtime = { workspace = true, features = ["dummy-module"] }
+wit-parser-wasmtime.workspace = true
 
 [lints]
 workspace = true
@@ -212,7 +246,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-all-features]
 # Skip feature combinations that require the WASM runtime to be built first.
 # preinit and native-extensions require liberyx_runtime.so.zst which is only
-# available after running `mise run build-eryx-runtime`.
+# available after running `mise run build-runtime-python`.
 skip_feature_sets = [
     ["preinit"],
     ["native-extensions"],

@@ -71,6 +71,11 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::wasm::{ExecutorState, SandboxPre};
 
+// The checks build.rs runs on a cached runtime, shared so the names and
+// checksums `eryx-precompile setup` writes are read the same way here.
+#[path = "../build/cached_runtime.rs"]
+mod cached_runtime;
+
 /// Error type for cache operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -144,8 +149,15 @@ impl CacheKey {
     /// embedded runtime when no native extensions are present.
     #[must_use]
     pub fn embedded_runtime() -> Self {
+        Self::embedded_runtime_for(crate::Language::Python)
+    }
+
+    /// Cache key for `language`'s embedded runtime. Python's is all zeros (no
+    /// extensions); the others fill the hash with their snapshot tag, which a
+    /// real extensions hash won't produce.
+    pub(crate) fn embedded_runtime_for(language: crate::Language) -> Self {
         Self {
-            extensions_hash: [0u8; 32], // All zeros = no extensions
+            extensions_hash: [language.snapshot_tag(); 32],
             eryx_version: env!("CARGO_PKG_VERSION"),
             wasmtime_version: wasmtime_version(),
         }
@@ -277,9 +289,9 @@ fn link_environment_hash() -> [u8; 32] {
             hasher.update((lib.len() as u64).to_le_bytes());
             hasher.update(lib);
         }
-        hasher.update(crate::wasm::PythonExecutor::ENGINE_CONFIG_VERSION.to_le_bytes());
+        hasher.update(crate::wasm::Executor::ENGINE_CONFIG_VERSION.to_le_bytes());
         // If the engine can't be created, building the sandbox fails anyway.
-        if let Ok(engine) = crate::wasm::PythonExecutor::shared_engine() {
+        if let Ok(engine) = crate::wasm::Executor::shared_engine() {
             let mut engine_hasher = std::hash::DefaultHasher::new();
             engine
                 .precompile_compatibility_hash()
@@ -328,7 +340,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Returns an error if none of the candidates can be created or passes the
 /// checks.
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "env-pack", feature = "preinit"))]
 pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
     static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     ROOT.get_or_init(|| {
@@ -345,7 +357,7 @@ pub fn default_cache_root() -> Result<&'static Path, crate::Error> {
     .map_err(|e| crate::ErrorKind::Initialization(e.clone()).into())
 }
 
-#[cfg(feature = "embedded-stdlib")]
+#[cfg(any(feature = "embedded-stdlib", feature = "env-pack", feature = "preinit"))]
 fn cache_root_candidates() -> Vec<PathBuf> {
     let env_dir = |name: &str| {
         std::env::var_os(name)
@@ -412,6 +424,112 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(dir)
+}
+
+/// The precompiled runtime for `language` that `eryx-precompile setup
+/// --language <language>` cached for this platform and eryx version, in
+/// `$XDG_CACHE_HOME/eryx` or `~/.cache/eryx`, if it exists.
+///
+/// It is loaded as native code, so it is ignored unless both the file and
+/// its directory are [private](is_private) to the current user (and not
+/// symlinks). Relative `XDG_CACHE_HOME` and `HOME` values are ignored, as for
+/// the embedded runtime's cache.
+#[must_use]
+pub fn setup_runtime(language: crate::Language) -> Option<PathBuf> {
+    setup_file(&format!("runtime-{language}"))
+}
+
+/// The shell's coreutils (`coreutils.cwasm`) that `eryx-precompile setup
+/// --language shell` cached for this platform and eryx version, under the
+/// same checks as [`setup_runtime`].
+#[must_use]
+pub fn setup_coreutils() -> Option<PathBuf> {
+    setup_file("coreutils")
+}
+
+/// The JavaScript bundler (`eryx-bundler.cwasm`) that `eryx-precompile setup
+/// --bundler` cached for this platform and eryx version, if it's there:
+/// its bytes, once they match the checksum `setup` wrote next to them and
+/// pass the same privacy checks as [`setup_runtime`], or why they don't.
+#[must_use]
+pub fn setup_bundler() -> Option<(PathBuf, Result<Vec<u8>, String>)> {
+    setup_file("eryx-bundler").map(|path| {
+        let bytes = setup_read_verified(&path);
+        (path, bytes)
+    })
+}
+
+/// The bytes of a file `eryx-precompile setup` cached at `path`, if they
+/// match the checksum next to them and the file, its checksum and their
+/// directory are private to this user (as for [`setup_runtime`]), or why
+/// they can't be used. `setup` and eryx's build script check its cache with
+/// this too.
+///
+/// # Errors
+///
+/// Why the cached file can't be used.
+pub fn setup_read_verified(path: &Path) -> Result<Vec<u8>, String> {
+    cached_runtime::read_verified(path)
+}
+
+/// The directory `eryx-precompile setup` caches into and eryx reads from:
+/// `$XDG_CACHE_HOME/eryx`, else `~/.cache/eryx` (`%USERPROFILE%` without a
+/// `HOME`). A relative or empty `XDG_CACHE_HOME` or `HOME` is ignored, as for
+/// the embedded runtime's cache. `None` without either.
+#[must_use]
+pub fn setup_dir() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    Some(match absolute("XDG_CACHE_HOME") {
+        Some(xdg) => xdg.join("eryx"),
+        None => absolute("HOME")
+            .or_else(|| absolute("USERPROFILE"))?
+            .join(".cache")
+            .join("eryx"),
+    })
+}
+
+/// The name `eryx-precompile setup` caches `stem` (e.g. `runtime-python`,
+/// `coreutils`, `eryx-bundler`) under for eryx `version` on `target` (see
+/// [`setup_target`]): `<stem>-v<version>-<target>.cwasm`. The setup cache's
+/// writer, eryx's build script and the readers here all use it.
+#[must_use]
+pub fn setup_file_name(stem: &str, version: &str, target: &str) -> String {
+    cached_runtime::file_name(stem, version, target)
+}
+
+/// This platform's target in [`setup_file_name`]s: `<arch>-<os>`, e.g.
+/// `x86_64-linux` or `aarch64-macos`.
+#[must_use]
+pub fn setup_target() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Where `eryx-precompile setup` keeps the SHA-256 of a cached `path`:
+/// `<path>.sha256`.
+#[must_use]
+pub fn setup_checksum_path(path: &Path) -> PathBuf {
+    cached_runtime::checksum_path(path)
+}
+
+/// [`setup_file_name`] for this eryx version and platform in the setup
+/// cache, if it's there and private.
+fn setup_file(stem: &str) -> Option<PathBuf> {
+    let dir = setup_dir()?;
+    let dir_meta = fs::symlink_metadata(&dir).ok()?;
+    if !dir_meta.is_dir() || !is_private(&dir_meta) {
+        return None;
+    }
+    let path = dir.join(setup_file_name(
+        stem,
+        env!("CARGO_PKG_VERSION"),
+        &setup_target(),
+    ));
+    let meta = fs::symlink_metadata(&path).ok()?;
+    (meta.is_file() && is_private(&meta)).then_some(path)
 }
 
 /// Whether a file or directory is owned by the current user and not group- or
@@ -657,7 +775,7 @@ impl ComponentCache for NoCache {
 ///
 /// # Usage
 ///
-/// This cache is used automatically by [`PythonExecutor`](crate::wasm::PythonExecutor)
+/// This cache is used automatically by [`Executor`](crate::wasm::Executor)
 /// when creating executors from precompiled files or the embedded runtime.
 /// You typically don't need to interact with it directly.
 ///
@@ -842,6 +960,58 @@ fn open_for_mmap(path: &Path) -> io::Result<fs::File> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The cached setup runtime is only used from a private directory, and a
+    /// relative XDG_CACHE_HOME is ignored.
+    // Setting env vars is unsafe, which only these features allow.
+    #[cfg(all(unix, any(feature = "embedded", feature = "preinit")))]
+    #[allow(unsafe_code)]
+    #[test]
+    fn setup_runtime_requires_a_private_file_and_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("eryx");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let file = dir.join(format!(
+            "runtime-shell-v{}-{}-{}.cwasm",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ));
+        fs::write(&file, b"cwasm").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // SAFETY: nextest runs each test in its own process, so nothing else
+        // reads the environment concurrently.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+        assert_eq!(setup_runtime(crate::Language::Shell), Some(file.clone()));
+        assert_eq!(setup_runtime(crate::Language::JavaScript), None);
+        assert_eq!(setup_coreutils(), None);
+        let coreutils = dir.join(
+            file.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace("runtime-shell", "coreutils"),
+        );
+        fs::write(&coreutils, b"cwasm").unwrap();
+        fs::set_permissions(&coreutils, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(setup_coreutils(), Some(coreutils));
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", "relative/cache");
+            std::env::set_var("HOME", root.path().join("nowhere"));
+        }
+        assert_eq!(setup_runtime(crate::Language::Shell), None);
+    }
 
     #[cfg(feature = "embedded")]
     #[test]
@@ -1050,7 +1220,7 @@ mod tests {
     #[cfg(feature = "embedded")]
     #[test]
     fn instance_pre_cache_evicts_least_recently_used() {
-        let pre = crate::wasm::PythonExecutor::from_embedded_runtime()
+        let pre = crate::wasm::Executor::from_embedded_runtime()
             .unwrap()
             .instance_pre()
             .clone();

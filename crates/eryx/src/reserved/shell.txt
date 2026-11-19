@@ -1,0 +1,74 @@
+# Names a shell callback can't take: the shell guest's builtins (brush's
+# BashMode set as the guest builds it, plus its own `invoke`, `grep`,
+# `env`, `xargs`, `chmod` and `kill`, and the `sh` and `bash` it runs as
+# nested shells), and the shell's reserved words (brush-core's keywords.rs),
+# which are parsed as syntax, so a command of that name can't be run.
+# Checked against the guest by its builtins_match_the_host_list test.
+!
+.
+:
+[
+[[
+]]
+alias
+bash
+break
+case
+cd
+chmod
+command
+continue
+coproc
+declare
+disown
+do
+done
+echo
+elif
+else
+env
+esac
+eval
+exec
+exit
+export
+false
+fi
+for
+function
+getopts
+grep
+if
+in
+invoke
+jobs
+kill
+let
+local
+logout
+printf
+pwd
+read
+readonly
+return
+select
+set
+sh
+shift
+shopt
+source
+test
+then
+time
+trap
+true
+type
+typeset
+unalias
+unset
+until
+wait
+while
+xargs
+{
+}

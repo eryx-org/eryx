@@ -3,6 +3,7 @@
 //! Provides the main `Sandbox` class that Python users interact with.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,7 +13,7 @@ use pyo3::types::PyDict;
 use eryx::{CancellationToken, OutputHandler};
 
 use crate::callback::extract_callbacks;
-use crate::error::eryx_error_to_py;
+use crate::error::{InitializationError, eryx_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
@@ -100,10 +101,29 @@ impl Sandbox {
     /// no per-line tracing overhead.
     ///
     /// Args:
+    ///     language: The guest language to run: "python" (the default),
+    ///         "javascript" or "shell". The JavaScript and shell runtimes aren't
+    ///         in the pyeryx wheel; see `runtime_path`.
+    ///     runtime_path: A precompiled runtime (.cwasm) to run instead of the
+    ///         built-in one. For JavaScript and the shell it is otherwise looked
+    ///         up in `ERYX_RUNTIME_CWASM_<LANGUAGE>`, then the
+    ///         `pyeryx-runtime-<language>` package (`pip install
+    ///         pyeryx[javascript]`), then the cache `eryx-precompile setup
+    ///         --language <language>` writes.
     ///     resource_limits: Optional resource limits for execution.
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     commands: For the shell only: external commands by name, each an
+    ///         `eryx.Command`. They replace the uutils coreutils tools
+    ///         (cat, head, ls, sort, ...) of the same name, which the shell
+    ///         gets by default from the `pyeryx-runtime-shell` package.
+    ///     child_network: For the shell only, with `network`: how its
+    ///         external commands reach the network, through a proxy on the
+    ///         host. None (the default) keeps them offline; "inherit" gives
+    ///         them `network`'s policy; a `NetConfig` only what both it and
+    ///         `network` allow. Children see secrets only as their
+    ///         placeholders, which the proxy replaces for the secrets' hosts.
     ///
     /// Returns:
     ///     A new Sandbox instance ready to execute Python code.
@@ -149,10 +169,12 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
+        language: Option<&str>,
+        runtime_path: Option<PathBuf>,
         resource_limits: Option<ResourceLimits>,
         network: Option<NetConfig>,
         callbacks: Option<Bound<'_, PyAny>>,
@@ -166,14 +188,19 @@ impl Sandbox {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        commands: Option<crate::command::Commands<'_>>,
+        child_network: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        let language = parse_language(language)?;
+        let child_network = parse_child_network(language, network.is_some(), child_network)?;
         let runtime = crate::error::make_runtime()?;
 
         // Build the eryx sandbox with embedded runtime. Trace collection
         // (sys.settrace) is always off: the Python ExecuteResult does not
         // expose trace events, and the hook makes instruction-heavy scripts
         // orders of magnitude slower.
-        let mut builder = eryx::Sandbox::embedded().with_trace_collection(false);
+        let (builder, source) = base_builder(py, language, runtime_path)?;
+        let mut builder = builder.with_trace_collection(false);
 
         // Apply resource limits if provided
         if let Some(limits) = resource_limits {
@@ -232,7 +259,7 @@ impl Sandbox {
             });
         }
 
-        let inner = builder.build().map_err(eryx_error_to_py)?;
+        let inner = build_for(py, (builder, source), language, commands, child_network)?;
 
         Ok(Self {
             inner,
@@ -252,6 +279,11 @@ impl Sandbox {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout, timing info, and statistics.
@@ -261,6 +293,7 @@ impl Sandbox {
     ///     TimeoutError: If execution exceeds the timeout limit.
     ///     ResourceLimitError: If a resource limit is exceeded.
     ///     CancelledError: If `cancel` was cancelled.
+    ///     ValueError: If `allowed_commands` is given for another language.
     ///
     /// Example:
     ///     result = sandbox.execute('''
@@ -268,15 +301,17 @@ impl Sandbox {
     ///     print(f"2 + 2 = {x}")
     ///     ''')
     ///     print(result.stdout)  # "2 + 2 = 4"
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute(
         &self,
         py: Python<'_>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ExecuteResult> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let token = call_token(cancel);
-        let run = run_cancellable(&self.inner, &self.runtime, code, token.clone());
+        let run = run_cancellable(&self.inner, code, options, token.clone());
         run_blocking(py, &self.runtime, &token, run)?
     }
 
@@ -289,23 +324,30 @@ impl Sandbox {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
     ///
     /// Example:
     ///     result = await sandbox.execute_async('print("hi")')
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute_async<'py>(
         &self,
         py: Python<'py>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let token = call_token(cancel);
         let run_token = token.clone();
         run_async(py, &self.runtime, token, || {
-            run_cancellable(&self.inner, &self.runtime, code, run_token)
+            run_cancellable(&self.inner, code, options, run_token)
         })
     }
 
@@ -322,6 +364,11 @@ impl Sandbox {
     ///         whose callback results are replayed instead of invoking callbacks
     ///         live. Trusted input: replayed results are returned to the sandbox
     ///         verbatim.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the sandbox's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     ReplayOutcome with the result or error, the recorded journal, the
@@ -333,18 +380,21 @@ impl Sandbox {
     ///         save(outcome.journal)  # resume later with execute_with_journal(code, journal=...)
     ///     elif outcome.error:
     ///         raise outcome.error
-    #[pyo3(signature = (code, journal=None))]
+    #[pyo3(signature = (code, journal=None, *, allowed_commands=None))]
     fn execute_with_journal(
         &self,
         py: Python<'_>,
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ReplayOutcome> {
+        let options = execute_options(&self.inner, allowed_commands)?;
         let journal = crate::result::journal_from_py(journal)?;
         let code = code.to_string();
         let runtime = self.runtime.clone();
         let inner = &self.inner;
-        let outcome = py.detach(|| runtime.block_on(inner.execute_with_journal(&code, journal)));
+        let outcome =
+            py.detach(|| runtime.block_on(inner.execute_journaled(&code, journal, &options)));
         ReplayOutcome::from_outcome(py, outcome)
     }
 
@@ -387,32 +437,42 @@ impl std::fmt::Debug for Sandbox {
     }
 }
 
-/// Start `code` on `sandbox` and return a future for its result that also
-/// stops the run when `token` is cancelled.
+/// A call's [`eryx::ExecuteOptions`], checking `allowed_commands`, which
+/// only the shell takes.
+pub(crate) fn execute_options(
+    sandbox: &eryx::Sandbox,
+    allowed_commands: Option<Vec<String>>,
+) -> PyResult<eryx::ExecuteOptions> {
+    let mut options = eryx::ExecuteOptions::new();
+    if let Some(names) = allowed_commands {
+        let language = sandbox.executor().language();
+        if language != eryx::Language::Shell {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "allowed_commands= is only for language=\"shell\", not {language}"
+            )));
+        }
+        options = options.with_allowed_commands(names);
+    }
+    Ok(options)
+}
+
+/// A future for running `code` on (a cheap clone of) `sandbox` with
+/// `options`, stopped when `token` is cancelled.
 pub(crate) fn run_cancellable(
     sandbox: &eryx::Sandbox,
-    runtime: &tokio::runtime::Runtime,
     code: &str,
+    options: eryx::ExecuteOptions,
     token: CancellationToken,
 ) -> impl Future<Output = PyResult<ExecuteResult>> + Send + 'static {
-    // A token cancelled before the call never starts the run.
-    let handle = (!token.is_cancelled()).then(|| {
-        let _guard = runtime.enter();
-        sandbox.execute_cancellable(code)
-    });
+    let sandbox = sandbox.clone();
+    let code = code.to_string();
+    let options = options.with_cancellation(token);
     async move {
-        let handle = handle.ok_or_else(|| eryx_error_to_py(eryx::ErrorKind::Cancelled.into()))?;
-        let stop = handle.cancellation_token();
-        let wait = handle.wait();
-        tokio::pin!(wait);
-        let result = tokio::select! {
-            result = &mut wait => result,
-            () = token.cancelled() => {
-                stop.cancel();
-                wait.await
-            }
-        };
-        result.map(ExecuteResult::from).map_err(eryx_error_to_py)
+        sandbox
+            .execute_with(&code, &options)
+            .await
+            .map(ExecuteResult::from)
+            .map_err(eryx_error_to_py)
     }
 }
 
@@ -420,10 +480,172 @@ pub(crate) fn run_cancellable(
 ///
 /// Expected format: `{"NAME": {"value": "secret", "allowed_hosts": ["host.com"]}}`
 /// The `allowed_hosts` key is optional and defaults to an empty list.
-pub(crate) fn apply_secrets<R, S>(
-    mut builder: eryx::SandboxBuilder<R, S>,
+/// The builder a sandbox or session starts from: Python's embedded runtime,
+/// or a precompiled runtime from [`find_runtime`] for the other languages,
+/// which the pyeryx wheel doesn't embed.
+pub(crate) fn base_builder(
+    py: Python<'_>,
+    language: eryx::Language,
+    runtime_path: Option<PathBuf>,
+) -> PyResult<(
+    eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
+    RuntimeSource,
+)> {
+    if language == eryx::Language::Python && runtime_path.is_none() {
+        return Ok((eryx::Sandbox::embedded(), RuntimeSource::Embedded));
+    }
+    let (path, source) = find_runtime(py, language, runtime_path)?;
+    // SAFETY: the runtime comes from the caller, its environment, an installed
+    // pyeryx-runtime package or the user's private eryx cache, all trusted
+    // like the pyeryx wheel itself. Its eryx version and language stamps are
+    // checked when the sandbox is built.
+    #[allow(unsafe_code)]
+    let builder = unsafe { eryx::Sandbox::builder().with_precompiled_file(path) };
+    Ok((builder, source))
+}
+
+/// Where a sandbox's runtime came from, which is where its shell finds
+/// coreutils.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeSource {
+    /// Built into the pyeryx wheel (Python).
+    Embedded,
+    /// `runtime_path=` or `ERYX_RUNTIME_CWASM_<LANGUAGE>`.
+    Explicit,
+    /// The `pyeryx-runtime-<language>` companion package.
+    Companion,
+    /// The cache `eryx-precompile setup` writes.
+    SetupCache,
+}
+
+/// Finish `builder` (configured as Python, whose language-neutral options
+/// carry over) as a sandbox for `language`. A shell gets uutils coreutils
+/// from the `pyeryx-runtime-shell` package if it's installed, then
+/// `commands`, which replace coreutils tools of the same name.
+pub(crate) fn build_for(
+    py: Python<'_>,
+    (builder, source): (
+        eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has>,
+        RuntimeSource,
+    ),
+    language: eryx::Language,
+    commands: Option<crate::command::Commands<'_>>,
+    child_network: eryx::ChildNetwork,
+) -> PyResult<eryx::Sandbox> {
+    if language != eryx::Language::Shell && commands.as_ref().is_some_and(|c| !c.is_empty()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "commands= is only for language=\"shell\", not {language}"
+        )));
+    }
+    match language {
+        eryx::Language::Python => builder.build(),
+        eryx::Language::JavaScript => builder.javascript().build(),
+        eryx::Language::Shell => {
+            let mut builder = builder.shell();
+            if let Some(coreutils) = crate::command::coreutils(py, source)? {
+                builder = builder.with_commands(eryx::embedded::COREUTILS_TOOLS, coreutils);
+            }
+            for (name, command) in commands.into_iter().flatten() {
+                builder = builder.with_command(name, command.inner.clone());
+            }
+            builder.with_child_network(child_network).build()
+        }
+        other => {
+            return Err(InitializationError::new_err(format!(
+                "unsupported language {other}"
+            )));
+        }
+    }
+    .map_err(eryx_error_to_py)
+}
+
+/// Find the precompiled runtime for `language`: `explicit`, then
+/// `ERYX_RUNTIME_CWASM_<LANGUAGE>`, then the `pyeryx_runtime_<language>`
+/// companion package, then the cache `eryx-precompile setup` writes.
+pub(crate) fn find_runtime(
+    py: Python<'_>,
+    language: eryx::Language,
+    explicit: Option<PathBuf>,
+) -> PyResult<(PathBuf, RuntimeSource)> {
+    if let Some(path) = explicit {
+        return Ok((path, RuntimeSource::Explicit));
+    }
+    let var = format!(
+        "ERYX_RUNTIME_CWASM_{}",
+        language.as_str().to_ascii_uppercase()
+    );
+    if let Some(path) = std::env::var_os(&var) {
+        return Ok((path.into(), RuntimeSource::Explicit));
+    }
+    // A companion package without its runtime (a source checkout's
+    // skeleton) counts as not installed.
+    let module = format!("pyeryx_runtime_{language}");
+    match py
+        .import(module.as_str())
+        .and_then(|module| module.call_method0("cwasm_path"))
+    {
+        Ok(path) => return Ok((path.extract()?, RuntimeSource::Companion)),
+        Err(e)
+            if e.is_instance_of::<pyo3::exceptions::PyModuleNotFoundError>(py)
+                || e.is_instance_of::<pyo3::exceptions::PyFileNotFoundError>(py) => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(path) = eryx::cache::setup_runtime(language) {
+        return Ok((path, RuntimeSource::SetupCache));
+    }
+    Err(InitializationError::new_err(format!(
+        "no {language} runtime found: pyeryx doesn't include it. Install it with \
+         `pip install pyeryx[{language}]`, or run `eryx-precompile setup --language \
+         {language}`, set {var}, or pass runtime_path="
+    )))
+}
+
+/// `child_network=`: None, "inherit" or a narrowing `NetConfig`, for a
+/// shell sandbox with `network=`.
+pub(crate) fn parse_child_network(
+    language: eryx::Language,
+    has_network: bool,
+    value: Option<Bound<'_, PyAny>>,
+) -> PyResult<eryx::ChildNetwork> {
+    let Some(value) = value.filter(|v| !v.is_none()) else {
+        return Ok(eryx::ChildNetwork::None);
+    };
+    if language != eryx::Language::Shell {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_network= is only for language=\"shell\", not {language}"
+        )));
+    }
+    if !has_network {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "child_network= needs network=: children only get what it allows",
+        ));
+    }
+    if let Ok(narrow) = value.extract::<NetConfig>() {
+        return Ok(eryx::ChildNetwork::Narrow(Box::new(narrow.into())));
+    }
+    match value.extract::<String>() {
+        Ok(mode) if mode == "inherit" => Ok(eryx::ChildNetwork::Inherit),
+        Ok(mode) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "child_network= must be None, \"inherit\" or a NetConfig, not {mode:?}"
+        ))),
+        Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(
+            "child_network= must be None, \"inherit\" or a NetConfig",
+        )),
+    }
+}
+
+/// Parse the `language` argument; `None` is Python.
+pub(crate) fn parse_language(language: Option<&str>) -> PyResult<eryx::Language> {
+    language.map_or(Ok(eryx::Language::Python), |name| {
+        name.parse()
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    })
+}
+
+pub(crate) fn apply_secrets<L: eryx::language::GuestLanguage, R>(
+    mut builder: eryx::SandboxBuilder<L, R>,
     secrets_dict: &Bound<'_, PyDict>,
-) -> PyResult<eryx::SandboxBuilder<R, S>> {
+) -> PyResult<eryx::SandboxBuilder<L, R>> {
     for (name, value, allowed_hosts) in extract_secrets(secrets_dict)? {
         builder = builder.with_secret(name, value, allowed_hosts);
     }

@@ -28,6 +28,9 @@ from eryx_run import (
 
 PathLike = Union[str, Path]
 
+Language = Literal["python", "javascript", "shell"]
+"""A guest language a Sandbox or Session can run (a plain string at runtime)."""
+
 VolumeSpec = Union[tuple[str, str, bool], tuple[str, str, bool, Optional[int]]]
 """A host volume mount: `(host_path, guest_path, read_only)`, optionally with a
 fourth `max_file_size` in bytes. Writes that would grow any file in the mount
@@ -75,6 +78,7 @@ def configure_shared_engine(
             already fixed by an earlier call or by creating a sandbox.
     """
     ...
+
 
 
 class SecretDict(TypedDict, total=False):
@@ -288,7 +292,14 @@ class ExecuteResult:
 
     @property
     def peak_memory_bytes(self) -> Optional[int]:
-        """Peak memory usage in bytes (if available)."""
+        """Peak memory usage in bytes (if available).
+
+        The guest instance's largest linear memory, plus what its child
+        processes held at the same time (which can take it past
+        ``max_memory_bytes``, the guest's own limit). In a session that's the
+        peak so far, not just this execution's growth, since memory never
+        shrinks between executions.
+        """
         ...
 
     @property
@@ -716,6 +727,96 @@ class NetConfig:
 
 
 @final
+class Command:
+    """A WASI command a shell sandbox can run as an external command.
+
+    For example uutils coreutils, ripgrep or curl built for ``wasm32-wasip2``,
+    ``gh`` built for ``wasm32-wasip3``, or a WASI preview 1 CLI
+    (``wasm32-wasip1``), which is adapted into a component when loaded.
+    Pass commands by name: ``Sandbox(language="shell", commands={"rg": rg})``.
+    The same `Command` under several names (a multicall binary, which picks the
+    tool from ``argv[0]``) is compiled once. A command sees the sandbox's
+    volumes and nothing else of the host, and the network only through the
+    sandbox's ``child_network=`` proxy.
+
+    ``allow_tunnels=True`` lets the command open blind ``CONNECT`` tunnels
+    through that proxy, for protocols it can't inspect (e.g. git over SSH):
+    requests in a tunnel get no secret substitution (placeholders go out as
+    they are) and no HTTP rules, and hosts with rules are refused one.
+    """
+
+    @staticmethod
+    def from_file(path: PathLike, *, allow_tunnels: bool = False) -> Command:
+        """Compile a command from a ``.wasm`` file.
+
+        A WASI 0.2 or 0.3 command component, or a WASI preview 1 command
+        module, adapted into a component first.
+
+        Raises:
+            InitializationError: If it can't be read or compiled, or isn't a
+                WASI command (for example if it imports what commands don't
+                get, such as ``wasi:http``).
+        """
+        ...
+
+    @staticmethod
+    def from_bytes(wasm: bytes, *, allow_tunnels: bool = False) -> Command:
+        """Compile a command from its ``.wasm`` bytes, as `from_file` does."""
+        ...
+
+    @staticmethod
+    def from_precompiled_file(
+        path: PathLike, *, allow_tunnels: bool = False
+    ) -> Command:
+        """Load a command precompiled by this pyeryx version's eryx.
+
+        Only load files you trust: a precompiled file is native code that can't
+        be fully validated.
+        """
+        ...
+
+    @staticmethod
+    def python() -> Command:
+        """Python itself as a command, to register as ``python`` and ``python3``.
+
+        ``py = Command.python()``, then
+        ``Sandbox(language="shell", commands={"python": py, "python3": py})``
+        runs ``python3 -c CODE``, ``python3 script.py`` and ``... | python3``.
+        Each run is a fresh interpreter (pyeryx's embedded one, with the
+        standard library) on the shell's files, environment, working directory
+        and stdio, within the execution's limits, with no callbacks and no
+        network.
+
+        Raises:
+            InitializationError: If the embedded runtime can't be loaded.
+        """
+        ...
+
+    @staticmethod
+    def node(*, runtime_path: PathLike | None = None) -> Command:
+        """JavaScript as a command, to register as ``node`` and ``js``.
+
+        ``js = Command.node()``, then
+        ``Sandbox(language="shell", commands={"node": js, "js": js})`` runs
+        ``node -e CODE``, ``node -p EXPR``, ``node script.js`` and
+        ``... | node``. Each run is a fresh QuickJS instance with Node's
+        ``process``, ``require`` and ``node:fs`` on the shell's files,
+        environment, working directory and stdio, within the execution's
+        limits, with no callbacks and no network.
+
+        The runtime is found as for ``Sandbox(language="javascript")``:
+        ``runtime_path``, then ``ERYX_RUNTIME_CWASM_JAVASCRIPT``, then the
+        ``pyeryx-runtime-javascript`` package, then the cache
+        ``eryx-precompile setup --language javascript`` writes.
+
+        Raises:
+            InitializationError: If there's no JavaScript runtime, or it
+                can't be loaded.
+        """
+        ...
+
+
+@final
 class Sandbox:
     """A Python sandbox powered by WebAssembly.
 
@@ -759,6 +860,8 @@ class Sandbox:
     def __new__(
         cls,
         *,
+        language: Optional[Language] = None,
+        runtime_path: Optional[PathLike] = None,
         resource_limits: Optional[ResourceLimits] = None,
         network: Optional[NetConfig] = None,
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
@@ -772,10 +875,21 @@ class Sandbox:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        commands: Optional[dict[str, Command]] = None,
+        child_network: Union[None, Literal["inherit"], NetConfig] = None,
     ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
         Args:
+            language: The guest language to run: "python" (the default),
+                "javascript" or "shell". The JavaScript and shell runtimes aren't
+                in the pyeryx wheel; see `runtime_path`.
+            runtime_path: A precompiled runtime (.cwasm) to run instead of the
+                built-in one. For JavaScript and the shell it is otherwise looked
+                up in `ERYX_RUNTIME_CWASM_<LANGUAGE>`, then the
+                `pyeryx-runtime-<language>` package (`pip install
+                pyeryx[javascript]`), then the cache `eryx-precompile setup
+                --language <language>` writes.
             resource_limits: Optional resource limits for execution.
             network: Optional network configuration. If provided, enables networking.
             callbacks: Optional callbacks that sandboxed code can invoke.
@@ -807,9 +921,22 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
+            commands: For the shell only: external commands by name, each a
+                `Command`. They replace the uutils coreutils tools (cat, head, ls,
+                sort, ...) of the same name, which the shell gets by default from
+                the ``pyeryx-runtime-shell`` package. A shell script's nonzero exit
+                status raises `PythonExceptionError` with ``exit_code`` set.
+            child_network: For the shell only, with ``network``: how its
+                commands reach the network, through a proxy on the host. None
+                (the default) keeps them offline; ``"inherit"`` gives them
+                ``network``'s policy; a `NetConfig` only what both it and
+                ``network`` allow. Children see secrets only as their
+                placeholders, which the proxy replaces for the secrets' hosts.
 
         Raises:
             InitializationError: If the sandbox fails to initialize.
+            ValueError: If ``commands`` or ``child_network`` is given for
+                another language, or ``child_network`` without ``network``.
 
         Example:
             # Default sandbox (stdlib only, no network)
@@ -833,7 +960,11 @@ class Sandbox:
         ...
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the sandbox.
 
@@ -848,6 +979,12 @@ class Sandbox:
             code: Python source code to execute.
             cancel: Optional token; calling ``cancel.cancel()`` from any thread
                 stops the run.
+            allowed_commands: For ``language="shell"`` only: the commands this
+                call may run, out of the sandbox's. ``None`` (the default)
+                allows them all, ``[]`` allows none, and names the sandbox
+                doesn't have are ignored. Others exit 127. The shell's ``grep``
+                builtin counts as a command; other builtins and callbacks are
+                unaffected. ValueError for other languages.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -868,7 +1005,11 @@ class Sandbox:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute Python code in the sandbox from asyncio.
 
@@ -881,6 +1022,7 @@ class Sandbox:
             code: Python source code to execute.
             cancel: Optional token; cancelling it stops the run and raises
                 ``CancelledError``.
+            allowed_commands: As for ``execute()``.
 
         Example:
             result = await sandbox.execute_async('print("hi")')
@@ -888,7 +1030,11 @@ class Sandbox:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code, journaling callback results and replaying them from
         ``journal`` if one was given.
@@ -901,9 +1047,11 @@ class Sandbox:
             journal: A journal from a previous ``ReplayOutcome.journal``. Matching
                 callbacks return their recorded results instead of running live.
                 Trusted input: replayed results reach the sandbox verbatim.
+            allowed_commands: As for ``execute()``.
 
         Raises:
-            ValueError: If ``journal`` is not a valid journal.
+            ValueError: If ``journal`` is not a valid journal, or
+                ``allowed_commands`` is given for another language.
 
         Example:
             outcome = sandbox.execute_with_journal(code)
@@ -1402,6 +1550,8 @@ class Session:
     def __new__(
         cls,
         *,
+        language: Optional[Language] = None,
+        runtime_path: Optional[PathLike] = None,
         vfs: Optional[VfsStorage] = None,
         vfs_mount_path: Optional[str] = None,
         resource_limits: Optional[ResourceLimits] = None,
@@ -1414,6 +1564,8 @@ class Session:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        commands: Optional[dict[str, Command]] = None,
+        child_network: Union[None, Literal["inherit"], NetConfig] = None,
     ) -> Session:
         """Create a new session with the embedded Python runtime.
 
@@ -1421,6 +1573,9 @@ class Session:
         unlike `Sandbox` which runs each execution in isolation.
 
         Args:
+            language: The guest language to run: "python" (the default),
+                "javascript" or "shell", as for `Sandbox`.
+            runtime_path: A precompiled runtime (.cwasm), as for `Sandbox`.
             vfs: Optional VfsStorage for persistent file storage.
                 Files written to `/data/*` will persist across executions.
             vfs_mount_path: Custom mount path for VFS (default: "/data").
@@ -1434,6 +1589,11 @@ class Session:
             mcp: Optional MCPManager with connected MCP servers.
             on_stdout: Optional callback for streaming stdout output in real-time.
             on_stderr: Optional callback for streaming stderr output in real-time.
+            child_network: For the shell only, with ``network``: how its
+                commands reach the network, through a proxy on the host. None
+                (the default) keeps them offline; ``"inherit"`` gives them
+                ``network``'s policy; a `NetConfig` only what both it and
+                ``network`` allow.
 
         Raises:
             InitializationError: If the session fails to initialize.
@@ -1460,7 +1620,11 @@ class Session:
         ...
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the session.
 
@@ -1478,6 +1642,12 @@ class Session:
             code: Python source code to execute.
             cancel: Optional token; calling ``cancel.cancel()`` from any thread
                 stops the run.
+            allowed_commands: For ``language="shell"`` only: the commands this
+                call may run, out of the session's. ``None`` (the default)
+                allows them all, ``[]`` allows none, and names the session
+                doesn't have are ignored. Others exit 127. The shell's
+                ``grep`` builtin counts as a command; other builtins and
+                callbacks are unaffected. ValueError for other languages.
 
         Returns:
             ExecuteResult containing stdout and execution statistics.
@@ -1496,7 +1666,11 @@ class Session:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute code in the session from asyncio.
 
@@ -1507,6 +1681,7 @@ class Session:
         calls made before them. Cancelling the awaiting task stops the run,
         losing session state as with ``cancel``. Raises ``RuntimeError``
         without running anything when called outside a running event loop.
+        ``allowed_commands`` is as for ``execute()``.
 
         Example:
             await session.execute_async('x = 1')
@@ -1515,12 +1690,17 @@ class Session:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code in the session with callback journaling and replay.
 
         Session state persists as with ``execute()``. See
         ``Sandbox.execute_with_journal()`` for the journal semantics.
+        ``allowed_commands`` is as for ``execute()``.
 
         If the run halts (a callback suspends, or it times out or runs out of
         fuel), the session is rolled back to its Python globals from before the
@@ -1647,8 +1827,8 @@ class VfsStorage:
 
         Args:
             max_bytes: Cap on the total size of all file contents combined,
-                plus a charge of the path length and 64 bytes for each file and
-                directory. Writes that would exceed it fail inside the sandbox with
+                plus a charge of the path length (twice for a directory) and 64
+                bytes for each file and directory. Writes that would exceed it fail inside the sandbox with
                 ``OSError``. ``None`` (the default) means 64 MiB. The storage owns
                 this cap, so ``ResourceLimits.max_vfs_bytes`` does not apply.
         """
@@ -1722,13 +1902,18 @@ class PooledSandbox:
     """
 
     def execute(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ExecuteResult:
         """Execute Python code in the sandboxed lease. See ``Sandbox.execute()``.
 
         Args:
             code: Python source code to execute.
             cancel: Optional token; cancelling it stops the run.
+            allowed_commands: As for ``Sandbox.execute()``.
 
         Returns:
             ExecuteResult containing stdout, timing info, and statistics.
@@ -1743,7 +1928,11 @@ class PooledSandbox:
         ...
 
     def execute_async(
-        self, code: str, *, cancel: Optional[CancelToken] = None
+        self,
+        code: str,
+        *,
+        cancel: Optional[CancelToken] = None,
+        allowed_commands: Optional[list[str]] = None,
     ) -> asyncio.Future[ExecuteResult]:
         """Execute Python code in the sandboxed lease from asyncio. See
         ``Sandbox.execute_async()``.
@@ -1754,7 +1943,11 @@ class PooledSandbox:
         ...
 
     def execute_with_journal(
-        self, code: str, journal: Optional[dict[str, Any]] = None
+        self,
+        code: str,
+        journal: Optional[dict[str, Any]] = None,
+        *,
+        allowed_commands: Optional[list[str]] = None,
     ) -> ReplayOutcome:
         """Execute code with callback journaling and replay. See
         ``Sandbox.execute_with_journal()``.

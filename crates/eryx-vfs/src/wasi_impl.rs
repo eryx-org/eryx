@@ -78,8 +78,12 @@ pub struct VfsDescriptor {
     pub(crate) is_dir: bool,
     /// Directory permissions (for directory descriptors).
     pub(crate) dir_perms: DirPerms,
-    /// File permissions.
+    /// File permissions: for a file, what it was opened for.
     pub(crate) file_perms: FilePerms,
+    /// The file permissions of the preopen this descriptor is beneath. Setting
+    /// a file's times needs the preopen to allow writing, not a descriptor
+    /// opened for writing (as with `futimens`).
+    pub(crate) mount_file_perms: FilePerms,
     /// Which storage it's in, for contexts with more than one (see
     /// `HybridVfsCtx::add_storage_preopen`); 0 is the default storage.
     pub(crate) storage: usize,
@@ -95,6 +99,7 @@ impl VfsDescriptor {
             is_dir: true,
             dir_perms,
             file_perms,
+            mount_file_perms: file_perms,
             storage: 0,
         }
     }
@@ -108,6 +113,7 @@ impl VfsDescriptor {
             is_dir: false,
             dir_perms: DirPerms::empty(),
             file_perms,
+            mount_file_perms: file_perms,
             storage: 0,
         }
     }
@@ -157,7 +163,8 @@ impl VfsDescriptor {
 /// it, and renaming a directory with such files beneath it is refused with
 /// `EBUSY`, since their marks are by path.
 ///
-/// Only descriptors in the same context count. Another context sharing the
+/// Only descriptors in the same context count, or in one forked from it
+/// (`HybridVfsCtx::fork` shares this table). Another context sharing the
 /// storage still deletes the file at once, and a file it creates at the
 /// unlinked name is deleted when this context's last descriptor closes.
 #[derive(Debug, Default)]
@@ -229,15 +236,16 @@ fn child_prefix(dir: &str) -> String {
 }
 
 /// Remove directory `dir`. If all it still holds are files unlinked while
-/// open, delete those with it: they have no name left to keep them by, so
-/// their descriptors lose the contents, as before unlinks were deferred.
+/// open (`unlinked`, from [`OpenFiles::unlinked_under`]), delete those with
+/// it: they have no name left to keep them by, so their descriptors lose the
+/// contents, as before unlinks were deferred. `detach` is called for each, so
+/// the caller can tell its `OpenFiles` the last close has nothing to delete.
 pub(crate) async fn remove_dir<S: VfsStorage>(
     storage: &S,
-    open_files: &mut OpenFiles,
-    index: usize,
     dir: &str,
+    unlinked: Vec<String>,
+    mut detach: impl FnMut(&str),
 ) -> crate::VfsResult<()> {
-    let unlinked = open_files.unlinked_under(index, dir);
     if !unlinked.is_empty() {
         let prefix = child_prefix(dir);
         let entries: Vec<String> = storage
@@ -249,8 +257,7 @@ pub(crate) async fn remove_dir<S: VfsStorage>(
         if entries.iter().all(|path| unlinked.contains(path)) {
             for path in &entries {
                 storage.delete(path).await?;
-                // Nothing for the last close to delete now.
-                open_files.set_linked(index, path, true);
+                detach(path);
             }
         }
     }
@@ -355,17 +362,18 @@ pub(crate) fn vfs_identity(path: &str) -> String {
     crate::InMemoryStorage::normalize_path(path).unwrap_or_else(|_| path.to_string())
 }
 
-/// Metadata hash for a VFS object: stable for the same object, and changes
-/// when a file's size or modification time does.
+/// Metadata hash for a VFS object, which wasi-libc reports as its inode
+/// number: stable while the object exists at `path`, so writing a file
+/// leaves it unchanged (#974). A file's creation time is mixed in, so a new
+/// file in a deleted one's place gets a new identity. A directory hashes its
+/// path alone, as it always has.
 pub(crate) fn vfs_metadata_hash(path: &str, meta: &Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     vfs_identity(path).hash(&mut hasher);
     meta.is_dir.hash(&mut hasher);
-    // Directory metadata carries no stored times or size.
     if !meta.is_dir {
-        meta.size.hash(&mut hasher);
-        meta.modified.hash(&mut hasher);
+        meta.created.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -422,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_hash_tracks_identity_and_modification() {
+    fn metadata_hash_is_stable_across_writes() {
         let meta = Metadata {
             size: 3,
             ..Metadata::default()
@@ -433,14 +441,31 @@ mod tests {
             vfs_metadata_hash("/a/b", &meta)
         );
 
-        // Same size, later modification: the hash must change.
-        let touched = Metadata {
+        // Writing the file changes its size and mtime, not its identity:
+        // wasi-libc uses the hash as the inode number (#974).
+        let written = Metadata {
+            size: 4,
             modified: meta.modified + std::time::Duration::from_secs(1),
+            ..meta.clone()
+        };
+        assert_eq!(
+            vfs_metadata_hash("/a/b", &meta),
+            vfs_metadata_hash("/a/b", &written)
+        );
+
+        // A different path, or a new file at the same path, is a different
+        // object.
+        assert_ne!(
+            vfs_metadata_hash("/a/b", &meta),
+            vfs_metadata_hash("/a/c", &meta)
+        );
+        let replaced = Metadata {
+            created: meta.created + std::time::Duration::from_secs(1),
             ..meta.clone()
         };
         assert_ne!(
             vfs_metadata_hash("/a/b", &meta),
-            vfs_metadata_hash("/a/b", &touched)
+            vfs_metadata_hash("/a/b", &replaced)
         );
     }
 }

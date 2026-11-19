@@ -2,7 +2,7 @@
 #![cfg(all(target_os = "linux", feature = "embedded"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use eryx::PythonExecutor;
+use eryx::Executor;
 
 fn epoch_ticker_thread_count() -> Option<usize> {
     Some(
@@ -29,7 +29,7 @@ async fn wait_for_ticker_count(expected: usize) -> Option<usize> {
 
 #[tokio::test]
 async fn test_epoch_ticker_starts_lazily_and_is_shared() {
-    let executor = PythonExecutor::from_embedded_runtime().expect("embedded runtime to load");
+    let executor = Executor::from_embedded_runtime().expect("embedded runtime to load");
     let Some(initial_count) = epoch_ticker_thread_count() else {
         eprintln!("skipping ticker-thread assertion: /proc/self/task is unavailable");
         return;
@@ -79,7 +79,7 @@ async fn test_epoch_ticker_starts_lazily_and_is_shared() {
             .await;
         assert!(matches!(
             python_error.as_ref().map_err(|e| e.kind()),
-            Err(eryx::ErrorKind::PythonException { .. })
+            Err(eryx::ErrorKind::ScriptFailed { .. })
         ));
         assert_eq!(epoch_ticker_thread_count(), Some(1));
     }

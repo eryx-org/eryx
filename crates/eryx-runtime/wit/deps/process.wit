@@ -1,0 +1,148 @@
+package eryx:process@0.1.0;
+
+/// Spawn host-registered WASI command components as child processes.
+///
+/// Language-neutral: the shell guest uses it for external commands, and other
+/// guests could use it for `subprocess` or `child_process`. A child's stdin,
+/// stdout and stderr are streams, so pipeline stages run concurrently and
+/// apply backpressure to each other. The child runs while `wait` is in
+/// progress, so a caller reading its output must wait concurrently.
+interface process {
+    enum process-error {
+        /// No component is registered under that command name.
+        command-not-found,
+        /// The component could not be instantiated or run.
+        spawn-failed,
+        /// The handle was used out of order (e.g. waited on twice).
+        io-error,
+        /// The host's limits on child processes were reached: too many
+        /// running, or arguments too large.
+        limit-exceeded,
+    }
+
+    /// Names of the commands the host can spawn. The shell seeds its command
+    /// table with these, since they aren't files on its `PATH`.
+    list-commands: func() -> list<string>;
+
+    /// A spawned child and its output streams, which end when it exits.
+    record spawned {
+        child: child,
+        stdout: stream<u8>,
+        stderr: stream<u8>,
+    }
+
+    resource child {
+        /// Start `cmd` reading `stdin`. It doesn't run until `wait` is
+        /// called: a caller that never waits never runs its child, and one
+        /// that reads its output must wait concurrently. Dropping the child
+        /// before `wait` finishes kills it.
+        spawn: static func(
+            cmd: string,
+            args: list<string>,
+            env: list<tuple<string, string>>,
+            cwd: string,
+            stdin: stream<u8>,
+        ) -> result<spawned, process-error>;
+        /// Run the child to completion, returning its exit code. Its
+        /// output streams end when it exits.
+        wait: async func() -> result<s32, process-error>;
+    }
+}
+
+/// Run a command to completion: for child commands, which spawn commands
+/// of their own (git runs `git`) but, written against plain WASI, can't
+/// drive `process`'s streams. A child may only call it if the host lets its
+/// command spawn; nested children share the execution's limits.
+interface run {
+    /// Why a command couldn't run, as for `process.spawn`.
+    enum run-error {
+        /// No component is registered under that command name.
+        command-not-found,
+        /// The command couldn't be run, or this child's command may not run
+        /// others.
+        spawn-failed,
+        /// A limit was reached: nesting too deep, too many children running,
+        /// arguments or output too large.
+        limit-exceeded,
+    }
+
+    /// How a command ended, and what it wrote.
+    record output {
+        status: s32,
+        stdout: list<u8>,
+        stderr: list<u8>,
+    }
+
+    /// Run `cmd` with `stdin` as its input, and wait for it to exit. Its
+    /// output is capped, and a command writing more fails with
+    /// `limit-exceeded`.
+    run: func(
+        cmd: string,
+        args: list<string>,
+        env: list<tuple<string, string>>,
+        cwd: string,
+        stdin: list<u8>,
+    ) -> result<output, run-error>;
+}
+
+/// Run a command with live pipes to its stdin and stdout: for child
+/// commands that talk to a command of their own while it runs (git and its
+/// `remote-https` helper) but, written against plain WASI, can't drive
+/// `process`'s streams. Its stderr is the caller's.
+///
+/// A piped command runs only while its caller is in a pipe call (`write`,
+/// `read` or `wait`, on it or on another of the caller's piped commands),
+/// which keeps them all on the caller's execution, and its fuel and timeout.
+/// So a caller should only block on its pipes, or exit, while its piped
+/// commands have work to do: one waiting on something else that depends on
+/// them (a file, its own stdin) waits until the timeout. As with `run`, a
+/// child may only call it if the host lets its command spawn, and piped
+/// commands share the execution's limits.
+interface pipe {
+    use run.{run-error};
+
+    /// A running command. Dropping it before `wait` returns kills it.
+    resource piped {
+        /// Start `cmd`. It runs during its caller's pipe calls.
+        spawn: static func(
+            cmd: string,
+            args: list<string>,
+            env: list<tuple<string, string>>,
+            cwd: string,
+        ) -> result<piped, run-error>;
+        /// Write all of `data` to its stdin, waiting while the pipe is
+        /// full, and return its length. Fails once it has exited or closed
+        /// its stdin.
+        write: func(data: list<u8>) -> result<u64, run-error>;
+        /// Close its stdin, ending its input.
+        close-stdin: func();
+        /// Read up to `max` bytes of its stdout, waiting until some are
+        /// there: empty once it has ended.
+        read: func(max: u64) -> result<list<u8>, run-error>;
+        /// Close its stdin and wait for it to exit, returning its exit
+        /// code. Output it writes to stdout and nobody reads holds it up,
+        /// as with any pipe.
+        wait: func() -> result<s32, run-error>;
+    }
+}
+
+/// The current execution, for a guest that runs work of its own once the
+/// script has finished (the shell's background jobs).
+interface execution {
+    /// How long the execution has left before its timeout, in nanoseconds;
+    /// none if it has no timeout.
+    time-left: func() -> option<u64>;
+}
+
+/// Host side: links just the process and execution interfaces next to
+/// `eryx:sandbox`.
+world spawner {
+    import process;
+    import execution;
+}
+
+/// What child commands import.
+world child {
+    import run;
+    import pipe;
+}

@@ -186,11 +186,11 @@ fn runtime_wasm_path() -> PathBuf {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("eryx-runtime")
-        .join("runtime.wasm")
+        .join("runtime-python.wasm")
 }
 
 #[cfg(not(feature = "embedded"))]
-fn python_stdlib_path() -> PathBuf {
+fn stdlib_path() -> PathBuf {
     // Check ERYX_PYTHON_STDLIB env var first (used in CI)
     if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
         let path = PathBuf::from(path);
@@ -204,12 +204,12 @@ fn python_stdlib_path() -> PathBuf {
     PathBuf::from(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
-        .join("eryx-wasm-runtime")
+        .join("eryx-guest-python")
         .join("tests")
         .join("python-stdlib")
 }
 
-fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has> {
+fn sandbox_builder() -> eryx::SandboxBuilder<eryx::language::Python, eryx::state::Has> {
     // When embedded feature is available, use it (more reliable)
     #[cfg(feature = "embedded")]
     {
@@ -219,7 +219,7 @@ fn sandbox_builder() -> eryx::SandboxBuilder<eryx::state::Has, eryx::state::Has>
     // Fallback to explicit paths for testing without embedded feature
     #[cfg(not(feature = "embedded"))]
     {
-        let stdlib_path = python_stdlib_path();
+        let stdlib_path = stdlib_path();
         Sandbox::builder()
             .with_wasm_file(runtime_wasm_path())
             .with_python_stdlib(&stdlib_path)
@@ -409,16 +409,14 @@ result = await sleep(ms=50)
         "Should have CallbackEnd event for 'sleep'"
     );
 
-    // Note: Duration tracking depends on the Python runtime implementation.
-    // We verify the event exists; duration may or may not be accurate.
+    // The host times the call, from its callback_start to its callback_end.
     if let Some(event) = callback_end
         && let TraceEventKind::CallbackEnd {
             duration_ms, name, ..
         } = &event.event
     {
         assert_eq!(name, "sleep", "Callback name should be 'sleep'");
-        // Duration is informational - just verify it's a valid u64
-        let _ = *duration_ms;
+        assert!(*duration_ms >= 50, "a 50 ms sleep took {duration_ms} ms");
     }
 }
 
@@ -929,4 +927,107 @@ print("stderr line", file=sys.stderr)
         "stderr should contain 'stderr line': {}",
         stderr
     );
+}
+
+/// Every callback_start gets exactly one callback_end, including calls that
+/// are cancelled (`asyncio.wait_for` timing out, a TaskGroup whose sibling
+/// failed), so the host's pairing by name stays aligned and later calls get
+/// their own durations (#943).
+#[tokio::test]
+async fn test_cancelled_callbacks_report_their_end() {
+    let trace_handler = CollectingTraceHandler::new();
+    let sandbox = sandbox_builder()
+        .with_callback(SleepCallback)
+        .with_trace_handler(trace_handler.clone())
+        .build()
+        .expect("Failed to build sandbox");
+
+    sandbox
+        .execute(
+            r#"
+import asyncio
+try:
+    await asyncio.wait_for(sleep(ms=1000), 0.2)
+except TimeoutError:
+    pass
+
+async def boom():
+    raise ValueError("boom")
+try:
+    async with asyncio.TaskGroup() as group:
+        group.create_task(sleep(ms=1000))
+        group.create_task(boom())
+except* ValueError:
+    pass
+
+await sleep(ms=10)
+"#,
+        )
+        .await
+        .expect("execution succeeds");
+
+    let events = trace_handler.events();
+    let starts = events
+        .iter()
+        .filter(
+            |e| matches!(&e.event, TraceEventKind::CallbackStart { name, .. } if name == "sleep"),
+        )
+        .count();
+    let durations: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            TraceEventKind::CallbackEnd {
+                name, duration_ms, ..
+            } if name == "sleep" => Some(*duration_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, 3, "{events:?}");
+    assert_eq!(durations.len(), 3, "every start has its end: {durations:?}");
+    // The cancelled calls end when they're cancelled, and the last call is
+    // timed from its own start, not from an orphaned one's.
+    assert!(
+        (150..1000).contains(&durations[0]),
+        "wait_for's call: {durations:?}"
+    );
+    assert!(durations[1] < 1000, "the TaskGroup's call: {durations:?}");
+    assert!(durations[2] < 150, "the last call: {durations:?}");
+}
+
+/// A call abandoned at the end of an execution (a task still pending) is
+/// closed by a later garbage collection with GeneratorExit. That mustn't
+/// report a stray callback_end into the later execution, where it would be
+/// paired with another call's start.
+#[tokio::test]
+async fn test_abandoned_call_reports_no_end_later() {
+    let trace_handler = CollectingTraceHandler::new();
+    let sandbox = sandbox_builder()
+        .with_callback(SleepCallback)
+        .with_trace_handler(trace_handler.clone())
+        .build()
+        .expect("Failed to build sandbox");
+    let mut session = eryx::InProcessSession::new(&sandbox)
+        .await
+        .expect("session");
+    use eryx::Session as _;
+    session
+        .execute(
+            "import asyncio\nleft = asyncio.ensure_future(sleep(ms=500))\nawait asyncio.sleep(0)",
+        )
+        .await
+        .expect("first execution");
+    let before = trace_handler.events().len();
+    session
+        .execute("del left\nimport gc\ngc.collect()\nawait sleep(ms=10)\ngc.collect()")
+        .await
+        .expect("second execution");
+    let later: Vec<_> = trace_handler.events()[before..]
+        .iter()
+        .filter_map(|e| match &e.event {
+            TraceEventKind::CallbackStart { name, .. } => Some(format!("start {name}")),
+            TraceEventKind::CallbackEnd { name, .. } => Some(format!("end {name}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(later, ["start sleep", "end sleep"], "{later:?}");
 }

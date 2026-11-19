@@ -9,6 +9,13 @@ authors.workspace = true
 description = "gRPC server for sandboxed Python execution via eryx"
 publish = false
 
+[features]
+default = ["javascript", "shell"]
+# Serve the JavaScript and shell guests, embedding their runtimes. Without
+# them the server is Python-only: smaller, and with no JS/shell runtime code.
+javascript = ["eryx/javascript"]
+shell = ["eryx/shell"]
+
 [dependencies]
 clap = { workspace = true } #unified
 dashmap.workspace = true
@@ -42,6 +49,8 @@ tonic-prost-build.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+tempfile.workspace = true
+wat.workspace = true
 
 [lints]
 workspace = true

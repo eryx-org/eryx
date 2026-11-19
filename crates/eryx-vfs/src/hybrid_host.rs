@@ -10,13 +10,17 @@ use cap_primitives::fs as capfs;
 use wasmtime::component::Resource;
 use wasmtime_wasi_io::streams::{DynInputStream, DynOutputStream};
 
-use crate::file_io::{read_at, write_at};
-use crate::hybrid::{HybridDescriptor, HybridPreopen, HybridVfsState, RealDir, RealFile};
+use crate::file_io::{read_at, reopen_for_append, write_at};
+use crate::hybrid::{
+    EntryKind, HybridDescriptor, HybridVfsCtx, HybridVfsState, RealDir, RealFile, RootEntry,
+    join_guest_path,
+};
 use crate::hybrid_bindings::HybridReaddirIterator;
 use crate::hybrid_bindings::{DirPerms, FilePerms, HybridFsError, HybridFsResult, preopens, types};
 use crate::storage::VfsStorage;
 use crate::streams::{
-    MAX_READ_CHUNK, RealFileInputStream, RealFileOutputStream, VfsInputStream, VfsOutputStream,
+    DeviceInputStream, DiscardOutputStream, MAX_READ_CHUNK, RealFileInputStream,
+    RealFileOutputStream, VfsInputStream, VfsOutputStream, device_read,
 };
 use crate::wasi_impl::VfsDescriptor;
 
@@ -31,27 +35,11 @@ impl<S: VfsStorage + Clone + 'static> preopens::Host for HybridVfsState<'_, S> {
             self.ctx.preopens.len()
         );
         let mut result = Vec::new();
-        for preopen in &self.ctx.preopens {
-            let (descriptor, path) = match preopen {
-                HybridPreopen::Vfs {
-                    guest_path,
-                    dir_perms,
-                    file_perms,
-                    storage,
-                } => {
-                    let mut vfs_desc =
-                        VfsDescriptor::dir(guest_path.clone(), *dir_perms, *file_perms);
-                    vfs_desc.storage = *storage;
-                    (HybridDescriptor::Vfs(vfs_desc), guest_path.clone())
-                }
-                HybridPreopen::Real { guest_path, dir } => {
-                    let hybrid_desc = HybridDescriptor::RealDir {
-                        dir: dir.clone(),
-                        guest_path: guest_path.clone(),
-                    };
-                    (hybrid_desc, guest_path.clone())
-                }
-            };
+        for (index, preopen) in self.ctx.preopens.iter().enumerate() {
+            if !self.ctx.exposes_preopen(index) {
+                continue;
+            }
+            let (descriptor, path) = HybridVfsCtx::<S>::preopen_descriptor(preopen);
             let resource = self.table.push(descriptor)?;
             tracing::debug!(
                 "hybrid VFS preopen: {:?} at path {:?}",
@@ -78,18 +66,17 @@ impl<S: VfsStorage + Clone + 'static> types::Host for HybridVfsState<'_, S> {
         &mut self,
         err: Resource<wasmtime::Error>,
     ) -> wasmtime::Result<Option<types::ErrorCode>> {
-        let err = self.table.get(&err)?;
-        if let Some(vfs_err) = err.downcast_ref::<crate::VfsError>() {
-            return Ok(Some(crate::hybrid_bindings::vfs_error_to_error_code(
-                vfs_err,
-            )));
-        }
-        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
-            let code = crate::hybrid_bindings::io_error_to_error_code(io_err);
-            return Ok(Some(code));
-        }
-        Ok(None)
+        Ok(stream_error_code(self.table.get(&err)?))
     }
+}
+
+/// The error code behind a failed stream operation, if it has one.
+pub(crate) fn stream_error_code(err: &wasmtime::Error) -> Option<types::ErrorCode> {
+    if let Some(vfs_err) = err.downcast_ref::<crate::VfsError>() {
+        return Some(crate::hybrid_bindings::vfs_error_to_error_code(vfs_err));
+    }
+    err.downcast_ref::<std::io::Error>()
+        .map(crate::hybrid_bindings::io_error_to_error_code)
 }
 
 /// The file permissions an `open-at` call asks for.
@@ -112,8 +99,7 @@ fn vfs_metadata_to_stat(meta: &crate::storage::Metadata) -> types::DescriptorSta
         types::DescriptorType::RegularFile
     };
 
-    // Only files store times; directory metadata just carries "now".
-    let time = |t| (!meta.is_dir).then(|| crate::wasi_impl::systemtime_to_datetime(t));
+    let time = |t| Some(crate::wasi_impl::systemtime_to_datetime(t));
 
     types::DescriptorStat {
         type_: dtype,
@@ -151,8 +137,9 @@ fn file_times(
     times
 }
 
-/// Metadata hash for a real file or directory: stable for the same object,
-/// and changes when its size or modification time does.
+/// Metadata hash for a real file or directory, which wasi-libc reports as
+/// its inode number: the host's device and inode, like wasmtime-wasi, so it
+/// survives writes and renames (#974).
 fn real_metadata_hash(guest_path: &str, meta: &capfs::Metadata) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -163,9 +150,10 @@ fn real_metadata_hash(guest_path: &str, meta: &capfs::Metadata) -> u64 {
         capfs::MetadataExt::ino(meta).hash(&mut hasher);
     }
     #[cfg(not(unix))]
-    guest_path.hash(&mut hasher);
-    meta.len().hash(&mut hasher);
-    meta.modified().ok().map(|t| t.into_std()).hash(&mut hasher);
+    {
+        let _ = meta;
+        guest_path.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -175,7 +163,9 @@ fn real_metadata(descriptor: &HybridDescriptor) -> Option<capfs::Metadata> {
     match descriptor {
         HybridDescriptor::RealDir { dir, .. } => dir.dir.dir_metadata().ok(),
         HybridDescriptor::RealFile { file, .. } => capfs::Metadata::from_file(&file.file).ok(),
-        HybridDescriptor::Vfs(_) => None,
+        HybridDescriptor::Vfs(_)
+        | HybridDescriptor::Synthetic { .. }
+        | HybridDescriptor::Device(_) => None,
     }
 }
 
@@ -226,6 +216,44 @@ fn cap_metadata_to_stat(meta: &capfs::Metadata) -> types::DescriptorStat {
 // types::HostDescriptor Implementation
 // ============================================================================
 
+// Every operation lives in an inherent method on `HybridVfsState`, shared with
+// the WASI 0.3 bindings in `hybrid_p3`. Those run with only brief, synchronous
+// access to the store, so an operation that has to await storage is split:
+// `*_op` does every descriptor, permission and mount check up front and
+// returns an `Op` that owns what it needs (a storage handle and a path) and
+// borrows nothing. Operations that never wait are plain `*_now` methods.
+//
+// On p3, calls on one store can interleave across an op's await, so an op
+// must not rely on anything checked in prepare that another call could
+// change meanwhile:
+// - The storage quota and entry limit are charged inside `VfsStorage`, under
+//   its lock, by the mutation itself, so concurrent writes can't both pass.
+// - Host files (real preopens) are opened, checked against both open-file
+//   limits and tracked in the same synchronous prepare step, never across an
+//   await; size caps on them are checked synchronously at each write.
+// - An op touches only its cloned storage handle and path. Closing the
+//   descriptor meanwhile drops nothing it needs and revives nothing; the only
+//   table write afterwards is `open_at` inserting a new, self-contained
+//   descriptor.
+// - Unlinking a file that is still open only marks it in `open_files`, and
+//   the last close deletes it (see `OpenFiles`). That bookkeeping happens in
+//   prepare, or right after `open_at` pushes its descriptor; the one op that
+//   touches it, removing a directory, only locks it briefly between awaits.
+//   An open still in flight isn't counted yet, so an unlink racing it
+//   deletes the file at once.
+
+/// The storage part of an operation, after its checks have passed.
+pub(crate) type Op<T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = HybridFsResult<T>> + Send>>;
+
+fn op<T>(fut: impl std::future::Future<Output = HybridFsResult<T>> + Send + 'static) -> Op<T> {
+    Box::pin(fut)
+}
+
+fn done<T: Send + 'static>(value: T) -> Op<T> {
+    Box::pin(std::future::ready(Ok(value)))
+}
+
 impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'_, S> {
     async fn advise(
         &mut self,
@@ -239,7 +267,316 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
     }
 
     async fn sync_data(&mut self, fd: Resource<HybridDescriptor>) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+        self.sync_data_now(&fd)
+    }
+
+    async fn get_flags(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<types::DescriptorFlags> {
+        self.get_flags_now(&fd)
+    }
+
+    async fn get_type(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<types::DescriptorType> {
+        self.get_type_now(&fd)
+    }
+
+    async fn set_size(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        size: types::Filesize,
+    ) -> HybridFsResult<()> {
+        self.set_size_op(&fd, size)?.await
+    }
+
+    async fn set_times(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        atim: types::NewTimestamp,
+        mtim: types::NewTimestamp,
+    ) -> HybridFsResult<()> {
+        self.set_times_op(&fd, atim, mtim)?.await
+    }
+
+    async fn read(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        len: types::Filesize,
+        offset: types::Filesize,
+    ) -> HybridFsResult<(Vec<u8>, bool)> {
+        self.read_op(&fd, len, offset)?.await
+    }
+
+    async fn write(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        buf: Vec<u8>,
+        offset: types::Filesize,
+    ) -> HybridFsResult<types::Filesize> {
+        self.write_op(&fd, buf, offset)?.await
+    }
+
+    async fn read_directory(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<Resource<HybridReaddirIterator>> {
+        let entries = self.directory_entries(&fd)?.await?;
+        Ok(self.table.push(HybridReaddirIterator::new(entries))?)
+    }
+
+    async fn sync(&mut self, fd: Resource<HybridDescriptor>) -> HybridFsResult<()> {
+        self.sync_now(&fd)
+    }
+
+    async fn create_directory_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path: String,
+    ) -> HybridFsResult<()> {
+        self.create_directory_at_op(&fd, path)?.await
+    }
+
+    async fn stat(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<types::DescriptorStat> {
+        self.stat_op(&fd)?.await
+    }
+
+    async fn stat_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path_flags: types::PathFlags,
+        path: String,
+    ) -> HybridFsResult<types::DescriptorStat> {
+        self.stat_at_op(&fd, path_flags, path)?.await
+    }
+
+    async fn set_times_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path_flags: types::PathFlags,
+        path: String,
+        atim: types::NewTimestamp,
+        mtim: types::NewTimestamp,
+    ) -> HybridFsResult<()> {
+        self.set_times_at_op(&fd, path_flags, path, atim, mtim)?
+            .await
+    }
+
+    async fn link_at(
+        &mut self,
+        _fd: Resource<HybridDescriptor>,
+        _old_path_flags: types::PathFlags,
+        _old_path: String,
+        _new_descriptor: Resource<HybridDescriptor>,
+        _new_path: String,
+    ) -> HybridFsResult<()> {
+        link_at_now()
+    }
+
+    async fn open_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path_flags: types::PathFlags,
+        path: String,
+        oflags: types::OpenFlags,
+        flags: types::DescriptorFlags,
+    ) -> HybridFsResult<Resource<HybridDescriptor>> {
+        let opened = self
+            .open_at_op(&fd, path_flags, path, oflags, flags)?
+            .await?;
+        self.push_opened(opened)
+    }
+
+    async fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
+        if let Some(delete) = self.close_op(fd)? {
+            let _ = delete.await;
+        }
+        Ok(())
+    }
+
+    async fn readlink_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path: String,
+    ) -> HybridFsResult<String> {
+        self.readlink_at_now(&fd, &path)
+    }
+
+    async fn remove_directory_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path: String,
+    ) -> HybridFsResult<()> {
+        self.remove_directory_at_op(&fd, path)?.await
+    }
+
+    async fn rename_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        old_path: String,
+        new_fd: Resource<HybridDescriptor>,
+        new_path: String,
+    ) -> HybridFsResult<()> {
+        self.rename_at_op(&fd, old_path, &new_fd, new_path)?.await
+    }
+
+    async fn symlink_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        _src_path: String,
+        _dest_path: String,
+    ) -> HybridFsResult<()> {
+        self.symlink_at_now(&fd)
+    }
+
+    async fn unlink_file_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path: String,
+    ) -> HybridFsResult<()> {
+        self.unlink_file_at_op(&fd, path)?.await
+    }
+
+    fn read_via_stream(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        offset: types::Filesize,
+    ) -> HybridFsResult<Resource<DynInputStream>> {
+        let stream = self.input_stream(&fd, offset)?;
+        Ok(self.table.push(stream)?)
+    }
+
+    fn write_via_stream(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        offset: types::Filesize,
+    ) -> HybridFsResult<Resource<DynOutputStream>> {
+        let stream = self.output_stream(&fd, Some(offset))?;
+        Ok(self.table.push(stream)?)
+    }
+
+    fn append_via_stream(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<Resource<DynOutputStream>> {
+        let stream = self.output_stream(&fd, None)?;
+        Ok(self.table.push(stream)?)
+    }
+
+    async fn is_same_object(
+        &mut self,
+        a: Resource<HybridDescriptor>,
+        b: Resource<HybridDescriptor>,
+    ) -> wasmtime::Result<bool> {
+        self.is_same_object_now(&a, &b)
+    }
+
+    async fn metadata_hash(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+    ) -> HybridFsResult<types::MetadataHashValue> {
+        self.metadata_hash_op(&fd)?.await
+    }
+
+    async fn metadata_hash_at(
+        &mut self,
+        fd: Resource<HybridDescriptor>,
+        path_flags: types::PathFlags,
+        path: String,
+    ) -> HybridFsResult<types::MetadataHashValue> {
+        self.metadata_hash_at_op(&fd, path_flags, path)?.await
+    }
+}
+
+/// Hard links are not supported in the hybrid VFS.
+pub(crate) fn link_at_now() -> HybridFsResult<()> {
+    Err(crate::VfsError::PermissionDenied("hard links not supported".to_string()).into())
+}
+
+/// The error for changing anything in the read-only root.
+fn read_only(path: &str) -> HybridFsError {
+    crate::VfsError::PermissionDenied(format!("{path}: read-only")).into()
+}
+
+/// The time synthetic directories and devices report: when the process
+/// first stated one, so it is real and stable rather than the epoch.
+static SYNTHETIC_TIME: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
+/// The stat of a synthetic (read-only) directory.
+fn synthetic_dir_stat() -> types::DescriptorStat {
+    let time = Some(crate::wasi_impl::systemtime_to_datetime(*SYNTHETIC_TIME));
+    types::DescriptorStat {
+        type_: types::DescriptorType::Directory,
+        link_count: 1,
+        size: 0,
+        data_access_timestamp: time,
+        data_modification_timestamp: time,
+        status_change_timestamp: None,
+    }
+}
+
+/// The stat of a device under `/dev`.
+fn device_stat() -> types::DescriptorStat {
+    types::DescriptorStat {
+        type_: types::DescriptorType::CharacterDevice,
+        ..synthetic_dir_stat()
+    }
+}
+
+/// A metadata hash for a synthetic directory or device, from its path.
+fn synthetic_hash(path: &str) -> types::MetadataHashValue {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ("eryx-synthetic", path).hash(&mut hasher);
+    types::MetadataHashValue {
+        lower: hasher.finish(),
+        upper: 0,
+    }
+}
+
+impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
+    /// Run `f` on a descriptor for the mount at `index`, held in the table
+    /// only for the call: the root hands paths under a mount to it.
+    fn with_mount<T>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&mut Self, &Resource<HybridDescriptor>) -> HybridFsResult<T>,
+    ) -> HybridFsResult<T> {
+        let (descriptor, _) = HybridVfsCtx::<S>::preopen_descriptor(&self.ctx.preopens[index]);
+        let fd = self.table.push(descriptor)?;
+        let result = f(self, &fd);
+        self.table.delete(fd)?;
+        result
+    }
+
+    /// Change `path` under the synthetic directory `dir` with `f`: only
+    /// allowed inside a mount, which `f` is then run on. A missing path is
+    /// `NotFound`, unless the change `creates` it.
+    fn root_mutation<T>(
+        &mut self,
+        dir: &str,
+        path: &str,
+        creates: bool,
+        f: impl FnOnce(&mut Self, &Resource<HybridDescriptor>, String) -> HybridFsResult<T>,
+    ) -> HybridFsResult<T> {
+        let target = join_guest_path(dir, path);
+        match self.ctx.resolve_from_root(&target) {
+            RootEntry::Mount { index, rest } if !rest.is_empty() => {
+                self.with_mount(index, |s, fd| f(s, fd, rest))
+            }
+            RootEntry::NotFound if !creates => Err(crate::VfsError::NotFound(target).into()),
+            _ => Err(read_only(&target)),
+        }
+    }
+
+    pub(crate) fn sync_data_now(&mut self, fd: &Resource<HybridDescriptor>) -> HybridFsResult<()> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(_) => {
                 // In-memory storage is always "synced"
@@ -253,14 +590,15 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 file.file.sync_data().map_err(HybridFsError::from)?;
                 Ok(())
             }
+            HybridDescriptor::Synthetic { .. } | HybridDescriptor::Device(_) => Ok(()),
         }
     }
 
-    async fn get_flags(
+    pub(crate) fn get_flags_now(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
     ) -> HybridFsResult<types::DescriptorFlags> {
-        let descriptor = self.table.get(&fd)?;
+        let descriptor = self.table.get(fd)?;
         let mut flags = types::DescriptorFlags::empty();
 
         match descriptor {
@@ -288,16 +626,20 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     flags |= types::DescriptorFlags::WRITE;
                 }
             }
+            HybridDescriptor::Synthetic { .. } => flags |= types::DescriptorFlags::READ,
+            HybridDescriptor::Device(_) => {
+                flags |= types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+            }
         }
 
         Ok(flags)
     }
 
-    async fn get_type(
+    pub(crate) fn get_type_now(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
     ) -> HybridFsResult<types::DescriptorType> {
-        let descriptor = self.table.get(&fd)?;
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if vfs_desc.is_dir {
@@ -306,17 +648,20 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     Ok(types::DescriptorType::RegularFile)
                 }
             }
-            HybridDescriptor::RealDir { .. } => Ok(types::DescriptorType::Directory),
+            HybridDescriptor::RealDir { .. } | HybridDescriptor::Synthetic { .. } => {
+                Ok(types::DescriptorType::Directory)
+            }
             HybridDescriptor::RealFile { .. } => Ok(types::DescriptorType::RegularFile),
+            HybridDescriptor::Device(_) => Ok(types::DescriptorType::CharacterDevice),
         }
     }
 
-    async fn set_size(
+    pub(crate) fn set_size_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         size: types::Filesize,
-    ) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<()>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if vfs_desc.is_dir {
@@ -326,79 +671,85 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
-                self.ctx.storage_for(vfs_desc).set_size(&path, size).await?;
-                Ok(())
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    storage.set_size(&path, size).await?;
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { guest_path, .. } => {
                 Err(crate::VfsError::NotFile(guest_path.clone()).into())
             }
-            HybridDescriptor::RealFile { file, guest_path } => {
+            HybridDescriptor::RealFile { file, .. } => {
                 if !file.writable {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
-                let guest_path = guest_path.clone();
-                let descriptor = self.table.get_mut(&fd)?;
-                if let HybridDescriptor::RealFile { file, .. } = descriptor {
-                    file.check_size(size)?;
-                    file.file.set_len(size)?;
-                    Ok(())
-                } else {
-                    Err(crate::VfsError::NotFile(guest_path).into())
-                }
+                file.check_size(size)?;
+                file.file.set_len(size)?;
+                Ok(done(()))
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            // Truncating a device (`> /dev/null`) is a no-op.
+            HybridDescriptor::Device(_) => Ok(done(())),
         }
     }
 
-    async fn set_times(
+    pub(crate) fn set_times_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         atim: types::NewTimestamp,
         mtim: types::NewTimestamp,
-    ) -> HybridFsResult<()> {
+    ) -> HybridFsResult<Op<()>> {
         let atime = new_timestamp(atim)?;
         let mtime = new_timestamp(mtim)?;
-        let descriptor = self.table.get(&fd)?;
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 let allowed = if vfs_desc.is_dir {
                     vfs_desc.dir_perms.contains(DirPerms::MUTATE)
                 } else {
-                    vfs_desc.file_perms.contains(FilePerms::WRITE)
+                    vfs_desc.mount_file_perms.contains(FilePerms::WRITE)
                 };
                 if !allowed {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
-                self.ctx
-                    .storage_for(vfs_desc)
-                    .set_times(&path, atime, mtime)
-                    .await?;
-                Ok(())
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    storage.set_times(&path, atime, mtime).await?;
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 dir.dir.set_dir_times(file_times(atime, mtime))?;
-                Ok(())
+                Ok(done(()))
             }
             HybridDescriptor::RealFile { file, .. } => {
-                if !file.writable {
+                // Like futimens, this needs the mount to allow writing, not
+                // a descriptor opened for writing.
+                if !file.perms.contains(FilePerms::WRITE) {
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 file.file.set_times(file_times(atime, mtime))?;
-                Ok(())
+                Ok(done(()))
             }
+            HybridDescriptor::Synthetic { guest_path } => Err(read_only(guest_path)),
+            HybridDescriptor::Device(_) => Ok(done(())),
         }
     }
 
-    async fn read(
+    pub(crate) fn read_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         len: types::Filesize,
         offset: types::Filesize,
-    ) -> HybridFsResult<(Vec<u8>, bool)> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<(Vec<u8>, bool)>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if vfs_desc.is_dir {
@@ -408,15 +759,14 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
                 // Reads may be short; never size a buffer by the guest's ask.
                 let len = len.min(MAX_READ_CHUNK as u64);
-                let data = self
-                    .ctx
-                    .storage_for(vfs_desc)
-                    .read_at(&path, offset, len)
-                    .await?;
-                let eof = (data.len() as u64) < len;
-                Ok((data, eof))
+                Ok(op(async move {
+                    let data = storage.read_at(&path, offset, len).await?;
+                    let eof = (data.len() as u64) < len;
+                    Ok((data, eof))
+                }))
             }
             HybridDescriptor::RealDir { guest_path, .. } => {
                 Err(crate::VfsError::NotFile(guest_path.clone()).into())
@@ -434,18 +784,25 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 let bytes_read = read_at(&file_arc, &mut buf, offset)?;
                 buf.truncate(bytes_read);
                 let eof = bytes_read < len;
-                Ok((buf, eof))
+                Ok(done((buf, eof)))
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(device) => {
+                let len = usize::try_from(len).unwrap_or(usize::MAX);
+                Ok(done(device_read(*device, len)))
             }
         }
     }
 
-    async fn write(
+    pub(crate) fn write_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         buf: Vec<u8>,
         offset: types::Filesize,
-    ) -> HybridFsResult<types::Filesize> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<types::Filesize>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if vfs_desc.is_dir {
@@ -455,12 +812,12 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
                 }
                 let path = vfs_desc.path.clone();
-                let len = buf.len() as u64;
-                self.ctx
-                    .storage_for(vfs_desc)
-                    .write_at(&path, offset, &buf)
-                    .await?;
-                Ok(len)
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    let len = buf.len() as u64;
+                    storage.write_at(&path, offset, &buf).await?;
+                    Ok(len)
+                }))
             }
             HybridDescriptor::RealDir { guest_path, .. } => {
                 Err(crate::VfsError::NotFile(guest_path.clone()).into())
@@ -472,79 +829,17 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 file.check_size(offset.saturating_add(buf.len() as u64))?;
                 let file_arc = Arc::clone(&file.file);
 
-                Ok(write_at(&file_arc, &buf, offset)? as u64)
+                Ok(done(write_at(&file_arc, &buf, offset)? as u64))
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(_) => Ok(done(buf.len() as u64)),
         }
     }
 
-    async fn read_directory(
-        &mut self,
-        fd: Resource<HybridDescriptor>,
-    ) -> HybridFsResult<Resource<HybridReaddirIterator>> {
-        let descriptor = self.table.get(&fd)?;
-        match descriptor {
-            HybridDescriptor::Vfs(vfs_desc) => {
-                if !vfs_desc.is_dir {
-                    return Err(crate::VfsError::NotDirectory(vfs_desc.path.clone()).into());
-                }
-                if !vfs_desc.dir_perms.contains(DirPerms::READ) {
-                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
-                }
-                let path = vfs_desc.path.clone();
-                let vfs_entries = self.ctx.storage_for(vfs_desc).list(&path).await?;
-                // Convert VFS entries to hybrid types::DirectoryEntry
-                let entries: Vec<types::DirectoryEntry> = vfs_entries
-                    .into_iter()
-                    .map(|e| types::DirectoryEntry {
-                        name: e.name,
-                        type_: if e.metadata.is_dir {
-                            types::DescriptorType::Directory
-                        } else {
-                            types::DescriptorType::RegularFile
-                        },
-                    })
-                    .collect();
-                let iterator = HybridReaddirIterator::new(entries);
-                let resource = self.table.push(iterator)?;
-                Ok(resource)
-            }
-            HybridDescriptor::RealDir { dir, .. } => {
-                if !dir.dir_perms.contains(DirPerms::READ) {
-                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
-                }
-
-                // RestrictedDir::entries() handles filtering + RestrictedDir::guest_name()
-                // handles the reverse translation — no manual file_map logic needed.
-                let raw_entries = dir.dir.entries()?;
-
-                let mut entries = Vec::new();
-                for entry in raw_entries {
-                    let name = dir.dir.guest_name(&entry);
-                    let file_type = entry.file_type()?;
-                    let type_ = if file_type.is_dir() {
-                        types::DescriptorType::Directory
-                    } else if file_type.is_symlink() {
-                        types::DescriptorType::SymbolicLink
-                    } else if file_type.is_file() {
-                        types::DescriptorType::RegularFile
-                    } else {
-                        types::DescriptorType::Unknown
-                    };
-                    entries.push(types::DirectoryEntry { name, type_ });
-                }
-
-                let iterator = HybridReaddirIterator::new(entries);
-                let resource = self.table.push(iterator)?;
-                Ok(resource)
-            }
-            HybridDescriptor::RealFile { guest_path, .. } => {
-                Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
-            }
-        }
-    }
-
-    async fn sync(&mut self, fd: Resource<HybridDescriptor>) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    pub(crate) fn sync_now(&mut self, fd: &Resource<HybridDescriptor>) -> HybridFsResult<()> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(_) => Ok(()),
             HybridDescriptor::RealDir { .. } => {
@@ -555,15 +850,16 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 file.file.sync_all().map_err(HybridFsError::from)?;
                 Ok(())
             }
+            HybridDescriptor::Synthetic { .. } | HybridDescriptor::Device(_) => Ok(()),
         }
     }
 
-    async fn create_directory_at(
+    pub(crate) fn create_directory_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         path: String,
-    ) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<()>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
@@ -573,80 +869,118 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                self.ctx.storage_for(vfs_desc).mkdir(&full_path).await?;
-                Ok(())
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    storage.mkdir(&full_path).await?;
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 dir.dir.create_dir(&path)?;
-                Ok(())
+                Ok(done(()))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, true, |s, fd, rest| {
+                    s.create_directory_at_op(fd, rest)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn stat(
+    pub(crate) fn stat_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
-    ) -> HybridFsResult<types::DescriptorStat> {
-        let descriptor = self.table.get(&fd)?;
+        fd: &Resource<HybridDescriptor>,
+    ) -> HybridFsResult<Op<types::DescriptorStat>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
-                let meta = self.ctx.storage_for(vfs_desc).stat(&vfs_desc.path).await?;
-                Ok(vfs_metadata_to_stat(&meta))
+                let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    let meta = storage.stat(&path).await?;
+                    Ok(vfs_metadata_to_stat(&meta))
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 let meta = dir.dir.dir_metadata()?;
-                Ok(cap_metadata_to_stat(&meta))
+                Ok(done(cap_metadata_to_stat(&meta)))
             }
             HybridDescriptor::RealFile { file, .. } => {
                 let meta = capfs::Metadata::from_file(&file.file)?;
-                Ok(cap_metadata_to_stat(&meta))
+                Ok(done(cap_metadata_to_stat(&meta)))
             }
+            HybridDescriptor::Synthetic { .. } => Ok(done(synthetic_dir_stat())),
+            HybridDescriptor::Device(_) => Ok(done(device_stat())),
         }
     }
 
-    async fn stat_at(
+    pub(crate) fn stat_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         _path_flags: types::PathFlags,
         path: String,
-    ) -> HybridFsResult<types::DescriptorStat> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<types::DescriptorStat>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
                     return Err(crate::VfsError::NotDirectory(vfs_desc.path.clone()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                let meta = self.ctx.storage_for(vfs_desc).stat(&full_path).await?;
-                Ok(vfs_metadata_to_stat(&meta))
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    let meta = storage.stat(&full_path).await?;
+                    Ok(vfs_metadata_to_stat(&meta))
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 let meta = dir.dir.metadata(&path)?;
-                Ok(cap_metadata_to_stat(&meta))
+                Ok(done(cap_metadata_to_stat(&meta)))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.stat_op(fd))
+                    }
+                    RootEntry::Mount { index, rest } => {
+                        self.with_mount(index, |s, fd| s.stat_at_op(fd, _path_flags, rest))
+                    }
+                    RootEntry::Directory => Ok(done(synthetic_dir_stat())),
+                    RootEntry::Device(_) => Ok(done(device_stat())),
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn set_times_at(
+    pub(crate) fn set_times_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         path_flags: types::PathFlags,
         path: String,
         atim: types::NewTimestamp,
         mtim: types::NewTimestamp,
-    ) -> HybridFsResult<()> {
+    ) -> HybridFsResult<Op<()>> {
         let atime = new_timestamp(atim)?;
         let mtime = new_timestamp(mtim)?;
-        let descriptor = self.table.get(&fd)?;
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
@@ -656,11 +990,11 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                self.ctx
-                    .storage_for(vfs_desc)
-                    .set_times(&full_path, atime, mtime)
-                    .await?;
-                Ok(())
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    storage.set_times(&full_path, atime, mtime).await?;
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
@@ -668,35 +1002,42 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 }
                 let follow = path_flags.contains(types::PathFlags::SYMLINK_FOLLOW);
                 dir.dir.set_times(&path, atime, mtime, follow)?;
-                Ok(())
+                Ok(done(()))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                // Touching a device succeeds and changes nothing, as on an
+                // open device.
+                if let RootEntry::Device(_) = self
+                    .ctx
+                    .resolve_from_root(&join_guest_path(guest_path, &path))
+                {
+                    return Ok(done(()));
+                }
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.set_times_at_op(fd, path_flags, rest, atim, mtim)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn link_at(
+    /// Open `path` under `fd`. The returned op resolves to the new
+    /// descriptor, which the caller adds to the resource table.
+    pub(crate) fn open_at_op(
         &mut self,
-        _fd: Resource<HybridDescriptor>,
-        _old_path_flags: types::PathFlags,
-        _old_path: String,
-        _new_descriptor: Resource<HybridDescriptor>,
-        _new_path: String,
-    ) -> HybridFsResult<()> {
-        // Hard links not supported in hybrid VFS
-        Err(crate::VfsError::PermissionDenied("hard links not supported".to_string()).into())
-    }
-
-    async fn open_at(
-        &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         _path_flags: types::PathFlags,
         path: String,
         oflags: types::OpenFlags,
         flags: types::DescriptorFlags,
-    ) -> HybridFsResult<Resource<HybridDescriptor>> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<HybridDescriptor>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
@@ -713,79 +1054,98 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::AccessDenied(full_path).into());
                 }
 
-                let exists = !self
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                let unlinked = self
                     .ctx
-                    .open_files
-                    .is_unlinked(vfs_desc.storage, &full_path)
-                    && self.ctx.storage_for(vfs_desc).exists(&full_path).await?;
-
-                if is_directory {
-                    if !exists {
-                        return Err(crate::VfsError::NotFound(full_path).into());
-                    }
-                    let meta = self.ctx.storage_for(vfs_desc).stat(&full_path).await?;
-                    if !meta.is_dir {
-                        return Err(crate::VfsError::NotDirectory(full_path).into());
-                    }
-                    let new_vfs_desc = vfs_desc.child_dir(full_path);
-                    let new_descriptor = HybridDescriptor::Vfs(new_vfs_desc);
-                    let resource = self.table.push(new_descriptor)?;
-                    Ok(resource)
-                } else {
-                    let create = oflags.contains(types::OpenFlags::CREATE);
-                    let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
-                    let truncate = oflags.contains(types::OpenFlags::TRUNCATE);
-
-                    if exclusive && exists {
-                        return Err(crate::VfsError::AlreadyExists(full_path).into());
-                    }
-
-                    if !exists {
-                        if !create {
+                    .open_files()
+                    .is_unlinked(vfs_desc.storage, &full_path);
+                let replace = unlinked
+                    && !is_directory
+                    && oflags.contains(types::OpenFlags::CREATE)
+                    && vfs_desc.dir_perms.contains(DirPerms::MUTATE);
+                if replace {
+                    // A new file takes the unlinked name, so closing the old
+                    // descriptors must not delete it.
+                    self.ctx
+                        .open_files()
+                        .set_linked(vfs_desc.storage, &full_path, true);
+                }
+                let vfs_desc = vfs_desc.clone();
+                Ok(op(async move {
+                    if is_directory {
+                        if !storage.exists(&full_path).await? {
                             return Err(crate::VfsError::NotFound(full_path).into());
                         }
-                        if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
-                            return Err(
-                                crate::VfsError::PermissionDenied("mutate".to_string()).into()
-                            );
+                        let meta = storage.stat(&full_path).await?;
+                        if !meta.is_dir {
+                            return Err(crate::VfsError::NotDirectory(full_path).into());
                         }
-                        self.ctx
-                            .storage_for(vfs_desc)
-                            .write(&full_path, &[])
-                            .await?;
-                        self.ctx
-                            .open_files
-                            .set_linked(vfs_desc.storage, &full_path, true);
+                        let new_vfs_desc = vfs_desc.child_dir(full_path);
+                        Ok(HybridDescriptor::Vfs(new_vfs_desc))
                     } else {
-                        let meta = self.ctx.storage_for(vfs_desc).stat(&full_path).await?;
-                        if meta.is_dir {
-                            return Err(crate::VfsError::NotFile(full_path).into());
-                        }
-                        if truncate {
-                            if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
+                        let create = oflags.contains(types::OpenFlags::CREATE);
+                        let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
+                        let truncate = oflags.contains(types::OpenFlags::TRUNCATE);
+
+                        // Creating checks and creates in one storage step, so
+                        // concurrent `CREATE|EXCLUSIVE` opens (lockfiles) can't
+                        // both succeed.
+                        let created = if replace {
+                            // Replace the old contents, which open
+                            // descriptors still use.
+                            storage.write(&full_path, &[]).await?;
+                            true
+                        } else if create && vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
+                            storage.create_file(&full_path, exclusive).await?
+                        } else {
+                            let exists = !unlinked && storage.exists(&full_path).await?;
+                            if exclusive && exists {
+                                return Err(crate::VfsError::AlreadyExists(full_path).into());
+                            }
+                            if !exists {
+                                if !create {
+                                    return Err(crate::VfsError::NotFound(full_path).into());
+                                }
                                 return Err(crate::VfsError::PermissionDenied(
                                     "mutate".to_string(),
                                 )
                                 .into());
                             }
-                            if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
-                                return Err(crate::VfsError::AccessDenied(full_path).into());
-                            }
-                            self.ctx
-                                .storage_for(vfs_desc)
-                                .write(&full_path, &[])
-                                .await?;
-                        }
-                    }
+                            false
+                        };
 
-                    let storage = vfs_desc.storage;
-                    let mut new_vfs_desc = VfsDescriptor::file(full_path.clone(), file_perms);
-                    new_vfs_desc.storage = storage;
-                    let new_descriptor = HybridDescriptor::Vfs(new_vfs_desc);
-                    let resource = self.table.push(new_descriptor)?;
-                    self.ctx.open_files.open(storage, &full_path);
-                    Ok(resource)
-                }
+                        if !created {
+                            let meta = storage.stat(&full_path).await?;
+                            if meta.is_dir {
+                                // As on POSIX, a directory opens without
+                                // O_DIRECTORY unless the open would change it.
+                                if !create && !truncate && !file_perms.contains(FilePerms::WRITE) {
+                                    return Ok(HybridDescriptor::Vfs(
+                                        vfs_desc.child_dir(full_path),
+                                    ));
+                                }
+                                return Err(crate::VfsError::NotFile(full_path).into());
+                            }
+                            if truncate {
+                                if !vfs_desc.dir_perms.contains(DirPerms::MUTATE) {
+                                    return Err(crate::VfsError::PermissionDenied(
+                                        "mutate".to_string(),
+                                    )
+                                    .into());
+                                }
+                                if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
+                                    return Err(crate::VfsError::AccessDenied(full_path).into());
+                                }
+                                storage.write(&full_path, &[]).await?;
+                            }
+                        }
+
+                        let mut new_vfs_desc = VfsDescriptor::file(full_path, file_perms);
+                        new_vfs_desc.storage = vfs_desc.storage;
+                        new_vfs_desc.mount_file_perms = vfs_desc.mount_file_perms;
+                        Ok(HybridDescriptor::Vfs(new_vfs_desc))
+                    }
+                }))
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
                 let is_directory = oflags.contains(types::OpenFlags::DIRECTORY);
@@ -814,12 +1174,10 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                         file_perms: dir.file_perms,
                         max_file_size: dir.max_file_size,
                     };
-                    let new_descriptor = HybridDescriptor::RealDir {
+                    Ok(done(HybridDescriptor::RealDir {
                         dir: new_real_dir,
                         guest_path: full_guest_path,
-                    };
-                    let resource = self.table.push(new_descriptor)?;
-                    Ok(resource)
+                    }))
                 } else {
                     // Opening a file
                     let readable = flags.contains(types::DescriptorFlags::READ);
@@ -863,65 +1221,111 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     })?;
 
                     let file = Arc::new(file);
+                    let perms = dir.file_perms;
+                    let max_size = dir.max_file_size;
                     self.ctx.track_open_host_file(&file)?;
                     let new_real_file = RealFile {
                         file,
-                        perms: dir.file_perms,
+                        perms,
                         readable,
                         writable,
-                        max_size: dir.max_file_size,
+                        max_size,
                     };
-                    let new_descriptor = HybridDescriptor::RealFile {
+                    Ok(done(HybridDescriptor::RealFile {
                         file: new_real_file,
-                        guest_path: full_guest_path.clone(),
-                    };
-                    let resource = self.table.push(new_descriptor)?;
-                    Ok(resource)
+                        guest_path: full_guest_path,
+                    }))
                 }
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                let exclusive = oflags.contains(types::OpenFlags::EXCLUSIVE);
+                let changes = flags.contains(types::DescriptorFlags::WRITE)
+                    || oflags.contains(types::OpenFlags::CREATE)
+                    || oflags.contains(types::OpenFlags::TRUNCATE);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        if exclusive {
+                            return Err(crate::VfsError::AlreadyExists(target).into());
+                        }
+                        let (descriptor, _) =
+                            HybridVfsCtx::<S>::preopen_descriptor(&self.ctx.preopens[index]);
+                        Ok(done(descriptor))
+                    }
+                    RootEntry::Mount { index, rest } => self.with_mount(index, |s, fd| {
+                        s.open_at_op(fd, _path_flags, rest, oflags, flags)
+                    }),
+                    RootEntry::Directory if exclusive => {
+                        Err(crate::VfsError::AlreadyExists(target).into())
+                    }
+                    RootEntry::Directory if changes => Err(read_only(&target)),
+                    RootEntry::Directory => {
+                        Ok(done(HybridDescriptor::Synthetic { guest_path: target }))
+                    }
+                    RootEntry::Device(_) if exclusive => {
+                        Err(crate::VfsError::AlreadyExists(target).into())
+                    }
+                    RootEntry::Device(_)
+                        if oflags.contains(types::OpenFlags::DIRECTORY) || path.ends_with('/') =>
+                    {
+                        Err(crate::VfsError::NotDirectory(target).into())
+                    }
+                    RootEntry::Device(device) => Ok(done(HybridDescriptor::Device(device))),
+                    RootEntry::NotFound if oflags.contains(types::OpenFlags::CREATE) => {
+                        Err(read_only(&target))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn drop(&mut self, fd: Resource<HybridDescriptor>) -> wasmtime::Result<()> {
-        if let HybridDescriptor::Vfs(desc) = self.table.delete(fd)?
-            && !desc.is_dir
-            && self.ctx.open_files.close(desc.storage, &desc.path)
-        {
-            // Nothing is left to report a failure to.
-            let _ = self.ctx.storage_for(&desc).delete(&desc.path).await;
-        }
-        Ok(())
-    }
-
-    async fn readlink_at(
+    pub(crate) fn readlink_at_now(
         &mut self,
-        fd: Resource<HybridDescriptor>,
-        path: String,
+        fd: &Resource<HybridDescriptor>,
+        path: &str,
     ) -> HybridFsResult<String> {
-        let descriptor = self.table.get(&fd)?;
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(_) => {
                 Err(crate::VfsError::PermissionDenied("symlinks not supported".to_string()).into())
             }
             HybridDescriptor::RealDir { dir, .. } => {
-                let target = dir.dir.read_link(&path)?;
+                let target = dir.dir.read_link(path)?;
                 Ok(target.to_string_lossy().into_owned())
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if !rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.readlink_at_now(fd, &rest))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                    // Nothing in the root is a symlink.
+                    _ => Err(crate::VfsError::InvalidPath(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn remove_directory_at(
+    pub(crate) fn remove_directory_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         path: String,
-    ) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<()>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
@@ -931,37 +1335,85 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                crate::wasi_impl::remove_dir(
-                    &self.ctx.storages[vfs_desc.storage],
-                    &mut self.ctx.open_files,
-                    vfs_desc.storage,
-                    &full_path,
-                )
-                .await?;
-                Ok(())
+                let index = vfs_desc.storage;
+                let unlinked = self.ctx.open_files().unlinked_under(index, &full_path);
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                let open_files = self.ctx.open_files.clone();
+                Ok(op(async move {
+                    crate::wasi_impl::remove_dir(&storage, &full_path, unlinked, |path| {
+                        crate::hybrid::lock(&open_files).set_linked(index, path, true);
+                    })
+                    .await?;
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 dir.dir.remove_dir(&path)?;
-                Ok(())
+                Ok(done(()))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.remove_directory_at_op(fd, rest)
+                })
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn rename_at(
+    /// Push a descriptor `open_at_op` opened, counting it if it's a VFS file.
+    pub(crate) fn push_opened(
+        &mut self,
+        opened: HybridDescriptor,
+    ) -> HybridFsResult<Resource<HybridDescriptor>> {
+        let file = match &opened {
+            HybridDescriptor::Vfs(desc) if !desc.is_dir => Some((desc.storage, desc.path.clone())),
+            _ => None,
+        };
+        let resource = self.table.push(opened)?;
+        if let Some((storage, path)) = file {
+            self.ctx.count_open(storage, &path);
+        }
+        Ok(resource)
+    }
+
+    /// Close a descriptor. Returns the deletion to await if it was the last
+    /// one on a file unlinked while open.
+    pub(crate) fn close_op(
         &mut self,
         fd: Resource<HybridDescriptor>,
+    ) -> wasmtime::Result<Option<Op<()>>> {
+        let HybridDescriptor::Vfs(desc) = self.table.delete(fd)? else {
+            return Ok(None);
+        };
+        if desc.is_dir || !self.ctx.count_close(desc.storage, &desc.path) {
+            return Ok(None);
+        }
+        let storage = self.ctx.storage_for(&desc).clone();
+        // Nothing is left to report a failure to.
+        Ok(Some(op(async move {
+            let _ = storage.delete(&desc.path).await;
+            Ok(())
+        })))
+    }
+
+    pub(crate) fn rename_at_op(
+        &mut self,
+        fd: &Resource<HybridDescriptor>,
         old_path: String,
-        new_fd: Resource<HybridDescriptor>,
+        new_fd: &Resource<HybridDescriptor>,
         new_path: String,
-    ) -> HybridFsResult<()> {
-        let old_descriptor = self.table.get(&fd)?;
-        let new_descriptor = self.table.get(&new_fd)?;
+    ) -> HybridFsResult<Op<()>> {
+        let old_descriptor = self.table.get(fd)?;
+        let new_descriptor = self.table.get(new_fd)?;
 
         // Both descriptors must be the same type (both VFS or both real)
         match (old_descriptor, new_descriptor) {
@@ -982,25 +1434,31 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 }
                 let old_full = old_vfs.resolve_path(&old_path)?;
                 let new_full = new_vfs.resolve_path(&new_path)?;
-                if self.ctx.open_files.is_unlinked(old_vfs.storage, &old_full) {
+                if self
+                    .ctx
+                    .open_files()
+                    .is_unlinked(old_vfs.storage, &old_full)
+                {
                     return Err(crate::VfsError::NotFound(old_full).into());
                 }
                 if !self
                     .ctx
-                    .open_files
+                    .open_files()
                     .unlinked_under(old_vfs.storage, &old_full)
                     .is_empty()
                 {
                     return Err(crate::VfsError::Busy(old_full).into());
                 }
+                let storage = self.ctx.storage_for(old_vfs).clone();
+                // The renamed file takes the new name, so closing descriptors
+                // left open on an unlinked file there must not delete it.
                 self.ctx
-                    .storage_for(old_vfs)
-                    .rename(&old_full, &new_full)
-                    .await?;
-                self.ctx
-                    .open_files
+                    .open_files()
                     .set_linked(new_vfs.storage, &new_full, true);
-                Ok(())
+                Ok(op(async move {
+                    storage.rename(&old_full, &new_full).await?;
+                    Ok(())
+                }))
             }
             (
                 HybridDescriptor::RealDir { dir: old_dir, .. },
@@ -1013,8 +1471,11 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                 }
                 // RestrictedDir::rename checks + translates both sides
                 old_dir.dir.rename(&old_path, &new_dir.dir, &new_path)?;
-                Ok(())
+                Ok(done(()))
             }
+            // Nothing above the mounts can be renamed or replaced.
+            (HybridDescriptor::Synthetic { guest_path }, _)
+            | (_, HybridDescriptor::Synthetic { guest_path }) => Err(read_only(guest_path)),
             _ => {
                 // Cross-filesystem rename not supported
                 Err(crate::VfsError::CrossDevice("rename between filesystems".to_string()).into())
@@ -1022,13 +1483,8 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         }
     }
 
-    async fn symlink_at(
-        &mut self,
-        fd: Resource<HybridDescriptor>,
-        src_path: String,
-        dest_path: String,
-    ) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    pub(crate) fn symlink_at_now(&mut self, fd: &Resource<HybridDescriptor>) -> HybridFsResult<()> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(_) => {
                 Err(crate::VfsError::PermissionDenied("symlinks not supported".to_string()).into())
@@ -1037,21 +1493,24 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
             // and host tools reading it later follow them, so the guest
             // can't create any (as on VFS preopens).
             HybridDescriptor::RealDir { .. } => {
-                let _ = (src_path, dest_path);
                 Err(crate::VfsError::PermissionDenied("symlinks not supported".to_string()).into())
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
+            HybridDescriptor::Synthetic { guest_path } => Err(read_only(guest_path)),
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
         }
     }
 
-    async fn unlink_file_at(
+    pub(crate) fn unlink_file_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         path: String,
-    ) -> HybridFsResult<()> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<()>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 if !vfs_desc.is_dir {
@@ -1061,160 +1520,61 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 let full_path = vfs_desc.resolve_path(&path)?;
-                let open_files = &self.ctx.open_files;
+                let mut open_files = self.ctx.open_files();
                 if open_files.is_unlinked(vfs_desc.storage, &full_path) {
                     return Err(crate::VfsError::NotFound(full_path).into());
                 }
-                let storage = self.ctx.storage_for(vfs_desc);
-                if !open_files.is_open(vfs_desc.storage, &full_path) {
+                if open_files.is_open(vfs_desc.storage, &full_path) {
+                    // Keep the contents for the open descriptors; the last to
+                    // close deletes them.
+                    open_files.set_linked(vfs_desc.storage, &full_path, false);
+                    return Ok(done(()));
+                }
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
                     storage.delete(&full_path).await?;
-                    return Ok(());
-                }
-                // Keep the contents for the open descriptors; the last to
-                // close deletes them.
-                if storage.stat(&full_path).await?.is_dir {
-                    return Err(crate::VfsError::NotFile(full_path).into());
-                }
-                self.ctx
-                    .open_files
-                    .set_linked(vfs_desc.storage, &full_path, false);
-                Ok(())
+                    Ok(())
+                }))
             }
             HybridDescriptor::RealDir { dir, .. } => {
                 if !dir.dir_perms.contains(DirPerms::MUTATE) {
                     return Err(crate::VfsError::PermissionDenied("mutate".to_string()).into());
                 }
                 dir.dir.remove_file(&path)?;
-                Ok(())
+                Ok(done(()))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
             }
-        }
-    }
-
-    fn read_via_stream(
-        &mut self,
-        fd: Resource<HybridDescriptor>,
-        offset: types::Filesize,
-    ) -> HybridFsResult<Resource<DynInputStream>> {
-        let descriptor = self.table.get(&fd)?;
-        match descriptor {
-            HybridDescriptor::Vfs(vfs_desc) => {
-                if vfs_desc.is_dir {
-                    return Err(crate::VfsError::NotFile(vfs_desc.path.clone()).into());
-                }
-                if !vfs_desc.file_perms.contains(FilePerms::READ) {
-                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
-                }
-                let path = vfs_desc.path.clone();
-                let storage = self.ctx.storage_for(vfs_desc).clone();
-                let stream = VfsInputStream::new(storage, path, offset);
-                let stream: DynInputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
+            HybridDescriptor::Synthetic { guest_path } => {
+                let dir = guest_path.clone();
+                self.root_mutation(&dir, &path, false, |s, fd, rest| {
+                    s.unlink_file_at_op(fd, rest)
+                })
             }
-            HybridDescriptor::RealDir { guest_path, .. } => {
-                Err(crate::VfsError::NotFile(guest_path.clone()).into())
-            }
-            HybridDescriptor::RealFile { file, .. } => {
-                if !file.readable {
-                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
-                }
-                let file_arc = Arc::clone(&file.file);
-                let stream = RealFileInputStream::new(file_arc, offset);
-                let stream: DynInputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
             }
         }
     }
 
-    fn write_via_stream(
+    pub(crate) fn is_same_object_now(
         &mut self,
-        fd: Resource<HybridDescriptor>,
-        offset: types::Filesize,
-    ) -> HybridFsResult<Resource<DynOutputStream>> {
-        let descriptor = self.table.get(&fd)?;
-        match descriptor {
-            HybridDescriptor::Vfs(vfs_desc) => {
-                if vfs_desc.is_dir {
-                    return Err(crate::VfsError::NotFile(vfs_desc.path.clone()).into());
-                }
-                if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
-                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
-                }
-                let path = vfs_desc.path.clone();
-                let storage = self.ctx.storage_for(vfs_desc).clone();
-                let stream = VfsOutputStream::write_at(storage, path, offset);
-                let stream: DynOutputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
-            }
-            HybridDescriptor::RealDir { guest_path, .. } => {
-                Err(crate::VfsError::NotFile(guest_path.clone()).into())
-            }
-            HybridDescriptor::RealFile { file, .. } => {
-                if !file.writable {
-                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
-                }
-                let stream =
-                    RealFileOutputStream::write_at(Arc::clone(&file.file), offset, file.max_size);
-                let stream: DynOutputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
-            }
-        }
-    }
-
-    fn append_via_stream(
-        &mut self,
-        fd: Resource<HybridDescriptor>,
-    ) -> HybridFsResult<Resource<DynOutputStream>> {
-        let descriptor = self.table.get(&fd)?;
-        match descriptor {
-            HybridDescriptor::Vfs(vfs_desc) => {
-                if vfs_desc.is_dir {
-                    return Err(crate::VfsError::NotFile(vfs_desc.path.clone()).into());
-                }
-                if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
-                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
-                }
-
-                let path = vfs_desc.path.clone();
-                let storage = self.ctx.storage_for(vfs_desc).clone();
-                let stream = VfsOutputStream::append(storage, path);
-                let stream: DynOutputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
-            }
-            HybridDescriptor::RealDir { guest_path, .. } => {
-                Err(crate::VfsError::NotFile(guest_path.clone()).into())
-            }
-            HybridDescriptor::RealFile { file, .. } => {
-                if !file.writable {
-                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
-                }
-                let stream = RealFileOutputStream::append(Arc::clone(&file.file), file.max_size);
-                let stream: DynOutputStream = Box::new(stream);
-                let resource = self.table.push(stream)?;
-                Ok(resource)
-            }
-        }
-    }
-
-    async fn is_same_object(
-        &mut self,
-        a: Resource<HybridDescriptor>,
-        b: Resource<HybridDescriptor>,
+        a: &Resource<HybridDescriptor>,
+        b: &Resource<HybridDescriptor>,
     ) -> wasmtime::Result<bool> {
-        let desc_a = self.table.get(&a)?;
-        let desc_b = self.table.get(&b)?;
+        let desc_a = self.table.get(a)?;
+        let desc_b = self.table.get(b)?;
         match (desc_a, desc_b) {
             (HybridDescriptor::Vfs(a), HybridDescriptor::Vfs(b)) => Ok(a.storage == b.storage
                 && crate::wasi_impl::vfs_identity(&a.path)
                     == crate::wasi_impl::vfs_identity(&b.path)),
             (HybridDescriptor::Vfs(_), _) | (_, HybridDescriptor::Vfs(_)) => Ok(false),
+            (
+                HybridDescriptor::Synthetic { guest_path: a },
+                HybridDescriptor::Synthetic { guest_path: b },
+            ) => Ok(a == b),
+            (HybridDescriptor::Device(a), HybridDescriptor::Device(b)) => Ok(a == b),
             #[cfg(unix)]
             _ => Ok(match (real_metadata(desc_a), real_metadata(desc_b)) {
                 (Some(a), Some(b)) => {
@@ -1228,67 +1588,285 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for HybridVfsState<'
         }
     }
 
-    async fn metadata_hash(
+    pub(crate) fn metadata_hash_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
-    ) -> HybridFsResult<types::MetadataHashValue> {
-        let descriptor = self.table.get(&fd)?;
+        fd: &Resource<HybridDescriptor>,
+    ) -> HybridFsResult<Op<types::MetadataHashValue>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
-                let meta = self.ctx.storage_for(vfs_desc).stat(&vfs_desc.path).await?;
-                let hash = crate::wasi_impl::vfs_metadata_hash(&vfs_desc.path, &meta);
-                Ok(types::MetadataHashValue {
-                    lower: hash,
-                    upper: 0,
-                })
+                let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    let meta = storage.stat(&path).await?;
+                    let hash = crate::wasi_impl::vfs_metadata_hash(&path, &meta);
+                    Ok(types::MetadataHashValue {
+                        lower: hash,
+                        upper: 0,
+                    })
+                }))
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
                 let meta = dir.dir.dir_metadata()?;
                 let hash = real_metadata_hash(guest_path, &meta);
-                Ok(types::MetadataHashValue {
+                Ok(done(types::MetadataHashValue {
                     lower: hash,
                     upper: 0,
-                })
+                }))
             }
             HybridDescriptor::RealFile { file, guest_path } => {
                 let meta = capfs::Metadata::from_file(&file.file)?;
                 let hash = real_metadata_hash(guest_path, &meta);
-                Ok(types::MetadataHashValue {
+                Ok(done(types::MetadataHashValue {
                     lower: hash,
                     upper: 0,
-                })
+                }))
             }
+            HybridDescriptor::Synthetic { guest_path } => Ok(done(synthetic_hash(guest_path))),
+            HybridDescriptor::Device(device) => Ok(done(synthetic_hash(device.path()))),
         }
     }
 
-    async fn metadata_hash_at(
+    pub(crate) fn metadata_hash_at_op(
         &mut self,
-        fd: Resource<HybridDescriptor>,
+        fd: &Resource<HybridDescriptor>,
         _path_flags: types::PathFlags,
         path: String,
-    ) -> HybridFsResult<types::MetadataHashValue> {
-        let descriptor = self.table.get(&fd)?;
+    ) -> HybridFsResult<Op<types::MetadataHashValue>> {
+        let descriptor = self.table.get(fd)?;
         match descriptor {
             HybridDescriptor::Vfs(vfs_desc) => {
                 let full_path = vfs_desc.resolve_path(&path)?;
-                let meta = self.ctx.storage_for(vfs_desc).stat(&full_path).await?;
-                let hash = crate::wasi_impl::vfs_metadata_hash(&full_path, &meta);
-                Ok(types::MetadataHashValue {
-                    lower: hash,
-                    upper: 0,
-                })
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(op(async move {
+                    let meta = storage.stat(&full_path).await?;
+                    let hash = crate::wasi_impl::vfs_metadata_hash(&full_path, &meta);
+                    Ok(types::MetadataHashValue {
+                        lower: hash,
+                        upper: 0,
+                    })
+                }))
             }
             HybridDescriptor::RealDir { dir, guest_path } => {
                 let meta = dir.dir.metadata(&path)?;
                 let full_path = format!("{}/{}", guest_path, path);
                 let hash = real_metadata_hash(&full_path, &meta);
-                Ok(types::MetadataHashValue {
+                Ok(done(types::MetadataHashValue {
                     lower: hash,
                     upper: 0,
-                })
+                }))
             }
             HybridDescriptor::RealFile { guest_path, .. } => {
                 Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let target = join_guest_path(guest_path, &path);
+                match self.ctx.resolve_from_root(&target) {
+                    RootEntry::Mount { index, rest } if rest.is_empty() => {
+                        self.with_mount(index, |s, fd| s.metadata_hash_op(fd))
+                    }
+                    RootEntry::Mount { index, rest } => {
+                        self.with_mount(index, |s, fd| s.metadata_hash_at_op(fd, _path_flags, rest))
+                    }
+                    RootEntry::Directory | RootEntry::Device(_) => {
+                        Ok(done(synthetic_hash(&target)))
+                    }
+                    RootEntry::NotFound => Err(crate::VfsError::NotFound(target).into()),
+                }
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Shared by the p2 and p3 bindings
+// ============================================================================
+
+/// A pending directory listing, from [`HybridVfsState::directory_entries`].
+pub(crate) type DirectoryListing = std::pin::Pin<
+    Box<dyn std::future::Future<Output = HybridFsResult<Vec<types::DirectoryEntry>>> + Send>,
+>;
+
+impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
+    /// List the directory `fd`, after its permission checks.
+    ///
+    /// The checks run now; the returned future does the listing and borrows
+    /// nothing, so the p3 bindings can drive it from a stream producer.
+    pub(crate) fn directory_entries(
+        &self,
+        fd: &Resource<HybridDescriptor>,
+    ) -> HybridFsResult<DirectoryListing> {
+        let descriptor = self.table.get(fd)?;
+        match descriptor {
+            HybridDescriptor::Vfs(vfs_desc) => {
+                if !vfs_desc.is_dir {
+                    return Err(crate::VfsError::NotDirectory(vfs_desc.path.clone()).into());
+                }
+                if !vfs_desc.dir_perms.contains(DirPerms::READ) {
+                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+                }
+                let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(Box::pin(async move {
+                    let vfs_entries = storage.list(&path).await?;
+                    Ok(vfs_entries
+                        .into_iter()
+                        .map(|e| types::DirectoryEntry {
+                            name: e.name,
+                            type_: if e.metadata.is_dir {
+                                types::DescriptorType::Directory
+                            } else {
+                                types::DescriptorType::RegularFile
+                            },
+                        })
+                        .collect())
+                }))
+            }
+            HybridDescriptor::RealDir { dir, .. } => {
+                if !dir.dir_perms.contains(DirPerms::READ) {
+                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+                }
+
+                // RestrictedDir::entries() handles filtering + RestrictedDir::guest_name()
+                // handles the reverse translation — no manual file_map logic needed.
+                let raw_entries = dir.dir.entries()?;
+
+                let mut entries = Vec::new();
+                for entry in raw_entries {
+                    let name = dir.dir.guest_name(&entry);
+                    let file_type = entry.file_type()?;
+                    let type_ = if file_type.is_dir() {
+                        types::DescriptorType::Directory
+                    } else if file_type.is_symlink() {
+                        types::DescriptorType::SymbolicLink
+                    } else if file_type.is_file() {
+                        types::DescriptorType::RegularFile
+                    } else {
+                        types::DescriptorType::Unknown
+                    };
+                    entries.push(types::DirectoryEntry { name, type_ });
+                }
+
+                Ok(Box::pin(std::future::ready(Ok(entries))))
+            }
+            HybridDescriptor::RealFile { guest_path, .. } => {
+                Err(crate::VfsError::NotDirectory(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                let entries = self
+                    .ctx
+                    .synthetic_children(guest_path)
+                    .into_iter()
+                    .map(|(name, kind)| types::DirectoryEntry {
+                        name,
+                        type_: match kind {
+                            EntryKind::Directory => types::DescriptorType::Directory,
+                            EntryKind::File => types::DescriptorType::RegularFile,
+                            EntryKind::Device => types::DescriptorType::CharacterDevice,
+                        },
+                    })
+                    .collect();
+                Ok(Box::pin(std::future::ready(Ok(entries))))
+            }
+            HybridDescriptor::Device(device) => {
+                Err(crate::VfsError::NotDirectory(device.path().to_owned()).into())
+            }
+        }
+    }
+
+    /// A read stream over the file `fd` from `offset`, after its permission
+    /// checks.
+    pub(crate) fn input_stream(
+        &self,
+        fd: &Resource<HybridDescriptor>,
+        offset: types::Filesize,
+    ) -> HybridFsResult<DynInputStream> {
+        let descriptor = self.table.get(fd)?;
+        match descriptor {
+            HybridDescriptor::Vfs(vfs_desc) => {
+                if vfs_desc.is_dir {
+                    return Err(crate::VfsError::NotFile(vfs_desc.path.clone()).into());
+                }
+                if !vfs_desc.file_perms.contains(FilePerms::READ) {
+                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+                }
+                let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                let stream = VfsInputStream::new(storage, path, offset);
+                Ok(Box::new(stream))
+            }
+            HybridDescriptor::RealDir { guest_path, .. } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(device) => Ok(Box::new(DeviceInputStream(*device))),
+            HybridDescriptor::RealFile { file, .. } => {
+                if !file.readable {
+                    return Err(crate::VfsError::PermissionDenied("read".to_string()).into());
+                }
+                let file_arc = Arc::clone(&file.file);
+                let stream = RealFileInputStream::new(file_arc, offset);
+                Ok(Box::new(stream))
+            }
+        }
+    }
+
+    /// A write stream over the file `fd`, at `offset` or appending when it is
+    /// `None`, after its permission checks.
+    pub(crate) fn output_stream(
+        &mut self,
+        fd: &Resource<HybridDescriptor>,
+        offset: Option<types::Filesize>,
+    ) -> HybridFsResult<DynOutputStream> {
+        let descriptor = self.table.get(fd)?;
+        match descriptor {
+            HybridDescriptor::Vfs(vfs_desc) => {
+                if vfs_desc.is_dir {
+                    return Err(crate::VfsError::NotFile(vfs_desc.path.clone()).into());
+                }
+                if !vfs_desc.file_perms.contains(FilePerms::WRITE) {
+                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+                }
+                let path = vfs_desc.path.clone();
+                let storage = self.ctx.storage_for(vfs_desc).clone();
+                Ok(Box::new(match offset {
+                    Some(offset) => VfsOutputStream::write_at(storage, path, offset),
+                    None => VfsOutputStream::append(storage, path),
+                }))
+            }
+            HybridDescriptor::RealDir { guest_path, .. } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Synthetic { guest_path } => {
+                Err(crate::VfsError::NotFile(guest_path.clone()).into())
+            }
+            HybridDescriptor::Device(_) => Ok(Box::new(DiscardOutputStream)),
+            HybridDescriptor::RealFile { file, .. } => {
+                if !file.writable {
+                    return Err(crate::VfsError::PermissionDenied("write".to_string()).into());
+                }
+                let max_size = file.max_size;
+                match offset {
+                    Some(offset) => Ok(Box::new(RealFileOutputStream::write_at(
+                        Arc::clone(&file.file),
+                        offset,
+                        max_size,
+                    ))),
+                    None => {
+                        // A handle of its own, opened for appending, so the
+                        // OS appends atomically even with other writers on
+                        // the host file. It counts as an open host file.
+                        self.ctx.check_open_host_files()?;
+                        let appender = Arc::new(reopen_for_append(&file.file)?);
+                        self.ctx.track_open_host_file(&appender)?;
+                        Ok(Box::new(RealFileOutputStream::append(appender, max_size)))
+                    }
+                }
             }
         }
     }
@@ -1359,6 +1937,321 @@ mod tests {
 
     fn storage() -> ArcStorage {
         ArcStorage::new(Arc::new(InMemoryStorage::new()))
+    }
+
+    /// A context with `/tmp` and `/mnt/data` mounts and the root, which is the
+    /// last preopen.
+    fn rooted_ctx() -> HybridVfsCtx<ArcStorage> {
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+        ctx.add_vfs_preopen("/mnt/data", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        ctx
+    }
+
+    fn is_err<T>(result: HybridFsResult<T>, pred: impl Fn(&crate::VfsError) -> bool) -> bool {
+        result.map(drop).map_err(vfs_err).is_err_and(|e| pred(&e))
+    }
+
+    #[tokio::test]
+    async fn the_root_lists_and_stats_the_mounts() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        assert_eq!(dirs.last().unwrap().1, "/");
+        let root = preopen(&mut state, 2);
+
+        let stat = state.stat(borrow(&root)).await.unwrap();
+        assert_eq!(stat.type_, types::DescriptorType::Directory);
+        let listing = state.directory_entries(&root).unwrap().await.unwrap();
+        let names: Vec<_> = listing.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["tmp", "mnt", "dev"]);
+
+        for (path, type_) in [
+            ("tmp", types::DescriptorType::Directory),
+            ("mnt", types::DescriptorType::Directory),
+            ("mnt/data", types::DescriptorType::Directory),
+            ("dev", types::DescriptorType::Directory),
+            ("dev/null", types::DescriptorType::CharacterDevice),
+            ("./dev/../tmp", types::DescriptorType::Directory),
+        ] {
+            let stat = state
+                .stat_at(borrow(&root), types::PathFlags::empty(), path.to_string())
+                .await
+                .unwrap();
+            assert_eq!(stat.type_, type_, "{path}");
+        }
+
+        // A file under a mount is reached through the root too.
+        state.ctx.storages[0].write("/tmp/f", b"hi").await.unwrap();
+        let f = open(
+            &mut state,
+            &root,
+            "tmp/f",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.read(f, 10, 0).await.unwrap().0, b"hi");
+    }
+
+    #[tokio::test]
+    async fn the_root_is_read_only_outside_the_mounts() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let denied = |e: &crate::VfsError| matches!(e, crate::VfsError::PermissionDenied(_));
+        let missing = |e: &crate::VfsError| matches!(e, crate::VfsError::NotFound(_));
+
+        // Creating or writing anything above the mounts fails.
+        let create = open(
+            &mut state,
+            &root,
+            "new.txt",
+            types::OpenFlags::CREATE,
+            types::DescriptorFlags::WRITE,
+        )
+        .await;
+        assert!(is_err(create, denied));
+        let write_dir = open(
+            &mut state,
+            &root,
+            "mnt",
+            types::OpenFlags::DIRECTORY,
+            types::DescriptorFlags::WRITE,
+        )
+        .await;
+        assert!(is_err(write_dir, denied));
+        let mkdir = state.create_directory_at(borrow(&root), "etc".into()).await;
+        assert!(is_err(mkdir, denied));
+        let mkdir = state.create_directory_at(borrow(&root), "mnt".into()).await;
+        assert!(is_err(mkdir, denied));
+        let rmdir = state.remove_directory_at(borrow(&root), "tmp".into()).await;
+        assert!(is_err(rmdir, denied));
+        let unlink = state.unlink_file_at(borrow(&root), "dev/null".into()).await;
+        assert!(is_err(unlink, denied));
+        let unlink = state
+            .unlink_file_at(borrow(&root), "etc/passwd".into())
+            .await;
+        assert!(is_err(unlink, missing));
+        let rename = state
+            .rename_at(borrow(&root), "tmp".into(), borrow(&root), "tmp2".into())
+            .await;
+        assert!(is_err(rename, denied));
+        let symlink = state
+            .symlink_at(borrow(&root), "tmp".into(), "link".into())
+            .await;
+        assert!(is_err(symlink, denied));
+
+        // Paths outside every mount don't exist.
+        let passwd = open(
+            &mut state,
+            &root,
+            "etc/passwd",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(passwd, missing));
+        let stat = state
+            .stat_at(borrow(&root), types::PathFlags::empty(), "etc".into())
+            .await;
+        assert!(is_err(stat, missing));
+
+        // Inside a mount, the root hands changes to it.
+        state
+            .create_directory_at(borrow(&root), "tmp/sub".into())
+            .await
+            .unwrap();
+        assert!(state.ctx.storages[0].exists("/tmp/sub").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dev_devices_read_and_discard() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        for (path, expect) in [("dev/null", None), ("dev/zero", Some(0u8))] {
+            let fd = open(&mut state, &root, path, types::OpenFlags::TRUNCATE, rw)
+                .await
+                .unwrap();
+            let stat = state.stat(borrow(&fd)).await.unwrap();
+            assert_eq!(stat.type_, types::DescriptorType::CharacterDevice);
+            assert_eq!(
+                state.write(borrow(&fd), b"gone".to_vec(), 0).await.unwrap(),
+                4
+            );
+            let (bytes, eof) = state.read(borrow(&fd), 8, 0).await.unwrap();
+            match expect {
+                None => assert!(bytes.is_empty() && eof, "{path}"),
+                Some(b) => assert_eq!(bytes, [b; 8], "{path}"),
+            }
+        }
+
+        // A huge read is capped, like every other read path.
+        let urandom = open(
+            &mut state,
+            &root,
+            "dev/urandom",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        let (bytes, eof) = state.read(borrow(&urandom), u64::MAX, 0).await.unwrap();
+        assert_eq!(bytes.len(), MAX_READ_CHUNK);
+        assert!(!eof);
+        assert!(bytes.iter().any(|&b| b != 0));
+        let mut stream = state.input_stream(&urandom, 0).unwrap();
+        assert_eq!(stream.read(usize::MAX).unwrap().len(), MAX_READ_CHUNK);
+
+        // A device can't be created exclusively or opened as a directory.
+        let excl = open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::CREATE | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await;
+        assert!(is_err(excl, |e| matches!(
+            e,
+            crate::VfsError::AlreadyExists(_)
+        )));
+    }
+
+    /// A single-file volume at the top level mounts a restricted view of its
+    /// host directory at `/`; the root still comes up and serves the file.
+    #[tokio::test]
+    async fn the_root_serves_a_top_level_file_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_file = temp.path().join("settings.json");
+        std::fs::write(&host_file, b"{}").unwrap();
+        std::fs::write(temp.path().join("secret"), b"no").unwrap();
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/tmp", DirPerms::all(), FilePerms::all());
+        ctx.add_real_file_preopen_path(
+            "/cfg.json",
+            &host_file,
+            DirPerms::READ,
+            FilePerms::READ,
+            None,
+        )
+        .unwrap();
+        ctx.add_root();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+
+        // The guest gets one preopen at `/`: the root.
+        let dirs = preopens::Host::get_directories(&mut state).unwrap();
+        let paths: Vec<_> = dirs.iter().map(|(_, p)| p.as_str()).collect();
+        assert_eq!(paths, ["/tmp", "/"]);
+        let root = preopen(&mut state, 1);
+
+        let listing = state.directory_entries(&root).unwrap().await.unwrap();
+        let entries: Vec<_> = listing.iter().map(|e| (e.name.as_str(), e.type_)).collect();
+        assert_eq!(
+            entries,
+            [
+                ("tmp", types::DescriptorType::Directory),
+                ("cfg.json", types::DescriptorType::RegularFile),
+                ("dev", types::DescriptorType::Directory),
+            ]
+        );
+        let cfg = open(
+            &mut state,
+            &root,
+            "cfg.json",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.read(cfg, 10, 0).await.unwrap().0, b"{}");
+        open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await
+        .unwrap();
+        // The rest of the host directory stays hidden.
+        let secret = open(
+            &mut state,
+            &root,
+            "secret",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(secret, |e| matches!(
+            e,
+            crate::VfsError::NotFound(_)
+        )));
+    }
+
+    /// `touch /dev/null` succeeds and changes nothing, as on an open device;
+    /// a device isn't a directory.
+    #[tokio::test]
+    async fn devices_can_be_touched_but_not_entered() {
+        let mut ctx = rooted_ctx();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 2);
+        let now = types::NewTimestamp::Now;
+        state
+            .set_times_at(
+                borrow(&root),
+                types::PathFlags::empty(),
+                "dev/null".into(),
+                now,
+                now,
+            )
+            .await
+            .unwrap();
+        let entered = open(
+            &mut state,
+            &root,
+            "dev/null/",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(entered, |e| matches!(
+            e,
+            crate::VfsError::NotDirectory(_)
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_mount_at_dev_or_root_wins() {
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/dev", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let root = preopen(&mut state, 1);
+        let null = open(
+            &mut state,
+            &root,
+            "dev/null",
+            types::OpenFlags::empty(),
+            types::DescriptorFlags::READ,
+        )
+        .await;
+        assert!(is_err(null, |e| matches!(e, crate::VfsError::NotFound(_))));
+
+        let mut ctx = HybridVfsCtx::new(storage());
+        ctx.add_vfs_preopen("/", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+        assert_eq!(ctx.preopens.len(), 1);
     }
 
     #[tokio::test]
@@ -1602,6 +2495,60 @@ mod tests {
         assert_eq!((data.len(), eof), (10, true));
     }
 
+    /// wasi-libc reports the metadata hash as `st_ino`, so writing a file
+    /// must leave it alone, and so must renaming a host file (#974).
+    #[tokio::test]
+    async fn metadata_hash_survives_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut vfs = HybridVfsCtx::new(storage());
+        vfs.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        for (mut ctx, host) in [(vfs, false), (real_ctx(temp.path(), |d| d), true)] {
+            let mut table = ResourceTable::new();
+            let mut state = HybridVfsState::new(&mut ctx, &mut table);
+            let dir = preopen(&mut state, 0);
+            let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+            let file = open(&mut state, &dir, "f", types::OpenFlags::CREATE, rw)
+                .await
+                .unwrap();
+            let hash = |s: types::MetadataHashValue| (s.lower, s.upper);
+            let before = hash(state.metadata_hash(borrow(&file)).await.unwrap());
+
+            state.write(borrow(&file), b"x".to_vec(), 0).await.unwrap();
+            state.write(borrow(&file), b"yz".to_vec(), 1).await.unwrap();
+            assert_eq!(
+                hash(state.metadata_hash(borrow(&file)).await.unwrap()),
+                before,
+                "host: {host}"
+            );
+            let flags = types::PathFlags::empty();
+            assert_eq!(
+                hash(
+                    state
+                        .metadata_hash_at(borrow(&dir), flags, "f".into())
+                        .await
+                        .unwrap()
+                ),
+                before,
+                "host: {host}"
+            );
+            if host {
+                state
+                    .rename_at(borrow(&dir), "f".into(), borrow(&dir), "g".into())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    hash(
+                        state
+                            .metadata_hash_at(borrow(&dir), flags, "g".into())
+                            .await
+                            .unwrap()
+                    ),
+                    before
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn open_host_files_are_limited() {
         let temp = tempfile::tempdir().unwrap();
@@ -1631,6 +2578,39 @@ mod tests {
         state.table.delete(stream).unwrap();
         open(&mut state, &mnt, "f", none, read).await.unwrap();
         HostDescriptor::drop(&mut state, dir).await.unwrap();
+    }
+
+    /// An append stream on a host file holds its own append-mode handle,
+    /// which counts against the open-file limit like any other.
+    #[tokio::test]
+    async fn host_append_streams_count_as_open_files() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("f"), b"").unwrap();
+        let mut ctx = real_ctx(temp.path(), |d| d).with_max_open_host_files(2);
+        let mut table = ResourceTable::new();
+        let mut state = HybridVfsState::new(&mut ctx, &mut table);
+        let mnt = preopen(&mut state, 0);
+        let write = types::DescriptorFlags::WRITE;
+        let file = open(&mut state, &mnt, "f", types::OpenFlags::empty(), write)
+            .await
+            .unwrap();
+
+        let stream = state.append_via_stream(borrow(&file)).unwrap();
+        assert!(matches!(
+            state.append_via_stream(borrow(&file)).map_err(vfs_err),
+            Err(crate::VfsError::TooManyOpenFiles(_))
+        ));
+        let mut out = state.table.delete(stream).unwrap();
+        out.blocking_write_and_flush(bytes::Bytes::from_static(b"ab"))
+            .await
+            .unwrap();
+        drop(out);
+        let stream = state.append_via_stream(borrow(&file)).unwrap();
+        let mut out = state.table.delete(stream).unwrap();
+        out.blocking_write_and_flush(bytes::Bytes::from_static(b"cd"))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(temp.path().join("f")).unwrap(), b"abcd");
     }
 
     #[tokio::test]
@@ -1861,5 +2841,78 @@ mod tests {
         HostDescriptor::drop(&mut state, file).await.unwrap();
         HostDescriptor::drop(&mut state, new).await.unwrap();
         assert_eq!(storage.read("/data/d/x").await.unwrap(), b"other");
+    }
+
+    #[tokio::test]
+    async fn forked_contexts_share_unlinked_files() {
+        let rw = types::DescriptorFlags::READ | types::DescriptorFlags::WRITE;
+        let create = types::OpenFlags::CREATE;
+        let storage = storage();
+        let mut parent = HybridVfsCtx::new(storage.clone());
+        parent.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        let mut child = parent.fork();
+        let mut p_table = ResourceTable::new();
+        let mut p = HybridVfsState::new(&mut parent, &mut p_table);
+        let p_data = preopen(&mut p, 0);
+        let mut c_table = ResourceTable::new();
+        let mut c = HybridVfsState::new(&mut child, &mut c_table);
+        let c_data = preopen(&mut c, 0);
+
+        let old = open(&mut p, &p_data, "x", create, rw).await.unwrap();
+        p.unlink_file_at(borrow(&p_data), "x".into()).await.unwrap();
+        // The child sees the name gone, and a file it creates there survives
+        // the parent's close.
+        let new = open(
+            &mut c,
+            &c_data,
+            "x",
+            create | types::OpenFlags::EXCLUSIVE,
+            rw,
+        )
+        .await
+        .unwrap();
+        c.write(borrow(&new), b"child".to_vec(), 0).await.unwrap();
+        HostDescriptor::drop(&mut c, new).await.unwrap();
+        HostDescriptor::drop(&mut p, old).await.unwrap();
+        assert_eq!(storage.read("/data/x").await.unwrap(), b"child");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_with_files_open_gives_back_its_counts() {
+        let storage = storage();
+        storage.mkdir("/data").await.unwrap();
+        storage.write("/data/f", b"x").await.unwrap();
+        storage.write("/data/g", b"y").await.unwrap();
+        let mut parent = HybridVfsCtx::new(storage.clone());
+        parent.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+
+        // The child opens both files, unlinks g, and exits without closing
+        // either (its store, and so its context, is dropped).
+        {
+            let mut child = parent.fork();
+            let mut table = ResourceTable::new();
+            let mut c = HybridVfsState::new(&mut child, &mut table);
+            let data = preopen(&mut c, 0);
+            let read = types::DescriptorFlags::READ;
+            for name in ["f", "g"] {
+                open(&mut c, &data, name, types::OpenFlags::empty(), read)
+                    .await
+                    .unwrap();
+            }
+            c.unlink_file_at(borrow(&data), "g".into()).await.unwrap();
+        }
+
+        // The parent's unlink deletes f at once, and g is an ordinary file
+        // again, so it can be removed too.
+        let mut table = ResourceTable::new();
+        let mut p = HybridVfsState::new(&mut parent, &mut table);
+        let data = preopen(&mut p, 0);
+        for name in ["f", "g"] {
+            p.unlink_file_at(borrow(&data), name.into()).await.unwrap();
+            assert!(
+                !storage.exists(&format!("/data/{name}")).await.unwrap(),
+                "{name}"
+            );
+        }
     }
 }

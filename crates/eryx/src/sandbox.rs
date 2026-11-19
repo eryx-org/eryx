@@ -36,7 +36,7 @@ pub mod state {
 /// Try to automatically find the Python stdlib directory.
 ///
 /// This function searches multiple locations in order:
-/// 1. `ERYX_PYTHON_STDLIB` environment variable
+/// 1. `ERYX_STDLIB` environment variable, then the older `ERYX_PYTHON_STDLIB`
 /// 2. `./python-stdlib` (relative to current directory)
 /// 3. `<exe_dir>/python-stdlib` (relative to executable)
 /// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
@@ -44,22 +44,26 @@ pub mod state {
 /// Returns `Some(path)` if a valid stdlib directory is found, `None` otherwise.
 /// A valid stdlib directory must exist and contain an `encodings` subdirectory
 /// (required for Python initialization).
-fn find_python_stdlib() -> Option<PathBuf> {
+fn find_stdlib() -> Option<PathBuf> {
     // Helper to validate a stdlib directory
     fn is_valid_stdlib(path: &std::path::Path) -> bool {
         path.is_dir() && path.join("encodings").is_dir()
     }
 
     // 1. Environment variable
-    if let Ok(path) = std::env::var("ERYX_PYTHON_STDLIB") {
+    for var in ["ERYX_STDLIB", "ERYX_PYTHON_STDLIB"] {
+        let Ok(path) = std::env::var(var) else {
+            continue;
+        };
         let path = PathBuf::from(path);
         if is_valid_stdlib(&path) {
-            tracing::debug!(path = %path.display(), "Found Python stdlib via ERYX_PYTHON_STDLIB");
+            tracing::debug!(path = %path.display(), var, "Found Python stdlib via environment");
             return Some(path);
         }
         tracing::warn!(
             path = %path.display(),
-            "ERYX_PYTHON_STDLIB is set but path is not a valid stdlib directory"
+            var,
+            "stdlib environment variable is set but path is not a valid stdlib directory"
         );
     }
 
@@ -95,22 +99,43 @@ fn find_python_stdlib() -> Option<PathBuf> {
 
     None
 }
+/// The Python stdlib to use when none was set explicitly: the embedded one.
+#[cfg(feature = "embedded")]
+fn default_python_stdlib() -> Result<PathBuf, Error> {
+    Ok(crate::embedded::EmbeddedResources::get()?
+        .stdlib_path
+        .clone())
+}
+
+/// The Python stdlib to use when none was set explicitly: one found on disk.
+#[cfg(not(feature = "embedded"))]
+fn default_python_stdlib() -> Result<PathBuf, Error> {
+    find_stdlib().ok_or_else(|| {
+        ErrorKind::MissingStdlib {
+            language: Language::Python,
+        }
+        .into()
+    })
+}
+
 use crate::callback::Callback;
 use crate::callback_handler::{
     run_callback_handler, run_net_handler, run_output_collector, run_trace_collector,
 };
 use crate::error::{Error, ErrorKind};
+use crate::language::{GuestLanguage, JavaScript, Language, Python, Shell};
 use crate::library::RuntimeLibrary;
 use crate::net::{ConnectionManager, NetConfig};
+use crate::process::Command;
 use crate::trace::{OutputHandler, TraceEvent, TraceHandler};
 use crate::wasm::{
-    CallbackRequest, ExecutionOutput, NetRequest, OutputRequest, PythonExecutor, TraceRequest,
+    CallbackRequest, ExecutionOutput, Executor, NetRequest, OutputRequest, TraceRequest,
 };
 
 /// A sandboxed Python execution environment.
 pub struct Sandbox {
     /// The Python WASM executor (wrapped in Arc for sharing with sessions).
-    executor: Arc<PythonExecutor>,
+    executor: Arc<Executor>,
     /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
     callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
     /// Python preamble code injected before user code: the secrets'
@@ -189,13 +214,13 @@ impl std::fmt::Debug for Sandbox {
 impl Sandbox {
     /// Create a sandbox builder.
     ///
-    /// You must configure both a runtime source and Python stdlib before building.
+    /// You must configure a runtime source before building.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
-    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_wasm_file("runtime-python.wasm")
     ///     .with_python_stdlib("/path/to/stdlib")
     ///     .build()?;
     /// ```
@@ -203,7 +228,7 @@ impl Sandbox {
     /// Or use [`Sandbox::embedded()`] for zero-config setup when the `embedded`
     /// feature is enabled.
     #[must_use]
-    pub fn builder() -> SandboxBuilder<state::Needs, state::Needs> {
+    pub fn builder() -> SandboxBuilder<Python, state::Needs> {
         SandboxBuilder::new()
     }
 
@@ -221,7 +246,7 @@ impl Sandbox {
     /// ```
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn embedded() -> SandboxBuilder<state::Has, state::Has> {
+    pub fn embedded() -> SandboxBuilder<Python, state::Has> {
         SandboxBuilder::new_embedded()
     }
 
@@ -236,7 +261,23 @@ impl Sandbox {
     ///
     /// Returns an error if the Python code fails to execute or a resource limit is exceeded.
     pub async fn execute(&self, code: &str) -> Result<ExecuteResult, Error> {
-        self.run_inner(code, None, None).await
+        self.execute_with(code, &ExecuteOptions::default()).await
+    }
+
+    /// Execute code with per-call [`ExecuteOptions`]: narrowed shell
+    /// commands, or a token that cancels it. [`execute`](Self::execute) is
+    /// this with the defaults.
+    ///
+    /// # Errors
+    ///
+    /// As for [`execute`](Self::execute), and
+    /// [`ErrorKind::Cancelled`] if the options' token is cancelled.
+    pub async fn execute_with(
+        &self,
+        code: &str,
+        options: &ExecuteOptions,
+    ) -> Result<ExecuteResult, Error> {
+        self.run_inner(code, None, options).await
     }
 
     /// Execute Python code with callback-result replay and journaling.
@@ -261,13 +302,31 @@ impl Sandbox {
     /// source** (e.g. a previous run of the same sandbox, or a journal verified
     /// via HMAC signature). See the [`replay`](crate::replay) module docs for
     /// details.
+    ///
+    /// Use [`execute_journaled`](Self::execute_journaled) when you need
+    /// [`ExecuteOptions`].
     pub async fn execute_with_journal(
         &self,
         code: &str,
         journal: Option<CallbackJournal>,
     ) -> ReplayOutcome {
+        self.execute_journaled(code, journal, &ExecuteOptions::default())
+            .await
+    }
+
+    /// [`execute_with_journal`](Self::execute_with_journal) with per-call
+    /// [`ExecuteOptions`]: use this one when you need options. The same
+    /// security note applies: only replay journals from a trusted source.
+    pub async fn execute_journaled(
+        &self,
+        code: &str,
+        journal: Option<CallbackJournal>,
+        options: &ExecuteOptions,
+    ) -> ReplayOutcome {
         let state = ReplayState::shared(code, journal);
-        let result = self.run_inner(code, Some(Arc::clone(&state)), None).await;
+        let result = self
+            .run_inner(code, Some(Arc::clone(&state)), options)
+            .await;
         ReplayOutcome::from_state(&state, code, result)
     }
 
@@ -277,9 +336,8 @@ impl Sandbox {
     ///
     /// When `replay_state` is `Some`, every registered callback is wrapped with
     /// a [`ReplayCallback`](crate::replay::ReplayCallback) sharing that state.
-    /// When `cancel_token` is `Some`, cancelling it interrupts the execution.
     #[tracing::instrument(
-        skip(self, code, replay_state, cancel_token),
+        skip(self, code, replay_state, options),
         fields(
             code_len = code.len(),
             callbacks = self.callbacks.len(),
@@ -293,7 +351,7 @@ impl Sandbox {
         &self,
         code: &str,
         replay_state: Option<Arc<Mutex<ReplayState>>>,
-        cancel_token: Option<CancellationToken>,
+        options: &ExecuteOptions,
     ) -> Result<ExecuteResult, Error> {
         let start = Instant::now();
 
@@ -325,13 +383,36 @@ impl Sandbox {
             .await
         });
 
+        // Spawn network handler if networking is enabled (first, so the
+        // output can be scrubbed of the child proxies' passwords)
+        let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
+            let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let manager = ConnectionManager::new(config.clone(), self.secrets.clone())
+                .map_err(ErrorKind::Initialization)?;
+            // Children draw on the guest's budget.
+            let child_net = manager
+                .child_network(self.executor.child_network().clone())
+                .map_err(ErrorKind::Initialization)?;
+            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
+            (Some(tx), Some(handler), child_net)
+        } else {
+            (None, None, None)
+        };
+
+        let scrub_secrets = self.scrub_secrets(
+            &options.credentials,
+            options.allowed_commands.as_deref(),
+            &options.command_options,
+            child_net.as_ref(),
+        );
+        let child_net = child_net.map(crate::process::ChildNet::new);
         // Create the trace channel and collector only when tracing is enabled.
         let tracing_enabled = self.tracing_enabled();
         let (trace_tx, trace_collector) = if tracing_enabled {
             let (trace_tx, trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
             let trace_handler = self.trace_handler.clone();
             let collect_trace = self.collect_trace;
-            let trace_secrets = self.secrets.clone();
+            let trace_secrets = scrub_secrets.clone();
             let trace_collector = tokio::spawn(async move {
                 run_trace_collector(trace_rx, trace_handler, collect_trace, trace_secrets).await
             });
@@ -340,21 +421,11 @@ impl Sandbox {
             (None, None)
         };
 
-        // Spawn network handler if networking is enabled
-        let (net_tx, net_handler) = if let Some(ref config) = self.net_config {
-            let (tx, rx) = mpsc::channel::<NetRequest>(32);
-            let manager = ConnectionManager::new(config.clone(), self.secrets.clone());
-            let handler = tokio::spawn(async move { run_net_handler(rx, manager).await });
-            (Some(tx), Some(handler))
-        } else {
-            (None, None)
-        };
-
         // Spawn output collector for real-time streaming if handler is configured
         let (output_tx, output_handler_task) = if self.output_handler.is_some() {
             let (tx, rx) = mpsc::unbounded_channel::<OutputRequest>();
             let handler = self.output_handler.clone();
-            let output_secrets = self.secrets.clone();
+            let output_secrets = scrub_secrets.clone();
             let scrub_stdout = matches!(self.scrub_stdout, crate::secrets::OutputScrubPolicy::All);
             let scrub_stderr = matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All);
             let task = tokio::spawn(async move {
@@ -372,8 +443,17 @@ impl Sandbox {
             .execute(code)
             .with_preamble(self.preamble.as_str())
             .with_callbacks(&callbacks, callback_tx);
-        if let Some(token) = cancel_token {
-            execute_builder = execute_builder.with_cancellation(token);
+        if let Some(token) = &options.cancellation {
+            execute_builder = execute_builder.with_cancellation(token.clone());
+        }
+        for (name, command_options) in &options.command_options {
+            execute_builder = execute_builder.with_command_options(name, command_options.clone());
+        }
+        for credential in &options.credentials {
+            execute_builder = execute_builder.with_credential(credential.clone());
+        }
+        if let Some(names) = &options.allowed_commands {
+            execute_builder = execute_builder.with_allowed_commands(names.iter().cloned());
         }
         if let Some(trace_tx) = trace_tx {
             execute_builder = execute_builder.with_tracing(trace_tx);
@@ -388,15 +468,14 @@ impl Sandbox {
         if let Some(tx) = net_tx {
             execute_builder = execute_builder.with_network(tx);
         }
+        if let Some(net) = child_net {
+            execute_builder = execute_builder.with_child_network(net);
+        }
 
         // Add VFS storage — use per-request override if set, otherwise create
         // a scrubbing storage from the sandbox's secrets configuration.
         #[cfg(feature = "unstable-vfs")]
         {
-            let vfs_max_bytes = self
-                .resource_limits
-                .max_vfs_bytes
-                .unwrap_or(eryx_vfs::DEFAULT_MAX_BYTES);
             let vfs_storage = if let Some(ref storage) = self.vfs_storage {
                 eryx_vfs::ArcStorage::new(Arc::clone(storage))
             } else {
@@ -423,7 +502,7 @@ impl Sandbox {
                     }
                 };
                 let scrubbing_storage = eryx_vfs::ScrubbingStorage::new(
-                    eryx_vfs::InMemoryStorage::with_max_bytes(vfs_max_bytes),
+                    crate::session::executor::VfsLimits::of(&self.resource_limits).storage(),
                     vfs_secrets,
                     vfs_policy,
                 );
@@ -442,6 +521,16 @@ impl Sandbox {
             execute_builder =
                 execute_builder.with_max_open_host_files(self.resource_limits.max_open_host_files);
         }
+        // Without `unstable-vfs`, the quota still bounds the shell's /tmp.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        {
+            execute_builder = execute_builder.with_vfs_limits(
+                crate::session::executor::VfsLimits::of(&self.resource_limits),
+            );
+        }
+        execute_builder = execute_builder
+            .with_max_child_host_bytes(self.resource_limits.max_child_host_bytes)
+            .with_max_child_memory_bytes(self.resource_limits.max_child_memory_bytes);
 
         // Add memory limit if configured
         if let Some(limit) = self.resource_limits.max_memory_bytes {
@@ -492,7 +581,7 @@ impl Sandbox {
 
         match execution_result {
             Ok(output) => {
-                let output = self.scrub_output(output);
+                let output = self.scrub_output(output, &scrub_secrets);
                 tracing::info!(
                     duration_ms = duration.as_millis() as u64,
                     callback_invocations,
@@ -531,7 +620,7 @@ impl Sandbox {
                     }),
                     None => error,
                 };
-                Err(self.scrub_error(error))
+                Err(self.scrub_error(error, &scrub_secrets))
             }
         }
     }
@@ -618,44 +707,98 @@ impl Sandbox {
         matches!(self.scrub_stderr, crate::secrets::OutputScrubPolicy::All)
     }
 
-    /// Scrub secret placeholders from an execution's output per the
-    /// configured policies.
-    pub(crate) fn scrub_output(&self, mut output: ExecutionOutput) -> ExecutionOutput {
+    /// What an execution's output and traces are scrubbed of: the secrets'
+    /// placeholders, the values of the credentials its children get (the
+    /// sandbox's and `extra`, the execution's own), in case one gets there
+    /// some way the proxy's response masking misses, and the passwords of
+    /// the proxies holding them (from `child_net`, the execution's): just
+    /// those of the commands the execution (`allowed`, `command_options`)
+    /// may give a credential to.
+    pub(crate) fn scrub_secrets(
+        &self,
+        extra: &[crate::net::Credential],
+        allowed: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        child_net: Option<&crate::net::ChildNetPolicy>,
+    ) -> HashMap<String, crate::secrets::SecretConfig> {
+        let mut secrets = self.secrets.clone();
+        let credentials: Vec<&crate::net::Credential> = self
+            .executor
+            .credentials()
+            .iter()
+            .map(|c| &**c)
+            .chain(extra)
+            .collect();
+        // The commands that may get a proxy of their own with a password.
+        let names =
+            self.executor
+                .commands()
+                .credentialed_names(allowed, command_options, &credentials);
+        let passwords = child_net.into_iter().flat_map(|net| {
+            names
+                .iter()
+                .flat_map(move |name| net.proxy_sensitive_values(name))
+        });
+        let values = credentials
+            .iter()
+            .flat_map(|c| c.sensitive_values())
+            .chain(passwords);
+        for (i, value) in values.enumerate() {
+            // Not a name a secret can have (names are env var names).
+            secrets.insert(
+                format!("eryx credential {i}"),
+                crate::secrets::SecretConfig::scrub_only(value),
+            );
+        }
+        secrets
+    }
+
+    /// Scrub `secrets` (from [`Self::scrub_secrets`]) from an execution's
+    /// output per the configured policies.
+    pub(crate) fn scrub_output(
+        &self,
+        mut output: ExecutionOutput,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> ExecutionOutput {
         use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
         if self.scrub_stdout() {
-            output.stdout = scrub_placeholders_bytes(&output.stdout, &self.secrets);
+            output.stdout = scrub_placeholders_bytes(&output.stdout, secrets);
         }
         if self.scrub_stderr() {
-            output.stderr = scrub_placeholders_bytes(&output.stderr, &self.secrets);
+            output.stderr = scrub_placeholders_bytes(&output.stderr, secrets);
         }
         // The structured result is an output channel too, but scrubbing is
         // opt-in (it's a programmatic side channel). When enabled, scrub both
         // the result and its error message.
         if self.scrub_result {
-            output.result = output.result.map(|r| scrub_placeholders(&r, &self.secrets));
-            output.result_error = output
-                .result_error
-                .map(|e| scrub_placeholders(&e, &self.secrets));
+            output.result = output.result.map(|r| scrub_placeholders(&r, secrets));
+            output.result_error = output.result_error.map(|e| scrub_placeholders(&e, secrets));
         }
         output
     }
 
-    /// Scrub secret placeholders from a Python traceback, which the guest
-    /// would otherwise print to stderr, and from the output captured with it.
-    pub(crate) fn scrub_error(&self, mut error: Error) -> Error {
-        if let ErrorKind::PythonException {
-            traceback,
+    /// Scrub secret placeholders from a script failure's message (for Python,
+    /// the traceback the guest would otherwise print to stderr), and from the
+    /// output captured with it.
+    pub(crate) fn scrub_error(
+        &self,
+        mut error: Error,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    ) -> Error {
+        if let ErrorKind::ScriptFailed {
+            message,
             stdout,
             stderr,
+            ..
         } = error.kind_mut()
         {
             use crate::secrets::{scrub_placeholders, scrub_placeholders_bytes};
             if self.scrub_stderr() {
-                *traceback = scrub_placeholders(traceback, &self.secrets);
-                *stderr = scrub_placeholders_bytes(stderr, &self.secrets);
+                *message = scrub_placeholders(message, secrets);
+                *stderr = scrub_placeholders_bytes(stderr, secrets);
             }
             if self.scrub_stdout() {
-                *stdout = scrub_placeholders_bytes(stdout, &self.secrets);
+                *stdout = scrub_placeholders_bytes(stdout, secrets);
             }
         }
         error
@@ -665,8 +808,14 @@ impl Sandbox {
     ///
     /// This allows creating a `SessionExecutor` from a pooled sandbox,
     /// enabling state persistence between executions.
+    ///
+    /// The executor carries the child-network setting but not the sandbox's
+    /// network ([`with_network`](SandboxBuilder::with_network)) or secrets,
+    /// which are needed to give its children a network. A `SessionExecutor`
+    /// made from it has no network, and its children none; use
+    /// [`InProcessSession`](crate::InProcessSession) for a session that does.
     #[must_use]
-    pub fn executor(&self) -> Arc<PythonExecutor> {
+    pub fn executor(&self) -> Arc<Executor> {
         self.executor.clone()
     }
 
@@ -677,7 +826,9 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
-    /// name; the existing callbacks are left unchanged.
+    /// name, or if one collides with a name the guest uses itself (a
+    /// JavaScript global, a Python builtin, a shell builtin or command);
+    /// the existing callbacks are left unchanged.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
         let mut duplicate = None;
@@ -685,6 +836,11 @@ impl Sandbox {
             insert_callback(&mut map, &mut duplicate, Arc::from(callback));
         }
         check_duplicate_callback(duplicate)?;
+        crate::reserved::check(
+            self.executor.language(),
+            map.keys().map(String::as_str),
+            self.executor.commands().registered_names(),
+        )?;
         self.callbacks = Arc::new(map);
         Ok(())
     }
@@ -714,8 +870,9 @@ impl Sandbox {
     /// sandbox was built with.
     ///
     /// Used by the pool to configure per-request networking on a reused
-    /// sandbox. The secrets' placeholders are set in `os.environ` from the
-    /// next execution, as with [`SandboxBuilder::with_secret`].
+    /// sandbox. The secrets' placeholders are set in `os.environ` (or, in
+    /// JavaScript, `process.env`) from the next execution, as with
+    /// [`SandboxBuilder::with_secret`].
     ///
     /// # Errors
     ///
@@ -732,7 +889,8 @@ impl Sandbox {
             .check_secret_hosts(&secrets)
             .map_err(ErrorKind::Initialization)?;
         crate::secrets::check_placeholders(&secrets).map_err(ErrorKind::Initialization)?;
-        self.preamble = full_preamble(&secrets, &self.library_preamble);
+        self.preamble =
+            language_preamble(self.executor.language(), &secrets, &self.library_preamble)?;
         self.net_config = Some(config);
         self.secrets = secrets;
         Ok(())
@@ -831,13 +989,14 @@ impl Sandbox {
 
         let finished = Arc::new(AtomicBool::new(false));
 
-        let sandbox = self.clone_for_task();
+        let sandbox = self.clone();
         let code = code.to_string();
         let token = cancel_token.clone();
         let task_finished = Arc::clone(&finished);
 
         tokio::spawn(async move {
-            let result = sandbox.run_inner(&code, None, Some(token)).await;
+            let options = ExecuteOptions::new().with_cancellation(token);
+            let result = sandbox.execute_with(&code, &options).await;
             task_finished.store(true, Ordering::Release);
             // Send result back (ignore error if receiver dropped)
             let _ = result_tx.send(result);
@@ -849,10 +1008,17 @@ impl Sandbox {
             result: result_rx,
         }
     }
+}
 
-    /// A copy of this sandbox sharing its executor and callbacks, so an
-    /// execution can run on a spawned task.
-    fn clone_for_task(&self) -> Self {
+/// A copy sharing the compiled runtime, callbacks and handlers, so a clone is
+/// cheap, and an execution can run on a spawned task. Executions of a sandbox
+/// and of its clones are independent, as executions of one sandbox are.
+///
+/// A clone of a [`SandboxPool`](crate::pool::SandboxPool) lease doesn't
+/// belong to the pool: it keeps that lease's callbacks, secrets and network
+/// config after the lease goes back, and isn't reset or reused with it.
+impl Clone for Sandbox {
+    fn clone(&self) -> Self {
         Self {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
@@ -876,6 +1042,61 @@ impl Sandbox {
             built: Arc::clone(&self.built),
         }
     }
+}
+
+unstable_pub! {
+/// The code the guest runs before each execution: `full_preamble` for
+/// Python, [`crate::secrets::javascript_preamble`] for JavaScript, and for the
+/// shell an `export` of each secret's placeholder, which its child commands
+/// inherit (the child proxy substitutes them). Library preambles are Python.
+///
+/// # Errors
+///
+/// A library preamble for another language, or a secret name the shell can't
+/// export.
+#[doc(hidden)]
+fn language_preamble(
+    language: Language,
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    library_preamble: &str,
+) -> Result<String, Error> {
+    let unsupported = |message: String| Err(ErrorKind::Initialization(message).into());
+    match language {
+        Language::Python => Ok(full_preamble(secrets, library_preamble)),
+        _ if !library_preamble.is_empty() => unsupported(format!(
+            "library preambles are only supported for Python, not {language}"
+        )),
+        Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
+        Language::Shell => shell_preamble(secrets),
+    }
+}
+}
+
+/// `export NAME='placeholder'` for each secret, in name order, with any `'`
+/// in the placeholder escaped. A name that isn't a shell variable name is
+/// refused.
+fn shell_preamble(
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+) -> Result<String, Error> {
+    let mut names: Vec<&String> = secrets.keys().collect();
+    names.sort();
+    let mut preamble = String::new();
+    for name in names {
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(ErrorKind::Initialization(format!(
+                "secret {name:?} can't be exported to the shell: not a shell variable name"
+            ))
+            .into());
+        }
+        let placeholder = secrets[name].placeholder().replace('\'', "'\\''");
+        preamble.push_str(&format!("export {name}='{placeholder}'\n"));
+    }
+    Ok(preamble)
 }
 
 /// The preamble setting each secret's placeholder in `os.environ`, followed
@@ -903,6 +1124,26 @@ fn full_preamble(
     }
     preamble.push_str(library_preamble);
     preamble
+}
+
+/// Check an environment given to `with_environment` is for `language` and
+/// still the one that was loaded.
+#[cfg(feature = "environment")]
+fn check_environment(
+    pinned: &PinnedEnvironment,
+    language: Language,
+) -> Result<crate::environment::Environment, Error> {
+    let error = |message: String| Error::from(ErrorKind::Initialization(message));
+    let environment = crate::environment::Environment::load_expecting(&pinned.root, &pinned.hash)
+        .map_err(|e| error(format!("environment {}: {e}", pinned.root.display())))?;
+    if environment.language() != language {
+        return Err(error(format!(
+            "{} is a {} environment, so a {language} sandbox can't use it",
+            pinned.root.display(),
+            pinned.language
+        )));
+    }
+    Ok(environment)
 }
 
 /// Register `callback` under its name, recording the first name registered
@@ -941,6 +1182,94 @@ fn python_str_literal(value: &str) -> String {
 pub(crate) fn handler_task_failed(task: &str, error: &tokio::task::JoinError) -> Error {
     tracing::error!(task, %error, "execution handler task failed");
     ErrorKind::Execution(format!("{task} task failed: {error}")).into()
+}
+
+/// Options for one execution of a [`Sandbox`], for
+/// [`execute_with`](Sandbox::execute_with) and
+/// [`execute_journaled`](Sandbox::execute_journaled).
+///
+/// # Stability
+///
+/// Options added later default to today's behaviour.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ExecuteOptions {
+    allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<crate::net::Credential>,
+    cancellation: Option<CancellationToken>,
+}
+
+impl ExecuteOptions {
+    /// The defaults: every registered command, and no cancellation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Let this execution spawn only the named commands: the guest lists
+    /// just those, and any other spawn fails with `command-not-found`. Only
+    /// the shell spawns commands; for other guests it changes nothing (no
+    /// error). An empty list allows none; names that aren't
+    /// registered are ignored. The shell's `grep` builtin and nested
+    /// `sh`/`bash` count as commands here; other builtins and callbacks
+    /// aren't affected. Sessions
+    /// take the same option on [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only): a narrower child network, or no tunnels or spawning.
+    /// Options can only take away from what the command and the sandbox
+    /// give. Setting them again for the same name replaces them. The
+    /// execution fails to start if `name` isn't a registered command, or if
+    /// the options give it network when the sandbox gives children none.
+    /// Sessions take the same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's child processes `credential` (shell only), as
+    /// well as the sandbox's own
+    /// ([`SandboxBuilder::with_credential`](crate::SandboxBuilder::with_credential)):
+    /// the child proxy adds it to their requests to its hosts, and the
+    /// sandbox never sees the secret. Hosted services can give each request
+    /// its own token this way. The execution fails to start if the credential
+    /// is invalid, names a command that isn't registered, has no network or
+    /// opens blind tunnels, or if the sandbox gives children no network.
+    /// Sessions take the same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    ///
+    /// Where it and one of the sandbox's both apply to a request and set the
+    /// same header, this one wins: the request carries its value, not the
+    /// sandbox's. Between an execution's own, the one given first wins.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(credential);
+        self
+    }
+
+    /// Interrupt the execution when `token` is cancelled; it then fails with
+    /// [`ErrorKind::Cancelled`].
+    #[must_use]
+    pub fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
 }
 
 /// Handle to a cancellable execution.
@@ -1056,6 +1385,9 @@ struct MappedComponent {
     /// even if its path is later replaced.
     file: Mutex<std::fs::File>,
     len: u64,
+    /// What [`Executor::stamp_language`] stamped it with, read once when
+    /// mapped.
+    stamp: Option<crate::wasm::LanguageStamp>,
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -1099,7 +1431,7 @@ impl PrecompiledArtifact {
     ///
     /// # Safety
     ///
-    /// The file must hold trusted output of [`PythonExecutor::precompile`],
+    /// The file must hold trusted output of [`Executor::precompile`],
     /// and must not be modified in place while the artifact is alive.
     /// Replacing its path by renaming a new file over it is safe.
     ///
@@ -1219,13 +1551,15 @@ impl PrecompiledArtifact {
             // whatever its path now points at.
             let fd_path = format!("/dev/fd/{}", file.as_raw_fd());
             // SAFETY: The caller guarantees the file is trusted and unmodified.
-            let component =
-                unsafe { PythonExecutor::deserialize_component_file(fd_path.as_ref())? };
+            let component = unsafe { Executor::deserialize_component_file(fd_path.as_ref())? };
+            let mut file = file;
+            let stamp = crate::wasm::file_language_stamp(&mut file, len);
             return Ok(Self {
                 component: ArtifactComponent::Mapped(Arc::new(MappedComponent {
                     component,
                     file: Mutex::new(file),
                     len,
+                    stamp,
                 })),
                 cache_key,
             });
@@ -1240,6 +1574,15 @@ impl PrecompiledArtifact {
             component: ArtifactComponent::Bytes(Arc::new(bytes)),
             cache_key,
         })
+    }
+
+    /// What [`Executor::stamp_language`] stamped the component with, if
+    /// anything.
+    fn language_stamp(&self) -> Option<crate::wasm::LanguageStamp> {
+        match &self.component {
+            ArtifactComponent::Bytes(bytes) => crate::wasm::language_stamp(bytes),
+            ArtifactComponent::Mapped(mapped) => mapped.stamp,
+        }
     }
 
     /// Write the pre-compiled component bytes to `writer`.
@@ -1288,7 +1631,7 @@ impl PrecompiledArtifact {
         self.len() == 0
     }
 
-    /// Build a [`PythonExecutor`] from this artifact, consulting the
+    /// Build a [`Executor`] from this artifact, consulting the
     /// process-global [`crate::cache::InstancePreCache`] when it carries a
     /// cache key.
     ///
@@ -1300,14 +1643,17 @@ impl PrecompiledArtifact {
     /// # Safety
     ///
     /// Pre-compiled bytes cannot be fully validated by Wasmtime. Only construct
-    /// executors from artifacts created by [`PythonExecutor::precompile`] from
+    /// executors from artifacts created by [`Executor::precompile`] from
     /// trusted components.
     #[allow(unsafe_code)]
-    pub unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+    pub unsafe fn to_executor(&self) -> std::result::Result<Executor, Error> {
+        if let Some(stamp) = self.language_stamp() {
+            stamp.check_guest()?;
+        }
         let bytes = match &self.component {
             ArtifactComponent::Bytes(bytes) => bytes,
             ArtifactComponent::Mapped(mapped) => {
-                return PythonExecutor::from_deserialized_component(
+                return Executor::from_deserialized_component(
                     &mapped.component,
                     self.cache_key.clone(),
                 );
@@ -1318,13 +1664,13 @@ impl PrecompiledArtifact {
         if let Some(key) = &self.cache_key {
             // SAFETY: The caller guarantees that the artifact bytes are trusted.
             #[allow(unsafe_code)]
-            return unsafe { PythonExecutor::from_precompiled_with_key(bytes, key.clone()) };
+            return unsafe { Executor::from_precompiled_with_key(bytes, key.clone()) };
         }
 
         // SAFETY: The caller guarantees that the artifact bytes are trusted.
         #[allow(unsafe_code)]
         unsafe {
-            PythonExecutor::from_precompiled(bytes)
+            Executor::from_precompiled(bytes)
         }
     }
 }
@@ -1396,10 +1742,10 @@ impl PrecompiledFileSource {
     ///
     /// # Safety
     ///
-    /// The file must hold trusted output of [`PythonExecutor::precompile`] and
+    /// The file must hold trusted output of [`Executor::precompile`] and
     /// must not be modified in place while the mapping is alive.
     #[allow(unsafe_code)]
-    unsafe fn to_executor(&self) -> std::result::Result<PythonExecutor, Error> {
+    unsafe fn to_executor(&self) -> std::result::Result<Executor, Error> {
         let artifact = self.artifact.get_or_try_init(|| {
             let file = std::fs::File::open(&self.path).map_err(|e| {
                 ErrorKind::Initialization(format!(
@@ -1417,6 +1763,11 @@ impl PrecompiledFileSource {
         // SAFETY: The caller guarantees the file is trusted.
         unsafe { artifact.to_executor() }
     }
+
+    /// What the file was stamped with, once it has been mapped.
+    fn language_stamp(&self) -> Option<crate::wasm::LanguageStamp> {
+        self.artifact.get()?.language_stamp()
+    }
 }
 
 #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -1432,10 +1783,17 @@ impl std::fmt::Debug for PrecompiledFileSource {
 /// Builder for constructing a [`Sandbox`].
 ///
 /// Type parameters track configuration state at compile time:
+/// - `Lang`: The guest language, one of the marker types
+///   [`eryx::language::{Python, JavaScript, Shell}`](crate::language)
+///   ([`Python`] by default; switch with
+///   [`javascript()`](SandboxBuilder::javascript) or [`shell()`](SandboxBuilder::shell)).
+///   Language-specific options, such as the Python stdlib, are only available
+///   for their language.
 /// - `Runtime`: Whether WASM runtime is configured ([`state::Needs`] or [`state::Has`])
-/// - `Stdlib`: Whether Python stdlib is configured ([`state::Needs`] or [`state::Has`])
 ///
-/// The [`build()`](SandboxBuilder::build) method is only available when both are [`state::Has`].
+/// The [`build()`](SandboxBuilder::build) method is only available once the runtime is
+/// [`state::Has`]. It checks that a Python sandbox has a stdlib and that other
+/// languages have a runtime, and returns a [`Sandbox`] for any language.
 ///
 /// # Examples
 ///
@@ -1445,13 +1803,13 @@ impl std::fmt::Debug for PrecompiledFileSource {
 ///     .with_callback(MyCallback)
 ///     .build()?;
 ///
-/// // Without embedded - must specify both runtime and stdlib
+/// // Without embedded - specify the runtime, and the stdlib unless it can be found
 /// let sandbox = Sandbox::builder()
-///     .with_wasm_file("runtime.wasm")
+///     .with_wasm_file("runtime-python.wasm")
 ///     .with_python_stdlib("/path/to/stdlib")
 ///     .build()?;
 /// ```
-pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
+pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> {
     wasm_source: WasmSource,
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
@@ -1464,10 +1822,21 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     resource_limits: ResourceLimits,
     /// Name of the user variable captured as the structured result. Default `result`.
     result_variable: String,
-    /// Path to Python stdlib for eryx-wasm-runtime.
-    python_stdlib_path: Option<std::path::PathBuf>,
-    /// Path to Python site-packages for eryx-wasm-runtime.
-    python_site_packages_path: Option<std::path::PathBuf>,
+    /// External commands (shell only).
+    commands: crate::process::Commands,
+    /// How the commands' children reach the network (shell only).
+    child_network: crate::net::ChildNetwork,
+    /// Credentials every execution's children get (shell only).
+    credentials: Vec<Arc<crate::net::Credential>>,
+    /// Whether the network policy is set per request (a pool's sandboxes),
+    /// so a child network needn't have one at build time.
+    network_per_request: bool,
+    /// Whether the embedded shell also gets the embedded coreutils.
+    embedded_commands: bool,
+    /// Path to the guest's standard library (for Python, the CPython stdlib).
+    stdlib_path: Option<std::path::PathBuf>,
+    /// Path to a guest library directory (for Python, site-packages).
+    library_path: Option<std::path::PathBuf>,
     /// Native Python extensions to link into the component.
     #[cfg(feature = "native-extensions")]
     native_extensions: Vec<eryx_runtime::linker::NativeExtension>,
@@ -1496,19 +1865,30 @@ pub struct SandboxBuilder<Runtime = state::Needs, Stdlib = state::Needs> {
     /// Host filesystem volume mounts.
     #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
-    /// Phantom data for Runtime type parameter.
-    _runtime: PhantomData<Runtime>,
-    /// Phantom data for Stdlib type parameter.
-    _stdlib: PhantomData<Stdlib>,
+    /// The environment to mount, with the hash and language it was loaded
+    /// with; checked again at `build()`.
+    #[cfg(feature = "environment")]
+    environment: Option<PinnedEnvironment>,
+    /// Phantom data for the Lang and Runtime type parameters.
+    _state: PhantomData<(Lang, Runtime)>,
 }
 
-impl Default for SandboxBuilder<state::Needs, state::Needs> {
+/// An environment as [`SandboxBuilder::with_environment`] took it.
+#[cfg(feature = "environment")]
+#[derive(Debug, Clone)]
+struct PinnedEnvironment {
+    root: std::path::PathBuf,
+    hash: String,
+    language: crate::environment::Language,
+}
+
+impl Default for SandboxBuilder<Python, state::Needs> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<R, S> std::fmt::Debug for SandboxBuilder<R, S> {
+impl<L: GuestLanguage, R> std::fmt::Debug for SandboxBuilder<L, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SandboxBuilder")
             .field(
@@ -1526,10 +1906,10 @@ impl<R, S> std::fmt::Debug for SandboxBuilder<R, S> {
     }
 }
 
-impl SandboxBuilder<state::Needs, state::Needs> {
+impl SandboxBuilder<Python, state::Needs> {
     /// Create a new sandbox builder with default settings.
     ///
-    /// You must configure both a runtime source and Python stdlib before building.
+    /// You must configure a runtime source before building.
     /// Use [`Sandbox::embedded()`] for zero-config setup when the `embedded` feature is enabled.
     #[must_use]
     pub fn new() -> Self {
@@ -1544,8 +1924,13 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            python_stdlib_path: None,
-            python_site_packages_path: None,
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
+            network_per_request: false,
+            embedded_commands: true,
+            stdlib_path: None,
+            library_path: None,
             #[cfg(feature = "native-extensions")]
             native_extensions: Vec::new(),
             #[cfg(feature = "native-extensions")]
@@ -1561,16 +1946,17 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
-            _runtime: PhantomData,
-            _stdlib: PhantomData,
+            #[cfg(feature = "environment")]
+            environment: None,
+            _state: PhantomData,
         }
     }
 }
 
 /// Create a builder pre-configured with embedded runtime and stdlib.
 #[cfg(feature = "embedded")]
-impl SandboxBuilder<state::Needs, state::Needs> {
-    fn new_embedded() -> SandboxBuilder<state::Has, state::Has> {
+impl SandboxBuilder<Python, state::Needs> {
+    fn new_embedded() -> SandboxBuilder<Python, state::Has> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
             callbacks: HashMap::new(),
@@ -1582,8 +1968,13 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             output_handler: None,
             resource_limits: ResourceLimits::default(),
             result_variable: "result".to_string(),
-            python_stdlib_path: None, // Will use embedded stdlib
-            python_site_packages_path: None,
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
+            network_per_request: false,
+            embedded_commands: true,
+            stdlib_path: None, // Will use embedded stdlib
+            library_path: None,
             #[cfg(feature = "native-extensions")]
             native_extensions: Vec::new(),
             #[cfg(feature = "native-extensions")]
@@ -1599,16 +1990,17 @@ impl SandboxBuilder<state::Needs, state::Needs> {
             scrub_files: crate::secrets::FileScrubPolicy::default(),
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
-            _runtime: PhantomData,
-            _stdlib: PhantomData,
+            #[cfg(feature = "environment")]
+            environment: None,
+            _state: PhantomData,
         }
     }
 }
 
 // Helper for state transitions
-impl<R, S> SandboxBuilder<R, S> {
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Internal: transition to new state while preserving all fields.
-    fn transition<R2, S2>(self) -> SandboxBuilder<R2, S2> {
+    fn transition<L2: GuestLanguage, R2>(self) -> SandboxBuilder<L2, R2> {
         SandboxBuilder {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
@@ -1620,8 +2012,13 @@ impl<R, S> SandboxBuilder<R, S> {
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
             result_variable: self.result_variable,
-            python_stdlib_path: self.python_stdlib_path,
-            python_site_packages_path: self.python_site_packages_path,
+            commands: self.commands,
+            child_network: self.child_network,
+            credentials: self.credentials,
+            network_per_request: self.network_per_request,
+            embedded_commands: self.embedded_commands,
+            stdlib_path: self.stdlib_path,
+            library_path: self.library_path,
             #[cfg(feature = "native-extensions")]
             native_extensions: self.native_extensions,
             #[cfg(feature = "native-extensions")]
@@ -1637,14 +2034,15 @@ impl<R, S> SandboxBuilder<R, S> {
             scrub_files: self.scrub_files,
             #[cfg(feature = "unstable-vfs")]
             volumes: self.volumes,
-            _runtime: PhantomData,
-            _stdlib: PhantomData,
+            #[cfg(feature = "environment")]
+            environment: self.environment,
+            _state: PhantomData,
         }
     }
 }
 
-// Runtime transitions (Needs -> Has)
-impl<S> SandboxBuilder<state::Needs, S> {
+// The embedded runtime
+impl<L: GuestLanguage> SandboxBuilder<L, state::Needs> {
     /// Explicitly use the embedded pre-compiled runtime.
     ///
     /// **Note:** You usually don't need to call this. When the `embedded`
@@ -1669,38 +2067,45 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///     .with_package("/path/to/numpy-wasi.tar.gz")?  // Has .so files
     ///     .build()?;  // Uses late-linking, not embedded runtime
     /// ```
-    /// Explicitly use the embedded pre-compiled runtime and stdlib.
+    /// Explicitly use the embedded pre-compiled runtime of the builder's
+    /// language (and, for Python, the embedded stdlib). Python's runtime is
+    /// always embedded; JavaScript's and the shell's with the `javascript` and
+    /// `shell` features, or [`build()`](SandboxBuilder::build) fails with
+    /// [`ErrorKind::MissingRuntime`].
     ///
     /// This transitions the builder to a fully-configured state, ready to build.
     ///
     /// **Note:** Consider using [`Sandbox::embedded()`] instead for cleaner code.
     #[cfg(feature = "embedded")]
     #[must_use]
-    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<state::Has, state::Has> {
+    pub fn with_embedded_runtime(mut self) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::EmbeddedRuntime;
         self.transition()
     }
+}
 
+// Runtime transitions (Needs -> Has)
+impl<L: GuestLanguage> SandboxBuilder<L, state::Needs> {
     /// Set the WASM component from bytes.
     ///
     /// Use this to embed the WASM component in your binary.
-    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
-    /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
+    /// Configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// unless the embedded or auto-detected one will do.
     #[must_use]
-    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<state::Has, S> {
+    pub fn with_wasm_bytes(mut self, bytes: impl Into<Vec<u8>>) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::Bytes(bytes.into());
         self.transition()
     }
 
     /// Set the WASM component from a file path.
     ///
-    /// You still need to configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
-    /// or [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
+    /// Configure the Python stdlib with [`with_python_stdlib()`](SandboxBuilder::with_python_stdlib)
+    /// unless the embedded or auto-detected one will do.
     #[must_use]
     pub fn with_wasm_file(
         mut self,
         path: impl Into<std::path::PathBuf>,
-    ) -> SandboxBuilder<state::Has, S> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::File(path.into());
         self.transition()
     }
@@ -1709,7 +2114,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// Pre-compiled components load much faster because they skip compilation
     /// (~50x faster sandbox creation). Create pre-compiled bytes using
-    /// `PythonExecutor::precompile()`.
+    /// `Executor::precompile()`.
     ///
     /// # Safety
     ///
@@ -1718,7 +2123,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// bytes can lead to **arbitrary code execution**.
     ///
     /// Only call this with pre-compiled bytes that:
-    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Were created by `Executor::precompile()` or `precompile_file()`
     /// - Come from a trusted source you control
     /// - Were compiled with a compatible wasmtime version and configuration
     ///
@@ -1726,7 +2131,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once (safe operation)
-    /// let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
+    /// let precompiled = Executor::precompile_file("runtime-python.wasm")?;
     ///
     /// // Load from pre-compiled (unsafe - you must trust the bytes)
     /// let sandbox = unsafe {
@@ -1742,7 +2147,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     pub unsafe fn with_precompiled_bytes(
         mut self,
         bytes: impl Into<Vec<u8>>,
-    ) -> SandboxBuilder<state::Has, S> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledBytes(bytes.into());
         self.transition()
     }
@@ -1751,7 +2156,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// Pre-compiled components load much faster because they skip compilation
     /// (~50x faster sandbox creation). Create pre-compiled files using
-    /// `PythonExecutor::precompile_file()`.
+    /// `Executor::precompile_file()`.
     ///
     /// Unlike [`Self::with_precompiled_bytes`], the artifact is cheaply cloned,
     /// so repeated sandbox creation does not copy its component bytes. When the
@@ -1765,7 +2170,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// bytes can lead to **arbitrary code execution**.
     ///
     /// Only call this with pre-compiled bytes that:
-    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Were created by `Executor::precompile()` or `precompile_file()`
     /// - Come from a trusted source you control
     /// - Were compiled with a compatible wasmtime version and configuration
     #[cfg(any(feature = "embedded", feature = "preinit"))]
@@ -1774,7 +2179,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     pub unsafe fn with_precompiled_artifact(
         mut self,
         artifact: PrecompiledArtifact,
-    ) -> SandboxBuilder<state::Has, S> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledArtifact(artifact);
         self.transition()
     }
@@ -1783,7 +2188,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// Pre-compiled components load much faster because they skip compilation
     /// (~50x faster sandbox creation). Create pre-compiled files using
-    /// `PythonExecutor::precompile_file()`.
+    /// `Executor::precompile_file()`.
     ///
     /// The file is memory-mapped by the first `build()`, and that mapping is
     /// shared by every later `build()` of this builder and its clones (such as
@@ -1799,7 +2204,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     /// it by renaming a new file over it is safe.
     ///
     /// Only call this with pre-compiled files that:
-    /// - Were created by `PythonExecutor::precompile()` or `precompile_file()`
+    /// - Were created by `Executor::precompile()` or `precompile_file()`
     /// - Come from a trusted source you control
     /// - Were compiled with a compatible wasmtime version and configuration
     ///
@@ -1807,13 +2212,13 @@ impl<S> SandboxBuilder<state::Needs, S> {
     ///
     /// ```rust,ignore
     /// // Pre-compile once and save to disk
-    /// let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
-    /// std::fs::write("runtime.cwasm", &precompiled)?;
+    /// let precompiled = Executor::precompile_file("runtime-python.wasm")?;
+    /// std::fs::write("runtime-python.cwasm", &precompiled)?;
     ///
     /// // Load from pre-compiled file (unsafe - you must trust the file)
     /// let sandbox = unsafe {
     ///     Sandbox::builder()
-    ///         .with_precompiled_file("runtime.cwasm")
+    ///         .with_precompiled_file("runtime-python.cwasm")
     ///         .with_python_stdlib("/path/to/stdlib")
     ///         .build()?
     /// };
@@ -1824,7 +2229,7 @@ impl<S> SandboxBuilder<state::Needs, S> {
     pub unsafe fn with_precompiled_file(
         mut self,
         path: impl Into<std::path::PathBuf>,
-    ) -> SandboxBuilder<state::Has, S> {
+    ) -> SandboxBuilder<L, state::Has> {
         self.wasm_source = WasmSource::PrecompiledFile(Arc::new(PrecompiledFileSource {
             path: path.into(),
             artifact: crate::wasm::RetryableOnce::new(),
@@ -1833,46 +2238,46 @@ impl<S> SandboxBuilder<state::Needs, S> {
     }
 }
 
-// Stdlib transitions (Needs -> Has)
-impl<R> SandboxBuilder<R, state::Needs> {
+// Python-only options
+impl<R> SandboxBuilder<Python, R> {
     /// Set the path to the Python standard library directory.
     ///
-    /// This is required when not using the `embedded` feature.
-    /// The directory should contain the extracted Python stdlib (e.g., from
-    /// componentize-py's python-lib.tar.zst).
-    ///
-    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    /// The directory should contain the extracted CPython stdlib (e.g., from
+    /// componentize-py's python-lib.tar.zst); it is mounted at
+    /// `/python-stdlib` inside the WASM sandbox. Without it, the embedded
+    /// stdlib is used if the `embedded` feature is enabled, and otherwise one
+    /// is searched for as by
+    /// [`with_auto_stdlib()`](SandboxBuilder::with_auto_stdlib).
     #[must_use]
-    pub fn with_python_stdlib(
-        mut self,
-        path: impl Into<std::path::PathBuf>,
-    ) -> SandboxBuilder<R, state::Has> {
-        self.python_stdlib_path = Some(path.into());
-        self.transition()
+    pub fn with_python_stdlib(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.stdlib_path = Some(path.into());
+        self
     }
 
-    /// Auto-detect Python stdlib from common locations.
+    /// Auto-detect the Python stdlib from common locations.
     ///
     /// Searches in order:
-    /// 1. `ERYX_PYTHON_STDLIB` environment variable
+    /// 1. `ERYX_STDLIB` environment variable (or the older `ERYX_PYTHON_STDLIB`)
     /// 2. `./python-stdlib` (relative to current directory)
     /// 3. `<exe_dir>/python-stdlib` (relative to executable)
     /// 4. `<exe_dir>/../python-stdlib` (sibling of executable directory)
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::MissingPythonStdlib`] if no valid stdlib directory is found.
+    /// Returns [`ErrorKind::MissingStdlib`] if no valid stdlib directory is found.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let sandbox = Sandbox::builder()
-    ///     .with_wasm_file("runtime.wasm")
+    ///     .with_wasm_file("runtime-python.wasm")
     ///     .with_auto_stdlib()?  // Explicit fallible auto-detection
     ///     .build()?;
     /// ```
-    pub fn with_auto_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
-        let path = find_python_stdlib().ok_or(ErrorKind::MissingPythonStdlib)?;
+    pub fn with_auto_stdlib(self) -> Result<Self, Error> {
+        let path = find_stdlib().ok_or(ErrorKind::MissingStdlib {
+            language: Language::Python,
+        })?;
         Ok(self.with_python_stdlib(path))
     }
 
@@ -1884,6 +2289,9 @@ impl<R> SandboxBuilder<R, state::Needs> {
     /// but still wanting the convenience of the embedded stdlib.
     ///
     /// Requires the `embedded-stdlib` feature (also enabled by `embedded`).
+    /// With `embedded`, [`build()`](SandboxBuilder::build) already uses the
+    /// embedded stdlib when none is set, so this call is only needed with
+    /// `embedded-stdlib` alone.
     ///
     /// # Errors
     ///
@@ -1900,14 +2308,10 @@ impl<R> SandboxBuilder<R, state::Needs> {
     /// };
     /// ```
     #[cfg(feature = "embedded-stdlib")]
-    pub fn with_embedded_stdlib(self) -> Result<SandboxBuilder<R, state::Has>, Error> {
+    pub fn with_embedded_stdlib(self) -> Result<Self, Error> {
         let stdlib = crate::embedded_stdlib::EmbeddedStdlib::get()?;
         Ok(self.with_python_stdlib(stdlib.path()))
     }
-}
-
-// Methods available in ANY state
-impl<R, S> SandboxBuilder<R, S> {
     /// Add a native Python extension (.so file) to be linked into the component.
     ///
     /// Native extensions allow Python packages with compiled code (like numpy)
@@ -2059,7 +2463,310 @@ impl<R, S> SandboxBuilder<R, S> {
         Ok(self)
     }
 
+    /// Set the path to additional Python packages directory.
+    ///
+    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
+    /// and added to Python's import path.
+    #[must_use]
+    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.library_path = Some(path.into());
+        self
+    }
+
+    /// Add a Python package from a wheel (.whl) or tar.gz archive.
+    ///
+    /// The package format is auto-detected from the file extension:
+    /// - `.whl` - Standard Python wheel (zip archive)
+    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
+    /// - Directory - Used directly without extraction
+    ///
+    /// # Pure Python packages
+    ///
+    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_embedded_runtime()
+    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Packages with native extensions
+    ///
+    /// For packages containing native extensions (like numpy), the extensions are
+    /// automatically registered for late-linking. A cache is set up automatically
+    /// in the per-user eryx cache directory for fast subsequent sandbox creations:
+    ///
+    /// ```rust,ignore
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
+    ///     .build()?;  // Caching is automatic!
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The package format cannot be detected
+    /// - The archive cannot be read or extracted
+    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_path(path)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(ErrorKind::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )).into());
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+
+    /// Load a Python package from raw bytes.
+    ///
+    /// This is useful when downloading packages from URLs. The format must be
+    /// specified explicitly since it cannot be detected from bytes alone.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use eryx::{Sandbox, PackageFormat};
+    ///
+    /// // Download a package (using your preferred HTTP client)
+    /// let bytes = reqwest::get("https://example.com/numpy-wasi.tar.gz")
+    ///     .await?
+    ///     .bytes()
+    ///     .await?;
+    ///
+    /// let sandbox = Sandbox::builder()
+    ///     .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
+    ///     .build()?;
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The raw package bytes
+    /// * `format` - The package format (Wheel or TarGz)
+    /// * `name_hint` - Package name hint used if detection fails (e.g., "numpy")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The format is `Directory` (not supported for bytes)
+    /// - The archive cannot be read or extracted
+    pub fn with_package_bytes(
+        mut self,
+        bytes: &[u8],
+        format: crate::package::PackageFormat,
+        name_hint: impl Into<String>,
+    ) -> Result<Self, Error> {
+        let package = crate::package::ExtractedPackage::from_bytes(bytes, format, name_hint)?;
+
+        tracing::info!(
+            name = %package.name,
+            has_native_extensions = package.has_native_extensions,
+            "Loaded package from bytes"
+        );
+
+        // Check for incompatible configuration
+        #[cfg(not(feature = "native-extensions"))]
+        if package.has_native_extensions {
+            return Err(ErrorKind::Initialization(format!(
+                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
+                 Either use a pure-Python package or enable the 'native-extensions' feature.",
+                package.name
+            )).into());
+        }
+
+        // Store the extracted package - native extensions will be registered at build()
+        // time when we know the mount index for computing dlopen paths
+        self.packages.push(package);
+
+        Ok(self)
+    }
+}
+
+// Language transitions
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
+    /// Run JavaScript instead.
+    ///
+    /// The language-neutral configuration (runtime source, callbacks, limits,
+    /// network, secrets, ...) carries over. With the `embedded` and
+    /// `javascript` features, the embedded JavaScript runtime is used; otherwise
+    /// supply one with [`with_wasm_file()`](SandboxBuilder::with_wasm_file) or a
+    /// precompiled equivalent, or [`build()`](SandboxBuilder::build) fails with
+    /// [`ErrorKind::MissingRuntime`]. Python-only options set earlier make
+    /// `build()` fail.
+    #[must_use]
+    pub fn javascript(self) -> SandboxBuilder<JavaScript, R> {
+        self.transition()
+    }
+
+    /// Run the shell instead. See [`javascript()`](SandboxBuilder::javascript)
+    /// for what carries over; the embedded shell runtime needs the `embedded`
+    /// and `shell` features.
+    ///
+    /// Each callback is a shell command: `weather London --days 3`,
+    /// `weather --json '{"city": "London"}'` or `invoke weather '{...}'`.
+    /// Flag values are typed by the callback's parameters schema, the host
+    /// binds positional arguments to its properties in order, and the result
+    /// goes to stdout.
+    /// The command exits 0 on success, 1 when the callback fails, 2 on a usage
+    /// error, and 127 for `invoke` of an unknown name. A suspending callback
+    /// stops the whole script. The book's "Callbacks in the Shell" section has
+    /// the full rules.
+    #[must_use]
+    pub fn shell(self) -> SandboxBuilder<Shell, R> {
+        self.transition()
+    }
+}
+
+/// External commands, for the shell.
+impl<R> SandboxBuilder<Shell, R> {
+    /// Let the shell run `command` as the external command `name`.
+    ///
+    /// The shell finds it after its functions, builtins and callbacks, and
+    /// runs it as a child process with `argv[0]` set to `name`. The child
+    /// sees the sandbox's VFS mounts (with `unstable-vfs`) and nothing else
+    /// of the host, and has no network unless
+    /// [`with_child_network`](Self::with_child_network) gives it some.
+    /// Registering a name again replaces it.
+    ///
+    /// ```rust,ignore
+    /// let curl = Command::from_file("curl.wasm")?;
+    /// let sandbox = Sandbox::embedded().shell().with_command("curl", curl).build()?;
+    /// ```
+    #[must_use]
+    pub fn with_command(mut self, name: impl Into<String>, command: Command) -> Self {
+        self.commands.insert(name.into(), command);
+        self
+    }
+
+    /// Register one command under several names, e.g. a multicall binary
+    /// such as uutils coreutils, which picks the tool from `argv[0]`. It is
+    /// compiled once, however many names it gets.
+    ///
+    /// ```rust,ignore
+    /// let coreutils = Command::from_file("coreutils.wasm")?;
+    /// let sandbox = Sandbox::embedded()
+    ///     .shell()
+    ///     .with_commands(["cat", "head", "sort"], coreutils)
+    ///     .build()?;
+    /// ```
+    #[must_use]
+    pub fn with_commands<I, S>(mut self, names: I, command: Command) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commands.insert(name.into(), command.clone());
+        }
+        self
+    }
+
+    /// Let the commands' child processes reach the network (default
+    /// [`ChildNetwork::None`](crate::ChildNetwork::None): no network).
+    ///
+    /// Children bring their own TLS, so they go through a forward proxy on
+    /// the host that enforces the sandbox's [`NetConfig`](crate::NetConfig)
+    /// (narrowed, with [`ChildNetwork::Narrow`](crate::ChildNetwork::Narrow))
+    /// as `eryx:net` does for the guest: host and address checks, HTTP
+    /// rules, and secret substitution. Each child gets `HTTPS_PROXY` and
+    /// `HTTP_PROXY` (and their lowercase forms) pointing at the proxy, its
+    /// CA certificate at `/etc/ssl/certs/ca-certificates.crt` (read-only),
+    /// with `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and
+    /// `NODE_EXTRA_CA_CERTS` naming it, and an env var with each secret's
+    /// placeholder. It may connect to the proxy and nothing else. Only
+    /// HTTP/1.1 is proxied; see [`Command::allow_tunnels`] for other
+    /// protocols. The proxy lives for one execution.
+    ///
+    /// A command can have less (see [`Command::with_network`], and
+    /// [`CommandOptions::with_network`](crate::CommandOptions::with_network)
+    /// for one execution), never more.
+    ///
+    /// Needs [`with_network`](Self::with_network): [`build`](Self::build)
+    /// fails without it. A [`SandboxPool`](crate::SandboxPool)'s sandboxes
+    /// use each lease's network
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network))
+    /// instead: [`SandboxPool::new`](crate::SandboxPool::new) sets that up,
+    /// and sandboxes for [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
+    /// need [`with_network_per_lease`](Self::with_network_per_lease).
+    /// Children of a lease without one stay offline.
+    #[must_use]
+    pub fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.child_network = network;
+        self
+    }
+
+    /// Build this sandbox for a [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
+    /// pool whose leases set the network
+    /// ([`PooledSandbox::with_network`](crate::PooledSandbox::with_network)),
+    /// so [`with_child_network`](Self::with_child_network) needn't have
+    /// [`with_network`](Self::with_network) at build time.
+    /// [`SandboxPool::new`](crate::SandboxPool::new) does this itself.
+    ///
+    /// Fails closed: an execution without a network, such as a lease that
+    /// didn't set one or a sandbox never given one with
+    /// [`Sandbox::set_network`], gives children none
+    /// (no proxy, no proxy env vars), whatever the child network and
+    /// commands' networks say, and doesn't fail. Only an execution's
+    /// [`CommandOptions::with_network`](crate::CommandOptions::with_network)
+    /// giving a command network makes it fail to start.
+    #[must_use]
+    pub fn with_network_per_lease(mut self) -> Self {
+        self.network_per_request = true;
+        self
+    }
+
+    /// Give every execution's child processes `credential`: the child proxy
+    /// adds it to their requests to its hosts, so they authenticate without
+    /// the sandbox ever seeing the secret (see
+    /// [`Credential`](crate::net::Credential)). For one execution, use
+    /// [`ExecuteOptions::with_credential`]. Needs a child network; an
+    /// execution fails to start if the credential is invalid or names a
+    /// command that isn't registered, has no network or opens blind tunnels.
+    ///
+    /// Where it and an execution's own both apply to a request and set the
+    /// same header, the execution's wins, so a per-request token overrides
+    /// a sandbox-wide default. Between the sandbox's own, the one given
+    /// first wins.
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
+    /// Leave out the embedded shell's default commands (uutils coreutils,
+    /// with the `coreutils` feature, and `sh`/`bash` for the commands that
+    /// spawn them, see [`Command::guest`](crate::Command::guest)), so only
+    /// commands registered with [`with_command`](Self::with_command) run.
+    #[must_use]
+    pub fn without_embedded_commands(mut self) -> Self {
+        self.embedded_commands = false;
+        self
+    }
+}
+
+// Methods available in ANY state
+impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// Add a runtime library (callbacks + preamble + stubs).
+    ///
+    /// A library's callbacks work in every guest language. Its preamble and
+    /// type stubs are Python: for another language, [`build`](Self::build)
+    /// fails if the library has a preamble, and the stubs are unused.
     ///
     /// A callback name registered twice makes [`build`](Self::build) fail.
     #[must_use]
@@ -2109,7 +2816,12 @@ impl<R, S> SandboxBuilder<R, S> {
 
     /// Add a single callback.
     ///
-    /// A callback name registered twice makes [`build`](Self::build) fail.
+    /// A callback name registered twice makes [`build`](Self::build) fail,
+    /// as does one the guest already uses itself, which the callback could
+    /// otherwise only be reached through `invoke()` under: a JavaScript
+    /// global (`fetch`, `crypto`, ...), including the first part of a dotted
+    /// name, or a shell builtin or command. A Python builtin is logged as a
+    /// warning for now.
     #[must_use]
     pub fn with_callback(mut self, callback: impl Callback + 'static) -> Self {
         insert_callback(
@@ -2245,7 +2957,8 @@ impl<R, S> SandboxBuilder<R, S> {
     ///
     /// # Security
     ///
-    /// - Python code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`
+    /// - Sandboxed code only sees a placeholder like `ERYX_SECRET_PLACEHOLDER_abc123`,
+    ///   in `os.environ` (Python) or `process.env` (JavaScript)
     /// - Real value is substituted transparently when making HTTPS requests
     /// - Host checks use the TCP connection target; the TLS server name and any
     ///   HTTP `Host` header must name that same host
@@ -2380,147 +3093,34 @@ impl<R, S> SandboxBuilder<R, S> {
         self
     }
 
-    /// Set the path to additional Python packages directory.
+    /// Mount `environment` (a package set built ahead of time; see
+    /// [`crate::environment`]) read-only into the sandbox, so its code can
+    /// import what it exports: `import { z } from "zod"` in JavaScript.
     ///
-    /// The directory will be mounted at `/site-packages` inside the WASM sandbox
-    /// and added to Python's import path.
+    /// [`build()`](SandboxBuilder::build) fails if the environment is for
+    /// another language, or if it no longer hashes to what it did when it
+    /// was loaded (load it with
+    /// [`Environment::load_expecting`](crate::environment::Environment::load_expecting)
+    /// to pin a hash). Each sandbox built from this builder, and each one a
+    /// pool or factory makes from it, checks again.
+    #[cfg(feature = "environment")]
     #[must_use]
-    pub fn with_site_packages(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.python_site_packages_path = Some(path.into());
+    pub fn with_environment(mut self, environment: &crate::environment::Environment) -> Self {
+        self.environment = Some(PinnedEnvironment {
+            root: environment.root().to_path_buf(),
+            hash: environment.manifest().content.hash.clone(),
+            language: environment.manifest().language,
+        });
         self
-    }
-
-    /// Add a Python package from a wheel (.whl) or tar.gz archive.
-    ///
-    /// The package format is auto-detected from the file extension:
-    /// - `.whl` - Standard Python wheel (zip archive)
-    /// - `.tar.gz`, `.tgz` - Tarball (used by wasi-wheels)
-    /// - Directory - Used directly without extraction
-    ///
-    /// # Pure Python packages
-    ///
-    /// For pure-Python packages (no `.so` files), you can use `with_embedded_runtime()`:
-    ///
-    /// ```rust,ignore
-    /// let sandbox = Sandbox::builder()
-    ///     .with_embedded_runtime()
-    ///     .with_package("/path/to/requests-2.31.0-py3-none-any.whl")?
-    ///     .build()?;
-    /// ```
-    ///
-    /// # Packages with native extensions
-    ///
-    /// For packages containing native extensions (like numpy), the extensions are
-    /// automatically registered for late-linking. A cache is set up automatically
-    /// in the per-user eryx cache directory for fast subsequent sandbox creations:
-    ///
-    /// ```rust,ignore
-    /// let sandbox = Sandbox::builder()
-    ///     .with_package("/path/to/numpy-wasi.tar.gz")?
-    ///     .build()?;  // Caching is automatic!
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The package format cannot be detected
-    /// - The archive cannot be read or extracted
-    pub fn with_package(mut self, path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        let package = crate::package::ExtractedPackage::from_path(path)?;
-
-        tracing::info!(
-            name = %package.name,
-            has_native_extensions = package.has_native_extensions,
-            "Loaded package"
-        );
-
-        // Check for incompatible configuration
-        #[cfg(not(feature = "native-extensions"))]
-        if package.has_native_extensions {
-            return Err(ErrorKind::Initialization(format!(
-                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
-                 Either use a pure-Python package or enable the 'native-extensions' feature.",
-                package.name
-            )).into());
-        }
-
-        // Store the extracted package - native extensions will be registered at build()
-        // time when we know the mount index for computing dlopen paths
-        self.packages.push(package);
-
-        Ok(self)
-    }
-
-    /// Load a Python package from raw bytes.
-    ///
-    /// This is useful when downloading packages from URLs. The format must be
-    /// specified explicitly since it cannot be detected from bytes alone.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use eryx::{Sandbox, PackageFormat};
-    ///
-    /// // Download a package (using your preferred HTTP client)
-    /// let bytes = reqwest::get("https://example.com/numpy-wasi.tar.gz")
-    ///     .await?
-    ///     .bytes()
-    ///     .await?;
-    ///
-    /// let sandbox = Sandbox::builder()
-    ///     .with_package_bytes(&bytes, PackageFormat::TarGz, "numpy")?
-    ///     .build()?;
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - The raw package bytes
-    /// * `format` - The package format (Wheel or TarGz)
-    /// * `name_hint` - Package name hint used if detection fails (e.g., "numpy")
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The format is `Directory` (not supported for bytes)
-    /// - The archive cannot be read or extracted
-    pub fn with_package_bytes(
-        mut self,
-        bytes: &[u8],
-        format: crate::package::PackageFormat,
-        name_hint: impl Into<String>,
-    ) -> Result<Self, Error> {
-        let package = crate::package::ExtractedPackage::from_bytes(bytes, format, name_hint)?;
-
-        tracing::info!(
-            name = %package.name,
-            has_native_extensions = package.has_native_extensions,
-            "Loaded package from bytes"
-        );
-
-        // Check for incompatible configuration
-        #[cfg(not(feature = "native-extensions"))]
-        if package.has_native_extensions {
-            return Err(ErrorKind::Initialization(format!(
-                "Package '{}' contains native extensions but the 'native-extensions' feature is not enabled. \
-                 Either use a pure-Python package or enable the 'native-extensions' feature.",
-                package.name
-            )).into());
-        }
-
-        // Store the extracted package - native extensions will be registered at build()
-        // time when we know the mount index for computing dlopen paths
-        self.packages.push(package);
-
-        Ok(self)
     }
 }
 
-// Build only available when BOTH runtime AND stdlib are configured
-impl SandboxBuilder<state::Has, state::Has> {
+// Build only available once a runtime is configured
+impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
-    /// The factory keeps the wasm source, stdlib and site-packages paths,
-    /// result variable and trace-collection setting, and builds fresh
+    /// The factory keeps the wasm source, language, stdlib and library paths,
+    /// result variable, trace-collection setting and shell commands, and builds fresh
     /// sandboxes from them on demand. Anything else would be silently lost
     /// (per-request settings are reset whenever a sandbox returns to the
     /// pool, and the rest is not carried over), so builders that set it are
@@ -2555,19 +3155,36 @@ impl SandboxBuilder<state::Has, state::Has> {
             }
             source => source,
         };
-        let python_stdlib_path = self.python_stdlib_path;
-        let python_site_packages_path = self.python_site_packages_path;
+        let stdlib_path = self.stdlib_path;
+        let library_path = self.library_path;
+        #[cfg(feature = "environment")]
+        let environment = self.environment;
         let result_variable = self.result_variable;
         let collect_trace = self.collect_trace;
+        let commands = self.commands;
+        let embedded_commands = self.embedded_commands;
+        let child_network = self.child_network;
+        let credentials = self.credentials;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
             builder.wasm_source = wasm_source.clone();
-            builder.python_stdlib_path = python_stdlib_path.clone();
-            builder.python_site_packages_path = python_site_packages_path.clone();
+            builder.stdlib_path = stdlib_path.clone();
+            builder.library_path = library_path.clone();
+            #[cfg(feature = "environment")]
+            {
+                builder.environment = environment.clone();
+            }
             builder.result_variable = result_variable.clone();
             builder.collect_trace = collect_trace;
-            builder.transition::<state::Has, state::Has>().build()
+            builder.commands = commands.clone();
+            builder.embedded_commands = embedded_commands;
+            // Each lease sets the network (PooledSandbox::with_network);
+            // without one, children stay offline.
+            builder.child_network = child_network.clone();
+            builder.credentials = credentials.clone();
+            builder.network_per_request = true;
+            builder.transition::<L, state::Has>().build()
         }))
     }
 
@@ -2644,6 +3261,8 @@ impl SandboxBuilder<state::Has, state::Has> {
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
+        self.check_language()?;
+        let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.preamble)?;
         crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
         if let Some(net) = &self.net_config {
             net.validate().map_err(ErrorKind::Initialization)?;
@@ -2655,11 +3274,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         // with correct dlopen paths. Mount index 0 is reserved for explicit site-packages.
         #[cfg(feature = "native-extensions")]
         {
-            let start_index = if self.python_site_packages_path.is_some() {
-                1
-            } else {
-                0
-            };
+            let start_index = usize::from(self.library_path.is_some());
             for (pkg_idx, package) in self.packages.iter().enumerate() {
                 let mount_index = start_index + pkg_idx;
                 for ext in &package.native_extensions {
@@ -2717,47 +3332,100 @@ impl SandboxBuilder<state::Has, state::Has> {
         #[cfg(not(feature = "native-extensions"))]
         let executor = self.build_executor_from_source()?;
 
-        // Determine stdlib path: explicit > embedded. A failure to extract the
-        // embedded stdlib is an error rather than a reason to go looking for a
-        // possibly mismatched one on disk.
-        #[cfg(feature = "embedded")]
-        let stdlib_path = match self.python_stdlib_path.clone() {
-            Some(path) => Some(path),
-            None => Some(
-                crate::embedded::EmbeddedResources::get()?
-                    .stdlib_path
-                    .clone(),
-            ),
+        // Determine the stdlib path: explicit > embedded > auto-detected. A
+        // failure to extract the embedded stdlib is an error rather than a
+        // reason to go looking for a possibly mismatched one on disk. Only
+        // Python has a stdlib.
+        let stdlib_path = match (L::LANGUAGE, self.stdlib_path.clone()) {
+            (Language::Python, None) => Some(default_python_stdlib()?),
+            (_, path) => path,
         };
 
-        #[cfg(not(feature = "embedded"))]
-        let stdlib_path = self.python_stdlib_path.clone().or_else(find_python_stdlib);
-
-        // Collect all site-packages paths: explicit path first, then package paths
-        let mut site_packages_paths = Vec::new();
-        if let Some(explicit_path) = self.python_site_packages_path.clone() {
-            site_packages_paths.push(explicit_path);
+        // Collect all library paths: explicit path first, then package paths
+        let mut library_paths = Vec::new();
+        if let Some(explicit_path) = self.library_path.clone() {
+            library_paths.push(explicit_path);
         }
         for package in &self.packages {
-            site_packages_paths.push(package.python_path.clone());
+            library_paths.push(package.python_path.clone());
         }
 
-        // Apply Python stdlib path if available
-        let executor = if let Some(stdlib) = stdlib_path {
-            executor.with_python_stdlib(&stdlib)
-        } else {
-            executor
+        let executor = executor.with_language(L::LANGUAGE);
+        let executor = match stdlib_path {
+            Some(stdlib) => executor.with_stdlib(&stdlib),
+            None => executor,
+        };
+        let executor = library_paths
+            .into_iter()
+            .fold(executor, |exec, path| exec.with_library_path(&path));
+        #[cfg(feature = "environment")]
+        let executor = match &self.environment {
+            Some(pinned) => {
+                let environment = check_environment(pinned, L::LANGUAGE)?;
+                executor.with_environment(environment.root())
+            }
+            None => executor,
         };
 
-        // Apply all site-packages paths
-        let executor = site_packages_paths
-            .into_iter()
-            .fold(executor, |exec, path| exec.with_site_packages(&path));
+        // The embedded shell runs the embedded coreutils, except where a
+        // command of the same name was registered.
+        #[cfg(all(feature = "embedded", feature = "coreutils"))]
+        let commands = {
+            let mut commands = self.commands;
+            if L::LANGUAGE == Language::Shell
+                && self.embedded_commands
+                && matches!(self.wasm_source, WasmSource::EmbeddedRuntime)
+            {
+                let coreutils = crate::embedded::coreutils()?;
+                for tool in crate::embedded::COREUTILS_TOOLS {
+                    commands.insert_if_absent(tool, &coreutils);
+                }
+                // `sh`/`bash` for commands that run them (git's aliases and
+                // hooks); the shell itself runs them in its own guest.
+                #[cfg(feature = "shell")]
+                {
+                    let sh = crate::embedded::shell_command()?;
+                    for name in ["sh", "bash"] {
+                        commands.insert_if_absent(name, &sh);
+                    }
+                }
+            }
+            commands
+        };
+        #[cfg(not(all(feature = "embedded", feature = "coreutils")))]
+        let commands = self.commands;
+        crate::reserved::check(
+            L::LANGUAGE,
+            self.callbacks.keys().map(String::as_str),
+            commands.registered_names(),
+        )?;
 
         // Apply the configured result-capture variable name, and hand the
         // executor the packages whose directories it mounts.
+        if let crate::net::ChildNetwork::Narrow(config) = &self.child_network {
+            config
+                .validate()
+                .map_err(|e| ErrorKind::Initialization(format!("child network: {e}")))?;
+        }
+        if !matches!(self.child_network, crate::net::ChildNetwork::None)
+            && self.net_config.is_none()
+            && !self.network_per_request
+        {
+            return Err(ErrorKind::Initialization(
+                "with_child_network needs with_network: children use the sandbox's network policy"
+                    .to_string(),
+            )
+            .into());
+        }
+        commands.check_networks(!matches!(
+            self.child_network,
+            crate::net::ChildNetwork::None
+        ))?;
         let executor = executor
             .with_result_variable(self.result_variable)
+            .with_commands(commands)
+            .with_child_network(self.child_network)
+            .with_credentials(self.credentials)
             .with_packages(self.packages);
 
         let built = Arc::new(PerRequestSettings {
@@ -2765,7 +3433,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             trace_handler: self.trace_handler,
             output_handler: self.output_handler,
             resource_limits: self.resource_limits,
-            preamble: full_preamble(&self.secrets, &self.preamble),
+            preamble,
             net_config: self.net_config,
             secrets: self.secrets,
             #[cfg(feature = "unstable-vfs")]
@@ -2795,11 +3463,54 @@ impl SandboxBuilder<state::Has, state::Has> {
         })
     }
 
+    /// Check that the selected language can run with this configuration.
+    fn check_language(&self) -> Result<(), Error> {
+        let language = L::LANGUAGE;
+        if language == Language::Python {
+            return Ok(());
+        }
+        let uses_embedded = match &self.wasm_source {
+            WasmSource::None => true,
+            #[cfg(feature = "embedded")]
+            WasmSource::EmbeddedRuntime => true,
+            _ => false,
+        };
+        #[cfg(feature = "embedded")]
+        let embedded = crate::embedded::has_runtime(language);
+        #[cfg(not(feature = "embedded"))]
+        let embedded = false;
+        if uses_embedded && !embedded {
+            return Err(ErrorKind::MissingRuntime { language }.into());
+        }
+        let mut python_only = Vec::new();
+        if self.stdlib_path.is_some() {
+            python_only.push("a stdlib");
+        }
+        if self.library_path.is_some() {
+            python_only.push("site-packages");
+        }
+        if !self.packages.is_empty() {
+            python_only.push("packages");
+        }
+        #[cfg(feature = "native-extensions")]
+        if !self.native_extensions.is_empty() {
+            python_only.push("native extensions");
+        }
+        if !python_only.is_empty() {
+            return Err(ErrorKind::Initialization(format!(
+                "{} are only supported for Python, not {language}",
+                python_only.join(", ")
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     /// Build executor from the configured WASM source.
-    fn build_executor_from_source(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_from_source(&self) -> Result<Executor, Error> {
         let executor = match &self.wasm_source {
-            WasmSource::Bytes(bytes) => PythonExecutor::from_binary(bytes)?,
-            WasmSource::File(path) => PythonExecutor::from_file(path)?,
+            WasmSource::Bytes(bytes) => Executor::from_binary(bytes)?,
+            WasmSource::File(path) => Executor::from_file(path)?,
 
             #[cfg(any(feature = "embedded", feature = "preinit"))]
             WasmSource::PrecompiledBytes(bytes) => {
@@ -2808,7 +3519,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // caller has acknowledged this responsibility.
                 #[allow(unsafe_code)]
                 unsafe {
-                    PythonExecutor::from_precompiled(bytes)?
+                    Executor::from_precompiled(bytes)?
                 }
             }
 
@@ -2837,7 +3548,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             #[cfg(feature = "embedded")]
             WasmSource::EmbeddedRuntime => {
                 // Use the optimized path that leverages InstancePreCache
-                PythonExecutor::from_embedded_runtime()?
+                Executor::from_embedded_runtime_for(L::LANGUAGE)?
             }
 
             WasmSource::None => {
@@ -2846,7 +3557,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 {
                     tracing::debug!("No WASM source specified, using embedded runtime");
                     // Use the optimized path that leverages InstancePreCache
-                    PythonExecutor::from_embedded_runtime()?
+                    Executor::from_embedded_runtime_for(L::LANGUAGE)?
                 }
 
                 #[cfg(not(feature = "embedded"))]
@@ -2859,6 +3570,27 @@ impl SandboxBuilder<state::Has, state::Has> {
             }
         };
 
+        let stamp: Option<crate::wasm::LanguageStamp> = match &self.wasm_source {
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
+            WasmSource::PrecompiledBytes(bytes) => crate::wasm::language_stamp(bytes),
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
+            WasmSource::PrecompiledArtifact(artifact) => artifact.language_stamp(),
+            #[cfg(any(feature = "embedded", feature = "preinit"))]
+            WasmSource::PrecompiledFile(source) => source.language_stamp(),
+            _ => None,
+        };
+        if let Some(stamp) = stamp {
+            if stamp.language != L::LANGUAGE {
+                return Err(ErrorKind::Initialization(format!(
+                    "this precompiled runtime runs {}, but the sandbox is for {}",
+                    stamp.language,
+                    L::LANGUAGE
+                ))
+                .into());
+            }
+            stamp.check_guest()?;
+        }
+
         Ok(executor)
     }
 
@@ -2870,7 +3602,7 @@ impl SandboxBuilder<state::Has, state::Has> {
     /// 2. If found, load from cache (fast path)
     /// 3. If not found, link extensions, pre-compile, cache, and return
     #[cfg(feature = "native-extensions")]
-    fn build_executor_with_extensions(&self) -> Result<PythonExecutor, Error> {
+    fn build_executor_with_extensions(&self) -> Result<Executor, Error> {
         #[cfg(feature = "embedded")]
         use crate::cache::{CacheKey, InstancePreCache};
 
@@ -2884,7 +3616,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 key = %cache_key.to_hex(),
                 "instance_pre cache hit - returning cached executor"
             );
-            return PythonExecutor::from_cached_instance_pre(instance_pre);
+            return Executor::from_cached_instance_pre(instance_pre);
         }
 
         // Tier 2: Try filesystem cache (mmap-based, faster than bytes).
@@ -2910,9 +3642,7 @@ impl SandboxBuilder<state::Has, state::Has> {
             // rejected by wasmtime's header checks and relinked below.
             // Use with_key to populate InstancePreCache for future calls.
             #[allow(unsafe_code)]
-            match unsafe {
-                PythonExecutor::from_precompiled_file_with_key(&path, cache_key.clone())
-            } {
+            match unsafe { Executor::from_precompiled_file_with_key(&path, cache_key.clone()) } {
                 Ok(executor) => return Ok(executor),
                 Err(e) => {
                     tracing::warn!(
@@ -2939,7 +3669,7 @@ impl SandboxBuilder<state::Has, state::Has> {
                 // SAFETY: the cache is the default private one or one the
                 // caller vouched for via the unsafe `with_cache`/`with_cache_dir`.
                 #[allow(unsafe_code)]
-                match unsafe { PythonExecutor::from_precompiled(&precompiled) } {
+                match unsafe { Executor::from_precompiled(&precompiled) } {
                     Ok(executor) => {
                         InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
                         return Ok(executor);
@@ -2966,7 +3696,7 @@ impl SandboxBuilder<state::Has, state::Has> {
         // Pre-compile and cache if available
         #[cfg(feature = "embedded")]
         if let Some(cache) = &self.cache {
-            let precompiled = PythonExecutor::precompile(&component_bytes)?;
+            let precompiled = Executor::precompile(&component_bytes)?;
 
             // Cache the pre-compiled bytes
             if let Err(e) = cache.put(&cache_key, precompiled.clone()) {
@@ -2985,13 +3715,13 @@ impl SandboxBuilder<state::Has, state::Has> {
             // Load from pre-compiled bytes and populate InstancePreCache
             // SAFETY: We just created these bytes from `precompile()` above.
             #[allow(unsafe_code)]
-            let executor = unsafe { PythonExecutor::from_precompiled(&precompiled) }?;
+            let executor = unsafe { Executor::from_precompiled(&precompiled) }?;
             InstancePreCache::global().put(cache_key, executor.instance_pre().clone());
             return Ok(executor);
         }
 
         // No cache or embedded feature - create executor directly from linked bytes
-        PythonExecutor::from_binary(&component_bytes)
+        Executor::from_binary(&component_bytes)
     }
 }
 
@@ -3114,7 +3844,14 @@ pub struct ExecuteStats {
     pub duration: Duration,
     /// Number of callback invocations.
     pub callback_invocations: u32,
-    /// Peak memory usage in bytes (if available).
+    /// Peak memory usage in bytes (if available): the guest instance's
+    /// largest linear memory, plus what its child processes (shell commands,
+    /// nested shells, `python3`) held at the same time. Children have a pool
+    /// of their own, so this can exceed
+    /// [`ResourceLimits::max_memory_bytes`](crate::ResourceLimits::max_memory_bytes),
+    /// which limits the guest's. In a session, which keeps its instance,
+    /// that's the peak so far, not just this execution's growth: linear
+    /// memory never shrinks, so it never falls between executions.
     pub peak_memory_bytes: Option<u64>,
     /// Fuel consumed during execution (if fuel tracking is enabled).
     ///
@@ -3122,9 +3859,11 @@ pub struct ExecuteStats {
     /// is always present when the engine has fuel consumption enabled,
     /// regardless of whether a fuel limit was set.
     pub fuel_consumed: Option<u64>,
-    /// Bytes the execution sent over the network, as the guest wrote them.
+    /// Bytes the execution sent over the network, as the guest and its
+    /// child processes wrote them.
     pub network_bytes_sent: u64,
-    /// Bytes the execution received over the network, as the guest read them.
+    /// Bytes the execution received over the network, as the guest and its
+    /// child processes read them.
     pub network_bytes_received: u64,
 }
 
@@ -3183,11 +3922,23 @@ pub struct ResourceLimits {
     /// allocate arbitrarily much via `f.seek(2**40); f.write(b'X')`. Scripts see
     /// the limit as `ENOSPC`.
     ///
-    /// Only applies with the `unstable-vfs` feature, and only to the storage eryx creates
-    /// itself; storage you construct and pass in carries its own limit (see
+    /// Applies with the `unstable-vfs` feature, and with `shell` to the shell's
+    /// `/tmp`, and only to the storage eryx creates itself; storage you construct and pass in carries its own limit (see
     /// `eryx::vfs::InMemoryStorage::with_max_bytes`). `None` uses the `eryx-vfs`
-    /// default of 64 MiB.
+    /// default of 64 MiB. A tree too large for this or
+    /// [`max_vfs_entries`](Self::max_vfs_entries) belongs on a host-directory
+    /// volume, which neither limit applies to.
     pub max_vfs_bytes: Option<u64>,
+    /// Maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Each entry is also charged against
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) (its path, twice for a directory, plus 64 bytes), so
+    /// this mainly bounds operations that visit every entry, such as listing,
+    /// removing or renaming a directory. Scripts see the limit as `ENOSPC`.
+    /// Applies to the same storage as `max_vfs_bytes`. `None` uses the
+    /// `eryx-vfs` default of 65,536.
+    pub max_vfs_entries: Option<usize>,
     /// Maximum host files and directories a script may hold open at once
     /// beneath host mounts (the stdlib, site-packages and volumes).
     ///
@@ -3197,6 +3948,27 @@ pub struct ResourceLimits {
     /// the process also share one total; see
     /// `eryx::vfs::set_process_max_open_host_files`.
     pub max_open_host_files: Option<usize>,
+    /// Maximum host memory the arguments and environment of an execution's
+    /// child processes may hold at once.
+    ///
+    /// Like [`max_vfs_bytes`](Self::max_vfs_bytes), this is *host* memory
+    /// outside [`max_memory_bytes`](Self::max_memory_bytes). A spawn that
+    /// would exceed it fails, and the shell reports the command as failed.
+    /// (Each child's stdin, stdout and stderr stream through fixed 64 KiB
+    /// pipes.) Only applies to shell sandboxes with commands. `None` uses the
+    /// default of 64 MiB.
+    pub max_child_host_bytes: Option<u64>,
+    /// Maximum memory an execution's running child processes may hold
+    /// together: their linear memories, tables and instance metadata.
+    ///
+    /// This is on top of [`max_memory_bytes`](Self::max_memory_bytes), which
+    /// bounds only the guest's own memory, so raising it raises how much host
+    /// memory one execution can use. A command that doesn't fit isn't started
+    /// (or fails as it grows), and the shell's stderr says the pool is full.
+    /// Each running command reserves its initial memory: about 4 MiB for a
+    /// coreutils command, 17 MiB for `python3`. Only applies to shell
+    /// sandboxes with commands. `None` uses the default of 256 MiB.
+    pub max_child_memory_bytes: Option<u64>,
 }
 
 impl Default for ResourceLimits {
@@ -3206,9 +3978,12 @@ impl Default for ResourceLimits {
             callback_timeout: Some(Duration::from_secs(10)),
             max_memory_bytes: Some(128 * 1024 * 1024), // 128 MB
             max_callback_invocations: Some(1000),
-            max_fuel: None,            // Unlimited by default, but still tracked
-            max_vfs_bytes: None,       // eryx-vfs default (64 MiB)
-            max_open_host_files: None, // eryx-vfs default (256)
+            max_fuel: None,               // Unlimited by default, but still tracked
+            max_vfs_bytes: None,          // eryx-vfs default (64 MiB)
+            max_vfs_entries: None,        // eryx-vfs default (65,536)
+            max_open_host_files: None,    // eryx-vfs default (256)
+            max_child_host_bytes: None,   // 64 MiB
+            max_child_memory_bytes: None, // 256 MiB
         }
     }
 }
@@ -3219,12 +3994,16 @@ impl ResourceLimits {
     /// Only for code you trust: scripts can then run indefinitely and consume
     /// memory without bound.
     ///
-    /// [`max_vfs_bytes`](Self::max_vfs_bytes) is the exception and stays at its
-    /// default. It bounds *host* memory rather than the guest, so clearing it
-    /// would let a script abort the process rather than merely outstay its
-    /// welcome; raise it explicitly if you need more room.
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes) and
+    /// [`max_vfs_entries`](Self::max_vfs_entries) are the exception and stay at
+    /// their defaults. They bound *host* memory rather than the guest, so
+    /// clearing them would let a script abort the process rather than merely
+    /// outstay its welcome; raise them explicitly if you need more room.
     /// [`max_open_host_files`](Self::max_open_host_files) likewise stays at its
-    /// default, since host descriptors are shared with the whole process.
+    /// default, since host descriptors are shared with the whole process,
+    /// and [`max_child_host_bytes`](Self::max_child_host_bytes) and
+    /// [`max_child_memory_bytes`](Self::max_child_memory_bytes) for the same
+    /// reason as `max_vfs_bytes`.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
@@ -3234,7 +4013,10 @@ impl ResourceLimits {
             max_callback_invocations: None,
             max_fuel: None,
             max_vfs_bytes: None,
+            max_vfs_entries: None,
             max_open_host_files: None,
+            max_child_host_bytes: None,
+            max_child_memory_bytes: None,
         }
     }
 
@@ -3294,6 +4076,18 @@ impl ResourceLimits {
         self
     }
 
+    /// Set the maximum number of files and directories the in-memory virtual
+    /// filesystem may hold.
+    ///
+    /// Pass `None` to use the `eryx-vfs` default of 65,536. Like
+    /// [`max_vfs_bytes`](Self::max_vfs_bytes), there is no way to remove this
+    /// limit; see [`max_vfs_entries`](Self::max_vfs_entries).
+    #[must_use]
+    pub fn with_max_vfs_entries(mut self, entries: impl Into<Option<usize>>) -> Self {
+        self.max_vfs_entries = entries.into();
+        self
+    }
+
     /// Set how many host files a script may hold open at once.
     ///
     /// Pass `None` to use the `eryx-vfs` default of 256; see
@@ -3301,6 +4095,26 @@ impl ResourceLimits {
     #[must_use]
     pub fn with_max_open_host_files(mut self, max: impl Into<Option<usize>>) -> Self {
         self.max_open_host_files = max.into();
+        self
+    }
+
+    /// Set how much host memory child processes may hold at once.
+    ///
+    /// Pass `None` to use the default of 64 MiB; see
+    /// [`max_child_host_bytes`](Self::max_child_host_bytes).
+    #[must_use]
+    pub fn with_max_child_host_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_child_host_bytes = bytes.into();
+        self
+    }
+
+    /// Set how much memory running child processes may hold together.
+    ///
+    /// Pass `None` to use the default of 256 MiB; see
+    /// [`max_child_memory_bytes`](Self::max_child_memory_bytes).
+    #[must_use]
+    pub fn with_max_child_memory_bytes(mut self, bytes: impl Into<Option<u64>>) -> Self {
+        self.max_child_memory_bytes = bytes.into();
         self
     }
 }
@@ -3915,7 +4729,7 @@ mod tests {
     #[test]
     fn sandbox_builder_wasm_file_not_found() {
         let result = Sandbox::builder()
-            .with_wasm_file("/nonexistent/path/to/runtime.wasm")
+            .with_wasm_file("/nonexistent/path/to/runtime-python.wasm")
             .with_python_stdlib("/fake/stdlib")
             .build();
 
@@ -3946,6 +4760,106 @@ mod tests {
     }
 
     #[test]
+    fn python_options_do_not_carry_over_to_another_language() {
+        let err = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .with_python_stdlib("/fake/stdlib")
+            .javascript()
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Initialization(msg) if msg.contains("javascript")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn shell_preamble_exports_placeholders() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
+        let preamble = language_preamble(Language::Shell, &secrets, "").unwrap();
+        assert_eq!(preamble, format!("export TOKEN='{placeholder}'\n"));
+        assert!(!preamble.contains("real-value"));
+        assert_eq!(
+            language_preamble(Language::Shell, &HashMap::new(), "").unwrap(),
+            ""
+        );
+
+        // Quotes in a placeholder can't end the quoting.
+        let quoted = crate::secrets::SecretConfig {
+            placeholder: "it's".to_string(),
+            ..secret.clone()
+        };
+        let preamble = language_preamble(
+            Language::Shell,
+            &HashMap::from([("Q".to_string(), quoted)]),
+            "",
+        )
+        .unwrap();
+        assert_eq!(preamble, "export Q='it'\\''s'\n");
+
+        let bad = HashMap::from([("NOT-A-NAME".to_string(), secret)]);
+        assert!(language_preamble(Language::Shell, &bad, "").is_err());
+        assert!(language_preamble(Language::Shell, &HashMap::new(), "import os").is_err());
+    }
+
+    #[test]
+    fn javascript_preamble_sets_process_env_placeholders() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+
+        let preamble = language_preamble(Language::JavaScript, &secrets, "").unwrap();
+        assert_eq!(
+            preamble,
+            format!(
+                "Object.defineProperty(globalThis, 'process', {{ value: {{ env: \
+                 Object.freeze(JSON.parse(\"{{\\\"TOKEN\\\":\\\"{placeholder}\\\"}}\")) }}, \
+                 writable: true, configurable: true }});\n"
+            )
+        );
+        assert!(!preamble.contains("real-value"));
+        assert_eq!(
+            language_preamble(Language::JavaScript, &HashMap::new(), "").unwrap(),
+            ""
+        );
+        let err = language_preamble(Language::JavaScript, &secrets, "import os").unwrap_err();
+        assert!(err.to_string().contains("library preambles"), "{err}");
+    }
+
+    #[test]
+    fn site_packages_do_not_carry_over_to_another_language() {
+        let err = Sandbox::builder()
+            .with_wasm_bytes(vec![])
+            .with_site_packages("/fake/site-packages")
+            .shell()
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::Initialization(msg)
+                if msg.contains("site-packages") && msg.contains("shell")),
+            "{err}"
+        );
+    }
+
+    #[cfg(all(feature = "embedded", not(feature = "shell")))]
+    #[test]
+    fn non_python_language_has_no_embedded_runtime() {
+        let err = Sandbox::embedded().shell().build().unwrap_err();
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::MissingRuntime {
+                    language: Language::Shell,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn sandbox_builder_empty_wasm_bytes() {
         let result = Sandbox::builder()
             .with_wasm_bytes(vec![])
@@ -3972,7 +4886,7 @@ mod tests {
             .with_wasm_bytes(vec![])
             .with_auto_stdlib();
 
-        // Either Ok (stdlib found) or Err (MissingPythonStdlib)
+        // Either Ok (stdlib found) or Err (MissingStdlib)
         match result {
             Ok(builder) => {
                 // Stdlib was found, builder is now fully configured
@@ -3981,7 +4895,7 @@ mod tests {
                 assert!(build_result.is_err()); // Invalid WASM
             }
             Err(e) => {
-                // Stdlib not found - should be MissingPythonStdlib error
+                // Stdlib not found - should be MissingStdlib error
                 let err_str = e.to_string();
                 assert!(
                     err_str.contains("stdlib") || err_str.contains("Python"),

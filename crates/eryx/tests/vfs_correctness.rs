@@ -5,21 +5,21 @@
 
 use std::sync::{Arc, OnceLock};
 
-use eryx::PythonExecutor;
+use eryx::Executor;
 use eryx::SessionExecutor;
 use eryx::vfs::{ArcStorage, InMemoryStorage};
 
-static EXECUTOR: OnceLock<Arc<PythonExecutor>> = OnceLock::new();
+static EXECUTOR: OnceLock<Arc<Executor>> = OnceLock::new();
 
-fn executor() -> Arc<PythonExecutor> {
+fn executor() -> Arc<Executor> {
     EXECUTOR
         .get_or_init(|| {
             let resources = eryx::embedded::EmbeddedResources::get().unwrap();
             #[allow(unsafe_code)]
             Arc::new(
-                unsafe { PythonExecutor::from_precompiled_file(resources.runtime()) }
+                unsafe { Executor::from_precompiled_file(resources.runtime()) }
                     .unwrap()
-                    .with_python_stdlib(resources.stdlib()),
+                    .with_stdlib(resources.stdlib()),
             )
         })
         .clone()
@@ -53,6 +53,37 @@ print(int(os.stat('/data/a').st_mtime), int(os.stat('/data/b').st_mtime))
     )
     .await;
     assert_eq!(out.trim(), "2000000 2000000");
+}
+
+/// Directories keep the times set on them, by path or through a descriptor
+/// opened without `O_DIRECTORY` (as `touch` does), and an open that would
+/// write, truncate or create one fails with `EISDIR`.
+#[tokio::test]
+async fn directory_times_can_be_set() {
+    let out = run(
+        InMemoryStorage::new(),
+        r#"
+import errno, os
+os.makedirs('/data/d')
+os.utime('/data/d', (1_000_000, 2_000_000))
+print(int(os.stat('/data/d').st_mtime))
+fd = os.open('/data/d', os.O_RDONLY)
+os.utime(fd, (3_000_000, 4_000_000))
+os.close(fd)
+print(int(os.stat('/data/d').st_mtime))
+for flags in [os.O_WRONLY, os.O_RDWR, os.O_RDONLY | os.O_TRUNC, os.O_RDONLY | os.O_CREAT]:
+    try:
+        os.open('/data/d', flags)
+        print('opened')
+    except OSError as e:
+        print(errno.errorcode[e.errno])
+"#,
+    )
+    .await;
+    assert_eq!(
+        out.trim(),
+        "2000000\n4000000\nEISDIR\nEISDIR\nEISDIR\nEISDIR"
+    );
 }
 
 #[tokio::test]

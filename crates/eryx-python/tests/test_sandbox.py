@@ -740,7 +740,7 @@ print("socket import ok")
 
         This is a diagnostic test to verify the ssl shim is injected
         during Python initialization. If this fails, the shim injection
-        in eryx-wasm-runtime/src/python.rs is not working correctly.
+        in eryx-guest-python/src/python.rs is not working correctly.
         """
         result = network_sandbox.execute("""
 import sys

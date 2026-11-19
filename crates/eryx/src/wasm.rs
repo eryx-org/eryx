@@ -3,7 +3,7 @@
 //! This module handles the wasmtime engine configuration, component loading,
 //! and host import implementations for running Python code in the sandbox.
 //!
-//! The `PythonExecutor` uses pre-instantiation (`SandboxPre`) to avoid
+//! The `Executor` uses pre-instantiation (`SandboxPre`) to avoid
 //! re-linking on every execution, significantly improving performance.
 //!
 //! # Pre-compiled Components
@@ -13,16 +13,17 @@
 //!
 //! ```rust,ignore
 //! // At build time - compile once:
-//! let precompiled = PythonExecutor::precompile_file("runtime.wasm")?;
-//! std::fs::write("runtime.cwasm", precompiled)?;
+//! let precompiled = Executor::precompile_file("runtime-python.wasm")?;
+//! std::fs::write("runtime-python.cwasm", precompiled)?;
 //!
 //! // At runtime - load quickly (unsafe, must trust the file):
-//! let executor = unsafe { PythonExecutor::from_precompiled_file("runtime.cwasm")? };
+//! let executor = unsafe { Executor::from_precompiled_file("runtime-python.cwasm")? };
 //! ```
 //!
 //! Alternatively, enable the `embedded` feature for a safe API that
 //! pre-compiles at build time and embeds the result in the binary.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -43,6 +44,7 @@ use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::callback::Callback;
 use crate::error::{Error, ErrorKind};
 use crate::fork_local::ForkLocal;
+use crate::language::Language;
 use crate::trace::TraceEvent;
 use crate::warm::{WarmInstance, WarmPool};
 
@@ -134,9 +136,9 @@ struct EpochTicker {
 }
 
 impl EpochTicker {
-    fn start(engine: &Engine) -> std::result::Result<Self, Error> {
-        let ticker_engine = engine.clone();
-
+    /// Start the ticker thread, advancing every engine in `engines` (which
+    /// can grow while it runs) once per tick.
+    fn start(engines: Arc<Mutex<Vec<Engine>>>) -> std::result::Result<Self, Error> {
         // Use a dedicated OS thread because guest execution can block the Tokio
         // runtime. Epochs must continue advancing independently of async scheduling.
         let handle = std::thread::Builder::new()
@@ -144,7 +146,12 @@ impl EpochTicker {
             .spawn(move || {
                 loop {
                     std::thread::sleep(EPOCH_TICK_INTERVAL);
-                    ticker_engine.increment_epoch();
+                    let engines = engines
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for engine in engines.iter() {
+                        engine.increment_epoch();
+                    }
                 }
             })
             .map_err(|error| {
@@ -199,11 +206,28 @@ pub(crate) fn is_already_cancelled(token: Option<&CancellationToken>) -> bool {
     token.is_some_and(CancellationToken::is_cancelled)
 }
 
-/// Start or restart the process-lifetime epoch ticker for the shared engine.
+/// Start or restart the process-lifetime epoch ticker, and have it advance
+/// `engine` from now on.
+///
+/// One thread ticks every engine it has been given (the shared engine and
+/// the child engine), so a store on any of them gets its deadline callbacks,
+/// fuel charging and timeouts. A restarted ticker keeps the engines.
 pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Error> {
-    // Per process, so a forked child never waits on a lock it inherited.
+    // Per process, so a forked child never waits on a lock it inherited, and
+    // ticks its own engines.
     static EPOCH_TICKER: ForkLocal<Mutex<Option<EpochTicker>>> =
         ForkLocal::new(|| Mutex::new(None));
+    static TICKED_ENGINES: ForkLocal<Arc<Mutex<Vec<Engine>>>> = ForkLocal::new(Arc::default);
+
+    let engines = TICKED_ENGINES.get();
+    {
+        let mut engines = engines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !engines.iter().any(|e| Engine::same(e, engine)) {
+            engines.push(engine.clone());
+        }
+    }
 
     let mut ticker = EPOCH_TICKER
         .get()
@@ -214,7 +238,7 @@ pub(crate) fn ensure_epoch_ticker(engine: &Engine) -> std::result::Result<(), Er
     }
 
     // Spawn errors are deliberately not cached. A later execution can retry.
-    *ticker = Some(EpochTicker::start(engine)?);
+    *ticker = Some(EpochTicker::start(Arc::clone(engines))?);
     Ok(())
 }
 
@@ -481,7 +505,9 @@ pub struct ExecutionOutput {
     pub stdout: Vec<u8>,
     /// Captured stderr from the Python execution (raw bytes).
     pub stderr: Vec<u8>,
-    /// Peak memory usage in bytes during execution.
+    /// Peak memory usage in bytes: the instance's largest linear memory, plus
+    /// its children's at the time (in a session, so far; see
+    /// [`crate::ExecuteStats::peak_memory_bytes`]).
     pub peak_memory_bytes: u64,
     /// Execution duration.
     pub duration: Duration,
@@ -493,7 +519,7 @@ pub struct ExecutionOutput {
     /// when the engine has fuel consumption enabled.
     pub fuel_consumed: Option<u64>,
     /// JSON-serialized value of the script's result variable, or `None` if the
-    /// variable was not set. See [`PythonExecutor::with_result_variable`].
+    /// variable was not set. See [`Executor::with_result_variable`].
     pub result: Option<String>,
     /// Why result capture failed (e.g. the value was not JSON-serializable), or
     /// `None` when capture succeeded or no result variable was set.
@@ -565,10 +591,10 @@ impl ExecutionOutput {
 /// # Example
 ///
 /// ```rust,ignore
-/// use eryx::{PythonExecutor, CpuFeatureLevel};
+/// use eryx::{Executor, CpuFeatureLevel};
 ///
 /// // Compile for Fly.io (x86-64-v3, no AVX-512)
-/// let cwasm = PythonExecutor::precompile_with_options(
+/// let cwasm = Executor::precompile_with_options(
 ///     &wasm_bytes,
 ///     None,  // native target
 ///     Some(CpuFeatureLevel::X86_64_V3),
@@ -666,7 +692,7 @@ pub enum InstanceAllocator {
 /// Settings for the process-wide shared engine and its warm-instance pool.
 ///
 /// Every sandbox in the process runs on one engine
-/// ([`PythonExecutor::shared_engine`]) and shares one warm pool, so these are
+/// ([`Executor::shared_engine`]) and shares one warm pool, so these are
 /// set once for the process with [`configure_shared_engine`], not per
 /// sandbox. Each setting left unset falls back to its environment variable,
 /// then to the default; the variables and defaults are documented in the
@@ -787,7 +813,7 @@ static ENGINE_CONFIG: OnceLock<SharedEngineConfig> = OnceLock::new();
 /// Like rayon's `ThreadPoolBuilder::build_global`, this configures a global
 /// that is created lazily: call it once, before creating any sandbox. The
 /// settings are read when the shared engine or the warm pool is first used
-/// (building a sandbox, or calling [`PythonExecutor::shared_engine`]), and
+/// (building a sandbox, or calling [`Executor::shared_engine`]), and
 /// cannot change after that. Explicit settings take precedence over the
 /// `ERYX_*` environment variables, which still apply to anything left unset.
 ///
@@ -813,7 +839,7 @@ pub fn configure_shared_engine(config: SharedEngineConfig) -> std::result::Resul
 /// tables, and async stacks).
 ///
 /// Set by [`SharedEngineConfig`], falling back to the environment, because the
-/// engine is process-global ([`PythonExecutor::shared_engine`]) and is
+/// engine is process-global ([`Executor::shared_engine`]) and is
 /// created before any sandbox configuration exists.
 ///
 /// - `ERYX_ALLOCATOR`: `pooling` (default, except on Windows) or `on-demand`.
@@ -885,12 +911,13 @@ impl AllocatorSettings {
 
     /// Upper bound on one core instance's `VMContext` metadata.
     ///
-    /// The largest with numpy linked in needs 242,088 bytes
-    /// (measured), so wasmtime's 1 MiB default leaves headroom for bigger
-    /// extensions. Like the component limit below, this is only checked at
-    /// instantiation: the metadata is heap-allocated at its actual size, never
-    /// reserved per slot.
-    const CORE_INSTANCE_SIZE: usize = 1 << 20;
+    /// The largest with numpy linked in needs 242,088 bytes (measured), but
+    /// child commands are bigger: Go's `gh` (wasip3) needs 1,276,940, almost
+    /// all of it per-function metadata, past wasmtime's 1 MiB default. 4 MiB
+    /// is about 3x that. Like the component limit below, this is only
+    /// checked at instantiation: the metadata is heap-allocated at its actual
+    /// size, never reserved per slot.
+    const CORE_INSTANCE_SIZE: usize = 4 << 20;
 
     /// Upper bound on one runtime instance's metadata: its
     /// `VMComponentContext` plus every core instance's `VMContext`.
@@ -1041,6 +1068,13 @@ pub struct MemoryTracker {
     peak_memory_bytes: AtomicU64,
     /// Optional memory limit (in bytes). If set, memory growth beyond this limit will fail.
     memory_limit: Option<u64>,
+    /// For a guest command (a child), its share of the children's memory
+    /// pool, which its memory and tables are charged to.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    child: Option<crate::process::ChildMemory>,
+    /// For an execution, its children's memory pool, whose peak (with this
+    /// guest's memory) is the execution's.
+    children: Option<std::sync::Arc<crate::process::MemoryPool>>,
 }
 
 impl MemoryTracker {
@@ -1050,30 +1084,66 @@ impl MemoryTracker {
         Self {
             peak_memory_bytes: AtomicU64::new(0),
             memory_limit,
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            child: None,
+            children: None,
         }
     }
 
-    /// Get the peak memory usage observed so far (in bytes).
-    #[must_use]
-    pub fn peak_memory_bytes(&self) -> u64 {
-        self.peak_memory_bytes.load(Ordering::Relaxed)
+    /// Count `children`, the execution's children's memory pool, in its peak.
+    pub(crate) fn set_children(&mut self, children: std::sync::Arc<crate::process::MemoryPool>) {
+        children.guest_grew(self.peak_memory_bytes.load(Ordering::Relaxed));
+        self.children = Some(children);
     }
 
-    /// Reset the peak memory tracker to zero.
-    pub fn reset(&self) {
-        self.peak_memory_bytes.store(0, Ordering::Relaxed);
+    /// A tracker for a guest command, charging `child`, its share of the
+    /// children's memory pool.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    pub(crate) fn for_child(child: crate::process::ChildMemory) -> Self {
+        Self {
+            child: Some(child),
+            ..Self::new(None)
+        }
+    }
+
+    /// For a guest command, whether the children's pool has refused it
+    /// memory.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    pub(crate) fn child_refused(&self) -> bool {
+        self.child
+            .as_ref()
+            .is_some_and(crate::process::ChildMemory::refused)
+    }
+
+    /// Get the peak memory usage observed so far (in bytes): the guest's,
+    /// plus, for an execution, what its child processes held at the same time.
+    #[must_use]
+    pub fn peak_memory_bytes(&self) -> u64 {
+        let own = self.peak_memory_bytes.load(Ordering::Relaxed);
+        self.children
+            .as_ref()
+            .map_or(own, |children| own.max(children.peak()))
     }
 
     /// Record memory that was already in use before this tracker was installed.
     pub(crate) fn observe(&self, bytes: u64) {
         self.peak_memory_bytes.fetch_max(bytes, Ordering::Relaxed);
+        if let Some(children) = &self.children {
+            children.guest_grew(bytes);
+        }
     }
 }
 
 impl ResourceLimiter for MemoryTracker {
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
@@ -1092,17 +1162,37 @@ impl ResourceLimiter for MemoryTracker {
             return Ok(false);
         }
 
+        // A guest command's growth is charged to the children's pool last,
+        // once nothing else refuses it.
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Some(child) = &mut self.child {
+            return child.memory_growing(current, desired, maximum);
+        }
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        let _ = current;
+        if let Some(children) = &self.children {
+            children.guest_grew(desired_u64);
+        }
         Ok(true)
     }
 
     fn table_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
         // Allow table growth up to the declared maximum
-        Ok(!maximum.is_some_and(|max| desired > max))
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
+        }
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Some(child) = &mut self.child {
+            return child.table_growing(current, desired, maximum);
+        }
+        #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+        let _ = current;
+        Ok(true)
     }
 }
 
@@ -1143,7 +1233,7 @@ const FD_CAPTURE_LIMIT: usize = 1024 * 1024;
 /// they can be appended to the execution's captured output. At most
 /// [`FD_CAPTURE_LIMIT`] bytes are kept between [`take`](Self::take)s; the
 /// rest is dropped.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FdCapture(Arc<Mutex<Vec<u8>>>);
 
 impl FdCapture {
@@ -1157,7 +1247,7 @@ impl FdCapture {
         )
     }
 
-    fn push(&self, data: &[u8]) {
+    pub(crate) fn push(&self, data: &[u8]) {
         let mut buf = self
             .0
             .lock()
@@ -1336,6 +1426,145 @@ impl StreamBudget {
     }
 }
 
+/// Most callback starts [`TraceClock`] keeps waiting for their end; past
+/// it, the oldest is forgotten (its end then reports no duration).
+const MAX_PENDING_CALLBACKS: usize = 1024;
+
+/// The host's part in an execution's trace events: timing callbacks, and
+/// numbering child processes.
+#[derive(Debug, Default)]
+pub(crate) struct TraceClock {
+    /// Callbacks started and not yet ended, oldest first, by name.
+    ///
+    /// The guests report `callback_start` and `callback_end` around a call
+    /// but don't time it. Calls are matched by name, first in first out. Only
+    /// events the trace budget let through are timed, and at most
+    /// [`MAX_PENDING_CALLBACKS`] starts are kept, so a guest reporting starts
+    /// without ends can't grow it.
+    // ponytail: concurrent calls to one callback that finish out of order get
+    // each other's durations; a call id in the events would pair them exactly.
+    // A start whose end never comes skews that name's later durations the
+    // same way: the CPython guest reports no end for a call abandoned at the
+    // end of an execution (a task still pending), since a garbage collection
+    // closes it in a later execution, where an end would be paired with
+    // another call.
+    callbacks: VecDeque<(String, std::time::Instant)>,
+    /// The last child process's pid.
+    last_pid: u32,
+    /// Children started and not yet ended.
+    running: Vec<RunningChild>,
+}
+
+impl TraceClock {
+    /// Note a `callback_start`, or add `duration_ms` to a `callback_end`.
+    fn time(&mut self, event_json: &mut String) {
+        // Only parse the events that can be callback events.
+        if !event_json.contains("callback_") {
+            return;
+        }
+        let Ok(serde_json::Value::Object(mut event)) = serde_json::from_str(event_json) else {
+            return;
+        };
+        let (Some(kind), Some(name)) = (
+            event.get("type").and_then(serde_json::Value::as_str),
+            event.get("name").and_then(serde_json::Value::as_str),
+        ) else {
+            return;
+        };
+        match kind {
+            "callback_start" => {
+                if self.callbacks.len() == MAX_PENDING_CALLBACKS {
+                    self.callbacks.pop_front();
+                }
+                self.callbacks
+                    .push_back((name.to_owned(), std::time::Instant::now()));
+            }
+            "callback_end" => {
+                let Some(i) = self
+                    .callbacks
+                    .iter()
+                    .position(|(started, _)| started == name)
+                else {
+                    return;
+                };
+                let Some((_, started)) = self.callbacks.remove(i) else {
+                    return;
+                };
+                let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                event.insert("duration_ms".to_owned(), ms.into());
+                *event_json = serde_json::Value::Object(event).to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A child process whose `process_start` was reported and whose
+/// `process_end` wasn't yet.
+#[derive(Debug)]
+struct RunningChild {
+    /// Identifies the child across executions; see [`ProcessTrace`].
+    key: u64,
+    name: String,
+    pid: u32,
+    started: std::time::Instant,
+}
+
+impl RunningChild {
+    /// Its `process_end` event: it exited with a code, or failed.
+    fn end_event(&self, outcome: Result<i32, &str>, ended: std::time::Instant) -> String {
+        let duration = ended.saturating_duration_since(self.started);
+        let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        let mut event = serde_json::json!({
+            "type": "process_end",
+            "name": self.name,
+            "pid": self.pid,
+            "duration_ms": duration_ms,
+        });
+        match outcome {
+            Ok(code) => event["exit_code"] = code.into(),
+            Err(error) => event["error"] = error.into(),
+        }
+        event.to_string()
+    }
+}
+
+/// A child process's trace, from [`ExecutorState::trace_process_start`] to
+/// [`Self::end`].
+///
+/// It holds no sender: a session keeps a `wait` its timeout interrupted
+/// parked in the store, and a sender held there would keep the trace channel
+/// open, so the execution would never finish. A child still running when the
+/// execution's trace channel goes is reported killed then instead
+/// ([`ExecutorState::end_running_children`]).
+#[must_use]
+pub(crate) struct ProcessTrace {
+    key: u64,
+}
+
+impl ProcessTrace {
+    /// Report that the child exited with `code`, or failed with `error`,
+    /// unless its execution already reported it killed.
+    pub(crate) fn end(self, state: &mut ExecutorState, outcome: Result<i32, &str>) {
+        self.end_at(state, outcome, std::time::Instant::now());
+    }
+
+    /// [`end`](Self::end), for a child that ended at `ended` (a nested one,
+    /// reported later).
+    pub(crate) fn end_at(
+        self,
+        state: &mut ExecutorState,
+        outcome: Result<i32, &str>,
+        ended: std::time::Instant,
+    ) {
+        let running = &mut state.trace_clock.running;
+        if let Some(i) = running.iter().position(|child| child.key == self.key) {
+            let child = running.swap_remove(i);
+            state.send_trace(0, child.end_event(outcome, ended), String::new());
+        }
+    }
+}
+
 /// State for a single execution, implementing WASI and callback channels.
 pub struct ExecutorState {
     /// WASI context for the execution.
@@ -1354,10 +1583,11 @@ pub struct ExecutorState {
     pub(crate) net_tx: Option<mpsc::Sender<NetRequest>>,
     /// Channel to stream output (stdout/stderr) to the host in real-time.
     pub(crate) output_tx: Option<mpsc::UnboundedSender<OutputRequest>>,
-    /// Hybrid virtual filesystem context (when the `unstable-vfs` feature is enabled).
+    /// Hybrid virtual filesystem context (with `unstable-vfs`, or `shell`
+    /// for the shell's own filesystem).
     /// Routes /data/* to VFS storage, other paths to real filesystem.
     /// Uses ScrubbingStorage to scrub secret placeholders from file writes.
-    #[cfg(feature = "unstable-vfs")]
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     pub(crate) hybrid_vfs_ctx: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
     /// Set when a callback requested suspension (`CallbackError::Suspend`).
     ///
@@ -1375,6 +1605,24 @@ pub struct ExecutorState {
     pub(crate) reuse_empty_callbacks: bool,
     /// Remaining trace/output stream bytes for the current execution.
     pub(crate) stream_budget: StreamBudget,
+    /// External commands the guest can spawn through `eryx:process`.
+    pub(crate) commands: crate::process::Commands,
+    /// Host memory the execution's child processes may hold.
+    pub(crate) child_budget: crate::process::ChildBudget,
+    /// The execution's children's network, if they have one, shared with
+    /// children that spawn their own. Dropped (with its proxies) when the
+    /// execution ends.
+    pub(crate) child_net: Option<std::sync::Arc<std::sync::Mutex<crate::process::ChildNet>>>,
+    /// When each callback still running started, for `callback_end`'s
+    /// duration.
+    pub(crate) trace_clock: TraceClock,
+    /// How a guest run as a command (see [`crate::Command::guest`]) spawns
+    /// commands of its own: its spawner's, one level deeper. `None` for the
+    /// guest an execution runs.
+    pub(crate) nested: Option<crate::process::Spawner>,
+    /// When the running execution times out, for `eryx:process/execution`'s
+    /// `time-left`; none without a timeout, or between executions.
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1392,9 +1640,17 @@ impl std::fmt::Debug for ExecutorState {
             )
             .field("net_tx", &self.net_tx.is_some())
             .field("output_tx", &self.output_tx.is_some());
-        #[cfg(feature = "unstable-vfs")]
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         debug.field("hybrid_vfs_ctx", &self.hybrid_vfs_ctx.is_some());
         debug.finish()
+    }
+}
+
+impl Drop for ExecutorState {
+    fn drop(&mut self) {
+        // A dropped store (a timed-out or cancelled one-shot execution) drops
+        // its children's `wait`s; report them before the trace channel goes.
+        self.end_running_children();
     }
 }
 
@@ -1402,7 +1658,7 @@ impl ExecutorState {
     /// State for instantiating a store ahead of any execution.
     ///
     /// Instantiation runs no guest code beyond table initialisation, so the
-    /// guest never observes this state; [`PythonExecutor::execute_internal`]
+    /// guest never observes this state; [`Executor::execute_internal`]
     /// replaces it wholesale with the real per-execution state before the
     /// first export call.
     pub(crate) fn placeholder() -> Self {
@@ -1415,20 +1671,107 @@ impl ExecutorState {
             memory_tracker: MemoryTracker::new(None),
             net_tx: None,
             output_tx: None,
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             hybrid_vfs_ctx: None,
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands: crate::process::Commands::default(),
+            child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
+            trace_clock: TraceClock::default(),
+            nested: None,
+            deadline: None,
         }
     }
 
-    /// Drop every channel to the host so their receivers see end-of-stream.
+    /// Send a trace event, if tracing is on and the stream budget allows;
+    /// whether it was sent.
+    fn send_trace(&mut self, lineno: u32, event_json: String, context_json: String) -> bool {
+        let charged = self.charge_trace(&event_json, &context_json);
+        if charged {
+            self.send_charged_trace(lineno, event_json, context_json);
+        }
+        charged
+    }
+
+    /// Whether tracing is on and the stream budget has room for an event;
+    /// charges it if so.
+    fn charge_trace(&mut self, event_json: &str, context_json: &str) -> bool {
+        self.trace_tx.is_some()
+            && self
+                .stream_budget
+                .spend_trace(event_json.len() + context_json.len())
+    }
+
+    /// Send an event without charging it: [`Self::charge_trace`] did, or
+    /// it's exempt.
+    fn send_charged_trace(&self, lineno: u32, event_json: String, context_json: String) {
+        if let Some(tx) = &self.trace_tx {
+            // Fire-and-forget - trace events are not critical
+            let _ = tx.send(TraceRequest {
+                lineno,
+                event_json,
+                context_json,
+            });
+        }
+    }
+
+    /// Report that a child process `argv` started, numbering it; `None` if
+    /// tracing is off or the start wasn't sent, so no end is reported either.
+    pub(crate) fn trace_process_start(&mut self, argv: &[String]) -> Option<ProcessTrace> {
+        self.trace_process_start_at(argv, std::time::Instant::now())
+    }
+
+    /// [`trace_process_start`](Self::trace_process_start), for a child that
+    /// started at `started` (a nested one, reported later).
+    pub(crate) fn trace_process_start_at(
+        &mut self,
+        argv: &[String],
+        started: std::time::Instant,
+    ) -> Option<ProcessTrace> {
+        /// Tells apart children of different executions of one session, whose
+        /// pids both start at 1.
+        static KEYS: AtomicU64 = AtomicU64::new(0);
+        let (name, args) = argv.split_first()?;
+        let pid = self.trace_clock.last_pid + 1;
+        let event = serde_json::json!({ "type": "process_start", "name": name, "pid": pid });
+        let context = serde_json::json!({ "args": args });
+        if !self.send_trace(0, event.to_string(), context.to_string()) {
+            return None;
+        }
+        self.trace_clock.last_pid = pid;
+        let key = KEYS.fetch_add(1, Ordering::Relaxed);
+        self.trace_clock.running.push(RunningChild {
+            key,
+            name: name.clone(),
+            pid,
+            started,
+        });
+        Some(ProcessTrace { key })
+    }
+
+    /// Report every child still running as killed: its execution is ending
+    /// (or timed out, or was cancelled) with the child's `wait` unfinished.
+    ///
+    /// Uncharged, so a timeout that comes once the budget is spent still
+    /// pairs each start; at most one event per running child.
+    pub(crate) fn end_running_children(&mut self) {
+        for child in std::mem::take(&mut self.trace_clock.running) {
+            let event = child.end_event(Err("killed"), std::time::Instant::now());
+            self.send_charged_trace(0, event, String::new());
+        }
+    }
+
+    /// Drop every channel to the host so their receivers see end-of-stream,
+    /// and stop the children's proxies.
     pub(crate) fn disconnect(&mut self) {
+        self.end_running_children();
         self.callback_tx = None;
         self.trace_tx = None;
         self.net_tx = None;
         self.output_tx = None;
+        self.child_net = None;
     }
 }
 
@@ -1467,6 +1810,49 @@ pub(crate) async fn instantiate_store(
     Ok((store, bindings))
 }
 
+impl ExecutorState {
+    /// State for running the guest as a command (see
+    /// [`Executor::run_command`]): its stdio is `wasi`'s and its filesystem
+    /// `vfs`, and it gets no callbacks, tracing or network, and only the
+    /// commands `nested` (its spawner's, if its command may spawn) runs.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    pub(crate) fn for_command(
+        wasi: WasiCtx,
+        vfs: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+        memory_tracker: MemoryTracker,
+        nested: Option<crate::process::Spawner>,
+    ) -> Self {
+        Self {
+            wasi,
+            // A shell's child, capped like other children's (see
+            // `process::child_table`).
+            table: crate::process::child_table(),
+            callback_tx: None,
+            trace_tx: None,
+            callbacks: Vec::new(),
+            memory_tracker,
+            net_tx: None,
+            output_tx: None,
+            hybrid_vfs_ctx: Some(vfs),
+            suspended: None,
+            reuse_empty_callbacks: true,
+            stream_budget: StreamBudget::default(),
+            commands: nested
+                .as_ref()
+                .map(crate::process::Spawner::commands)
+                .unwrap_or_default(),
+            child_budget: crate::process::ChildBudget::default(),
+            child_net: None,
+            trace_clock: TraceClock::default(),
+            nested,
+            deadline: None,
+        }
+    }
+}
+
 impl WasiView for ExecutorState {
     fn ctx(&mut self) -> WasiCtxView<'_> {
         WasiCtxView {
@@ -1476,7 +1862,7 @@ impl WasiView for ExecutorState {
     }
 }
 
-#[cfg(feature = "unstable-vfs")]
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
@@ -1591,19 +1977,12 @@ impl SandboxImports for ExecutorState {
     }
 
     /// Report a trace event to the host.
-    fn report_trace(&mut self, lineno: u32, event_json: String, context_json: String) {
-        if let Some(tx) = &self.trace_tx {
-            let size = event_json.len() + context_json.len();
-            if !self.stream_budget.spend_trace(size) {
-                return;
-            }
-            let request = TraceRequest {
-                lineno,
-                event_json,
-                context_json,
-            };
-            // Fire-and-forget - trace events are not critical
-            let _ = tx.send(request);
+    fn report_trace(&mut self, lineno: u32, mut event_json: String, context_json: String) {
+        if self.charge_trace(&event_json, &context_json) {
+            // Only once charged: the clock keeps what a start's event names.
+            // (An end's added `duration_ms` goes uncharged, a few bytes.)
+            self.trace_clock.time(&mut event_json);
+            self.send_charged_trace(lineno, event_json, context_json);
         }
     }
 
@@ -1629,7 +2008,7 @@ impl SandboxImports for ExecutorState {
     /// Read host-controlled behavior for this execution.
     fn get_execution_options(&mut self) -> ExecutionOptions {
         ExecutionOptions {
-            python_tracing: self.trace_tx.is_some(),
+            tracing: self.trace_tx.is_some(),
             reuse_empty_callbacks: self.reuse_empty_callbacks,
         }
     }
@@ -1936,7 +2315,7 @@ impl tls::Host for ExecutorState {
 
 /// Builder for configuring and executing Python code.
 ///
-/// Created by [`PythonExecutor::execute`]. Use the builder methods to
+/// Created by [`Executor::execute`]. Use the builder methods to
 /// configure callbacks, tracing, memory limits, and timeouts, then call
 /// [`run`](Self::run) to execute.
 ///
@@ -1951,7 +2330,7 @@ impl tls::Host for ExecutorState {
 ///     .await?;
 /// ```
 pub struct ExecuteBuilder<'a> {
-    executor: &'a PythonExecutor,
+    executor: &'a Executor,
     code: String,
     preamble: String,
     callbacks: Vec<Arc<dyn Callback>>,
@@ -1963,12 +2342,19 @@ pub struct ExecuteBuilder<'a> {
     execution_timeout: Option<Duration>,
     cancellation_token: Option<CancellationToken>,
     fuel_limit: Option<u64>,
+    child_limits: crate::process::ChildLimits,
+    child_net: Option<crate::process::ChildNet>,
+    allowed_commands: Option<Vec<String>>,
+    command_options: HashMap<String, crate::process::CommandOptions>,
+    credentials: Vec<Arc<crate::net::Credential>>,
     #[cfg(feature = "unstable-vfs")]
     vfs_storage: Option<eryx_vfs::ArcStorage>,
     #[cfg(feature = "unstable-vfs")]
     volumes: Vec<crate::session::VolumeMount>,
     #[cfg(feature = "unstable-vfs")]
     max_open_host_files: Option<usize>,
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    vfs_limits: crate::session::executor::VfsLimits,
 }
 
 impl std::fmt::Debug for ExecuteBuilder<'_> {
@@ -1995,7 +2381,7 @@ impl std::fmt::Debug for ExecuteBuilder<'_> {
 
 impl<'a> ExecuteBuilder<'a> {
     /// Create a new execute builder.
-    fn new(executor: &'a PythonExecutor, code: impl Into<String>) -> Self {
+    fn new(executor: &'a Executor, code: impl Into<String>) -> Self {
         Self {
             executor,
             code: code.into(),
@@ -2009,12 +2395,19 @@ impl<'a> ExecuteBuilder<'a> {
             execution_timeout: None,
             cancellation_token: None,
             fuel_limit: None,
+            child_limits: crate::process::ChildLimits::default(),
+            child_net: None,
+            allowed_commands: None,
+            command_options: HashMap::new(),
+            credentials: Vec::new(),
             #[cfg(feature = "unstable-vfs")]
             vfs_storage: None,
             #[cfg(feature = "unstable-vfs")]
             volumes: Vec::new(),
             #[cfg(feature = "unstable-vfs")]
             max_open_host_files: None,
+            #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+            vfs_limits: crate::session::executor::VfsLimits::default(),
         }
     }
 
@@ -2148,6 +2541,76 @@ impl<'a> ExecuteBuilder<'a> {
         self
     }
 
+    /// Limit the size and entry count of the shell's private `/tmp` (see
+    /// [`ResourceLimits::max_vfs_bytes`](crate::ResourceLimits::max_vfs_bytes)).
+    #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+    #[must_use]
+    pub(crate) fn with_vfs_limits(mut self, limits: crate::session::executor::VfsLimits) -> Self {
+        self.vfs_limits = limits;
+        self
+    }
+
+    /// Limit the host memory child processes may hold (default 64 MiB; see
+    /// [`ResourceLimits::max_child_host_bytes`](crate::ResourceLimits::max_child_host_bytes)).
+    #[must_use]
+    pub fn with_max_child_host_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.child_limits.host_bytes = bytes;
+        self
+    }
+
+    /// Limit the memory running child processes may hold together (default
+    /// 256 MiB; see
+    /// [`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes)).
+    #[must_use]
+    pub fn with_max_child_memory_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.child_limits.memory_bytes = bytes;
+        self
+    }
+
+    /// Give this execution's child processes network, through a proxy that
+    /// lives as long as the execution.
+    pub(crate) fn with_child_network(mut self, net: crate::process::ChildNet) -> Self {
+        self.child_net = Some(net);
+        self
+    }
+
+    /// Let this execution spawn only the named host-registered commands
+    /// (shell only): the guest lists just those, and any other spawn fails
+    /// with `command-not-found`. An empty list allows none; names that aren't
+    /// registered are ignored. Without this, every registered command is
+    /// allowed. The shell's `grep` builtin and nested `sh`/`bash` count as
+    /// commands here; other builtins and callbacks aren't affected.
+    #[must_use]
+    pub fn with_allowed_commands<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_commands = Some(names.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Change what the registered command `name` gets in this execution
+    /// (shell only); see
+    /// [`ExecuteOptions::with_command_options`](crate::ExecuteOptions::with_command_options).
+    #[must_use]
+    pub fn with_command_options(
+        mut self,
+        name: impl Into<String>,
+        options: crate::process::CommandOptions,
+    ) -> Self {
+        self.command_options.insert(name.into(), options);
+        self
+    }
+
+    /// Give this execution's children `credential` too (shell only); see
+    /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+    #[must_use]
+    pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
+        self.credentials.push(Arc::new(credential));
+        self
+    }
+
     /// Execute the Python code with the configured options.
     ///
     /// # Errors
@@ -2166,14 +2629,43 @@ impl<'a> ExecuteBuilder<'a> {
                 self.execution_timeout,
                 self.cancellation_token,
                 self.fuel_limit,
+                self.child_limits,
+                self.child_net,
+                self.allowed_commands.as_deref(),
+                &self.command_options,
+                &self.credentials,
                 #[cfg(feature = "unstable-vfs")]
                 self.vfs_storage,
                 #[cfg(feature = "unstable-vfs")]
                 self.volumes,
                 #[cfg(feature = "unstable-vfs")]
                 self.max_open_host_files,
+                #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+                self.vfs_limits,
             )
             .await
+    }
+}
+
+/// The shell guest's baseline environment (#832): where tools expect to find
+/// a home, temp dir, locale and terminal. `/tmp` is the only directory it can
+/// write to by default, so it is also `HOME`; `/eryx/bin` is where the guest
+/// lists its host commands.
+pub(crate) const SHELL_ENV: [(&str, &str); 8] = [
+    ("HOME", "/tmp"),
+    ("PATH", "/eryx/bin"),
+    ("TERM", "dumb"),
+    ("LANG", "C.UTF-8"),
+    ("LC_ALL", "C.UTF-8"),
+    ("USER", "eryx"),
+    ("PWD", "/"),
+    ("TMPDIR", "/tmp"),
+];
+
+/// Set [`SHELL_ENV`] on a shell guest's WASI context.
+pub(crate) fn add_shell_env(builder: &mut WasiCtxBuilder) {
+    for (key, value) in SHELL_ENV {
+        builder.env(key, value);
     }
 }
 
@@ -2200,49 +2692,60 @@ pub(crate) fn site_packages_mount_path(index: usize) -> String {
     }
 }
 
-/// The Python executor that manages the WASM runtime.
+/// The executor that manages a guest language's WASM runtime.
 ///
 /// This struct uses pre-instantiation (`SandboxPre`) to perform as much
 /// work as possible upfront. The expensive operations (parsing WASM,
 /// compiling, linking) happen once during construction. Each `execute()`
 /// call only needs to create a new store and instantiate from the
 /// pre-compiled template, which is much faster.
-pub struct PythonExecutor {
+pub struct Executor {
     /// The wasmtime engine (shared configuration).
     engine: Engine,
     /// Pre-instantiated component - linking is already done.
     instance_pre: SandboxPre<ExecutorState>,
-    /// Path to the Python standard library directory.
-    /// Required for the eryx-wasm-runtime to initialize Python.
-    python_stdlib_path: Option<PathBuf>,
-    /// Paths to Python package directories.
+    /// The guest language this executor's runtime runs.
+    language: Language,
+    /// Path to the guest's standard library directory (for Python, the
+    /// CPython stdlib it needs to initialize).
+    stdlib_path: Option<PathBuf>,
+    /// Paths to the guest's library directories (for Python, site-packages).
     /// Each will be mounted at `/site-packages-N` and added to PYTHONPATH.
-    python_site_packages_paths: Vec<PathBuf>,
+    library_paths: Vec<PathBuf>,
+    /// An environment's root, mounted read-only at
+    /// [`crate::environment::MOUNT_PATH`].
+    #[cfg(feature = "environment")]
+    environment: Option<PathBuf>,
     /// Name of the user variable captured as the structured result after each
     /// execution. Defaults to `"result"`. Configured via [`Self::with_result_variable`].
     result_variable: String,
-    /// Extracted packages backing entries in `python_site_packages_paths`.
+    /// Extracted packages backing entries in `library_paths`.
     /// Held here so their temp directories live as long as the executor,
     /// including when it outlives the `Sandbox` (e.g. in a session).
     packages: Vec<crate::package::ExtractedPackage>,
+    /// External commands its guest can spawn (the shell's, via `eryx:process`).
+    commands: crate::process::Commands,
+    /// How the commands' children reach the network.
+    child_network: crate::net::ChildNetwork,
+    /// Credentials every execution's children get (see
+    /// [`Credential`](crate::net::Credential)).
+    credentials: Vec<Arc<crate::net::Credential>>,
 }
 
-impl std::fmt::Debug for PythonExecutor {
+impl std::fmt::Debug for Executor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PythonExecutor")
+        f.debug_struct("Executor")
             .field("engine", &"<wasmtime::Engine>")
             .field("instance_pre", &"<SandboxPre>")
-            .field("python_stdlib_path", &self.python_stdlib_path)
-            .field(
-                "python_site_packages_paths",
-                &self.python_site_packages_paths,
-            )
+            .field("language", &self.language)
+            .field("stdlib_path", &self.stdlib_path)
+            .field("library_paths", &self.library_paths)
             .field("result_variable", &self.result_variable)
             .finish_non_exhaustive()
     }
 }
 
-impl PythonExecutor {
+impl Executor {
     /// Get a reference to the wasmtime engine.
     #[must_use]
     pub fn engine(&self) -> &Engine {
@@ -2269,16 +2772,36 @@ impl PythonExecutor {
         WarmPool::global().ready(&self.instance_pre)
     }
 
-    /// Get the Python stdlib path if configured.
+    /// The guest language this executor runs (default [`Language::Python`]).
     #[must_use]
-    pub fn python_stdlib_path(&self) -> Option<&PathBuf> {
-        self.python_stdlib_path.as_ref()
+    pub fn language(&self) -> Language {
+        self.language
     }
 
-    /// Get the Python site-packages paths.
+    /// The guest's standard library directory, if configured.
+    #[must_use]
+    pub fn stdlib_path(&self) -> Option<&PathBuf> {
+        self.stdlib_path.as_ref()
+    }
+
+    /// Deprecated name for [`stdlib_path`](Self::stdlib_path).
+    #[deprecated(since = "0.16.0", note = "renamed to `stdlib_path`")]
+    #[must_use]
+    pub fn python_stdlib_path(&self) -> Option<&PathBuf> {
+        self.stdlib_path()
+    }
+
+    /// The guest's library directories (for Python, site-packages).
+    #[must_use]
+    pub fn library_paths(&self) -> &[PathBuf] {
+        &self.library_paths
+    }
+
+    /// Deprecated name for [`library_paths`](Self::library_paths).
+    #[deprecated(since = "0.16.0", note = "renamed to `library_paths`")]
     #[must_use]
     pub fn python_site_packages_paths(&self) -> &[PathBuf] {
-        &self.python_site_packages_paths
+        self.library_paths()
     }
 
     /// Get the configured result-capture variable name (defaults to `"result"`).
@@ -2287,29 +2810,67 @@ impl PythonExecutor {
         &self.result_variable
     }
 
-    /// Set the path to the Python standard library directory.
+    /// Set the guest language this executor's runtime runs.
     ///
-    /// This is required when using the eryx-wasm-runtime (Rust/CPython FFI based).
-    /// The directory should contain the extracted Python stdlib (e.g., from
-    /// componentize-py's python-lib.tar.zst).
-    ///
-    /// The stdlib will be mounted at `/python-stdlib` inside the WASM sandbox.
+    /// The runtime itself decides what runs; this records which language it
+    /// is, so state snapshots are stamped with it and checked on restore.
     #[must_use]
-    pub fn with_python_stdlib(mut self, path: impl Into<PathBuf>) -> Self {
-        self.python_stdlib_path = Some(path.into());
+    pub fn with_language(mut self, language: Language) -> Self {
+        self.language = language;
         self
     }
 
-    /// Add a path to Python packages directory.
+    /// Set the path to the guest's standard library directory.
+    ///
+    /// For Python, the directory should contain the extracted CPython stdlib
+    /// (e.g., from componentize-py's python-lib.tar.zst). It is mounted at
+    /// `/python-stdlib` inside the WASM sandbox.
+    #[must_use]
+    pub fn with_stdlib(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stdlib_path = Some(path.into());
+        self
+    }
+
+    /// Deprecated name for [`with_stdlib`](Self::with_stdlib).
+    #[deprecated(since = "0.16.0", note = "renamed to `with_stdlib`")]
+    #[must_use]
+    pub fn with_python_stdlib(self, path: impl Into<PathBuf>) -> Self {
+        self.with_stdlib(path)
+    }
+
+    /// Add a guest library directory (for Python, a site-packages directory).
     ///
     /// The first directory will be mounted at `/site-packages` inside the WASM sandbox
     /// (for compatibility with preinit). Additional directories are mounted at
     /// `/site-packages-1`, `/site-packages-2`, etc. All paths are added to Python's
     /// import path. Can be called multiple times.
     #[must_use]
-    pub fn with_site_packages(mut self, path: impl Into<PathBuf>) -> Self {
-        self.python_site_packages_paths.push(path.into());
+    pub fn with_library_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.library_paths.push(path.into());
         self
+    }
+
+    /// Mount the environment at `root` read-only at
+    /// [`crate::environment::MOUNT_PATH`]. `SandboxBuilder::with_environment`
+    /// checks it first.
+    #[cfg(feature = "environment")]
+    #[must_use]
+    pub(crate) fn with_environment(mut self, root: &std::path::Path) -> Self {
+        self.environment = Some(root.to_path_buf());
+        self
+    }
+
+    /// The environment root this executor mounts, if any.
+    #[cfg(feature = "environment")]
+    pub(crate) fn environment(&self) -> Option<&std::path::Path> {
+        self.environment.as_deref()
+    }
+
+    /// Deprecated name for [`with_library_path`](Self::with_library_path).
+    #[deprecated(since = "0.16.0", note = "renamed to `with_library_path`")]
+    #[must_use]
+    pub fn with_site_packages(self, path: impl Into<PathBuf>) -> Self {
+        self.with_library_path(path)
     }
 
     /// Keep extracted packages alive for as long as this executor exists.
@@ -2330,9 +2891,45 @@ impl PythonExecutor {
         self
     }
 
+    /// The external commands its guest can spawn.
+    pub(crate) fn with_commands(mut self, commands: crate::process::Commands) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    /// The external commands its guest can spawn.
+    pub(crate) fn commands(&self) -> &crate::process::Commands {
+        &self.commands
+    }
+
+    /// How its commands' children reach the network.
+    pub(crate) fn with_child_network(mut self, network: crate::net::ChildNetwork) -> Self {
+        self.child_network = network;
+        self
+    }
+
+    /// How its commands' children reach the network.
+    pub(crate) fn child_network(&self) -> &crate::net::ChildNetwork {
+        &self.child_network
+    }
+
+    /// Credentials every execution's children get.
+    pub(crate) fn with_credentials(
+        mut self,
+        credentials: Vec<Arc<crate::net::Credential>>,
+    ) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// Credentials every execution's children get.
+    pub(crate) fn credentials(&self) -> &[Arc<crate::net::Credential>] {
+        &self.credentials
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
-    /// The Engine is thread-safe and automatically shared across all `PythonExecutor`
+    /// The Engine is thread-safe and automatically shared across all `Executor`
     /// instances. Sharing an Engine saves memory and startup time since the JIT
     /// compiler configuration and compiled code cache are shared.
     ///
@@ -2347,6 +2944,32 @@ impl PythonExecutor {
         static SHARED_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
 
         SHARED_ENGINE.get_or_try_init(Self::create_engine).cloned()
+    }
+
+    /// The engine external commands (shell children) are compiled for and run
+    /// on: the shared engine's configuration with on-demand allocation, so
+    /// children never take the pooling allocator's slots, which stay sized
+    /// for sandboxes (#833). Created on first use; when the shared engine is
+    /// already on-demand (`ERYX_ALLOCATOR=on-demand`, or Windows), it's that
+    /// engine.
+    ///
+    /// Both engines' compiled code is interchangeable: the allocator isn't
+    /// part of wasmtime's compatibility check, so a command precompiled by
+    /// [`Self::precompile`] loads on either.
+    pub(crate) fn child_engine() -> std::result::Result<Engine, Error> {
+        static CHILD_ENGINE: RetryableOnce<Engine> = RetryableOnce::new();
+
+        CHILD_ENGINE
+            .get_or_try_init(|| {
+                let shared = Self::shared_engine()?;
+                if shared.pooling_allocator_metrics().is_none() {
+                    return Ok(shared);
+                }
+                let mut config = Self::engine_config_with_target(None)?;
+                config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
+                Engine::new(&config).map_err(|e| Error::from(ErrorKind::WasmEngine(e.to_string())))
+            })
+            .cloned()
     }
 
     /// Create a new executor by loading a WASM component from bytes.
@@ -2367,7 +2990,7 @@ impl PythonExecutor {
     /// Returns an error if the WASM component cannot be loaded or the
     /// wasmtime engine cannot be configured.
     #[tracing::instrument(
-        name = "PythonExecutor::from_binary",
+        name = "Executor::from_binary",
         skip(wasm_bytes),
         fields(wasm_bytes_len = wasm_bytes.len())
     )]
@@ -2380,9 +3003,15 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2397,7 +3026,7 @@ impl PythonExecutor {
     /// Returns an error if the file cannot be read or the WASM component
     /// cannot be loaded.
     #[tracing::instrument(
-        name = "PythonExecutor::from_file",
+        name = "Executor::from_file",
         fields(path = %path.as_ref().display())
     )]
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::result::Result<Self, Error> {
@@ -2409,9 +3038,15 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2457,9 +3092,15 @@ impl PythonExecutor {
             Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                stdlib_path: None,
+                library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
+                language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             })
         }
@@ -2513,9 +3154,15 @@ impl PythonExecutor {
             return Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                stdlib_path: None,
+                library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
+                language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
@@ -2536,9 +3183,15 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2609,9 +3262,15 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2658,9 +3317,15 @@ impl PythonExecutor {
             Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                stdlib_path: None,
+                library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
+                language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             })
         }
@@ -2714,9 +3379,15 @@ impl PythonExecutor {
             return Ok(Self {
                 engine,
                 instance_pre,
-                python_stdlib_path: None,
-                python_site_packages_paths: Vec::new(),
+                stdlib_path: None,
+                library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
+                language: Language::Python,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
@@ -2737,9 +3408,15 @@ impl PythonExecutor {
         Ok(Self {
             engine,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2752,7 +3429,7 @@ impl PythonExecutor {
     /// - Only loads from disk on first call; subsequent calls return cached instance
     ///
     /// The executor is created without Python stdlib or site-packages paths.
-    /// Use [`Self::with_python_stdlib`] and [`Self::with_site_packages`] to
+    /// Use [`Self::with_stdlib`] and [`Self::with_library_path`] to
     /// configure paths after creation.
     ///
     /// # Errors
@@ -2760,35 +3437,119 @@ impl PythonExecutor {
     /// Returns an error if the embedded resources cannot be extracted or
     /// the component cannot be loaded.
     #[cfg(feature = "embedded")]
-    #[tracing::instrument(name = "PythonExecutor::from_embedded_runtime")]
+    #[tracing::instrument(name = "Executor::from_embedded_runtime")]
     pub fn from_embedded_runtime() -> std::result::Result<Self, Error> {
-        let cache_key = CacheKey::embedded_runtime();
+        Self::from_embedded_runtime_for(Language::Python)
+    }
 
-        // Get embedded resources (extracts stdlib on first call)
-        let resources = crate::embedded::EmbeddedResources::get()?;
-        let stdlib_path = Some(resources.stdlib_path.clone());
+    /// Create an executor from `language`'s embedded runtime, like
+    /// [`Self::from_embedded_runtime`] does for Python.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::MissingRuntime`] if this build doesn't embed a
+    /// runtime for `language`, or an error if it cannot be extracted or loaded.
+    #[cfg(feature = "embedded")]
+    pub fn from_embedded_runtime_for(language: Language) -> std::result::Result<Self, Error> {
+        let cache_key = CacheKey::embedded_runtime_for(language);
+
+        // Get embedded resources (for Python, extracts the stdlib on first call)
+        let (runtime_path, stdlib_path) = if language == Language::Python {
+            let resources = crate::embedded::EmbeddedResources::get()?;
+            (resources.runtime(), Some(resources.stdlib_path.clone()))
+        } else {
+            let path = crate::embedded::runtime_path(language)?
+                .ok_or(ErrorKind::MissingRuntime { language })?;
+            (path, None)
+        };
 
         // Check InstancePreCache first (fast path)
         if let Some(instance_pre) = InstancePreCache::global().get(&cache_key) {
             return Ok(Self {
                 engine: Self::shared_engine()?,
                 instance_pre,
-                python_stdlib_path: stdlib_path,
-                python_site_packages_paths: Vec::new(),
+                stdlib_path,
+                library_paths: Vec::new(),
+                #[cfg(feature = "environment")]
+                environment: None,
+                language,
                 result_variable: "result".to_string(),
+                commands: crate::process::Commands::default(),
+                child_network: crate::net::ChildNetwork::None,
+                credentials: Vec::new(),
                 packages: Vec::new(),
             });
         }
 
-        // Cache miss - load from embedded resources
+        // Cache miss - load from embedded resources. A stale runtime embedded
+        // through ERYX_RUNTIME_CWASM* fails here rather than misbehaving.
+        if let Some(stamp) = std::fs::File::open(runtime_path).ok().and_then(|mut file| {
+            let len = file.metadata().ok()?.len();
+            file_language_stamp(&mut file, len)
+        }) {
+            stamp.check_guest()?;
+        }
         // SAFETY: The embedded runtime was pre-compiled at build time from our own
-        // trusted runtime.wasm, so we know it's safe to deserialize.
+        // trusted runtime-<language>.wasm, so we know it's safe to deserialize.
         #[allow(unsafe_code)]
         let mut executor =
-            unsafe { Self::from_precompiled_file_with_key(resources.runtime(), cache_key)? };
+            unsafe { Self::from_precompiled_file_with_key(runtime_path, cache_key)? };
 
-        executor.python_stdlib_path = stdlib_path;
+        executor.stdlib_path = stdlib_path;
+        executor.language = language;
         Ok(executor)
+    }
+
+    /// An executor that runs the `language` runtime precompiled at `path` as
+    /// a guest command (see [`crate::Command::guest`]), loaded on the child
+    /// engine so guest children never take the sandboxes' pooling slots.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::from_precompiled_file`]: a trusted file that doesn't
+    /// change while it's loaded.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    #[allow(unsafe_code)]
+    pub(crate) unsafe fn for_guest_command(
+        language: Language,
+        path: &std::path::Path,
+        stdlib_path: Option<PathBuf>,
+    ) -> std::result::Result<Self, Error> {
+        if let Some(stamp) = std::fs::File::open(path).ok().and_then(|mut file| {
+            let len = file.metadata().ok()?.len();
+            file_language_stamp(&mut file, len)
+        }) {
+            if stamp.language != language {
+                return Err(ErrorKind::Initialization(format!(
+                    "this precompiled runtime runs {}, not {language}",
+                    stamp.language
+                ))
+                .into());
+            }
+            stamp.check_guest()?;
+        }
+        let engine = Self::child_engine()?;
+        // SAFETY: the caller vouches for the file.
+        let component =
+            unsafe { Component::deserialize_file(&engine, path) }.map_err(deserialize_error)?;
+        let instance_pre = Self::create_instance_pre(&engine, &component)?;
+        Ok(Self {
+            engine,
+            instance_pre,
+            stdlib_path,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language,
+            result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
+            packages: Vec::new(),
+        })
     }
 
     /// Create a new executor from a cached `SandboxPre`.
@@ -2802,9 +3563,15 @@ impl PythonExecutor {
         Ok(Self {
             engine: Self::shared_engine()?,
             instance_pre,
-            python_stdlib_path: None,
-            python_site_packages_paths: Vec::new(),
+            stdlib_path: None,
+            library_paths: Vec::new(),
+            #[cfg(feature = "environment")]
+            environment: None,
+            language: Language::Python,
             result_variable: "result".to_string(),
+            commands: crate::process::Commands::default(),
+            child_network: crate::net::ChildNetwork::None,
+            credentials: Vec::new(),
             packages: Vec::new(),
         })
     }
@@ -2828,10 +3595,9 @@ impl PythonExecutor {
     ///
     /// Returns an error if pre-compilation fails.
     pub fn precompile(wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(None)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
     }
 
     /// Pre-compile a WASM component file to native code.
@@ -2879,10 +3645,9 @@ impl PythonExecutor {
         wasm_bytes: &[u8],
         target: Option<&str>,
     ) -> std::result::Result<Vec<u8>, Error> {
+        Self::check_cpu_feature_env()?;
         let engine = Self::create_engine_with_target(target)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
     }
 
     /// Pre-compile a WASM component file to native code for a specific target.
@@ -2915,10 +3680,10 @@ impl PythonExecutor {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use eryx::{PythonExecutor, CpuFeatureLevel};
+    /// use eryx::{Executor, CpuFeatureLevel};
     ///
     /// // Compile for Fly.io (x86-64-v3, no AVX-512)
-    /// let cwasm = PythonExecutor::precompile_with_options(
+    /// let cwasm = Executor::precompile_with_options(
     ///     &wasm_bytes,
     ///     None,  // native target triple
     ///     CpuFeatureLevel::X86_64v3,
@@ -2935,9 +3700,41 @@ impl PythonExecutor {
         cpu_features: CpuFeatureLevel,
     ) -> std::result::Result<Vec<u8>, Error> {
         let engine = Self::create_engine_with_options(target, cpu_features)?;
-        engine.precompile_component(wasm_bytes).map_err(|e| {
-            ErrorKind::WasmEngine(format!("Failed to precompile component: {e}")).into()
-        })
+        Self::precompile_on(&engine, wasm_bytes)
+    }
+
+    /// Compile `wasm_bytes` on `engine`: what every `precompile` function
+    /// does. A command also gets its instance-metadata stamp here, so no
+    /// path produces a precompiled command without it.
+    fn precompile_on(engine: &Engine, wasm_bytes: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        let mut precompiled = engine.precompile_component(wasm_bytes).map_err(|e| {
+            Error::from(ErrorKind::WasmEngine(format!(
+                "Failed to precompile component: {e}"
+            )))
+        })?;
+        crate::process::stamp_if_command(&mut precompiled, wasm_bytes);
+        Ok(precompiled)
+    }
+
+    /// Stamp `precompiled` (output of the `precompile` functions) with the
+    /// guest language it runs, so that building a sandbox for another
+    /// language from it fails with a clear error instead of misbehaving.
+    /// Unstamped runtimes are not checked.
+    ///
+    /// An eryx built from a checkout also stamps the hash of the guest's
+    /// sources it was built with. Loading the runtime in an eryx built from
+    /// other guest sources then fails with
+    /// [`ErrorKind::IncompatiblePrecompiled`], as for another eryx version.
+    pub fn stamp_language(precompiled: &mut Vec<u8>, language: Language) {
+        let magic = match guest_sources_hash(language) {
+            Some(hash) => {
+                precompiled.extend_from_slice(&hash.to_le_bytes());
+                GUEST_STAMP_MAGIC
+            }
+            None => LANGUAGE_STAMP_MAGIC,
+        };
+        precompiled.push(language.snapshot_tag());
+        precompiled.extend_from_slice(magic);
     }
 
     /// Create a configured wasmtime engine.
@@ -3031,6 +3828,24 @@ impl PythonExecutor {
     /// For fine-grained control, set `ERYX_CRANELIFT_FLAGS` to a comma-separated
     /// list of `flag=value` pairs. Example:
     /// `ERYX_CRANELIFT_FLAGS=has_avx512f=false,has_avx512bw=false`
+    /// Refuse to precompile when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS`
+    /// is set but this build can't apply it (it needs the `embedded` or
+    /// `preinit` feature): the output would silently target this machine's
+    /// CPU instead, and fail to load on one with fewer features.
+    fn check_cpu_feature_env() -> std::result::Result<(), Error> {
+        #[cfg(not(any(feature = "embedded", feature = "preinit")))]
+        for var in ["ERYX_CPU_FEATURES", "ERYX_CRANELIFT_FLAGS"] {
+            if std::env::var_os(var).is_some() {
+                return Err(ErrorKind::WasmEngine(format!(
+                    "{var} is set, but this build of eryx can't apply it: enable \
+                     the `embedded` or `preinit` feature"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn create_engine_with_target(target: Option<&str>) -> std::result::Result<Engine, Error> {
         let config = Self::engine_config_with_target(target)?;
         Engine::new(&config).map_err(|e| ErrorKind::WasmEngine(e.to_string()).into())
@@ -3098,6 +3913,11 @@ impl PythonExecutor {
         // TCP/TLS functions are sync `func` in WIT but use fiber-based async
         // on the host (via `async` bindgen flag) - they appear blocking to guest.
         config.wasm_component_model_async(true);
+        // The synchronous `stream`/`future` read and write builtins and async
+        // `subtask.cancel`, which wasip3 Go programs (`gh`) use as child
+        // commands. Only validation gates them: wasmparser refuses those
+        // canonical builtins unless this is on.
+        config.wasm_component_model_more_async_builtins(true);
 
         // Enable epoch-based interruption for execution timeouts.
         // This allows us to interrupt WASM execution even in tight loops
@@ -3318,7 +4138,7 @@ impl PythonExecutor {
     ///
     /// This does the expensive linking work once, so that `execute()` can
     /// quickly instantiate from the template.
-    #[tracing::instrument(name = "PythonExecutor::create_instance_pre", skip(engine, component))]
+    #[tracing::instrument(name = "Executor::create_instance_pre", skip(engine, component))]
     fn create_instance_pre(
         engine: &Engine,
         component: &Component,
@@ -3328,18 +4148,29 @@ impl PythonExecutor {
         // Add WASI support (p2 = preview 2)
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add WASI to linker: {e}")))?;
+        // And WASI 0.3, for guests built for wasm32-wasip3. Its interfaces
+        // have their own versions, and a component links only what it
+        // imports, so p2 guests are unaffected.
+        wasmtime_wasi::p3::add_to_linker(&mut linker)
+            .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add WASI 0.3 to linker: {e}")))?;
 
         // Add hybrid VFS filesystem support (overrides WASI filesystem bindings)
         // The hybrid VFS routes:
         // - /data/* paths to VFS storage (sandboxed in-memory/KV store)
         // - Other paths (like /python-stdlib/*) to real filesystem via WASI
         // This allows Python to access its stdlib while providing sandboxed storage.
-        #[cfg(feature = "unstable-vfs")]
+        // The shell always runs on it, for its private /tmp, /dev and root.
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
         {
             // Allow shadowing to override WASI filesystem bindings
             linker.allow_shadowing(true);
             eryx_vfs::add_hybrid_vfs_to_linker(&mut linker).map_err(|e| {
                 ErrorKind::WasmEngine(format!("Failed to add hybrid VFS to linker: {e}"))
+            })?;
+            eryx_vfs::add_hybrid_vfs_to_linker_p3(&mut linker).map_err(|e| {
+                ErrorKind::WasmEngine(format!(
+                    "Failed to add the WASI 0.3 hybrid VFS to linker: {e}"
+                ))
             })?;
             linker.allow_shadowing(false);
         }
@@ -3349,6 +4180,11 @@ impl PythonExecutor {
         Sandbox::add_to_linker::<_, HasSelf<ExecutorState>>(&mut linker, |state| state)
             .map_err(|e| ErrorKind::WasmEngine(format!("Failed to add sandbox to linker: {e}")))?;
         tracing::debug!("Sandbox bindings added successfully");
+
+        // External commands; only the shell guest imports this.
+        crate::process::add_to_linker(&mut linker).map_err(|e| {
+            ErrorKind::WasmEngine(format!("Failed to add eryx:process to linker: {e}"))
+        })?;
 
         // Create pre-instantiated component
         // This validates that all imports are satisfied and prepares for fast instantiation
@@ -3392,7 +4228,7 @@ impl PythonExecutor {
     /// This is called by [`ExecuteBuilder::run`].
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
-        name = "PythonExecutor::execute_internal",
+        name = "Executor::execute_internal",
         skip_all,
         fields(
             code_len = code.len(),
@@ -3414,11 +4250,31 @@ impl PythonExecutor {
         execution_timeout: Option<Duration>,
         cancellation_token: Option<CancellationToken>,
         fuel_limit: Option<u64>,
+        child_limits: crate::process::ChildLimits,
+        child_net: Option<crate::process::ChildNet>,
+        allowed_commands: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        credentials: &[Arc<crate::net::Credential>],
         #[cfg(feature = "unstable-vfs")] vfs_storage: Option<eryx_vfs::ArcStorage>,
         #[cfg(feature = "unstable-vfs")] volumes: Vec<crate::session::VolumeMount>,
         #[cfg(feature = "unstable-vfs")] max_open_host_files: Option<usize>,
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        vfs_limits: crate::session::executor::VfsLimits,
     ) -> std::result::Result<ExecutionOutput, Error> {
         crate::error::validate_user_code(code)?;
+        // The execution's first: for a header both set on a request, the
+        // first match wins (`inject_credentials`), so the execution's does.
+        let credentials: Vec<_> = credentials
+            .iter()
+            .chain(&self.credentials)
+            .cloned()
+            .collect();
+        let commands = self.commands.for_execution(
+            allowed_commands,
+            command_options,
+            child_net.is_some(),
+            &credentials,
+        )?;
 
         // Avoid making an already-cancelled request wait for the first epoch
         // tick. Cancellation that races this check is still observed by the
@@ -3447,15 +4303,15 @@ impl PythonExecutor {
         // The first site-packages is mounted at /site-packages (for preinit compatibility)
         // Additional ones are mounted at /site-packages-1, /site-packages-2, etc.
         let mut pythonpath_parts = Vec::new();
-        if self.python_stdlib_path.is_some() {
+        if self.stdlib_path.is_some() {
             pythonpath_parts.push("/python-stdlib".to_string());
         }
-        for i in 0..self.python_site_packages_paths.len() {
+        for i in 0..self.library_paths.len() {
             pythonpath_parts.push(site_packages_mount_path(i));
         }
 
-        // Mount Python stdlib if configured (required for eryx-wasm-runtime)
-        if let Some(ref stdlib_path) = self.python_stdlib_path {
+        // Mount Python stdlib if configured (required for eryx-guest-python)
+        if let Some(ref stdlib_path) = self.stdlib_path {
             // PYTHONHOME tells Python where to find the standard library
             wasi_builder.env("PYTHONHOME", "/python-stdlib");
             wasi_builder
@@ -3472,7 +4328,7 @@ impl PythonExecutor {
 
         // Mount each site-packages directory
         // First one at /site-packages (for preinit compatibility), rest at /site-packages-N
-        for (i, site_packages_path) in self.python_site_packages_paths.iter().enumerate() {
+        for (i, site_packages_path) in self.library_paths.iter().enumerate() {
             let mount_path = site_packages_mount_path(i);
             wasi_builder
                 .preopened_dir(site_packages_path, &mount_path, FsPerms::ReadOnly)
@@ -3481,7 +4337,29 @@ impl PythonExecutor {
                 })?;
         }
 
+        #[cfg(feature = "environment")]
+        if let Some(root) = &self.environment {
+            wasi_builder
+                .preopened_dir(root, crate::environment::MOUNT_PATH, FsPerms::ReadOnly)
+                .map_err(|e| {
+                    ErrorKind::Initialization(format!("Failed to mount the environment: {e}"))
+                })?;
+        }
+
+        if self.language == Language::Shell {
+            add_shell_env(&mut wasi_builder);
+        }
         let wasi = wasi_builder.build();
+
+        // Without `unstable-vfs`, the hybrid VFS is only linked for the
+        // shell's filesystem: a private /tmp under the quota, /dev and the
+        // root, and for Python the same mounts as above.
+        #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
+        let hybrid_vfs_ctx = Some(crate::session::executor::build_private_vfs_context(
+            self,
+            crate::session::executor::private_vfs_storage(vfs_limits),
+            None,
+        )?);
 
         // Build hybrid VFS context when the `unstable-vfs` feature is enabled.
         // The hybrid VFS routes /data/* to VFS storage while passing through
@@ -3502,20 +4380,30 @@ impl PythonExecutor {
             )?)
         };
 
+        let child_budget =
+            crate::process::ChildBudget::new(child_limits, Some(fd_output.stderr.clone()));
+        let mut memory_tracker = MemoryTracker::new(memory_limit);
+        memory_tracker.set_children(child_budget.memory());
         let state = ExecutorState {
             wasi,
             table: ResourceTable::new(),
             callback_tx,
             trace_tx,
             callbacks: callback_infos,
-            memory_tracker: MemoryTracker::new(memory_limit),
+            memory_tracker,
             net_tx,
             output_tx,
-            #[cfg(feature = "unstable-vfs")]
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             hybrid_vfs_ctx,
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
+            commands,
+            child_budget,
+            child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
+            trace_clock: TraceClock::default(),
+            nested: None,
+            deadline: None,
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
@@ -3545,13 +4433,14 @@ impl PythonExecutor {
             }
             // The traceback is the error's stderr.
             Err(e) => {
-                if let ErrorKind::PythonException {
-                    traceback,
+                if let ErrorKind::ScriptFailed {
+                    message,
+                    exit_code,
                     stdout,
                     stderr,
                 } = e.kind_mut()
                 {
-                    append_fd_stderr(traceback, &fd_stderr);
+                    append_fd_stderr(message, &fd_stderr, self.language, *exit_code);
                     stdout.extend(fd_stdout);
                     stderr.extend(fd_stderr);
                 }
@@ -3581,6 +4470,30 @@ impl PythonExecutor {
         };
         WarmPool::global().retire(&self.instance_pre, store);
         result
+    }
+
+    /// Instantiate the guest in `store` and run it as a command, with argv
+    /// `args`, environment `env` and working directory `cwd`, through the
+    /// `run-command` export; its exit status. The store's state comes from
+    /// [`ExecutorState::for_command`], and its fuel and epoch deadline are the
+    /// caller's to set.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    pub(crate) async fn run_command(
+        &self,
+        store: &mut Store<ExecutorState>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: String,
+    ) -> wasmtime::Result<i32> {
+        let bindings = self.instance_pre.instantiate_async(&mut *store).await?;
+        store
+            .run_concurrent(async move |accessor| {
+                bindings.call_run_command(accessor, args, env, cwd).await
+            })
+            .await?
     }
 
     /// Take a warm store for this component, or instantiate a fresh one.
@@ -3661,6 +4574,7 @@ impl PythonExecutor {
         } else {
             arm_epoch_deadline(store, execution_timeout);
         }
+        store.data_mut().deadline = execution_timeout.map(|t| std::time::Instant::now() + t);
 
         // Call the async execute export
         let code_owned = code.to_string();
@@ -3732,11 +4646,12 @@ impl PythonExecutor {
         // The outer Result is from wasmtime, the inner is the WIT-generated result
         // where ExecuteOutput is the WIT-generated record with stdout and stderr
         // The inner WIT Err is the guest's logical execution error — for real
-        // input that is always an uncaught Python exception (its traceback).
+        // input that is always a script failure (for Python, its traceback).
         let wit_output = wasmtime_result
             .map_err(|e| ErrorKind::Execution(format!("WASM execution error: {e:?}")))?
-            .map_err(|failure| ErrorKind::PythonException {
-                traceback: failure.message,
+            .map_err(|failure| ErrorKind::ScriptFailed {
+                message: failure.message,
+                exit_code: failure.exit_code,
                 stdout: failure.stdout,
                 stderr: failure.stderr,
             })?;
@@ -3748,7 +4663,7 @@ impl PythonExecutor {
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let fuel_consumed = Some(initial_fuel.saturating_sub(remaining_fuel));
 
-        // Note: callback_invocations is 0 here because PythonExecutor doesn't
+        // Note: callback_invocations is 0 here because Executor doesn't
         // handle callbacks internally - it just passes the channel to the WASM state.
         // Higher-level APIs like Sandbox track callback invocations in their own
         // callback handler tasks.
@@ -3772,10 +4687,70 @@ impl PythonExecutor {
     }
 }
 
-/// Append the guest's direct fd 2 writes to an uncaught exception's
-/// traceback, the way a successful run appends them to stderr.
-pub(crate) fn append_fd_stderr(traceback: &mut String, fd_stderr: &[u8]) {
-    traceback.push_str(&String::from_utf8_lossy(fd_stderr));
+/// The most of a shell script's last stderr line its failure message quotes.
+const SHELL_MESSAGE_LINE_MAX: usize = 1024;
+
+/// Where to cut `line` at most at `end` without splitting a run of ASCII
+/// letters, digits and underscores: secret placeholders are such runs
+/// (`SecretConfig::with_placeholder`), and the message is scrubbed after
+/// it's composed, so half of one would be left unredacted. The cut backs off
+/// to the run's start, so the run is either whole (and scrubbed) or gone.
+fn placeholder_safe_cut(line: &str, end: usize) -> usize {
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = line.as_bytes();
+    if !bytes.get(end).copied().is_some_and(word) {
+        return end;
+    }
+    bytes[..end]
+        .iter()
+        .rposition(|&b| !word(b))
+        .map_or(0, |i| i + 1)
+}
+
+/// Add the guest's direct fd 2 writes to a script failure's message, the way
+/// a successful run appends them to stderr.
+///
+/// For Python and JavaScript the message is the exception (Python's
+/// traceback), and fd 2 holds what the runtime itself printed around it: it's
+/// appended on a line of its own. A shell failure's message is its exit
+/// status, and fd 2 is the script's own stderr, already all in the failure's
+/// `stderr`: the message quotes just its last line, as `exit status 127:
+/// error: command not found: x`. A shell failure without an exit status (the
+/// shell itself erred) keeps its message as it is: the stderr is unrelated.
+pub(crate) fn append_fd_stderr(
+    message: &mut String,
+    fd_stderr: &[u8],
+    language: Language,
+    exit_code: Option<i32>,
+) {
+    let text = String::from_utf8_lossy(fd_stderr);
+    if language == Language::Shell {
+        if exit_code.is_none() {
+            return;
+        }
+        if let Some(line) = text
+            .lines()
+            .map(str::trim_end)
+            .rfind(|line| !line.is_empty())
+        {
+            message.push_str(": ");
+            match line.char_indices().nth(SHELL_MESSAGE_LINE_MAX) {
+                Some((end, _)) => {
+                    message.push_str(&line[..placeholder_safe_cut(line, end)]);
+                    message.push('…');
+                }
+                None => message.push_str(line),
+            }
+        }
+        return;
+    }
+    if text.is_empty() {
+        return;
+    }
+    if !message.is_empty() && !message.ends_with('\n') {
+        message.push('\n');
+    }
+    message.push_str(&text);
 }
 
 /// Parse a trace request into a `TraceEvent`.
@@ -3838,10 +4813,42 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>")
                 .to_string();
-            // Duration would need to be tracked by the host
-            crate::trace::TraceEventKind::CallbackEnd {
-                name,
-                duration_ms: 0,
+            // Added by the host; see `TraceClock`.
+            let duration_ms = event_data
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            crate::trace::TraceEventKind::CallbackEnd { name, duration_ms }
+        }
+        "process_start" | "process_end" => {
+            let str_field = |key: &str| {
+                event_data
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            };
+            let name = str_field("name").unwrap_or_else(|| "<unknown>".to_owned());
+            let pid = event_data
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok())
+                .unwrap_or(0);
+            if event_type == "process_start" {
+                crate::trace::TraceEventKind::ProcessStart { name, pid }
+            } else {
+                crate::trace::TraceEventKind::ProcessEnd {
+                    name,
+                    pid,
+                    exit_code: event_data
+                        .get("exit_code")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|code| i32::try_from(code).ok()),
+                    duration_ms: event_data
+                        .get("duration_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    error: str_field("error"),
+                }
             }
         }
         _ => crate::trace::TraceEventKind::Line,
@@ -3854,20 +4861,143 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
     })
 }
 
+/// Ends a precompiled runtime stamped with its guest language, after the
+/// language's snapshot tag. wasmtime ignores bytes after a component, so a
+/// stamped file still loads anywhere a plain one does.
+pub(crate) const LANGUAGE_STAMP_MAGIC: &[u8; 8] = b"ERYXLANG";
+
+/// Ends a precompiled runtime stamped with its guest language and the hash
+/// of its guest sources: `[hash u64 LE][language tag][magic]`.
+const GUEST_STAMP_MAGIC: &[u8; 8] = b"ERYXLNG2";
+
+/// The most bytes [`Executor::stamp_language`] appends.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) const LANGUAGE_STAMP_LEN: usize = 8 + 1 + GUEST_STAMP_MAGIC.len();
+
+/// The hash of `language`'s guest sources this eryx was built with (see
+/// `build/guest_sources.rs`), or `None` outside an eryx checkout.
+///
+/// It catches a stale runtime, not a tampered one: a 64-bit FNV-1a is
+/// trivial to forge, and the stamp sits outside anything wasmtime checks.
+/// Only load precompiled files you trust.
+fn guest_sources_hash(language: Language) -> Option<u64> {
+    let hex = match language {
+        Language::Python => option_env!("ERYX_GUEST_HASH_PYTHON"),
+        Language::JavaScript => option_env!("ERYX_GUEST_HASH_JAVASCRIPT"),
+        Language::Shell => option_env!("ERYX_GUEST_HASH_SHELL"),
+    }?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+/// What [`Executor::stamp_language`] stamped a precompiled runtime with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LanguageStamp {
+    /// The guest language it runs.
+    pub(crate) language: Language,
+    /// The hash of the guest sources it was built from, if the eryx that
+    /// stamped it was built from a checkout.
+    guest_hash: Option<u64>,
+}
+
+impl LanguageStamp {
+    /// Fail if the runtime was built from other guest sources than this eryx.
+    /// Only checked when both have a hash.
+    pub(crate) fn check_guest(self) -> std::result::Result<(), Error> {
+        match (self.guest_hash, guest_sources_hash(self.language)) {
+            (Some(found), Some(expected)) if found != expected => {
+                let describe = |hash: u64| {
+                    format!(
+                        "{}, {} guest {hash:016x}",
+                        Executor::module_version(),
+                        self.language
+                    )
+                };
+                Err(ErrorKind::IncompatiblePrecompiled {
+                    built_by: describe(found),
+                    expected: describe(expected),
+                    guest: Some(self.language),
+                }
+                .into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The stamp of the precompiled runtime in the first `len` bytes of `file`,
+/// if any.
+#[cfg(any(feature = "embedded", feature = "preinit"))]
+pub(crate) fn file_language_stamp(file: &mut std::fs::File, len: u64) -> Option<LanguageStamp> {
+    use std::io::{Read as _, Seek as _};
+
+    // In a bundle the stamp ends the component, before the bundle's own
+    // sections and footer.
+    #[cfg(feature = "preinit")]
+    let end = match crate::bundle::read_layout(file) {
+        Ok(crate::bundle::Layout::Mapped { component_len, .. }) => component_len.min(len),
+        _ => len,
+    };
+    #[cfg(not(feature = "preinit"))]
+    let end = len;
+    let mut tail = [0; LANGUAGE_STAMP_LEN];
+    let start = end.checked_sub(tail.len() as u64)?;
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
+    file.read_exact(&mut tail).ok()?;
+    language_stamp(&tail)
+}
+
+/// The stamp a precompiled runtime ending in `tail` got from
+/// [`Executor::stamp_language`], or `None` if it wasn't stamped.
+#[cfg(any(test, feature = "embedded", feature = "preinit"))]
+pub(crate) fn language_stamp(tail: &[u8]) -> Option<LanguageStamp> {
+    let (rest, magic) = tail.split_last_chunk::<8>()?;
+    let (&tag, rest) = rest.split_last()?;
+    let language = Language::from_snapshot_tag(tag)?;
+    let guest_hash = if magic == LANGUAGE_STAMP_MAGIC {
+        None
+    } else if magic == GUEST_STAMP_MAGIC {
+        Some(u64::from_le_bytes(*rest.split_last_chunk::<8>()?.1))
+    } else {
+        return None;
+    };
+    Some(LanguageStamp {
+        language,
+        guest_hash,
+    })
+}
+
 /// Map an error from loading a precompiled component, reporting a file built
 /// by another eryx version as [`ErrorKind::IncompatiblePrecompiled`].
-#[cfg(any(feature = "embedded", feature = "preinit"))]
-fn deserialize_error(err: wasmtime::Error) -> Error {
-    // wasmtime only reports the stored version as text. If the wording ever
-    // changes, callers just get the raw error again.
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
+pub(crate) fn deserialize_error(err: wasmtime::Error) -> Error {
+    // wasmtime only reports these as text. If the wording ever changes,
+    // callers just get the raw error again.
     const PREFIX: &str = "Module was compiled with incompatible version '";
+    // The same eryx version with other engine settings (a development build
+    // from before or after a wasm feature was switched on) passes the
+    // version check, then fails this one.
+    const FEATURE: &str = "Module was compiled with support for WebAssembly feature `";
     let message = format!("{err:#}");
     if let Some((_, rest)) = message.split_once(PREFIX)
         && let Some((built_by, _)) = rest.split_once('\'')
     {
         return ErrorKind::IncompatiblePrecompiled {
             built_by: built_by.to_owned(),
-            expected: PythonExecutor::module_version(),
+            expected: Executor::module_version(),
+            guest: None,
+        }
+        .into();
+    }
+    if let Some((_, rest)) = message.split_once(FEATURE)
+        && let Some((feature, _)) = rest.split_once('`')
+    {
+        return ErrorKind::IncompatiblePrecompiled {
+            built_by: format!(
+                "{} with other engine settings (it uses WebAssembly feature `{feature}`)",
+                Executor::module_version()
+            ),
+            expected: Executor::module_version(),
+            guest: None,
         }
         .into();
     }
@@ -3877,6 +5007,206 @@ fn deserialize_error(err: wasmtime::Error) -> Error {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// The callback clock times matched calls, keeps at most
+    /// `MAX_PENDING_CALLBACKS` unmatched starts, and keeps none the trace
+    /// budget dropped.
+    #[test]
+    fn the_trace_clock_is_bounded_and_charged() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ExecutorState::placeholder();
+        state.trace_tx = Some(tx);
+        let event =
+            |kind: &str, name: &str| serde_json::json!({ "type": kind, "name": name }).to_string();
+
+        SandboxImports::report_trace(&mut state, 0, event("callback_start", "a"), String::new());
+        SandboxImports::report_trace(&mut state, 0, event("callback_end", "a"), String::new());
+        let _start = rx.try_recv().unwrap();
+        let end: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert!(end["duration_ms"].is_u64(), "{end}");
+        assert!(state.trace_clock.callbacks.is_empty());
+
+        for i in 0..3 * MAX_PENDING_CALLBACKS {
+            let name = format!("cb{i}");
+            SandboxImports::report_trace(
+                &mut state,
+                0,
+                event("callback_start", &name),
+                String::new(),
+            );
+        }
+        assert_eq!(state.trace_clock.callbacks.len(), MAX_PENDING_CALLBACKS);
+
+        // Once the budget is spent, starts are dropped and not kept either.
+        state.trace_clock = TraceClock::default();
+        state.stream_budget.trace = 0;
+        SandboxImports::report_trace(&mut state, 0, event("callback_start", "b"), String::new());
+        assert!(state.trace_clock.callbacks.is_empty());
+    }
+
+    /// A child still running when its execution ends is reported killed even
+    /// once the trace budget is spent, so its start isn't left unpaired; one
+    /// whose start the budget dropped reports nothing.
+    #[test]
+    fn running_children_are_reported_killed_past_the_budget() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ExecutorState::placeholder();
+        state.trace_tx = Some(tx);
+        let argv = ["tc".to_owned(), "spin".to_owned()];
+        let _running = state.trace_process_start(&argv).unwrap();
+        let start: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert_eq!(start["type"], "process_start");
+
+        state.stream_budget.trace = 0;
+        assert!(state.trace_process_start(&argv).is_none());
+        state.end_running_children();
+        let end: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
+        assert_eq!(
+            (&end["type"], &end["pid"], &end["error"]),
+            (&"process_end".into(), &1.into(), &"killed".into())
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A script failure's message gets the runtime's fd 2 writes on a line
+    /// of their own, except a shell's: there they're the script's stderr,
+    /// already in the failure's `stderr`, and its message quotes the last
+    /// line after its exit status.
+    #[test]
+    fn fd_stderr_joins_the_message_on_its_own_line_or_the_shells_last_line() {
+        let mut python = "Traceback (most recent call last):\n  ...\nValueError: x".to_string();
+        append_fd_stderr(&mut python, b"warning from C\n", Language::Python, None);
+        assert_eq!(
+            python,
+            "Traceback (most recent call last):\n  ...\nValueError: x\nwarning from C\n"
+        );
+
+        let mut ended = "Error: x\n".to_string();
+        append_fd_stderr(&mut ended, b"more", Language::JavaScript, None);
+        assert_eq!(ended, "Error: x\nmore");
+
+        let mut nothing = "Error: x".to_string();
+        append_fd_stderr(&mut nothing, b"", Language::JavaScript, None);
+        assert_eq!(nothing, "Error: x");
+
+        // The shell's message quotes the last non-empty line, capped.
+        let mut shell = "exit status 127".to_string();
+        append_fd_stderr(
+            &mut shell,
+            b"first\nerror: command not found: mcp.calc.add\n\n",
+            Language::Shell,
+            Some(127),
+        );
+        assert_eq!(
+            shell,
+            "exit status 127: error: command not found: mcp.calc.add"
+        );
+        let mut quiet = "exit status 3".to_string();
+        append_fd_stderr(&mut quiet, b"", Language::Shell, Some(3));
+        assert_eq!(quiet, "exit status 3");
+        let mut long = "exit status 1".to_string();
+        append_fd_stderr(
+            &mut long,
+            "é".repeat(5000).as_bytes(),
+            Language::Shell,
+            Some(1),
+        );
+        assert_eq!(
+            long.chars().count(),
+            "exit status 1: ".len() + SHELL_MESSAGE_LINE_MAX + 1
+        );
+        assert!(long.ends_with('…'));
+
+        // The shell itself erred (no exit status): its message stands alone.
+        let mut erred = "brush: something broke".to_string();
+        append_fd_stderr(&mut erred, b"unrelated\n", Language::Shell, None);
+        assert_eq!(erred, "brush: something broke");
+    }
+
+    /// The cap never splits a secret placeholder (a run of ASCII letters,
+    /// digits and underscores), which scrubbing after it couldn't then
+    /// match: a run straddling the cut is dropped whole, generated or custom.
+    #[test]
+    fn the_shell_message_cap_keeps_placeholders_whole() {
+        for placeholder in [
+            "ERYX_SECRET_PLACEHOLDER_0123456789abcdef0123456789abcdef",
+            "my_own_placeholder_with_32_chars_or_more",
+        ] {
+            // A run of 1000 non-word characters, then the placeholder across
+            // character 1024.
+            let line = format!("{} {placeholder} tail", "-".repeat(1000));
+            let mut message = "exit status 1".to_string();
+            append_fd_stderr(&mut message, line.as_bytes(), Language::Shell, Some(1));
+            assert_eq!(message, format!("exit status 1: {} …", "-".repeat(1000)));
+
+            // Entirely before the cut it's kept whole, for scrubbing.
+            let line = format!("{placeholder} {}", "-".repeat(2000));
+            let mut message = "exit status 1".to_string();
+            append_fd_stderr(&mut message, line.as_bytes(), Language::Shell, Some(1));
+            assert!(message.contains(placeholder), "{message}");
+        }
+        // One run longer than the cap: nothing of it is quoted.
+        let mut message = "exit status 1".to_string();
+        append_fd_stderr(
+            &mut message,
+            "A".repeat(5000).as_bytes(),
+            Language::Shell,
+            Some(1),
+        );
+        assert_eq!(message, "exit status 1: …");
+    }
+
+    #[test]
+    fn language_stamp_round_trips() {
+        for language in [Language::Python, Language::JavaScript, Language::Shell] {
+            let mut bytes = b"component".to_vec();
+            Executor::stamp_language(&mut bytes, language);
+            let stamp = language_stamp(&bytes).unwrap();
+            assert_eq!(stamp.language, language);
+            // Built from this checkout, so it carries this eryx's hash.
+            assert_eq!(stamp.guest_hash, guest_sources_hash(language));
+            assert!(stamp.guest_hash.is_some());
+            stamp.check_guest().unwrap();
+        }
+        assert_eq!(language_stamp(b"component"), None);
+        assert_eq!(language_stamp(b""), None);
+        // An unknown tag isn't a language.
+        assert_eq!(language_stamp(b"\x09ERYXLANG"), None);
+        // A stamp from before guest hashes: the language, not checked.
+        let old = language_stamp(b"component\x01ERYXLANG").unwrap();
+        assert_eq!((old.language, old.guest_hash), (Language::JavaScript, None));
+        old.check_guest().unwrap();
+    }
+
+    /// A runtime built from other guest sources is `IncompatiblePrecompiled`,
+    /// naming the language and how to rebuild it.
+    #[test]
+    fn other_guest_sources_are_incompatible() {
+        let mut bytes = b"component".to_vec();
+        bytes.extend_from_slice(&0x1234_u64.to_le_bytes());
+        bytes.push(Language::Shell.snapshot_tag());
+        bytes.extend_from_slice(GUEST_STAMP_MAGIC);
+        let err = language_stamp(&bytes).unwrap().check_guest().unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            ErrorKind::IncompatiblePrecompiled {
+                guest: Some(Language::Shell),
+                ..
+            }
+        ));
+        let message = err.to_string();
+        assert!(
+            message.contains("shell guest 0000000000001234"),
+            "{message}"
+        );
+        assert!(
+            message.contains("mise run precompile-runtime-shell"),
+            "{message}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -4128,7 +5458,7 @@ mod tests {
     #[test]
     #[cfg(feature = "embedded")]
     fn pooling_engine_is_constructible() {
-        let mut config = PythonExecutor::base_engine_config().unwrap();
+        let mut config = Executor::base_engine_config().unwrap();
         let settings = allocator_settings(&[("ERYX_ALLOCATOR", "pooling")]).unwrap();
         let pooling = settings.pooling_config().unwrap();
         config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
@@ -4136,13 +5466,12 @@ mod tests {
     }
 
     /// The engine keeps the host headroom on the fiber that
-    /// `PythonExecutor::ASYNC_STACK_SIZE` requires.
+    /// `Executor::ASYNC_STACK_SIZE` requires.
     #[test]
     fn engine_leaves_host_stack_headroom() {
-        let engine = Engine::new(&PythonExecutor::base_engine_config().unwrap()).unwrap();
+        let engine = Engine::new(&Executor::base_engine_config().unwrap()).unwrap();
         assert!(
-            engine.get_async_stack_size()
-                >= engine.get_max_wasm_stack() + PythonExecutor::MIN_HOST_STACK
+            engine.get_async_stack_size() >= engine.get_max_wasm_stack() + Executor::MIN_HOST_STACK
         );
     }
 
@@ -4174,7 +5503,7 @@ mod tests {
             }
 
             // Creating the engine will fail if any flag name is invalid
-            let result = PythonExecutor::create_engine_with_target(None);
+            let result = Executor::create_engine_with_target(None);
             assert!(
                 result.is_ok(),
                 "CPU feature level '{level}' failed to create engine: {:?}",
@@ -4209,7 +5538,7 @@ mod tests {
             env::remove_var("ERYX_CRANELIFT_FLAGS");
             env::remove_var("ERYX_TARGET");
         }
-        let result = PythonExecutor::precompile_with_target(EMPTY_COMPONENT, Some(target));
+        let result = Executor::precompile_with_target(EMPTY_COMPONENT, Some(target));
         // SAFETY: Same as above - single-threaded test cleanup.
         unsafe {
             env::remove_var("ERYX_CPU_FEATURES");
@@ -4219,6 +5548,377 @@ mod tests {
         assert!(
             bytes.windows(target.len()).any(|w| w == target.as_bytes()),
             "precompiled artifact should record the {target} triple"
+        );
+    }
+}
+
+/// The Python guest's `run-command` export, on the embedded runtime.
+#[cfg(all(
+    test,
+    feature = "embedded",
+    any(feature = "unstable-vfs", feature = "shell")
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod run_command_tests {
+    use super::*;
+    use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+
+    struct Ran {
+        status: i32,
+        stdout: String,
+        stderr: String,
+    }
+
+    /// Run `python3 ARGS` with `stdin`, in `cwd`, on a filesystem with a
+    /// writable /tmp in `storage`.
+    async fn run_in(
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
+        let executor = Executor::from_embedded_runtime().unwrap();
+        run_command_in(&executor, "python3", storage, args, env, cwd, stdin).await
+    }
+
+    /// Run `NAME ARGS` on `executor`'s runtime, as [`run_in`] does.
+    async fn run_command_in(
+        executor: &Executor,
+        name: &str,
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
+        let stdout = MemoryOutputPipe::new(1 << 20);
+        let stderr = MemoryOutputPipe::new(1 << 20);
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stdin(MemoryInputPipe::new(stdin.to_owned()))
+            .stdout(stdout.clone())
+            .stderr(stderr.clone());
+        let mut base = eryx_vfs::HybridVfsCtx::new(storage.clone());
+        base.add_vfs_preopen(
+            "/tmp",
+            eryx_vfs::DirPerms::all(),
+            eryx_vfs::FilePerms::all(),
+        );
+        let vfs = crate::session::executor::command_vfs_context(executor, Some(base)).unwrap();
+        let state = ExecutorState::for_command(wasi.build(), vfs, MemoryTracker::new(None), None);
+        let mut store = Store::new(executor.engine(), state);
+        store.limiter(|s| &mut s.memory_tracker);
+        store.set_fuel(u64::MAX).unwrap();
+        store.set_epoch_deadline(u64::MAX / 2);
+        let args = std::iter::once(name)
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        let env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let status = executor
+            .run_command(&mut store, args, env, cwd.to_owned())
+            .await
+            .unwrap();
+        drop(store);
+        Ran {
+            status,
+            stdout: String::from_utf8(stdout.contents().to_vec()).unwrap(),
+            stderr: String::from_utf8(stderr.contents().to_vec()).unwrap(),
+        }
+    }
+
+    async fn run(args: &[&str], stdin: &str) -> Ran {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        run_in(&storage, args, &[], "/tmp", stdin).await
+    }
+
+    #[tokio::test]
+    async fn dash_c_sees_its_argv() {
+        let ran = run(&["-c", "import sys; print(sys.argv)", "a", "b"], "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "['-c', 'a', 'b']\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn code_and_data_come_from_stdin() {
+        let ran = run(&[], "print(1 + 1)\n").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "2\n"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-", "x"], "import sys; print(sys.argv)").await;
+        assert_eq!(ran.stdout, "['-', 'x']\n", "{}", ran.stderr);
+        let ran = run(
+            &["-c", "import sys; print(len(sys.stdin.read()))"],
+            &"x".repeat(100_000),
+        )
+        .await;
+        assert_eq!(ran.stdout, "100000\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn exit_status_is_system_exit_or_1_with_a_traceback() {
+        let ran = run(&["-c", "import sys; sys.exit(3)"], "").await;
+        assert_eq!(ran.status, 3);
+        let ran = run(&["-c", "raise SystemExit('bye')"], "").await;
+        assert_eq!((ran.status, ran.stderr.as_str()), (1, "bye\n"));
+        let ran = run(&["-c", "def f():\n    1 / 0\nf()"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(ran.stderr.starts_with("Traceback"), "{}", ran.stderr);
+        assert!(ran.stderr.contains("ZeroDivisionError"), "{}", ran.stderr);
+        assert!(!ran.stderr.contains("_eryx"), "eryx frames: {}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn usage_errors_exit_2() {
+        let ran = run(&["-X", "dev"], "").await;
+        assert_eq!(ran.status, 2, "{}", ran.stderr);
+        assert!(
+            ran.stderr.contains("unsupported option -X"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-c"], "").await;
+        assert_eq!(ran.status, 2, "{}", ran.stderr);
+        let ran = run(&["/nope.py"], "").await;
+        assert_eq!(ran.status, 2);
+        assert!(
+            ran.stderr.contains("can't open file '/nope.py'"),
+            "{}",
+            ran.stderr
+        );
+        let ran = run(&["-u", "-B", "-c", "print('flags ignored')"], "").await;
+        assert_eq!(ran.stdout, "flags ignored\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn env_and_cwd_are_the_callers() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let ran = run_in(
+            &storage,
+            &[
+                "-c",
+                "import os; print(os.environ['FOO'], os.getcwd(), 'PATH' in os.environ)",
+            ],
+            &[("FOO", "bar")],
+            "/tmp",
+            "",
+        )
+        .await;
+        assert_eq!(ran.stdout, "bar /tmp False\n", "{}", ran.stderr);
+    }
+
+    #[tokio::test]
+    async fn modules_run_with_dash_m() {
+        let ran = run(&["-m", "json.tool", "--compact"], r#"{"a": [1, 2]}"#).await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "{\"a\":[1,2]}\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[tokio::test]
+    async fn scripts_run_as_main_with_their_argv_and_asyncio() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let script = "import asyncio, sys\n\
+                      async def main():\n    await asyncio.sleep(0.01)\n    print(sys.argv, __name__, __file__)\n\
+                      if __name__ == '__main__':\n    asyncio.run(main())\n    sys.exit(4)\n";
+        let write = format!("open('/tmp/s.py', 'w').write({script:?})");
+        let ran = run_in(&storage, &["-c", &write], &[], "/tmp", "").await;
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        let ran = run_in(&storage, &["s.py", "x"], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (4, "['s.py', 'x'] __main__ s.py\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    /// Run `node ARGS` with `stdin`, in `cwd`, as [`run_in`] does Python.
+    #[cfg(feature = "javascript")]
+    async fn node_in(
+        storage: &eryx_vfs::ArcStorage,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Ran {
+        let executor = Executor::from_embedded_runtime_for(Language::JavaScript).unwrap();
+        run_command_in(&executor, "node", storage, args, env, cwd, stdin).await
+    }
+
+    #[cfg(feature = "javascript")]
+    async fn node(args: &[&str], stdin: &str) -> Ran {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        node_in(&storage, args, &[], "/tmp", stdin).await
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_evals_prints_and_reads_stdin() {
+        let ran = node(
+            &["-e", "console.log(1 + 1, process.argv.slice(1))", "a"],
+            "",
+        )
+        .await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "2 [\"a\"]\n"),
+            "{}",
+            ran.stderr
+        );
+        let ran = node(&["-p", "6 * 7"], "").await;
+        assert_eq!(ran.stdout, "42\n", "{}", ran.stderr);
+        let ran = node(&[], "console.log(2)").await;
+        assert_eq!(ran.stdout, "2\n", "{}", ran.stderr);
+        let ran = node(&["-", "x"], "console.log(process.argv.slice(1))").await;
+        assert_eq!(ran.stdout, "[\"-\",\"x\"]\n", "{}", ran.stderr);
+        let ran = node(
+            &[
+                "-e",
+                "console.log(require('fs').readFileSync(0, 'utf8').length)",
+            ],
+            &"x".repeat(100_000),
+        )
+        .await;
+        assert_eq!(ran.stdout, "100000\n", "{}", ran.stderr);
+        let ran = node(&["--version"], "").await;
+        assert!(ran.stdout.starts_with("quickjs-ng "), "{}", ran.stdout);
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_exit_status() {
+        let ran = node(&["-e", "process.exit(3); console.log('not reached')"], "").await;
+        assert_eq!((ran.status, ran.stdout.as_str()), (3, ""), "{}", ran.stderr);
+        // From a timer, past a `catch`, and with `exitCode`.
+        let ran = node(
+            &[
+                "-e",
+                "setTimeout(() => { try { process.exit(4) } catch {} console.log('x') }, 1)",
+            ],
+            "",
+        )
+        .await;
+        assert_eq!((ran.status, ran.stderr.as_str()), (4, ""));
+        let ran = node(&["-e", "process.exitCode = 5"], "").await;
+        assert_eq!(ran.status, 5, "{}", ran.stderr);
+        let ran = node(&["-e", "function f() { throw new Error('boom') }\nf()"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(ran.stderr.starts_with("Error: boom\n"), "{}", ran.stderr);
+        let ran = node(&["-e", "Promise.reject(new Error('later'))"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(
+            ran.stderr.contains("Uncaught (in promise) Error: later"),
+            "{}",
+            ran.stderr
+        );
+        // Un-awaited work and timers finish before the command does.
+        let ran = node(
+            &[
+                "-e",
+                "setTimeout(() => console.log('t'), 20); (async () => console.log('a'))()",
+            ],
+            "",
+        )
+        .await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "a\nt\n"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_usage_errors_exit_9() {
+        let ran = node(&["--bogus"], "").await;
+        assert_eq!(
+            (ran.status, ran.stderr.as_str()),
+            (9, "node: bad option: --bogus\n")
+        );
+        let ran = node(&["-e"], "").await;
+        assert_eq!(ran.status, 9);
+        let ran = node(&["/nope.js"], "").await;
+        assert_eq!(ran.status, 1);
+        assert!(
+            ran.stderr.contains("Cannot find module '/nope.js'"),
+            "{}",
+            ran.stderr
+        );
+    }
+
+    #[cfg(feature = "javascript")]
+    #[tokio::test]
+    async fn node_env_cwd_and_files() {
+        let storage = eryx_vfs::ArcStorage::new(Arc::new(eryx_vfs::InMemoryStorage::new()));
+        let ran = node_in(
+            &storage,
+            &[
+                "-e",
+                "console.log(process.env.FOO, process.cwd(), 'PATH' in process.env)",
+            ],
+            &[("FOO", "bar")],
+            "/tmp",
+            "",
+        )
+        .await;
+        assert_eq!(ran.stdout, "bar /tmp false\n", "{}", ran.stderr);
+
+        // A script with its argv, a CommonJS module and an ES module beside
+        // it, relative paths against the cwd, and node:fs.
+        let setup = r##"
+            const fs = require('fs');
+            fs.mkdirSync('/tmp/lib/sub', { recursive: true });
+            fs.writeFileSync('lib/cjs.js', "exports.twice = (x) => 2 * x; exports.data = require('./sub/d.json');");
+            fs.writeFileSync('lib/sub/d.json', '{"n": 3}');
+            fs.writeFileSync('/tmp/lib/esm.mjs', "export const hi = 'hi';");
+            fs.writeFileSync('/tmp/s.js', [
+                "#!/usr/bin/env node",
+                "import { hi } from './lib/esm.mjs';",
+                "const { twice, data } = require('./lib/cjs');",
+                "console.log(hi, twice(data.n), process.argv.slice(1), __filename, require.main === module);",
+            ].join('\n'));
+        "##;
+        let ran = node_in(&storage, &["-e", setup], &[], "/tmp", "").await;
+        assert_eq!(ran.status, 0, "{}", ran.stderr);
+        let ran = node_in(&storage, &["s.js", "x"], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "hi 6 [\"/tmp/s.js\",\"x\"] /tmp/s.js true\n"),
+            "{}",
+            ran.stderr
+        );
+        let check = r#"
+            const fs = require('node:fs');
+            console.log(fs.readdirSync('/tmp/lib').join(','), fs.statSync('/tmp/s.js').isFile(), fs.existsSync('/tmp/no'));
+            try { fs.readFileSync('/tmp/no') } catch (e) { console.log(e.code) }
+            fs.appendFileSync('/tmp/log', 'a'); fs.appendFileSync('/tmp/log', 'b');
+            fs.renameSync('/tmp/log', '/tmp/log2');
+            const { readFile } = await import('fs/promises');
+            console.log(await readFile('/tmp/log2', 'utf8'));
+            fs.rmSync('/tmp/lib', { recursive: true });
+            console.log(fs.existsSync('/tmp/lib'));
+        "#;
+        let ran = node_in(&storage, &["-e", check], &[], "/tmp", "").await;
+        assert_eq!(
+            (ran.status, ran.stdout.as_str()),
+            (0, "cjs.js,esm.mjs,sub true false\nENOENT\nab\nfalse\n"),
+            "{}",
+            ran.stderr
         );
     }
 }

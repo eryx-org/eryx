@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -75,6 +76,8 @@ pub struct Session {
     callbacks: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
     /// Network configuration for this session.
     net_config: Option<eryx::NetConfig>,
+    /// The network for a shell session's children, under `net_config`.
+    child_network: eryx::ChildNetwork,
     /// Output handler for streaming stdout/stderr.
     output_handler: Option<Arc<dyn OutputHandler>>,
     /// Keep a factory's site-packages directories alive for sessions it
@@ -82,15 +85,28 @@ pub struct Session {
     _factory_files: Option<crate::preinit::FactoryFiles>,
     /// Limits passed to callback handlers for this session.
     callback_limits: eryx::ResourceLimits,
+    /// The guest language, for the shell-only `allowed_commands`.
+    language: eryx::Language,
 }
 
 impl Session {
+    /// Check a call's `allowed_commands`, which only the shell takes.
+    fn allowed_commands(&self, allowed: Option<Vec<String>>) -> PyResult<Option<Vec<String>>> {
+        if allowed.is_some() && self.language != eryx::Language::Shell {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "allowed_commands= is only for language=\"shell\", not {}",
+                self.language
+            )));
+        }
+        Ok(allowed)
+    }
+
     /// Build a session from a preconfigured executor. Factory sessions use this
     /// path so ordinary `Session` construction remains unchanged.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_executor(
         py: Python<'_>,
-        executor: Arc<eryx::PythonExecutor>,
+        executor: Arc<eryx::Executor>,
         runtime: Arc<tokio::runtime::Runtime>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
@@ -103,6 +119,7 @@ impl Session {
         on_stderr: Option<Py<PyAny>>,
         factory_files: Option<crate::preinit::FactoryFiles>,
     ) -> PyResult<Self> {
+        let language = executor.language();
         let net_config: Option<eryx::NetConfig> = network.map(Into::into);
         if let Some(net) = &net_config {
             net.validate().map_err(InitializationError::new_err)?;
@@ -194,9 +211,11 @@ impl Session {
             vfs_mount_path: mount_path,
             callbacks: callbacks_map,
             net_config,
+            child_network: eryx::ChildNetwork::None,
             output_handler,
             _factory_files: factory_files,
             callback_limits,
+            language,
         })
     }
 }
@@ -209,6 +228,9 @@ impl Session {
     /// unlike `Sandbox` which runs each execution in isolation.
     ///
     /// Args:
+    ///     language: The guest language to run: "python" (the default),
+    ///         "javascript" or "shell", as for `Sandbox`.
+    ///     runtime_path: A precompiled runtime (.cwasm), as for `Sandbox`.
     ///     vfs: Optional VfsStorage for persistent file storage.
     ///         Files written to `/data/*` will persist across executions.
     ///     vfs_mount_path: Custom mount path for VFS (default: "/data").
@@ -218,6 +240,10 @@ impl Session {
     ///     max_fuel: Overrides `resource_limits.max_fuel`.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     commands: For the shell only: external commands by name, as for
+    ///         `Sandbox`.
+    ///     child_network: For the shell only, with `network`: its commands'
+    ///         network, as for `Sandbox`.
     ///
     /// Returns:
     ///     A new Session instance ready to execute Python code.
@@ -245,10 +271,12 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
+        language: Option<&str>,
+        runtime_path: Option<PathBuf>,
         vfs: Option<VfsStorage>,
         vfs_mount_path: Option<String>,
         resource_limits: Option<ResourceLimits>,
@@ -261,16 +289,27 @@ impl Session {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        commands: Option<crate::command::Commands<'_>>,
+        child_network: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
-        // Create the PythonExecutor from embedded runtime
-        let mut executor = eryx::PythonExecutor::from_embedded_runtime()
-            .map_err(|e| InitializationError::new_err(format!("failed to create executor: {e}")))?;
+        let language = crate::sandbox::parse_language(language)?;
+        let child_network =
+            crate::sandbox::parse_child_network(language, network.is_some(), child_network)?;
+        // The runtime is checked and loaded the way a Sandbox's is.
+        let (mut builder, source) = crate::sandbox::base_builder(py, language, runtime_path)?;
         if let Some(name) = result_variable {
-            executor = executor.with_result_variable(name);
+            builder = builder.with_result_variable(name);
         }
-        let executor = Arc::new(executor);
+        let executor = crate::sandbox::build_for(
+            py,
+            (builder, source),
+            language,
+            commands,
+            eryx::ChildNetwork::None,
+        )?
+        .executor();
 
         let mut limits = resource_limits.unwrap_or_default();
         if execution_timeout_ms.is_some() {
@@ -294,6 +333,10 @@ impl Session {
             on_stderr,
             None,
         )
+        .map(|session| Self {
+            child_network,
+            ..session
+        })
     }
 
     /// Execute Python code in the session.
@@ -304,6 +347,11 @@ impl Session {
     ///
     /// Args:
     ///     code: Python source code to execute.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     ExecuteResult containing stdout and execution statistics.
@@ -324,15 +372,17 @@ impl Session {
     ///     session.execute('y = 2')
     ///     result = session.execute('print(x + y)')
     ///     print(result.stdout)  # "3"
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute(
         &self,
         py: Python<'_>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ExecuteResult> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let token = call_token(cancel);
-        let run = self.run(code, self.callbacks.clone(), None, token.clone());
+        let run = self.run(code, self.callbacks.clone(), None, allowed, token.clone());
         flatten_run(run_blocking(py, &self.runtime, &token, run)??)
     }
 
@@ -348,6 +398,11 @@ impl Session {
     /// Args:
     ///     code: Python source code to execute.
     ///     cancel: Optional CancelToken; cancelling it stops the run.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// Returns:
     ///     An awaitable resolving to an ExecuteResult.
@@ -355,17 +410,19 @@ impl Session {
     /// Example:
     ///     await session.execute_async('x = 1')
     ///     result = await session.execute_async('print(x)')
-    #[pyo3(signature = (code, *, cancel=None))]
+    #[pyo3(signature = (code, *, cancel=None, allowed_commands=None))]
     fn execute_async<'py>(
         &self,
         py: Python<'py>,
         code: &str,
         cancel: Option<&CancelToken>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let token = call_token(cancel);
         let run_token = token.clone();
         run_async(py, &self.runtime, token, || {
-            let run = self.run(code, self.callbacks.clone(), None, run_token);
+            let run = self.run(code, self.callbacks.clone(), None, allowed, run_token);
             async move { flatten_run(run.await?) }
         })
     }
@@ -378,6 +435,11 @@ impl Session {
     ///     code: Python source code to execute.
     ///     journal: Optional journal from a previous `ReplayOutcome.journal`.
     ///         Trusted input: replayed results are returned verbatim.
+    ///     allowed_commands: For the shell only: the commands this call may
+    ///         run, out of the session's. None (the default) allows them all,
+    ///         [] allows none, and unknown names are ignored. Others exit 127.
+    ///         The shell's grep builtin and nested sh/bash count as
+    ///         commands; other builtins and callbacks aren't affected.
     ///
     /// If the run halts (a callback suspends, or it times out or runs out of
     /// fuel), the session is rolled back to its state from before the call, so
@@ -390,18 +452,26 @@ impl Session {
     ///
     /// Raises:
     ///     ValueError: If `journal` is not a valid journal.
-    #[pyo3(signature = (code, journal=None))]
+    #[pyo3(signature = (code, journal=None, *, allowed_commands=None))]
     fn execute_with_journal(
         &self,
         py: Python<'_>,
         code: &str,
         journal: Option<&Bound<'_, PyAny>>,
+        allowed_commands: Option<Vec<String>>,
     ) -> PyResult<ReplayOutcome> {
+        let allowed = self.allowed_commands(allowed_commands)?;
         let journal = crate::result::journal_from_py(journal)?;
         let state = eryx::ReplayState::shared(code, journal);
         let wrapped = eryx::replay::wrap_callbacks(&self.callbacks, &state);
         let token = call_token(None);
-        let run = self.run(code, Arc::new(wrapped), Some(state.clone()), token.clone());
+        let run = self.run(
+            code,
+            Arc::new(wrapped),
+            Some(state.clone()),
+            allowed,
+            token.clone(),
+        );
         match run_blocking(py, &self.runtime, &token, run)?? {
             Ok(result) => ReplayOutcome::from_state(
                 py,
@@ -473,7 +543,7 @@ impl Session {
 
         Ok(StateSnapshot {
             data: snapshot.to_bytes(),
-            skipped_globals: snapshot.skipped_globals().to_vec(),
+            skipped_globals: snapshot.skipped().to_vec(),
         })
     }
 
@@ -493,8 +563,8 @@ impl Session {
     ///     result = session.execute('print(x)')  # x was in the snapshot
     fn restore_state(&self, py: Python<'_>, snapshot: &Bound<'_, PyAny>) -> PyResult<()> {
         let snapshot = match snapshot.cast::<StateSnapshot>() {
-            Ok(snapshot) => eryx::PythonStateSnapshot::from_bytes(&snapshot.get().data),
-            Err(_) => eryx::PythonStateSnapshot::from_bytes(snapshot.extract::<&[u8]>()?),
+            Ok(snapshot) => eryx::StateSnapshot::from_bytes(&snapshot.get().data),
+            Err(_) => eryx::StateSnapshot::from_bytes(snapshot.extract::<&[u8]>()?),
         }
         .map_err(eryx_error_to_py)?;
         self.queued(py, async |inner| inner.restore_state(&snapshot).await)
@@ -639,12 +709,14 @@ impl Session {
         code: &str,
         callbacks_map: Arc<HashMap<String, Arc<dyn eryx::Callback>>>,
         replay: Option<Arc<Mutex<eryx::ReplayState>>>,
+        allowed_commands: Option<Vec<String>>,
         token: CancellationToken,
     ) -> impl Future<Output = PyResult<RunOutcome>> + Send + 'static {
         let code = code.to_string();
         let session = Arc::clone(&self.inner);
         let output_handler = self.output_handler.clone();
         let net_config = self.net_config.clone();
+        let child_network = self.child_network.clone();
         let callback_limits = self.callback_limits.clone();
         let slot = self.queue_slot();
 
@@ -676,18 +748,25 @@ impl Session {
                 });
 
                 // Spawn network handler if networking is enabled
-                let (net_tx, net_handler) = if let Some(ref config) = net_config {
+                let (net_tx, net_handler, child_net) = if let Some(ref config) = net_config {
                     let (tx, rx) = mpsc::channel::<eryx::NetRequest>(32);
+                    // `network=` was validated at construction; a narrowed
+                    // `child_network=` is first checked here.
                     let manager = eryx::net::ConnectionManager::new(
                         config.clone(),
                         std::collections::HashMap::new(),
-                    );
+                    )
+                    .map_err(eryx::ErrorKind::Initialization)?;
+                    // A shell session's children share its network budget.
+                    let child_net = manager
+                        .child_network(child_network)
+                        .map_err(eryx::ErrorKind::Initialization)?;
                     let task = tokio::spawn(async move {
                         eryx::callback_handler::run_net_handler(rx, manager).await;
                     });
-                    (Some(tx), Some(task))
+                    (Some(tx), Some(task), child_net)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 // Spawn output collector for real-time streaming if handler is configured
@@ -718,9 +797,16 @@ impl Session {
                 if let Some(tx) = net_tx {
                     builder = builder.with_network(tx);
                 }
+                if let Some(net) = child_net {
+                    builder = builder.with_child_network(net);
+                }
 
                 if let Some(tx) = output_tx {
                     builder = builder.with_output_streaming(tx);
+                }
+
+                if let Some(names) = &allowed_commands {
+                    builder = builder.with_allowed_commands(names.iter().cloned());
                 }
 
                 let result = builder.run().await;

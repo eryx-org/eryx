@@ -9,29 +9,36 @@
 //! # One-time setup for crates.io users (downloads + compiles for your platform)
 //! eryx-precompile setup
 //!
+//! # The same for the JavaScript and shell runtimes too (the shell's brings
+//! # its embedded coreutils commands)
+//! eryx-precompile setup --language python --language javascript --language shell
+//!
 //! # Pre-init + compile for Fly.io (x86-64-v3, no AVX-512)
-//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
 //!   --cpu-features x86-64-v3
 //!
 //! # Pre-init only (output pre-initialized .wasm for later compilation)
-//! eryx-precompile compile runtime.wasm -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
+//! eryx-precompile compile -o runtime-preinit.wasm --preinit --stdlib ./python-stdlib --wasm-only
 //!
 //! # AOT compile only (no pre-init, for already pre-initialized .wasm)
-//! eryx-precompile compile runtime-preinit.wasm -o runtime.cwasm --cpu-features x86-64-v3
+//! eryx-precompile compile runtime-preinit.wasm -o runtime-python.cwasm --cpu-features x86-64-v3
 //!
 //! # Cross-compile for aarch64
-//! eryx-precompile compile runtime.wasm -o runtime.cwasm --target aarch64-unknown-linux-gnu
+//! eryx-precompile compile runtime-python.wasm -o runtime-python.cwasm --target aarch64-unknown-linux-gnu
 //!
 //! # Pre-init with packages (wheels, tar.gz, or directories)
-//! eryx-precompile compile runtime.wasm -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-2.2.3-wasi.tar.gz --import numpy
 //!
 //! # Pre-init with site-packages directory
-//! eryx-precompile compile runtime.wasm -o runtime.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o runtime-python.cwasm --preinit --stdlib ./python-stdlib \
 //!   --site-packages ./my-site-packages --import jinja2
 //!
+//! # Check a WASI CLI before registering it as a shell command
+//! eryx-precompile commands inspect rg.wasm
+//!
 //! # Verify packages work (not just import)
-//! eryx-precompile compile runtime.wasm -o numpy.cwasm --preinit --stdlib ./python-stdlib \
+//! eryx-precompile compile -o numpy.cwasm --preinit --stdlib ./python-stdlib \
 //!   --package numpy-wasi.tar.gz --import numpy \
 //!   --verify-code "import numpy; print(numpy.array(\[1,2,3\]).sum())"
 //! ```
@@ -45,10 +52,11 @@ use clap::{Parser, Subcommand};
 use eryx::{CpuFeatureLevel, Session}; // For execute() method and CPU features
 use sha2::{Digest, Sha256};
 
-/// Largest `runtime.wasm` that `setup` will download (the real one is ~50 MB).
+/// Largest component (e.g. `runtime-python.wasm`) that `setup` will download
+/// (the real Python runtime is ~50 MB).
 const MAX_RUNTIME_WASM_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Largest `runtime.wasm.sha256` that `setup` will download.
+/// Largest `runtime-python.wasm.sha256` that `setup` will download.
 const MAX_CHECKSUM_BYTES: u64 = 1024;
 
 /// Pre-compile eryx WASM runtimes for fast sandbox creation.
@@ -62,11 +70,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Download and pre-compile the WASM runtime for your platform.
+    /// Download and pre-compile the WASM runtimes for your platform.
     ///
-    /// Downloads runtime.wasm from the matching GitHub Release, pre-compiles it
+    /// Downloads `runtime-<language>.wasm` (Python's by default; see
+    /// `--language`) from the matching GitHub Release, pre-compiles it
     /// to native code, and caches it in ~/.cache/eryx/ so that `cargo build`
-    /// with `features = ["embedded"]` finds it automatically.
+    /// with `features = ["embedded"]` finds it automatically. The shell's
+    /// also brings `coreutils.wasm`, the commands the `shell` feature embeds.
     ///
     /// For cross-compilation, custom CPU targets, or pre-initialization with
     /// packages, use the `compile` subcommand instead.
@@ -86,6 +96,91 @@ enum Command {
     /// the original packages or flags. pyeryx's saved factories are the same
     /// format and can be rebuilt too.
     Upgrade(UpgradeArgs),
+
+    /// Check shell commands: what a `.wasm` CLI imports, and whether eryx
+    /// can run it.
+    #[command(subcommand)]
+    Commands(CommandsCommand),
+
+    /// Pack environments: installed packages turned into a directory for
+    /// sandboxes to mount. Resolving and fetching packages is eryx-run's (or
+    /// `npm ci`'s) job, not eryx's.
+    #[cfg(feature = "env")]
+    #[command(subcommand)]
+    Env(EnvCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum CommandsCommand {
+    /// Print a command's WASI version, its imports (and whether shell
+    /// children get each), its exports, and whether eryx can run it. Exits 1
+    /// if it can't, and 2 if the file can't be inspected (unreadable,
+    /// precompiled, or not a command component or WASI preview 1 module).
+    Inspect(InspectArgs),
+}
+
+#[derive(Parser, Debug)]
+struct InspectArgs {
+    /// The command component (`.wasm`)
+    file: PathBuf,
+
+    /// Print JSON instead
+    #[arg(long)]
+    json: bool,
+}
+
+#[cfg(feature = "env")]
+#[derive(Subcommand, Debug)]
+enum EnvCommand {
+    /// Pack packages already installed in a directory (`npm ci
+    /// --ignore-scripts --omit=dev`, or pnpm) into an environment.
+    ///
+    /// Bundles them into ES modules in a sandbox that sees only the
+    /// node_modules dirs and the packages they link to, read-only; nothing
+    /// is fetched or run. Package symlinks (pnpm, workspaces, `file:`
+    /// dependencies) must be relative and stay inside `--root`.
+    Pack(EnvPackArgs),
+}
+
+#[cfg(feature = "env")]
+#[derive(Parser, Debug)]
+struct EnvPackArgs {
+    /// The directory holding `node_modules` (and usually `package.json`)
+    tree: PathBuf,
+
+    /// Where to write the environment: replaced if it's one already, filled
+    /// if it's an empty directory, refused otherwise
+    #[arg(short, long)]
+    out: PathBuf,
+
+    /// The environment's name
+    #[arg(long)]
+    name: String,
+
+    /// Where to look for packages up to (default: TREE): a monorepo's root,
+    /// for hoisted node_modules, workspace members or `file:` dependencies
+    /// outside TREE. The bundler still sees only the node_modules dirs and
+    /// the packages they link to (whole), never the rest of ROOT
+    #[arg(long)]
+    root: Option<PathBuf>,
+
+    /// A specifier to make importable (`zod`, `date-fns/format`). Repeat for
+    /// more. Default: TREE/package.json's dependencies, skipping (with a
+    /// warning) any with nothing to import, such as `@types/*`
+    #[arg(long = "entry", value_name = "SPECIFIER")]
+    entries: Vec<String>,
+
+    /// A lockfile to copy into the environment and record (e.g.
+    /// package-lock.json)
+    #[arg(long)]
+    lockfile: Option<PathBuf>,
+
+    /// Let imports of SPECIFIER stay unresolved (left external, with a
+    /// warning) instead of failing the pack, for code that copes without
+    /// it. Repeat for more. Imports a package declares optional are allowed
+    /// already
+    #[arg(long = "allow-unresolved", value_name = "SPECIFIER")]
+    allow_unresolved: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -120,12 +215,45 @@ struct SetupArgs {
     #[arg(long)]
     version: Option<String>,
 
-    /// Expected SHA-256 of runtime.wasm, as hex
+    /// Guest language whose runtime to set up: python, javascript or shell.
+    /// Repeat to set up several. `shell` also sets up the shell's embedded
+    /// commands (`coreutils.wasm`), which eryx's `shell` feature embeds.
+    /// Defaults to python, unless only `--bundler` is given.
+    #[arg(long = "language", value_name = "LANGUAGE", value_parser = parse_language)]
+    languages: Vec<eryx::Language>,
+
+    /// Also set up the JavaScript bundler (`eryx-bundler.wasm`), which eryx's
+    /// `env-pack` feature embeds to pack environments. On its own (no
+    /// `--language`), sets up only the bundler.
+    #[arg(long)]
+    bundler: bool,
+
+    /// Expected SHA-256 of `runtime-<language>.wasm`, as hex
     ///
-    /// By default the checksum comes from the release's `runtime.wasm.sha256`
-    /// asset. Pass a hash here to check the download against it instead.
+    /// By default the checksum comes from the release's
+    /// `runtime-<language>.wasm.sha256` asset. Pass a hash here to check the
+    /// download against it instead (with a single `--language` only). It
+    /// applies to the runtime: the shell's coreutils is always checked against
+    /// its own `.sha256` asset.
     #[arg(long, value_name = "HEX")]
     sha256: Option<String>,
+
+    /// Download the release assets from this URL instead of GitHub, e.g. a
+    /// mirror, a private registry or a local directory served over HTTP:
+    /// `<URL>/<asset>` and `<URL>/<asset>.sha256`.
+    ///
+    /// The URL must serve this eryx version's assets: setup stamps whatever it
+    /// downloads with this binary's version, so an older release's assets
+    /// would be cached as current.
+    ///
+    /// The checksum comes from the same URL, so it catches a corrupted or
+    /// truncated download but not a hostile mirror, which can serve a
+    /// matching checksum for anything. Use only a mirror you trust. `--sha256`
+    /// pins the language runtime only: with `--language shell`, the shell's
+    /// coreutils is always checked against the mirror's own checksum, so it is
+    /// only as trustworthy as the mirror.
+    #[arg(long, value_name = "URL")]
+    release_url: Option<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -135,10 +263,20 @@ struct SetupArgs {
 #[derive(Parser, Debug)]
 struct CompileArgs {
     /// Input WASM file (.wasm or pre-initialized .wasm)
-    #[arg(required = true)]
-    input: PathBuf,
+    ///
+    /// Not needed with `--preinit` for Python, which builds from the
+    /// runtime built into this binary; an input given then is ignored.
+    input: Option<PathBuf>,
 
-    /// Output path (default: input with .cwasm extension, or .wasm for --wasm-only)
+    /// The guest language the component runs (python, javascript or shell).
+    /// Stamped into the output, so loading it for another language fails
+    /// with a clear error. `--preinit` works for Python and JavaScript;
+    /// verification is Python only.
+    #[arg(long, value_parser = parse_language)]
+    language: Option<eryx::Language>,
+
+    /// Output path (default: input with .cwasm extension, or .preinit.wasm
+    /// for --wasm-only; required without an input)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -167,10 +305,11 @@ struct CompileArgs {
     #[arg(short = 'c', long, value_name = "LEVEL")]
     cpu_features: Option<CpuFeatureLevel>,
 
-    /// Pre-initialize Python before compiling
+    /// Pre-initialize the runtime before compiling
     ///
-    /// This runs Python's interpreter initialization and captures the memory state,
-    /// reducing session creation time from ~450ms to ~1-5ms.
+    /// This runs the interpreter's initialization and captures the memory state:
+    /// for Python it cuts session creation from ~450ms to ~1-5ms, for JavaScript
+    /// (`--language javascript`) a stateless execution from ~0.5ms to ~0.12ms.
     #[arg(long)]
     preinit: bool,
 
@@ -216,7 +355,8 @@ struct CompileArgs {
     #[arg(long, conflicts_with_all = ["target", "cpu_features"])]
     wasm_only: bool,
 
-    /// Skip verification step
+    /// Skip verification: running a Python runtime's imports (and
+    /// --verify-code), or loading a command as a shell sandbox would
     #[arg(long)]
     no_verify: bool,
 
@@ -303,41 +443,169 @@ async fn main() -> Result<()> {
         Command::Setup(args) => run_setup(args).await,
         Command::Compile(args) => run_compile(*args).await,
         Command::Upgrade(args) => run_upgrade(args).await,
+        Command::Commands(CommandsCommand::Inspect(args)) => run_inspect(&args),
+        #[cfg(feature = "env")]
+        Command::Env(EnvCommand::Pack(args)) => run_env_pack(args).await,
     }
 }
 
-/// Determine the cache directory for eryx runtime artifacts.
-fn cache_dir() -> Result<PathBuf> {
-    let dir = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        PathBuf::from(xdg).join("eryx")
-    } else {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .context("Could not determine home directory (set HOME or XDG_CACHE_HOME)")?;
-        PathBuf::from(home).join(".cache").join("eryx")
+/// `commands inspect`: exits 1 if eryx can't run the command, and 2 if the
+/// file can't be inspected at all (unreadable, precompiled, or not a
+/// component or WASI preview 1 module), with `{"error": ...}` under --json.
+fn run_inspect(args: &InspectArgs) -> Result<()> {
+    let inspected = std::fs::read(&args.file)
+        .with_context(|| format!("Failed to read {}", args.file.display()))
+        .and_then(|wasm| {
+            if wasm.starts_with(b"\x7fELF") || wasm.starts_with(b"\xcf\xfa\xed\xfe") {
+                anyhow::bail!(
+                    "{} is precompiled: inspect the .wasm it was compiled from",
+                    args.file.display()
+                );
+            }
+            Ok(eryx::Command::inspect(&wasm)?)
+        });
+    let info = match inspected {
+        Ok(info) => info,
+        Err(e) => {
+            if args.json {
+                println!("{}", serde_json::json!({ "error": format!("{e:#}") }));
+            }
+            eprintln!("Error: {e:#}");
+            std::process::exit(2);
+        }
     };
-    Ok(dir)
+    if args.json {
+        let imports: Vec<_> = info
+            .imports
+            .iter()
+            .map(|i| {
+                let (support, why) = match &i.support {
+                    eryx::ImportSupport::Provided => ("provided", None),
+                    eryx::ImportSupport::NeedsSpawn => ("needs-spawn", None),
+                    eryx::ImportSupport::Missing(why) => ("missing", Some(why)),
+                    _ => ("unknown", None),
+                };
+                serde_json::json!({ "name": i.name, "support": support, "why": why })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "preview1": info.preview1,
+            "wasi": info.wasi,
+            "runnable": info.runnable(),
+            "problem": info.problem,
+            "imports": imports,
+            "exports": info.exports,
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        if info.preview1 && info.wasi.is_some() {
+            println!(
+                "{}: a WASI preview 1 module, which eryx adapts into a WASI 0.2 command",
+                args.file.display()
+            );
+        } else if info.preview1 {
+            println!("{}: a WASI preview 1 module", args.file.display());
+        }
+        match info.wasi {
+            Some(version) => println!("{}: WASI {version} command", args.file.display()),
+            None => println!("{}: not a command", args.file.display()),
+        }
+        println!("imports:");
+        for import in &info.imports {
+            println!("  {import}");
+        }
+        println!("exports:");
+        for export in &info.exports {
+            println!("  {export}");
+        }
+        match &info.problem {
+            None => println!("eryx can run it as a shell command"),
+            Some(_)
+                if info
+                    .imports
+                    .iter()
+                    .any(|i| matches!(i.support, eryx::ImportSupport::Missing(_))) =>
+            {
+                println!("eryx can't run it: it imports what children don't get (above)");
+            }
+            Some(problem) => println!("eryx can't run it: {problem}"),
+        }
+    }
+    if !info.runnable() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
-/// Build a short platform target string like "x86_64-linux" or "aarch64-macos".
-fn platform_target() -> String {
-    let arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
-    let os = std::env::consts::OS; // "linux", "macos", "windows"
-    format!("{arch}-{os}")
+#[cfg(feature = "env")]
+async fn run_env_pack(args: EnvPackArgs) -> Result<()> {
+    use eryx::environment::{Language, PackOptions};
+
+    let mut options = PackOptions::new(&args.name, Language::JavaScript);
+    if let Some(root) = args.root {
+        options = options.root(root);
+    }
+    for entry in args.entries {
+        options = options.entry(entry);
+    }
+    if let Some(lockfile) = args.lockfile {
+        options = options.lockfile(lockfile);
+    }
+    for specifier in args.allow_unresolved {
+        options = options.allow_unresolved(specifier);
+    }
+    println!("Packing {:?} from {}", args.name, args.tree.display());
+    let start = Instant::now();
+    let environment = eryx::environment::pack(&args.tree, &args.out, &options).await?;
+    print_environment(&environment, start.elapsed());
+    Ok(())
 }
 
-/// Try to download runtime.wasm from a GitHub Release and verify its SHA-256.
+/// What `env pack` prints about the environment it wrote.
+#[cfg(feature = "env")]
+fn print_environment(environment: &eryx::environment::Environment, elapsed: Duration) {
+    let manifest = environment.manifest();
+    println!(
+        "  {} files, {} bytes, {} in {elapsed:?}",
+        manifest.content.files, manifest.content.bytes, manifest.content.hash,
+    );
+    for (name, path) in environment.exports() {
+        println!("  {name} -> {path}");
+    }
+    for warning in &manifest.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!("Wrote {}", environment.root().display());
+}
+
+/// The cache directory for eryx runtime artifacts: the one eryx reads them
+/// from ([`eryx::cache::setup_dir`]).
+fn cache_dir() -> Result<PathBuf> {
+    eryx::cache::setup_dir().context(
+        "Could not determine the cache directory (set HOME or XDG_CACHE_HOME to an absolute path)",
+    )
+}
+
+fn parse_language(s: &str) -> Result<eryx::Language, String> {
+    s.parse()
+}
+
+/// Try to download `asset` (e.g. `runtime-python.wasm`) from a GitHub
+/// Release, or from `release_url` if given, and verify its SHA-256.
 ///
-/// Tries multiple tag patterns since the naming convention has changed over time:
+/// On GitHub, tries multiple tag patterns since the naming convention has
+/// changed over time:
 /// - `v{version}` (cargo-dist releases, used for v0.3.0 and earlier)
 /// - `eryx-v{version}` (release-plz releases, used from v0.4.0+)
 /// - `eryx-precompile-v{version}` (upload-runtime attaches to whichever release triggers it)
 ///
 /// The expected hash is `expected_sha256` if given, otherwise the
-/// `runtime.wasm.sha256` asset next to `runtime.wasm` in the same release.
-async fn download_runtime_wasm(
+/// `<asset>.sha256` asset next to it in the same release.
+async fn download_asset(
     client: &reqwest::Client,
     version: &str,
+    release_url: Option<&str>,
+    asset: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Vec<u8>> {
     let tag_patterns = [
@@ -345,22 +613,29 @@ async fn download_runtime_wasm(
         format!("eryx-precompile-v{version}"),
         format!("v{version}"),
     ];
+    let release_urls: Vec<String> = match release_url {
+        Some(url) => vec![url.trim_end_matches('/').to_owned()],
+        None => tag_patterns
+            .iter()
+            .map(|tag| format!("https://github.com/eryx-org/eryx/releases/download/{tag}"))
+            .collect(),
+    };
 
     let mut last_error = None;
-    for tag in &tag_patterns {
-        let url = format!("https://github.com/eryx-org/eryx/releases/download/{tag}/runtime.wasm");
+    for release in &release_urls {
+        let url = format!("{release}/{asset}");
         println!("  Trying {url}");
 
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                println!("  Found runtime.wasm in release {tag}");
+                println!("  Found {asset} in {release}");
                 let expected = match expected_sha256 {
                     Some(hex) => parse_sha256(hex)?,
                     None => fetch_sha256(client, &format!("{url}.sha256")).await?,
                 };
                 let bytes = read_capped(resp, MAX_RUNTIME_WASM_BYTES)
                     .await
-                    .context("Failed to download runtime.wasm body")?;
+                    .with_context(|| format!("Failed to download {asset} body"))?;
                 verify_sha256(&bytes, &expected)?;
                 println!("  Verified SHA-256 {}", hex::encode(expected));
                 return Ok(bytes);
@@ -374,8 +649,12 @@ async fn download_runtime_wasm(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No tag patterns to try"))).context(format!(
-        "Could not find runtime.wasm in any GitHub Release for version {version}.\n\
+    let last_error = last_error.unwrap_or_else(|| anyhow::anyhow!("No release URLs to try"));
+    if let Some(url) = release_url {
+        return Err(last_error).context(format!("Could not download {asset} from {url}"));
+    }
+    Err(last_error).context(format!(
+        "Could not find {asset} in any GitHub Release for version {version}.\n\
              Tried tags: {}.\n\
              Check https://github.com/eryx-org/eryx/releases for available versions.",
         tag_patterns.join(", ")
@@ -443,21 +722,14 @@ fn verify_sha256(bytes: &[u8], expected: &[u8; 32]) -> Result<()> {
 
 /// Path of the checksum file kept next to a cached runtime.
 fn checksum_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".sha256");
-    PathBuf::from(name)
+    eryx::cache::setup_checksum_path(path)
 }
 
-/// Whether `path` holds a complete runtime written by `setup`, according to
-/// the checksum file stored next to it.
+/// Whether `path` holds a complete runtime written by `setup` that eryx will
+/// use: matching the checksum file stored next to it, and private, as
+/// eryx's readers check it.
 fn cached_runtime_is_valid(path: &Path) -> bool {
-    let (Ok(bytes), Ok(checksum)) = (
-        std::fs::read(path),
-        std::fs::read_to_string(checksum_path(path)),
-    ) else {
-        return false;
-    };
-    parse_sha256(&checksum).is_ok_and(|expected| verify_sha256(&bytes, &expected).is_ok())
+    eryx::cache::setup_read_verified(path).is_ok()
 }
 
 /// Write `bytes` to `path` through a temp file in the same directory, so
@@ -494,7 +766,10 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     init_tracing(args.verbose);
 
     let own_version = env!("CARGO_PKG_VERSION");
-    let version = args.version.unwrap_or_else(|| own_version.to_string());
+    let version = args
+        .version
+        .clone()
+        .unwrap_or_else(|| own_version.to_string());
     // The runtime is compiled by the eryx inside this binary, and a precompiled
     // runtime only loads in the eryx version that compiled it.
     if version != own_version {
@@ -505,10 +780,9 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
              cargo binstall eryx-precompile@{version}"
         );
     }
-    let target = platform_target();
+    let components = setup_components(&args)?;
+    let target = eryx::cache::setup_target();
     let cache = cache_dir()?;
-    let cwasm_name = format!("runtime-v{version}-{target}.cwasm");
-    let cwasm_path = cache.join(&cwasm_name);
 
     println!("eryx-precompile setup");
     println!("=====================");
@@ -518,24 +792,6 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Cache:    {}", cache.display());
     println!();
 
-    // Check if already cached. A file another user could have written, or one
-    // without a matching checksum (from an interrupted run or an older version
-    // of this tool), is rebuilt.
-    if std::fs::symlink_metadata(&cwasm_path)
-        .is_ok_and(|meta| meta.is_file() && eryx::cache::is_private(&meta))
-        && cached_runtime_is_valid(&cwasm_path)
-    {
-        println!("Already cached: {}", cwasm_path.display());
-        println!();
-        println!(
-            "To force re-download, delete the file and run again:\n  rm {}",
-            cwasm_path.display()
-        );
-        return Ok(());
-    }
-
-    // Step 1: Download runtime.wasm
-    println!("Step 1: Downloading runtime.wasm from GitHub Release...");
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .user_agent(format!("eryx-precompile/{version}"))
@@ -544,7 +800,146 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
-    let wasm_bytes = download_runtime_wasm(&client, &version, args.sha256.as_deref()).await?;
+    for &(component, sha256) in &components {
+        setup_component(
+            &client,
+            &version,
+            &target,
+            &cache,
+            args.release_url.as_deref(),
+            component,
+            sha256,
+        )
+        .await?;
+    }
+
+    // Say what `cargo build` will now find, and with which feature.
+    let set_up: Vec<String> = components.iter().map(|(c, _)| c.to_string()).collect();
+    let feature = if components
+        .iter()
+        .all(|(c, _)| matches!(c, Component::Bundler))
+    {
+        "env-pack"
+    } else {
+        "embedded"
+    };
+    println!(
+        "Setup complete! `cargo build` with `features = [\"{feature}\"]` will now find the cached {}.",
+        set_up.join(", ")
+    );
+    println!();
+    println!(
+        "Tip: for cross-compilation or custom CPU targets, use `eryx-precompile compile` instead."
+    );
+
+    Ok(())
+}
+
+/// What `setup` sets up, each with the `--sha256` to check it against: the
+/// `--language` runtimes (python if neither they nor `--bundler` are given),
+/// the shell's coreutils with the shell, and the bundler.
+fn setup_components(args: &SetupArgs) -> Result<Vec<(Component, Option<&str>)>> {
+    let mut languages = args.languages.clone();
+    if languages.is_empty() && !args.bundler {
+        languages.push(eryx::Language::Python);
+    }
+    if args.sha256.is_some() && languages.len() != 1 {
+        anyhow::bail!("--sha256 checks a single download; pass one --language with it");
+    }
+    let mut components = Vec::new();
+    for language in languages {
+        components.push((Component::Runtime(language), args.sha256.as_deref()));
+        // The `shell` feature turns on `coreutils`, which embeds these.
+        if language == eryx::Language::Shell {
+            components.push((Component::Coreutils, None));
+        }
+    }
+    if args.bundler {
+        components.push((Component::Bundler, None));
+    }
+    Ok(components)
+}
+
+/// A component `setup` downloads, precompiles and caches.
+#[derive(Clone, Copy)]
+enum Component {
+    /// A guest language's runtime, `runtime-<language>.wasm`.
+    Runtime(eryx::Language),
+    /// The shell's embedded commands, `coreutils.wasm` (eryx's `coreutils`
+    /// feature).
+    Coreutils,
+    /// The JavaScript bundler `env pack` runs, `eryx-bundler.wasm`
+    /// (eryx's `env-pack` feature).
+    Bundler,
+}
+
+impl Component {
+    /// The file name, without `.wasm` or `.cwasm`. eryx's build.rs looks for
+    /// `<stem>-v<version>-<arch>-<os>.cwasm` in the cache.
+    fn stem(self) -> String {
+        match self {
+            Self::Runtime(language) => format!("runtime-{language}"),
+            Self::Coreutils => "coreutils".to_owned(),
+            Self::Bundler => "eryx-bundler".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Runtime(language) => write!(f, "{language} runtime"),
+            Self::Coreutils => f.write_str("shell commands (coreutils)"),
+            Self::Bundler => f.write_str("JavaScript bundler"),
+        }
+    }
+}
+
+/// The cache path of `component` for eryx `version` on `target`.
+fn cached_component_path(
+    cache: &Path,
+    component: Component,
+    version: &str,
+    target: &str,
+) -> PathBuf {
+    cache.join(eryx::cache::setup_file_name(
+        &component.stem(),
+        version,
+        target,
+    ))
+}
+
+/// Download, precompile and cache one component.
+async fn setup_component(
+    client: &reqwest::Client,
+    version: &str,
+    target: &str,
+    cache: &Path,
+    release_url: Option<&str>,
+    component: Component,
+    sha256: Option<&str>,
+) -> Result<()> {
+    let asset = format!("{}.wasm", component.stem());
+    let cwasm_path = cached_component_path(cache, component, version, target);
+    println!("Component: {component}");
+
+    // Check if already cached. A file another user could have written, or one
+    // without a matching checksum (from an interrupted run or an older version
+    // of this tool), is rebuilt.
+    if cached_runtime_is_valid(&cwasm_path) {
+        println!("Already cached: {}", cwasm_path.display());
+        println!();
+        println!(
+            "To force re-download, delete the file and run again:\n  rm {}",
+            cwasm_path.display()
+        );
+        println!();
+        return Ok(());
+    }
+
+    // Step 1: Download the component
+    println!("Step 1: Downloading {asset}...");
+    let wasm_bytes = download_asset(client, version, release_url, &asset, sha256).await?;
 
     println!(
         "  Downloaded {} bytes ({:.1} MB)",
@@ -560,9 +955,14 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     // The cache file is named for the host platform only, so compile for
     // exactly that: `precompile` would also honour ERYX_TARGET and friends,
     // and could cache an artifact under a name that does not describe it.
-    let precompiled =
-        eryx::PythonExecutor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
-            .context("Failed to pre-compile runtime.wasm to native code")?;
+    let mut precompiled =
+        eryx::Executor::precompile_with_options(&wasm_bytes, None, CpuFeatureLevel::Native)
+            .with_context(|| format!("Failed to pre-compile {asset} to native code"))?;
+    // Commands aren't runtimes, so coreutils carries no language stamp
+    // (precompiling stamped it with the size of its instances' metadata).
+    if let Component::Runtime(language) = component {
+        eryx::Executor::stamp_language(&mut precompiled, language);
+    }
 
     let elapsed = start.elapsed();
     println!(
@@ -576,19 +976,19 @@ async fn run_setup(args: SetupArgs) -> Result<()> {
     println!("Step 3: Writing to cache...");
     // The library extracts its embedded runtime here too, so create it with
     // the same owner-only permissions it requires.
-    eryx::cache::ensure_private_dir(&cache)
+    eryx::cache::ensure_private_dir(cache)
         .with_context(|| format!("Failed to create cache directory: {}", cache.display()))?;
+    // eryx doesn't read its setup cache through a symlink.
+    if std::fs::symlink_metadata(cache).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        anyhow::bail!(
+            "{} is a symlink, which eryx won't read its cache from: replace it with a \
+             directory, or set XDG_CACHE_HOME",
+            cache.display()
+        );
+    }
     write_cached_runtime(&cwasm_path, &precompiled)?;
     println!("  Saved to: {}", cwasm_path.display());
-
     println!();
-    println!(
-        "Setup complete! `cargo build` with `features = [\"embedded\"]` will now find the cached runtime."
-    );
-    println!();
-    println!(
-        "Tip: for cross-compilation or custom CPU targets, use `eryx-precompile compile` instead."
-    );
 
     Ok(())
 }
@@ -631,16 +1031,28 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     // Set up tracing
     init_tracing(args.verbose);
 
-    // Determine output path
-    let output = args.output.unwrap_or_else(|| {
-        let mut out = args.input.clone();
-        if args.wasm_only {
-            out.set_extension("preinit.wasm");
-        } else {
-            out.set_extension("cwasm");
-        }
-        out
-    });
+    let python = args.language.is_none_or(|l| l == eryx::Language::Python);
+    let javascript = args.language == Some(eryx::Language::JavaScript);
+    if args.preinit && !python && !javascript {
+        anyhow::bail!("--preinit only works for Python and JavaScript runtimes");
+    }
+
+    let python_preinit = args.preinit && python;
+    let (input, output) = resolve_input_and_output(&args, python_preinit)?;
+    if javascript
+        && (args.site_packages.is_some()
+            || !args.packages.is_empty()
+            || !args.imports.is_empty()
+            || args.setup_code.is_some()
+            || args.setup_file.is_some()
+            || args.callbacks.is_some())
+    {
+        anyhow::bail!(
+            "--site-packages, --package, --import, --setup-code, --setup-file and \
+             --callbacks are Python only: JavaScript pre-initialization only creates \
+             the QuickJS engine"
+        );
+    }
 
     // Resolve target triple and CPU feature level from the flags.
     let (target_triple, cpu_features) =
@@ -660,7 +1072,9 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!("eryx-precompile");
     println!("===============");
     println!();
-    println!("Input:   {}", args.input.display());
+    if let Some(input) = &input {
+        println!("Input:   {}", input.display());
+    }
     println!("Output:  {}", output.display());
     if !args.wasm_only {
         if let Some(ref triple) = target_triple {
@@ -669,7 +1083,7 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("CPU:     {cpu_features}");
     }
     let stdlib = resolve_stdlib(args.stdlib.as_deref())?;
-    if args.preinit {
+    if args.preinit && python {
         println!("Stdlib:  {}", stdlib.display());
     }
     if let Some(ref site_pkg) = args.site_packages {
@@ -726,13 +1140,15 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
 
     // Read input WASM
-    let wasm_bytes = std::fs::read(&args.input)
-        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
-    println!(
-        "Input size: {} bytes ({:.1} MB)",
-        wasm_bytes.len(),
-        wasm_bytes.len() as f64 / 1_000_000.0
-    );
+    let (wasm_bytes, command) = match &input {
+        Some(input) => read_input(input, args.language)?,
+        None => (Vec::new(), false),
+    };
+    if command && args.verify_code.is_some() {
+        anyhow::bail!(
+            "--verify-code is Python code, for runtimes: a command is verified by loading it"
+        );
+    }
 
     // What an upgrade needs to rebuild the output; only stored with
     // --preinit, since without it there's nothing to rebuild from.
@@ -743,8 +1159,8 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         .with_target(target_triple.clone())
         .with_cpu_features(Some(cpu_features));
 
-    // Step 1: Pre-initialize Python if requested
-    let packages = if args.preinit {
+    // Step 1: Pre-initialize if requested
+    let packages = if python_preinit {
         Some(process_packages(
             args.site_packages.as_ref(),
             &args.packages,
@@ -754,6 +1170,15 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     };
     let component_bytes = if let Some(packages) = &packages {
         preinitialize(&stdlib, packages, &build_inputs).await?
+    } else if args.preinit {
+        println!();
+        println!("Step 1: Pre-initializing JavaScript...");
+        let start = Instant::now();
+        let bytes = eryx::preinit::pre_initialize_javascript(&wasm_bytes)
+            .await
+            .context("Failed to pre-initialize")?;
+        println!("  Done in {:?}", start.elapsed());
+        bytes
     } else {
         println!();
         println!("Step 1: Skipping pre-initialization (use --preinit to enable)");
@@ -776,12 +1201,17 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
         println!("Step 2: AOT compiling to native code...");
         let start = Instant::now();
 
-        let precompiled = eryx::PythonExecutor::precompile_with_options(
+        let mut precompiled = eryx::Executor::precompile_with_options(
             &component_bytes,
             target_triple.as_deref(),
             cpu_features,
         )
         .context("Failed to AOT compile")?;
+        // Without a language it's usually a command, which precompiling
+        // stamped with the size of its instances' metadata.
+        if let Some(language) = args.language {
+            eryx::Executor::stamp_language(&mut precompiled, language);
+        }
 
         let elapsed = start.elapsed();
         println!(
@@ -808,9 +1238,25 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
             println!();
             if let Some(reason) = unrunnable_reason(target_triple.as_deref(), cpu_features) {
                 println!("Step 4: Skipping verification: {reason}");
+            } else if command {
+                println!("Step 4: Verifying the command loads...");
+                // SAFETY: We just created this file from Executor::precompile()
+                #[allow(unsafe_code)]
+                unsafe { eryx::Command::from_precompiled_file(&output) }
+                    .context("The compiled command doesn't load")?;
+                println!("  Verification passed!");
+            } else if !python {
+                println!("Step 4: Skipping verification: it runs Python code");
             } else {
                 println!("Step 4: Verifying...");
-                verify_cwasm(&output, &stdlib, &args.imports, args.verify_code.as_deref()).await?;
+                verify_cwasm(
+                    &output,
+                    &stdlib,
+                    packages.as_ref().and_then(|p| p.site_packages.as_deref()),
+                    &args.imports,
+                    args.verify_code.as_deref(),
+                )
+                .await?;
                 println!("  Verification passed!");
             }
         }
@@ -819,6 +1265,86 @@ async fn run_compile(args: CompileArgs) -> Result<()> {
     println!();
     println!("Success!");
     Ok(())
+}
+
+/// The input `compile` reads, if any, and the output path.
+///
+/// Python pre-initialization builds from this binary's own runtime, so it
+/// reads no input; everything else compiles the input.
+fn resolve_input_and_output(
+    args: &CompileArgs,
+    python_preinit: bool,
+) -> Result<(Option<PathBuf>, PathBuf)> {
+    let input = match &args.input {
+        Some(input) if python_preinit => {
+            println!(
+                "note: --preinit builds from the Python runtime built into this binary, \
+                 so {} is ignored",
+                input.display()
+            );
+            None
+        }
+        Some(input) => Some(input.clone()),
+        None if python_preinit => None,
+        None => anyhow::bail!(
+            "an input .wasm is required, except with --preinit for Python, which builds \
+             from the runtime built into this binary"
+        ),
+    };
+    let output = match (&args.output, &args.input) {
+        (Some(output), _) => output.clone(),
+        (None, Some(input)) => {
+            let mut out = input.clone();
+            if args.wasm_only {
+                out.set_extension("preinit.wasm");
+            } else {
+                out.set_extension("cwasm");
+            }
+            out
+        }
+        (None, None) => anyhow::bail!("--output is required without an input .wasm"),
+    };
+    Ok((input, output))
+}
+
+/// Read `compile`'s input, and say whether it's a command (a component
+/// exporting `wasi:cli/run`, compiled without `--language`).
+fn read_input(input: &Path, language: Option<eryx::Language>) -> Result<(Vec<u8>, bool)> {
+    let mut wasm_bytes = std::fs::read(input)
+        .with_context(|| format!("Failed to read input file: {}", input.display()))?;
+    // A WASI preview 1 command module becomes a 0.2 command component, as
+    // Command::from_bytes would adapt it.
+    if language.is_none() {
+        let adapted = match eryx::Command::to_component(&wasm_bytes)? {
+            std::borrow::Cow::Owned(component) => Some(component),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        if let Some(component) = adapted {
+            println!("Adapted the WASI preview 1 module into a command component");
+            wasm_bytes = component;
+        }
+    }
+    println!(
+        "Input size: {} bytes ({:.1} MB)",
+        wasm_bytes.len(),
+        wasm_bytes.len() as f64 / 1_000_000.0
+    );
+
+    // A command is a component exporting wasi:cli/run. One that imports what
+    // children don't get would only fail once registered: refuse it now.
+    let command = match eryx::Command::inspect(&wasm_bytes) {
+        Ok(info) if language.is_none() && info.wasi.is_some() => {
+            if let Some(problem) = info.problem {
+                anyhow::bail!(
+                    "{} can't run as a shell command: {problem}",
+                    input.display()
+                );
+            }
+            true
+        }
+        _ => false,
+    };
+    Ok((wasm_bytes, command))
 }
 
 /// The stdlib to pre-initialize and verify with: `stdlib`, or the one
@@ -964,6 +1490,20 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
         println!("Imports: {}", inputs.imports.join(", "));
     }
 
+    if !inputs.callbacks.is_empty() {
+        eprintln!(
+            "warning: {} bakes {} callback declaration(s) recorded by another eryx \
+             version, whose schema JSON may be in a different key order than this \
+             version sends (eryx keeps schema key order since #860). If so, the \
+             upgraded runtime still works, but its sandboxes set callbacks up on every \
+             execution instead of skipping it. Rebuild it with `eryx-precompile compile \
+             --callbacks` from the source declarations to bake them in this version's \
+             order.",
+            args.input.display(),
+            inputs.callbacks.len()
+        );
+    }
+
     let site_packages_dir =
         tempfile::tempdir().context("Failed to create site-packages directory")?;
     eryx::bundle::extract_data_files(&data_files, site_packages_dir.path())
@@ -977,7 +1517,7 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
     println!();
     println!("Step 2: AOT compiling to native code...");
     let start = Instant::now();
-    let precompiled = eryx::PythonExecutor::precompile_with_options(
+    let precompiled = eryx::Executor::precompile_with_options(
         &preinit_bytes,
         target_triple.as_deref(),
         cpu_features,
@@ -1000,7 +1540,14 @@ async fn run_upgrade(args: UpgradeArgs) -> Result<()> {
             println!("Step 4: Skipping verification: {reason}");
         } else {
             println!("Step 4: Verifying...");
-            verify_cwasm(&args.output, &stdlib, &inputs.imports, None).await?;
+            verify_cwasm(
+                &args.output,
+                &stdlib,
+                packages.site_packages.as_deref(),
+                &inputs.imports,
+                None,
+            )
+            .await?;
             println!("  Verification passed!");
         }
     }
@@ -1265,22 +1812,32 @@ fn missing_host_features(_level: CpuFeatureLevel) -> Vec<&'static str> {
 }
 
 /// Verify that the compiled cwasm file works correctly.
+///
+/// `site_packages` is the directory pre-initialization mounted, if any. It's
+/// mounted again here, as a sandbox using the artifact would, so modules the
+/// snapshot didn't import (lazy imports such as `numpy.ma`) still resolve.
 async fn verify_cwasm(
     cwasm_path: &Path,
     stdlib_path: &Path,
+    site_packages: Option<&Path>,
     imports: &[String],
     verify_code: Option<&str>,
 ) -> Result<()> {
     // Create a sandbox using the compiled cwasm
-    // SAFETY: We just created this file from PythonExecutor::precompile()
+    // SAFETY: We just created this file from Executor::precompile()
     #[allow(unsafe_code)]
-    let sandbox = unsafe {
+    let builder = unsafe {
         eryx::Sandbox::builder()
             .with_precompiled_file(cwasm_path)
             .with_python_stdlib(stdlib_path)
-            .build()
-            .context("Failed to create sandbox from compiled cwasm")?
     };
+    let builder = match site_packages {
+        Some(path) => builder.with_site_packages(path),
+        None => builder,
+    };
+    let sandbox = builder
+        .build()
+        .context("Failed to create sandbox from compiled cwasm")?;
 
     // Create a session and run a simple test
     let mut session = eryx::InProcessSession::new(&sandbox)
@@ -1385,11 +1942,151 @@ mod tests {
         Ok(())
     }
 
+    /// Serve `files` (path → body) over HTTP until the test ends, and return
+    /// the base URL. Other paths get a 404.
+    async fn serve_files(files: Vec<(&'static str, Vec<u8>)>) -> Result<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let files = std::sync::Arc::new(files);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let files = files.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let n = stream.read(&mut request).await?;
+                    let request = String::from_utf8_lossy(&request[..n]);
+                    let path = request.split_whitespace().nth(1).unwrap_or_default();
+                    let response = match files.iter().find(|(p, _)| *p == path) {
+                        Some((_, body)) => {
+                            let mut r = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            r.extend_from_slice(body);
+                            r
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec(),
+                    };
+                    stream.write_all(&response).await?;
+                    stream.shutdown().await
+                });
+            }
+        });
+        Ok(format!("http://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn release_url_downloads_and_verifies_an_asset() -> Result<()> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = reqwest::Client::new();
+        let body = b"coreutils component".to_vec();
+        let good = format!("{}  coreutils.wasm\n", hex::encode(Sha256::digest(&body)));
+        let url = serve_files(vec![
+            ("/good/coreutils.wasm", body.clone()),
+            ("/good/coreutils.wasm.sha256", good.into_bytes()),
+            ("/bad/coreutils.wasm", body.clone()),
+            ("/bad/coreutils.wasm.sha256", "00".repeat(32).into_bytes()),
+        ])
+        .await?;
+
+        let got = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/good/")),
+            "coreutils.wasm",
+            None,
+        )
+        .await?;
+        assert_eq!(got, body);
+        let Err(err) = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/bad")),
+            "coreutils.wasm",
+            None,
+        )
+        .await
+        else {
+            anyhow::bail!("the download should fail");
+        };
+        assert!(format!("{err:#}").contains("SHA-256 mismatch"), "{err:#}");
+        let Err(err) = download_asset(
+            &client,
+            "0.0.0",
+            Some(&format!("{url}/missing")),
+            "coreutils.wasm",
+            None,
+        )
+        .await
+        else {
+            anyhow::bail!("the download should fail");
+        };
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        Ok(())
+    }
+
+    /// eryx's build.rs looks for `<stem>-v<version>-<arch>-<os>.cwasm`.
+    #[test]
+    fn cache_names_match_the_build_script() {
+        let cache = Path::new("/cache");
+        assert_eq!(
+            cached_component_path(cache, Component::Coreutils, "0.15.1", "x86_64-linux"),
+            Path::new("/cache/coreutils-v0.15.1-x86_64-linux.cwasm")
+        );
+        assert_eq!(
+            cached_component_path(
+                cache,
+                Component::Runtime(eryx::Language::Shell),
+                "0.15.1",
+                "x86_64-linux"
+            ),
+            Path::new("/cache/runtime-shell-v0.15.1-x86_64-linux.cwasm")
+        );
+        assert_eq!(
+            cached_component_path(cache, Component::Bundler, "0.15.1", "x86_64-linux"),
+            Path::new("/cache/eryx-bundler-v0.15.1-x86_64-linux.cwasm")
+        );
+    }
+
+    /// The components `setup` sets up for its flags, by name.
+    fn components_for(args: &[&str]) -> Result<Vec<String>> {
+        let Command::Setup(setup) = Cli::try_parse_from(args)?.command else {
+            anyhow::bail!("not a setup command");
+        };
+        Ok(setup_components(&setup)?
+            .into_iter()
+            .map(|(component, _)| component.stem())
+            .collect())
+    }
+
+    #[test]
+    fn setup_sets_up_python_unless_only_the_bundler_is_asked_for() -> Result<()> {
+        let setup = ["eryx-precompile", "setup"];
+        assert_eq!(components_for(&setup)?, ["runtime-python"]);
+        assert_eq!(
+            components_for(&[&setup[..], &["--bundler"]].concat())?,
+            ["eryx-bundler"]
+        );
+        assert_eq!(
+            components_for(&[&setup[..], &["--language", "shell", "--bundler"]].concat())?,
+            ["runtime-shell", "coreutils", "eryx-bundler"]
+        );
+        // --sha256 pins one language runtime, so it needs exactly one.
+        assert!(components_for(&[&setup[..], &["--bundler", "--sha256", "00"]].concat()).is_err());
+        Ok(())
+    }
+
     #[test]
     fn checksum_parsing_accepts_sha256sum_output() -> Result<()> {
         let hex = "ab".repeat(32);
         assert_eq!(parse_sha256(&hex)?, [0xab; 32]);
-        assert_eq!(parse_sha256(&format!("{hex}  runtime.wasm\n"))?, [0xab; 32]);
+        assert_eq!(
+            parse_sha256(&format!("{hex}  runtime-python.wasm\n"))?,
+            [0xab; 32]
+        );
         assert!(parse_sha256(&hex[..62]).is_err());
         assert!(parse_sha256("").is_err());
         Ok(())
@@ -1405,7 +2102,7 @@ mod tests {
     #[test]
     fn cached_runtime_must_match_its_checksum() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("runtime.cwasm");
+        let path = dir.path().join("runtime-python.cwasm");
         assert!(!cached_runtime_is_valid(&path));
 
         write_cached_runtime(&path, b"compiled runtime")?;
@@ -1422,6 +2119,50 @@ mod tests {
         Ok(())
     }
 
+    /// What `setup` writes is where eryx looks: each component, cached under
+    /// `cache_dir()` for this version and platform, is found by eryx's
+    /// readers, and the bundler passes their checksum check.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    #[test]
+    fn eryx_finds_what_setup_caches() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        // SAFETY: nextest runs each test in its own process, so nothing else
+        // reads the environment concurrently.
+        unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+        let cache = cache_dir()?;
+        eryx::cache::ensure_private_dir(&cache)?;
+        let version = env!("CARGO_PKG_VERSION");
+        let target = eryx::cache::setup_target();
+        for component in [
+            Component::Runtime(eryx::Language::Shell),
+            Component::Coreutils,
+            Component::Bundler,
+        ] {
+            let path = cached_component_path(&cache, component, version, &target);
+            write_cached_runtime(&path, component.stem().as_bytes())?;
+        }
+
+        let path = |component| cached_component_path(&cache, component, version, &target);
+        assert_eq!(
+            eryx::cache::setup_runtime(eryx::Language::Shell),
+            Some(path(Component::Runtime(eryx::Language::Shell)))
+        );
+        assert_eq!(
+            eryx::cache::setup_coreutils(),
+            Some(path(Component::Coreutils))
+        );
+        assert_eq!(
+            eryx::cache::setup_bundler(),
+            Some((path(Component::Bundler), Ok(b"eryx-bundler".to_vec())))
+        );
+
+        // A bundler that no longer matches its checksum is refused.
+        std::fs::write(path(Component::Bundler), b"tampered")?;
+        assert!(matches!(eryx::cache::setup_bundler(), Some((_, Err(_)))));
+        Ok(())
+    }
+
     #[test]
     fn package_flags_require_preinit() {
         for flag in [
@@ -1429,7 +2170,7 @@ mod tests {
             ["--package", "pkg.whl"],
             ["--import", "numpy"],
         ] {
-            let base = ["eryx-precompile", "compile", "runtime.wasm"];
+            let base = ["eryx-precompile", "compile", "runtime-python.wasm"];
             assert!(Cli::try_parse_from(base.iter().chain(&flag)).is_err());
             assert!(
                 Cli::try_parse_from(
@@ -1440,6 +2181,39 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn python_preinit_needs_no_input() -> Result<()> {
+        let resolve = |args: &[&str]| -> Result<(Option<PathBuf>, PathBuf)> {
+            let Command::Compile(args) =
+                Cli::try_parse_from(["eryx-precompile", "compile"].iter().chain(args))?.command
+            else {
+                anyhow::bail!("not a compile command");
+            };
+            let python_preinit =
+                args.preinit && args.language.is_none_or(|l| l == eryx::Language::Python);
+            resolve_input_and_output(&args, python_preinit)
+        };
+
+        assert_eq!(
+            resolve(&["--preinit", "-o", "out.cwasm"])?,
+            (None, PathBuf::from("out.cwasm"))
+        );
+        // eryx-run passes /dev/null, which is ignored.
+        assert_eq!(
+            resolve(&["/dev/null", "--preinit", "-o", "out.cwasm"])?,
+            (None, PathBuf::from("out.cwasm"))
+        );
+        assert_eq!(
+            resolve(&["rg.wasm"])?,
+            (Some(PathBuf::from("rg.wasm")), PathBuf::from("rg.cwasm"))
+        );
+        assert!(resolve(&["--preinit"]).is_err());
+        assert!(resolve(&["-o", "out.cwasm"]).is_err());
+        // JavaScript pre-initialization starts from the input.
+        assert!(resolve(&["--language", "javascript", "--preinit", "-o", "out.cwasm"]).is_err());
+        Ok(())
     }
 
     #[test]

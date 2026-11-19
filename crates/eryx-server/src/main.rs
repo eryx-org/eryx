@@ -68,7 +68,20 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0:9090", env = "ERYX_METRICS_ADDR")]
     metrics_addr: SocketAddr,
 
-    /// Path to a pre-compiled runtime (.cwasm) to use instead of the embedded runtime.
+    /// Guest languages to accept, comma-separated; a request for any other
+    /// is rejected. Each gets its own sandbox pool, sized by the pool flags:
+    /// Python's is created at startup, the others' on their first request.
+    /// Must include python.
+    #[arg(
+        long,
+        env = "ERYX_LANGUAGES",
+        value_delimiter = ',',
+        default_value = "python,javascript,shell",
+        value_parser = |s: &str| s.parse::<eryx::Language>()
+    )]
+    languages: Vec<eryx::Language>,
+
+    /// Path to a pre-compiled Python runtime (.cwasm) to use instead of the embedded runtime.
     ///
     /// This allows using a custom runtime with additional packages (e.g. numpy, polars)
     /// baked in via `eryx-precompile`.
@@ -143,6 +156,20 @@ struct Args {
     #[arg(long, env = "ERYX_MAX_OPEN_HOST_FILES_TOTAL")]
     max_open_host_files_total: Option<usize>,
 
+    /// Ceiling on `resource_limits.max_child_host_bytes`: the most host
+    /// memory a shell execution's child processes' arguments and
+    /// environments may hold at once. Also the value for requests that set
+    /// none.
+    #[arg(long, default_value_t = 64 * 1024 * 1024, env = "ERYX_MAX_CHILD_HOST_BYTES")]
+    max_child_host_bytes: u64,
+
+    /// Ceiling on `resource_limits.max_child_memory_bytes`: the most memory
+    /// a shell execution's running child processes may hold together, on top
+    /// of its own `--max-memory-bytes`. Also the value for requests that set
+    /// none. Raising it raises the host memory one execution can use.
+    #[arg(long, default_value_t = 256 * 1024 * 1024, env = "ERYX_MAX_CHILD_MEMORY_BYTES")]
+    max_child_memory_bytes: u64,
+
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
     /// requests are rejected and secrets are only substituted over TLS.
@@ -168,6 +195,195 @@ struct Args {
     /// rejected. Requires `--tls-cert`/`--tls-key`.
     #[arg(long, env = "ERYX_TLS_CLIENT_CA", requires = "tls_cert")]
     tls_client_ca: Option<PathBuf>,
+
+    /// An external command for the shell, `NAME=PATH[@sha256:<hex>]`; repeat
+    /// for more. `NAME1,NAME2=PATH` registers one multicall binary (e.g.
+    /// busybox-style) under several names, compiled once. PATH is a WASI 0.2
+    /// or 0.3 command component or a WASI preview 1 command module (`.wasm`),
+    /// or one precompiled by this eryx version's `eryx-precompile compile`
+    /// (`.cwasm`, trusted like --runtime-cwasm). A name overrides the embedded
+    /// coreutils tool of the same name. A `.wasm` is compiled once into
+    /// eryx's cache directory, keyed by its content, so a restart reuses it.
+    ///
+    /// `@sha256:<hex>` pins a `.wasm` to that digest: startup fails if the
+    /// file differs. In the environment, separate entries with `;`; empty
+    /// entries, and an empty ERYX_SHELL_COMMANDS, mean no commands.
+    #[arg(
+        long = "shell-command",
+        env = "ERYX_SHELL_COMMANDS",
+        value_name = "NAME=PATH[@sha256:<hex>]",
+        value_delimiter = ';'
+    )]
+    shell_commands: Vec<String>,
+
+    /// Let a --shell-command NAME open blind CONNECT tunnels through the
+    /// child proxy, for protocols it can't inspect (e.g. git over SSH):
+    /// requests through a tunnel get no secret substitution and no HTTP
+    /// rules, and hosts with rules are refused one. Repeat for more names; in
+    /// the environment, separate them with `,`. Only matters for requests
+    /// that give children network (NetworkConfig.child_network).
+    #[arg(
+        long = "shell-command-tunnels",
+        env = "ERYX_SHELL_COMMAND_TUNNELS",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
+    shell_command_tunnels: Vec<String>,
+
+    /// Let a --shell-command NAME run commands itself (through
+    /// `eryx:process/run`), as git runs `git` for `stash`: nested commands
+    /// share the execution's commands, network and limits. Repeat for more
+    /// names; in the environment, separate them with `,`. A request can turn
+    /// it off for one execution (ExecuteRequest.commands), not on.
+    #[arg(
+        long = "shell-command-spawn",
+        env = "ERYX_SHELL_COMMAND_SPAWN",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
+    shell_command_spawn: Vec<String>,
+
+    /// Leave out the shell's embedded commands (coreutils: cat, head, ls,
+    /// ..., and sh/bash for commands that spawn them), so it runs only the
+    /// --shell-command commands (and python, with --shell-python).
+    #[arg(long, env = "ERYX_NO_SHELL_EMBEDDED_COMMANDS")]
+    no_shell_embedded_commands: bool,
+
+    /// Let the shell run Python as `python` and `python3` (`python3 -c ...`,
+    /// `python3 script.py`, `... | python3`): a fresh interpreter per run,
+    /// from the server's Python runtime (--runtime-cwasm and --stdlib, or the
+    /// embedded one), sharing the script's files, env and limits. It has no
+    /// callbacks or network.
+    #[arg(long, env = "ERYX_SHELL_PYTHON")]
+    shell_python: bool,
+
+    /// Let the shell run JavaScript as `node` and `js` (`node -e ...`,
+    /// `node script.js`, `... | node`): a fresh QuickJS instance per run,
+    /// from the embedded JavaScript runtime, with Node's `process`,
+    /// `require` and `node:fs` on the script's files, env and limits. It has
+    /// no callbacks or network.
+    #[arg(long, env = "ERYX_SHELL_NODE")]
+    shell_node: bool,
+}
+
+/// One `--shell-command`: the names to register, the component's path, and
+/// the digest it's pinned to, if any.
+#[derive(Debug, Clone)]
+struct ShellCommand {
+    names: Vec<String>,
+    path: PathBuf,
+    /// `sha256:<hex>`, from `PATH@sha256:<hex>`.
+    sha256: Option<String>,
+}
+
+/// Parse the `--shell-command` values, skipping empty ones, so an empty
+/// ERYX_SHELL_COMMANDS (or a stray `;`) means no commands.
+fn parse_shell_commands(values: &[String]) -> Result<Vec<ShellCommand>, String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(parse_shell_command)
+        .collect()
+}
+
+fn parse_shell_command(value: &str) -> Result<ShellCommand, String> {
+    let invalid =
+        || format!("--shell-command: expected NAME[,NAME...]=PATH[@sha256:<hex>], got {value:?}");
+    let (names, path) = value.split_once('=').ok_or_else(invalid)?;
+    let names: Vec<String> = names.split(',').map(|n| n.trim().to_owned()).collect();
+    // The pin is the last `@sha256:`, so a path may contain `@`.
+    let (path, sha256) = match path.rsplit_once("@sha256:") {
+        Some((path, hex)) => (path, Some(format!("sha256:{hex}"))),
+        None => (path, None),
+    };
+    if names.iter().any(String::is_empty) || path.is_empty() {
+        return Err(invalid());
+    }
+    Ok(ShellCommand {
+        names,
+        path: path.into(),
+        sha256,
+    })
+}
+
+/// Load each `--shell-command`, so a bad one fails startup rather than the
+/// first shell request. The names in `tunnels` (`--shell-command-tunnels`)
+/// get [`allow_tunnels`](eryx::Command::allow_tunnels), and those in `spawn`
+/// (`--shell-command-spawn`) [`allow_spawn`](eryx::Command::allow_spawn);
+/// each must be one of the commands' names.
+fn load_shell_commands(
+    commands: &[ShellCommand],
+    tunnels: &[String],
+    spawn: &[String],
+) -> Result<Vec<(Vec<String>, eryx::Command)>, String> {
+    for (flag, names) in [("tunnels", tunnels), ("spawn", spawn)] {
+        if let Some(name) = names
+            .iter()
+            .find(|name| !commands.iter().any(|c| c.names.contains(name)))
+        {
+            return Err(format!(
+                "--shell-command-{flag} {name}: not a --shell-command name"
+            ));
+        }
+    }
+    let mut loaded = Vec::new();
+    for ShellCommand {
+        names,
+        path,
+        sha256,
+    } in commands
+    {
+        let flag = || {
+            let pin = sha256
+                .as_deref()
+                .map(|d| format!("@{d}"))
+                .unwrap_or_default();
+            format!(
+                "--shell-command {}={}{pin}",
+                names.join(","),
+                path.display()
+            )
+        };
+        let precompiled = path.extension().is_some_and(|ext| ext == "cwasm");
+        let command = match (precompiled, sha256) {
+            // A pin is for the `.wasm` eryx compiles itself; a `.cwasm` is
+            // trusted as a whole, like --runtime-cwasm.
+            (true, Some(_)) => {
+                return Err(format!(
+                    "{}: only a .wasm can be pinned; pin the .wasm and let eryx compile it",
+                    flag()
+                ));
+            }
+            // SAFETY: the operator's own file, trusted as --runtime-cwasm is.
+            #[allow(unsafe_code)]
+            (true, None) => unsafe { eryx::Command::from_precompiled_file(path) },
+            // Pinned or not, compiled once into eryx's cache, which is keyed
+            // by the file's content, so a changed file is compiled afresh.
+            (false, sha256) => eryx::Command::load_cached(path, sha256.as_deref()),
+        };
+        let command = command.map_err(|e| format!("{}: {e}", flag()))?;
+        // One registration per combination of grants among its names.
+        for grants in [(true, true), (true, false), (false, true), (false, false)] {
+            let granted: Vec<String> = names
+                .iter()
+                .filter(|name| (tunnels.contains(name), spawn.contains(name)) == grants)
+                .cloned()
+                .collect();
+            if granted.is_empty() {
+                continue;
+            }
+            let mut command = command.clone();
+            if grants.0 {
+                command = command.allow_tunnels();
+            }
+            if grants.1 {
+                command = command.allow_spawn();
+            }
+            loaded.push((granted, command));
+        }
+    }
+    Ok(loaded)
 }
 
 /// Build a [`ServerTlsConfig`] from the configured cert/key/CA paths.
@@ -199,26 +415,111 @@ fn build_tls_config(args: &Args) -> Result<Option<ServerTlsConfig>, Box<dyn std:
     Ok(Some(tls))
 }
 
+/// The shell's external commands: the --shell-command ones (and python),
+/// and whether to keep the embedded ones.
+#[derive(Clone)]
+struct ShellCommands {
+    commands: Vec<(Vec<String>, eryx::Command)>,
+    embedded: bool,
+}
+
+/// `python`/`python3` for the shell (--shell-python): the server's Python
+/// runtime, `runtime_cwasm` with `stdlib` (the embedded stdlib if `None`), or
+/// the embedded one.
+fn python_command(
+    runtime_cwasm: Option<&std::path::Path>,
+    stdlib: Option<&std::path::Path>,
+) -> Result<eryx::Command, String> {
+    let fail = |e: eryx::Error| format!("--shell-python: {e}");
+    match runtime_cwasm {
+        Some(path) => {
+            let stdlib = match stdlib {
+                Some(stdlib) => stdlib.to_path_buf(),
+                None => eryx::embedded::EmbeddedResources::get()
+                    .map_err(fail)?
+                    .stdlib()
+                    .to_path_buf(),
+            };
+            // SAFETY: --runtime-cwasm is trusted, as for the Python pool.
+            unsafe {
+                eryx::Command::guest_from_precompiled_file(
+                    eryx::Language::Python,
+                    path,
+                    Some(stdlib),
+                )
+            }
+            .map_err(fail)
+        }
+        None => eryx::Command::guest(eryx::Language::Python).map_err(fail),
+    }
+}
+
+/// `node`/`js` for the shell (--shell-node): the embedded JavaScript runtime.
+fn node_command() -> Result<eryx::Command, String> {
+    #[cfg(feature = "javascript")]
+    return eryx::Command::guest(eryx::Language::JavaScript)
+        .map_err(|e| format!("--shell-node: {e}"));
+    #[cfg(not(feature = "javascript"))]
+    Err("--shell-node needs the `javascript` cargo feature".to_owned())
+}
+
+/// Build the sandbox pool for a language other than Python, from its
+/// embedded runtime.
+async fn create_language_pool(
+    language: eryx::Language,
+    config: PoolConfig,
+    shell: ShellCommands,
+) -> Result<SandboxPool, eryx::PoolError> {
+    match language {
+        #[cfg(feature = "javascript")]
+        eryx::Language::JavaScript => {
+            SandboxPool::new(Sandbox::embedded().javascript(), config).await
+        }
+        #[cfg(feature = "shell")]
+        eryx::Language::Shell => {
+            let mut builder = Sandbox::embedded().shell();
+            if !shell.embedded {
+                builder = builder.without_embedded_commands();
+            }
+            for (names, command) in shell.commands {
+                builder = builder.with_commands(names, command);
+            }
+            SandboxPool::new(builder, config).await
+        }
+        other => {
+            let _ = (config, shell);
+            Err(eryx::PoolError::Creation(format!(
+                "this server has no {other} runtime"
+            )))
+        }
+    }
+}
+
 /// Spawn a background task that periodically evicts idle sandboxes and
 /// records pool gauge metrics.
-fn spawn_pool_maintenance(pool: Arc<SandboxPool>) {
+fn spawn_pool_maintenance(language: eryx::Language, pool: Arc<SandboxPool>) {
     tokio::spawn(async move {
+        let language = language.as_str();
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
             let evicted = pool.evict_idle();
             if evicted > 0 {
-                tracing::debug!(evicted, "evicted idle sandboxes");
+                tracing::debug!(evicted, language, "evicted idle sandboxes");
             }
             let stats = pool.stats();
-            metrics::gauge!("eryx_sandbox_pool_in_use").set(stats.in_use as f64);
-            metrics::gauge!("eryx_sandbox_pool_available").set(stats.available as f64);
-            metrics::gauge!("eryx_sandbox_pool_total").set(stats.total as f64);
-            metrics::gauge!("eryx_sandbox_pool_max_size").set(pool.config().max_size as f64);
-            metrics::counter!("eryx_sandbox_pool_acquisitions_total")
+            let labels = [("language", language)];
+            metrics::gauge!("eryx_sandbox_pool_in_use", &labels).set(stats.in_use as f64);
+            metrics::gauge!("eryx_sandbox_pool_available", &labels).set(stats.available as f64);
+            metrics::gauge!("eryx_sandbox_pool_total", &labels).set(stats.total as f64);
+            metrics::gauge!("eryx_sandbox_pool_max_size", &labels)
+                .set(pool.config().max_size as f64);
+            metrics::counter!("eryx_sandbox_pool_acquisitions_total", &labels)
                 .absolute(stats.total_acquisitions);
-            metrics::counter!("eryx_sandbox_pool_creations_total").absolute(stats.total_creations);
-            metrics::counter!("eryx_sandbox_pool_wait_count_total").absolute(stats.wait_count);
+            metrics::counter!("eryx_sandbox_pool_creations_total", &labels)
+                .absolute(stats.total_creations);
+            metrics::counter!("eryx_sandbox_pool_wait_count_total", &labels)
+                .absolute(stats.wait_count);
         }
     });
 }
@@ -287,6 +588,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("--max-io-timeout-ms", args.max_io_timeout_ms),
         ("--max-output-bytes", args.max_output_bytes as u64),
         ("--max-open-host-files", args.max_open_host_files as u64),
+        ("--max-child-host-bytes", args.max_child_host_bytes),
+        ("--max-child-memory-bytes", args.max_child_memory_bytes),
         (
             "--max-open-host-files-total",
             args.max_open_host_files_total.unwrap_or(1) as u64,
@@ -340,38 +643,117 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     tracing::info!(%args.metrics_addr, "prometheus metrics endpoint started");
 
-    let builder = match (&args.runtime_cwasm, &args.stdlib) {
-        (Some(cwasm_path), Some(stdlib_path)) => {
+    // Python's pool is built and prewarmed up front, as before; the other
+    // languages' on their first request. --runtime-cwasm and --stdlib
+    // configure Python; the other languages run their embedded runtimes.
+    let python_builder = match (&args.runtime_cwasm, &args.stdlib) {
+        // SAFETY: The user is responsible for providing a trusted .cwasm file
+        // that was precompiled with a compatible engine configuration.
+        (Some(cwasm_path), Some(stdlib_path)) => unsafe {
             // Explicit stdlib path — no embedded feature needed for stdlib
-            // SAFETY: The user is responsible for providing a trusted .cwasm file
-            // that was precompiled with a compatible engine configuration.
-            unsafe {
-                Sandbox::builder()
-                    .with_precompiled_file(cwasm_path)
-                    .with_python_stdlib(stdlib_path)
-            }
-        }
-        (Some(cwasm_path), None) => {
+            Sandbox::builder()
+                .with_precompiled_file(cwasm_path)
+                .with_python_stdlib(stdlib_path)
+        },
+        // SAFETY: as above.
+        (Some(cwasm_path), None) => unsafe {
             // Custom runtime with embedded stdlib
-            // SAFETY: The user is responsible for providing a trusted .cwasm file
-            // that was precompiled with a compatible engine configuration.
-            unsafe {
-                Sandbox::builder()
-                    .with_precompiled_file(cwasm_path)
-                    .with_embedded_stdlib()?
-            }
-        }
+            Sandbox::builder()
+                .with_precompiled_file(cwasm_path)
+                .with_embedded_stdlib()?
+        },
         (None, Some(_)) => {
             return Err("--stdlib requires --runtime-cwasm".into());
         }
         (None, None) => Sandbox::embedded(),
     };
-
-    let pool = SandboxPool::new(builder, pool_config).await?;
-    let pool = Arc::new(pool);
-
+    if !args.languages.contains(&eryx::Language::Python) {
+        return Err("--languages must include python".into());
+    }
+    let python_pool = Arc::new(SandboxPool::new(python_builder, pool_config.clone()).await?);
     // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
-    spawn_pool_maintenance(Arc::clone(&pool));
+    spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
+
+    let mut commands = load_shell_commands(
+        &parse_shell_commands(&args.shell_commands)?,
+        &args.shell_command_tunnels,
+        &args.shell_command_spawn,
+    )?;
+    if args.shell_python {
+        commands.push((
+            vec!["python".to_owned(), "python3".to_owned()],
+            python_command(args.runtime_cwasm.as_deref(), args.stdlib.as_deref())?,
+        ));
+    }
+    if args.shell_node {
+        commands.push((vec!["node".to_owned(), "js".to_owned()], node_command()?));
+    }
+    let shell = ShellCommands {
+        commands,
+        embedded: !args.no_shell_embedded_commands,
+    };
+    // What requests' ExecuteRequest.commands may name.
+    let shell_command_names: Vec<String> = shell
+        .commands
+        .iter()
+        .flat_map(|(names, _)| names.iter().cloned())
+        .chain(
+            shell
+                .embedded
+                // With the embedded shell as `sh`/`bash`, for commands that
+                // spawn them.
+                .then(|| {
+                    eryx::embedded::COREUTILS_TOOLS
+                        .iter()
+                        .chain(&["sh", "bash"])
+                })
+                .into_iter()
+                .flatten()
+                .map(|tool| (*tool).to_owned()),
+        )
+        .collect();
+    let shell_configured = !shell.commands.is_empty() || !shell.embedded;
+    if shell_configured && !cfg!(feature = "shell") {
+        return Err(
+            "--shell-command, --shell-python, --shell-node and --no-shell-embedded-commands need \
+             the `shell` cargo feature"
+                .into(),
+        );
+    }
+    if shell_configured && !args.languages.contains(&eryx::Language::Shell) {
+        return Err(
+            "--shell-command, --shell-python, --shell-node and --no-shell-embedded-commands need \
+             the shell in --languages"
+                .into(),
+        );
+    }
+    let mut lazy_pools = Vec::new();
+    for &language in &args.languages {
+        let built_in = match language {
+            eryx::Language::Python => continue,
+            eryx::Language::JavaScript => cfg!(feature = "javascript"),
+            eryx::Language::Shell => cfg!(feature = "shell"),
+            _ => false,
+        };
+        if !built_in {
+            tracing::info!(%language, "not serving {language}: built without its cargo feature");
+            continue;
+        }
+        let config = pool_config.clone();
+        let shell = shell.clone();
+        let create: eryx_server::service::PoolFactory = Arc::new(move || {
+            let config = config.clone();
+            let shell = shell.clone();
+            Box::pin(async move {
+                tracing::info!(%language, "creating sandbox pool on first request");
+                let pool = create_language_pool(language, config, shell).await?;
+                let pool = Arc::new(pool);
+                spawn_pool_maintenance(language, Arc::clone(&pool));
+                Ok(pool)
+            })
+        });
+        lazy_pools.push((language, create));
+    }
 
     let signer = match &args.journal_signing_key {
         Some(hex_key) => {
@@ -404,6 +786,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_io_timeout: Duration::from_millis(args.max_io_timeout_ms),
         max_output_bytes: args.max_output_bytes,
         max_open_host_files: args.max_open_host_files,
+        max_child_host_bytes: args.max_child_host_bytes,
+        max_child_memory_bytes: args.max_child_memory_bytes,
         allow_plaintext_secrets: args.allow_plaintext_secrets,
     };
     if let Some(total) = args.max_open_host_files_total {
@@ -414,9 +798,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal_ttl_secs = args.journal_ttl_secs,
         "request ceilings"
     );
-    let service = EryxService::with_signer(pool, signer)
+    let service = lazy_pools.into_iter().fold(
+        EryxService::with_signer(python_pool, signer),
+        |service, (language, create)| service.with_lazy_pool(language, create),
+    );
+    let service = service
         .with_max_message_size(args.max_message_size)
         .with_limits(limits)
+        .with_shell_commands(shell_command_names)
         .with_journal_ttl(Duration::from_secs(args.journal_ttl_secs));
 
     // The overall ("") status starts as SERVING; the pool is already warm here.
@@ -475,4 +864,299 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_command_flags_parse() {
+        let one = parse_shell_command("rg=/opt/rg.wasm").unwrap();
+        assert_eq!(one.names, ["rg"]);
+        assert_eq!(one.path, PathBuf::from("/opt/rg.wasm"));
+        assert_eq!(one.sha256, None);
+        let pinned = parse_shell_command("rg=/opt/a@b/rg.wasm@sha256:00ff").unwrap();
+        assert_eq!(pinned.path, PathBuf::from("/opt/a@b/rg.wasm"));
+        assert_eq!(pinned.sha256.as_deref(), Some("sha256:00ff"));
+        let multi = parse_shell_command("cat,head=/opt/coreutils.cwasm").unwrap();
+        assert_eq!(multi.names, ["cat", "head"]);
+
+        for bad in [
+            "rg",
+            "=/opt/rg.wasm",
+            "rg=",
+            "a,,b=/x.wasm",
+            "rg=@sha256:00",
+        ] {
+            assert!(parse_shell_command(bad).is_err(), "{bad}");
+        }
+
+        let args = Args::try_parse_from([
+            "eryx-server",
+            "--shell-command",
+            "rg=/opt/rg.wasm",
+            "--shell-command",
+            "cat,head=/opt/coreutils.cwasm",
+            "--no-shell-embedded-commands",
+            "--shell-python",
+            "--shell-node",
+        ])
+        .unwrap();
+        assert_eq!(parse_shell_commands(&args.shell_commands).unwrap().len(), 2);
+        assert!(args.no_shell_embedded_commands);
+        assert!(args.shell_python);
+        assert!(args.shell_node);
+    }
+
+    /// `--shell-command` registers a command (here coreutils' multicall
+    /// binary, as `cat` only) and `--no-shell-embedded-commands` drops the
+    /// rest; `--shell-python` adds python.
+    #[cfg(feature = "shell")]
+    #[tokio::test]
+    async fn shell_command_flags_shape_the_shell_pool() {
+        let coreutils =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm");
+        let shell = ShellCommands {
+            commands: load_shell_commands(
+                &[ShellCommand {
+                    names: vec!["cat".into()],
+                    path: coreutils,
+                    sha256: None,
+                }],
+                &[],
+                &[],
+            )
+            .unwrap(),
+            embedded: false,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("echo hi | cat; sort; echo \"sort=$?\"")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "hi\nsort=127\n");
+
+        // With the default flags, the embedded coreutils are all there.
+        let shell = ShellCommands {
+            commands: Vec::new(),
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox.execute("printf 'b\\na\\n' | sort").await.unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "a\nb\n");
+    }
+
+    /// `--shell-python` registers the embedded Python as `python` and
+    /// `python3`.
+    #[cfg(feature = "shell")]
+    #[tokio::test]
+    async fn shell_python_runs_python_in_the_shell() {
+        let shell = ShellCommands {
+            commands: vec![(
+                vec!["python".into(), "python3".into()],
+                python_command(None, None).unwrap(),
+            )],
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("seq 3 | python3 -c 'import sys; print(sum(map(int, sys.stdin)))'")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "6\n");
+    }
+
+    /// `--shell-node` registers the embedded JavaScript as `node` and `js`.
+    #[cfg(all(feature = "shell", feature = "javascript"))]
+    #[tokio::test]
+    async fn shell_node_runs_javascript_in_the_shell() {
+        let shell = ShellCommands {
+            commands: vec![(vec!["node".into(), "js".into()], node_command().unwrap())],
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("seq 3 | node -e 'console.log(require(\"fs\").readFileSync(0).length)'")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "6\n");
+    }
+
+    /// `--shell-command-tunnels` splits a multicall entry by name, and must
+    /// name a `--shell-command`.
+    #[test]
+    fn shell_command_tunnels_name_registered_commands() {
+        let coreutils = ShellCommand {
+            names: vec!["cat".into(), "head".into()],
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eryx-runtime/coreutils.cwasm"),
+            sha256: None,
+        };
+        let loaded =
+            load_shell_commands(std::slice::from_ref(&coreutils), &["head".into()], &[]).unwrap();
+        let names: Vec<_> = loaded.iter().map(|(names, _)| names.clone()).collect();
+        assert_eq!(names, [vec!["head".to_string()], vec!["cat".to_string()]]);
+
+        let spawning = load_shell_commands(
+            std::slice::from_ref(&coreutils),
+            &["head".into()],
+            &["head".into(), "cat".into()],
+        )
+        .unwrap();
+        let names: Vec<_> = spawning.iter().map(|(names, _)| names.clone()).collect();
+        assert_eq!(names, [vec!["head".to_string()], vec!["cat".to_string()]]);
+        let err = load_shell_commands(std::slice::from_ref(&coreutils), &[], &["curl".into()])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "--shell-command-spawn curl: not a --shell-command name"
+        );
+
+        let err = load_shell_commands(&[coreutils], &["curl".into()], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            "--shell-command-tunnels curl: not a --shell-command name"
+        );
+    }
+
+    #[test]
+    fn a_missing_shell_command_fails_startup_clearly() {
+        let err = load_shell_commands(
+            &[ShellCommand {
+                names: vec!["rg".into()],
+                path: "/nonexistent/rg.wasm".into(),
+                sha256: None,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("--shell-command rg=/nonexistent/rg.wasm: "),
+            "{err}"
+        );
+    }
+
+    /// An empty ERYX_SHELL_COMMANDS, and empty `;` entries, mean no commands
+    /// rather than an error.
+    #[test]
+    fn empty_shell_commands_are_skipped() {
+        let parse = |value: &str| {
+            let args = Args::try_parse_from(["eryx-server", "--shell-command", value]).unwrap();
+            parse_shell_commands(&args.shell_commands)
+        };
+        assert!(parse("").unwrap().is_empty());
+        assert_eq!(parse(";rg=/opt/rg.wasm;; ").unwrap().len(), 1);
+        assert!(parse("rg").is_err());
+    }
+
+    /// A pinned `.wasm` must have its digest, and only a `.wasm` can be
+    /// pinned; both fail startup naming the flag.
+    #[test]
+    fn pinned_shell_commands_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("rg.wasm");
+        std::fs::write(&wasm, b"not the pinned file").unwrap();
+        let pin = format!("sha256:{}", "0".repeat(64));
+        let pinned = |path: &std::path::Path| {
+            load_shell_commands(
+                &[ShellCommand {
+                    names: vec!["rg".into()],
+                    path: path.to_owned(),
+                    sha256: Some(pin.clone()),
+                }],
+                &[],
+                &[],
+            )
+            .map(|_| ())
+            .unwrap_err()
+        };
+        let err = pinned(&wasm);
+        assert!(
+            err.starts_with(&format!("--shell-command rg={}@{pin}: ", wasm.display())),
+            "{err}"
+        );
+        assert!(err.contains(&pin), "{err}");
+        let err = pinned(&dir.path().join("rg.cwasm"));
+        assert!(err.contains("only a .wasm can be pinned"), "{err}");
+    }
+
+    /// An unpinned `.wasm` is compiled into eryx's command cache, as a
+    /// pinned one is, so a restart doesn't compile it again (#1064).
+    #[test]
+    fn unpinned_shell_commands_use_the_compile_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noop.wasm");
+        let mut wasm = wat::parse_str(
+            r#"(module
+                (import "wasi_snapshot_preview1" "proc_exit" (func (param i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")))"#,
+        )
+        .unwrap();
+        // A custom section naming this run, so the cache entry is this
+        // test's own and not one an earlier run left behind.
+        let run = format!("{:?}", std::time::SystemTime::now());
+        wasm.extend([0, u8::try_from(run.len() + 2).unwrap(), 1, b'x']);
+        wasm.extend(run.as_bytes());
+        std::fs::write(&path, &wasm).unwrap();
+        let prefix = format!(
+            "sha256-{}-",
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&wasm))
+        );
+
+        load_shell_commands(
+            &[ShellCommand {
+                names: vec!["noop".into()],
+                path,
+                sha256: None,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let commands = eryx::cache::default_cache_root().unwrap().join("commands");
+        let cached: Vec<_> = std::fs::read_dir(&commands)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect();
+        assert_eq!(cached.len(), 1, "no {prefix}* in {}", commands.display());
+        for path in cached {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }

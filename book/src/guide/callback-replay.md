@@ -18,7 +18,8 @@ Callbacks are matched by their **name plus canonicalized arguments**, treated as
 
 - When a journal is loaded, each recorded result is bucketed by its `(name, args)` key in recorded order. Each live invocation pops the next cached result for its key, so repeated identical calls replay in their original order.
 - While replay is active, matching is **independent of invocation order** — a concurrently launched batch (`asyncio.gather`) replays correctly no matter which future the scheduler polls first, because a call is matched by *what it is*, not by its position.
-- The canonical arguments are the guest's argument JSON **verbatim**: Python emits them with `json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)`, and no host re-encodes them. So a journal matches the same way in the Rust, Python and JavaScript hosts and the gRPC server. Passing NaN or infinity as a callback argument raises `ValueError` in the script.
+- The canonical arguments are the guest's argument JSON **verbatim**: Python emits them with `json.dumps(kwargs, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)`, and no host re-encodes them. So a journal matches the same way in the Rust, Python and JavaScript hosts and the gRPC server. In the Python guest, passing NaN or infinity as a callback argument raises `ValueError` in the script; the JavaScript guest sends them as `null`, as `JSON.stringify` does.
+- Every guest writes its arguments with sorted keys, so a call matches whatever order its keys (or, in the shell, its flags) were written in: the JavaScript guest with `JSON.stringify` and every object's keys sorted, the shell with its flags' keys sorted. Each guest has its own canonical form (number formatting differs between them), so a journal replays in the guest language that recorded it.
 
 If a dict has keys that can't be compared with each other (e.g. int with str, `None` with anything), they can't be sorted, so the whole payload is emitted unsorted, in insertion order.
 
@@ -194,6 +195,8 @@ Plain [`Sandbox::execute`] never journals or replays (likewise JavaScript's `exe
 The replay identity is exactly `(callback name, canonical args)`. FIFO ordering is guaranteed for *sequential* identical calls, but it is **not** a stable per-task identity for *concurrent* identical calls — replay can't preserve which `gather` task happened to get which result without an invocation id. If you need a stable assignment, make each call's identity unique by including a **nonce or correlation key in the callback args** so the calls no longer share a key.
 
 ## Suspension
+
+Replay and suspension work the same way in the Python, JavaScript and shell guests: a callback that suspends halts the guest, even where the script catches the call's failure (`try`/`catch` in JavaScript, `|| true` in the shell).
 
 A callback can defer its work by returning [`CallbackError::Suspend`] (raising `eryx.SuspendCallback` in Python, from a sync or async callback; throwing `SuspendCallback` in JavaScript) with an opaque reason string:
 

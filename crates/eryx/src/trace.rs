@@ -56,6 +56,30 @@ pub enum TraceEventKind {
         /// Duration of the callback in milliseconds.
         duration_ms: u64,
     },
+    /// A child process started (spawned through `eryx:process`). Its
+    /// arguments are the event's context, `{"args": [...]}`.
+    #[non_exhaustive]
+    ProcessStart {
+        /// The command's name.
+        name: String,
+        /// Numbers the execution's children, to pair this with its
+        /// [`ProcessEnd`](Self::ProcessEnd).
+        pid: u32,
+    },
+    /// A child process ended.
+    #[non_exhaustive]
+    ProcessEnd {
+        /// The command's name.
+        name: String,
+        /// The [`ProcessStart`](Self::ProcessStart)'s `pid`.
+        pid: u32,
+        /// Its exit code, if it exited rather than failing.
+        exit_code: Option<i32>,
+        /// How long it ran, in milliseconds.
+        duration_ms: u64,
+        /// Why it failed (trapped, ran out of fuel or memory, was killed).
+        error: Option<String>,
+    },
 }
 
 /// Handler for trace events during execution.

@@ -80,26 +80,28 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
         // `{:#}` keeps the whole chain: wasmtime's outer context alone can be as
         // bare as "failed to open file", without the OS error behind it.
         eryx::ErrorKind::WasmComponent(e) => InitializationError::new_err(format!("{e:#}")),
-        err @ eryx::ErrorKind::IncompatiblePrecompiled { .. } => {
-            InitializationError::new_err(err.to_string())
-        }
+        err @ (eryx::ErrorKind::IncompatiblePrecompiled { .. }
+        | eryx::ErrorKind::CommandImports { .. }) => InitializationError::new_err(err.to_string()),
         eryx::ErrorKind::Execution(msg) => ExecutionError::new_err(msg),
         // A subclass of ExecutionError, so callers can tell a script error from
         // a sandbox failure while `except ExecutionError` still catches both.
         // `stdout` and `stderr` carry what the script wrote before it raised.
-        eryx::ErrorKind::PythonException {
-            traceback,
+        eryx::ErrorKind::ScriptFailed {
+            message,
+            exit_code,
             stdout,
             stderr,
             ..
         } => {
-            let err = PythonExceptionError::new_err(traceback);
+            let err = PythonExceptionError::new_err(message);
             Python::attach(|py| {
                 let value = err.value(py);
                 // Setting an attribute on a fresh exception instance cannot
                 // realistically fail; if it does, the traceback still raises.
                 let _ = value.setattr("stdout", PyBytes::new(py, &stdout));
                 let _ = value.setattr("stderr", PyBytes::new(py, &stderr));
+                // A shell script's exit status; None for Python and JavaScript.
+                let _ = value.setattr("exit_code", exit_code);
             });
             err
         }
@@ -109,11 +111,15 @@ fn kind_to_py(kind: eryx::ErrorKind) -> PyErr {
             TimeoutError::new_err(format!("execution timed out after {duration:?}"))
         }
         eryx::ErrorKind::Serialization(msg) => PyValueError::new_err(msg),
-        eryx::ErrorKind::MissingPythonStdlib => InitializationError::new_err(
+        eryx::ErrorKind::MissingStdlib { .. } => InitializationError::new_err(
             "Python stdlib not found. Use Sandbox() which includes embedded runtime.",
         ),
+        err @ eryx::ErrorKind::MissingRuntime { .. } => {
+            InitializationError::new_err(err.to_string())
+        }
         eryx::ErrorKind::Snapshot(msg) => InitializationError::new_err(msg),
-        err @ eryx::ErrorKind::IncompatibleSnapshot { .. } => {
+        err @ (eryx::ErrorKind::IncompatibleSnapshot { .. }
+        | eryx::ErrorKind::IncompatibleStateFormat { .. }) => {
             InitializationError::new_err(err.to_string())
         }
         eryx::ErrorKind::Cancelled => CancelledError::new_err("execution was cancelled"),
