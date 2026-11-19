@@ -1280,7 +1280,10 @@ pub(crate) struct Spawner {
     /// Where the process it spawns for is told why a command was refused.
     notices: Notices,
     /// When its execution times out, for a guest child's `time-left`.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     deadline: Option<std::time::Instant>,
 }
 
@@ -1380,7 +1383,10 @@ struct Prepared {
 
 impl Spawner {
     /// The commands it runs.
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     pub(crate) fn commands(&self) -> Commands {
         self.commands.clone()
     }
@@ -1534,7 +1540,10 @@ impl Spawner {
                 notices: Notices::Child(stderr_tx.clone()),
                 ..self.clone()
             }),
-            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            #[cfg(all(
+                any(feature = "embedded", feature = "preinit"),
+                any(feature = "unstable-vfs", feature = "shell")
+            ))]
             deadline: self.deadline,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs,
@@ -2340,7 +2349,10 @@ struct ChildRun {
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
     /// When its execution times out (see [`Spawner`]).
-    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
     deadline: Option<std::time::Instant>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
@@ -2641,7 +2653,10 @@ impl ExecutorState {
                 .stderr
                 .clone()
                 .map_or(Notices::None, Notices::Guest),
-            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            #[cfg(all(
+                any(feature = "embedded", feature = "preinit"),
+                any(feature = "unstable-vfs", feature = "shell")
+            ))]
             deadline: self.deadline,
         }
     }
@@ -3653,7 +3668,10 @@ pub(crate) mod tests {
             offline: None,
             notices: Notices::None,
             spawner: None,
-            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            #[cfg(all(
+                any(feature = "embedded", feature = "preinit"),
+                any(feature = "unstable-vfs", feature = "shell")
+            ))]
             deadline: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs: None,
