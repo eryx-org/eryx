@@ -2197,8 +2197,10 @@ jobs:
           # docker job only pushes too.
           push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
           load: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+          # The bare local tag is only for the size report. A push sends every
+          # tag, and a bare name means docker.io/library, which we can't push to.
           tags: |
-            eryx-server:python-only
+            ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 'eryx-server:python-only' || '' }}
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
