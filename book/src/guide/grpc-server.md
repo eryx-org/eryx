@@ -58,6 +58,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--shell-command-tunnels` | `ERYX_SHELL_COMMAND_TUNNELS` (`,`-separated) | *(none)* | Let a `--shell-command` name open blind `CONNECT` tunnels through the child proxy (no secret substitution, no HTTP rules). A request can turn it off (`commands`), not on. |
 | `--shell-command-spawn` | `ERYX_SHELL_COMMAND_SPAWN` (`,`-separated) | *(none)* | Let a `--shell-command` name run commands itself, as git runs `git`. A request can turn it off (`commands`), not on. |
 | `--max-child-host-bytes` | `ERYX_MAX_CHILD_HOST_BYTES` | `67108864` (64 MiB) | Ceiling on `resource_limits.max_child_host_bytes`, and the value for requests that set none: the host memory a shell execution's commands' arguments and environments may hold at once. |
+| `--max-child-memory-bytes` | `ERYX_MAX_CHILD_MEMORY_BYTES` | `268435456` (256 MiB) | Ceiling on `resource_limits.max_child_memory_bytes`, and the value for requests that set none: the memory a shell execution's running commands may hold together, on top of `--max-memory-bytes`. Raising it raises the host memory one execution can use. |
 | `--tls-cert` | `ERYX_TLS_CERT` | *(off)* | PEM certificate chain; enables TLS. Requires `--tls-key`. |
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
@@ -93,7 +94,7 @@ A request with `language = LANGUAGE_SHELL` runs a shell script against the serve
 - **Which commands:** `allowed_commands` narrows a request to some of them.
 - **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.
-- **Limits:** `resource_limits.max_child_host_bytes` bounds their arguments and environments, under `--max-child-host-bytes`.
+- **Limits:** `resource_limits.max_child_host_bytes` bounds their arguments and environments, under `--max-child-host-bytes`, and `resource_limits.max_child_memory_bytes` the memory they hold together, under `--max-child-memory-bytes`.
 - **Results:** `ExecuteResult.exit_code` is the script's exit status. Trace events report each command as `process_start` and `process_end`, with `pid` and `exit_code`.
 - **Sessions:** `persist_state` and `state_snapshot` carry the shell's variables and functions across requests, as for the other guests.
 
@@ -149,7 +150,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 |-------|-------------|
 | `code` | The Python source to execute (required). |
 | `callbacks` | [Callback](./callbacks.md) declarations (name, description, parameters) that become `async` functions in Python. |
-| `resource_limits` | Execution timeout, callback timeout, memory cap, max callback count, [fuel limit](./resource-limits.md), and for the shell `max_child_host_bytes`. Zero means "use the default". |
+| `resource_limits` | Execution timeout, callback timeout, memory cap, max callback count, [fuel limit](./resource-limits.md), and for the shell `max_child_host_bytes` and `max_child_memory_bytes`. Zero means "use the default". |
 | `network_config` | [Networking](./networking.md) policy. **Absent disables networking entirely**; present enables it with the configured host allow/block lists and timeouts. Its `child_network` gives a shell's commands network through a proxy: `MODE_INHERIT` (this policy) or `MODE_NARROW` with `narrow` (only what both allow; `narrow` starts from the defaults, so it must repeat any `allowed_networks`, `internal_hosts` or `blocked_*` overrides children need); absent, they have none. Shell requests only. The request's `max_connections` covers the guest's connections and its children's together. See [External Commands](./sandboxes.md#external-commands). |
 | `secrets` | [Secrets](./secrets.md) injected as environment variables with placeholder values; real values are substituted only in HTTP headers to allowed hosts. The shell exports the placeholders to its commands, and only their `child_network` proxy substitutes the real values; commands the server allows tunnels (`--shell-command-tunnels`) send placeholders as they are. With networking on, a secret that has no `allowed_hosts` of its own and no `network_config.allowed_hosts` to fall back on (e.g. under `allow_all_hosts`) is rejected with `INVALID_ARGUMENT`. |
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |

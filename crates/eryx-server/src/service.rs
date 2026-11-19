@@ -102,6 +102,10 @@ pub struct ServerLimits {
     /// environments may hold at once, and the value for requests that set
     /// none (`resource_limits.max_child_host_bytes`).
     pub max_child_host_bytes: u64,
+    /// Most memory a shell execution's running child processes may hold
+    /// together, and the value for requests that set none
+    /// (`resource_limits.max_child_memory_bytes`).
+    pub max_child_memory_bytes: u64,
     /// Whether a request may set `network_config.allow_plaintext_secrets`,
     /// which sends real secret values over unencrypted connections. Off by
     /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
@@ -122,6 +126,7 @@ impl Default for ServerLimits {
             max_output_bytes: 16 * 1024 * 1024,
             max_open_host_files: eryx::vfs::DEFAULT_MAX_OPEN_HOST_FILES,
             max_child_host_bytes: 64 * 1024 * 1024,
+            max_child_memory_bytes: 256 * 1024 * 1024,
             allow_plaintext_secrets: false,
         }
     }
@@ -301,6 +306,11 @@ impl ServerLimits {
                 nonzero(request.max_child_host_bytes)
                     .unwrap_or(self.max_child_host_bytes)
                     .min(self.max_child_host_bytes),
+            )
+            .with_max_child_memory_bytes(
+                nonzero(request.max_child_memory_bytes)
+                    .unwrap_or(self.max_child_memory_bytes)
+                    .min(self.max_child_memory_bytes),
             )
     }
 }
@@ -1868,25 +1878,27 @@ mod tests {
         );
     }
 
-    /// `max_child_host_bytes` defaults to the ceiling and is clamped to it.
+    /// `max_child_host_bytes` and `max_child_memory_bytes` default to their
+    /// ceilings and are clamped to them.
     #[test]
-    fn child_host_bytes_are_clamped() {
+    fn child_limits_are_clamped() {
         let ceilings = ServerLimits {
             max_child_host_bytes: 1000,
+            max_child_memory_bytes: 2000,
             ..Default::default()
         };
         let bytes = |requested: u64| {
             let request = crate::proto::eryx::v1::ResourceLimits {
                 max_child_host_bytes: requested,
+                max_child_memory_bytes: requested,
                 ..Default::default()
             };
-            ceilings
-                .resource_limits(Some(&request))
-                .max_child_host_bytes
+            let limits = ceilings.resource_limits(Some(&request));
+            (limits.max_child_host_bytes, limits.max_child_memory_bytes)
         };
-        assert_eq!(bytes(0), Some(1000));
-        assert_eq!(bytes(10), Some(10));
-        assert_eq!(bytes(5000), Some(1000));
+        assert_eq!(bytes(0), (Some(1000), Some(2000)));
+        assert_eq!(bytes(10), (Some(10), Some(10)));
+        assert_eq!(bytes(5000), (Some(1000), Some(2000)));
     }
 
     /// A request's per-command options are checked against the server's

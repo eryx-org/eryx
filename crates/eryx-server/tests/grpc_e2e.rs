@@ -414,8 +414,8 @@ async fn shell_requests_narrow_their_commands() {
 /// `commands` changes what one shell request's commands get, and may only
 /// take away: a name the server doesn't have, network for a command when the
 /// request gives children none, or `commands` on a Python request is
-/// INVALID_ARGUMENT. `resource_limits.max_child_host_bytes` reaches the
-/// children, and shell state persists across requests like any guest's.
+/// INVALID_ARGUMENT. `resource_limits.max_child_host_bytes` and
+/// `max_child_memory_bytes` reach the children, and shell state persists across requests like any guest's.
 #[cfg(feature = "shell")]
 #[tokio::test]
 async fn shell_requests_set_command_options_and_child_limits() {
@@ -507,6 +507,30 @@ async fn shell_requests_set_command_options_and_child_limits() {
             && !String::from_utf8_lossy(&limited.stdout).contains("cat=0"),
         "{limited:?}"
     );
+
+    // Children over the request's memory pool: a coreutils command reserves
+    // about 4 MiB, so three of eight stages fit 16 MiB.
+    let pipeline = format!("{}; true", ["sleep 0.2"; 8].join(" | "));
+    let pooled = |mib: u64| {
+        execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                resource_limits: Some(ResourceLimits {
+                    max_child_memory_bytes: mib << 20,
+                    ..Default::default()
+                }),
+                ..shell(&pipeline, vec![])
+            },
+        )
+    };
+    let full = pooled(16).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&full.stderr).contains("(child memory pool full: ")
+            && String::from_utf8_lossy(&full.stderr).contains(" of 16 MiB in use; "),
+        "{full:?}"
+    );
+    let roomy = pooled(64).await.unwrap();
+    assert!(roomy.stderr.is_empty(), "{roomy:?}");
 
     // Shell state carries over through the snapshot.
     let first = execute_request(

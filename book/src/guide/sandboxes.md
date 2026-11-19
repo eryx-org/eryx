@@ -243,7 +243,7 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   (`/tmp` and volumes), environment, working directory and stdio. It burns
   the execution's fuel, stops at its timeout, and its memory (about 17 MB
   per run, more as it allocates) counts against the children's shared
-  256 MiB. It gets no callbacks and no network (yet), so a credential can't
+  pool (`max_child_memory_bytes`, 256 MiB by default). It gets no callbacks and no network (yet), so a credential can't
   be for it. A script's top-level `asyncio.run(main())` works as in
   `execute`.
 - **JavaScript (`@eryx-org/eryx`):** a shell sandbox includes coreutils (as a
@@ -400,8 +400,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   `execution_timeout` and cancellation, even mid-computation. They're
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).
-  The running children share 256 MiB of memory, outside `max_memory_bytes`;
-  a child that can't grow fails like one out of memory. A child holds at
+  The running children share one pool of memory,
+  `ResourceLimits::max_child_memory_bytes` (default 256 MiB), outside
+  `max_memory_bytes`; a child that can't grow fails like one out of memory,
+  and one that can't start says so on the shell's stderr (`eryx: not enough
+  memory for <command> (child memory pool full: ...)`). A child holds at
   most 16,384 resource handles (open files, streams, sockets) at once. Children run on an
   engine of their own that allocates on demand, so they take none of the
   pooling allocator's slots (`ERYX_POOL_INSTANCES`).
@@ -411,7 +414,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   children spawned but not yet finished and 2 MiB of arguments and
   environment per spawn. Each argument and variable counts its host
   overhead as well as its text (24 bytes per string on 64-bit hosts). Past a limit the spawn fails and the shell reports
-  `<command>: limit-exceeded`.
+  `<command>: limit-exceeded`, after a line saying which limit (`eryx: too
+  many commands running (limit 64)`, say).
 - **Pipes:** a child's stdin, stdout and stderr stream through 64 KiB pipes,
   so pipeline stages run together and a full pipe makes its writer wait:
   `yes | head -n 1` stops once `head` exits. A loop of builtins writing into

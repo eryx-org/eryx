@@ -847,8 +847,8 @@ pub struct SessionExecutor {
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     max_open_host_files: Option<usize>,
 
-    /// Host memory child processes may hold, kept for resets.
-    max_child_host_bytes: Option<u64>,
+    /// Limits on child processes, kept for resets.
+    child_limits: crate::process::ChildLimits,
 }
 
 impl std::fmt::Debug for SessionExecutor {
@@ -1338,7 +1338,11 @@ impl SessionExecutor {
             MemoryTracker::new(limits.max_memory_bytes),
             hybrid_vfs_ctx,
         )
-        .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
+        .with_commands(
+            executor.commands().clone(),
+            crate::process::ChildLimits::of(limits),
+            &fd_output,
+        );
 
         // Create store
         let mut store = Store::new(executor.engine(), state);
@@ -1396,7 +1400,7 @@ impl SessionExecutor {
             vfs_config: Some(vfs_config),
             vfs_limits: VfsLimits::of(limits),
             max_open_host_files: limits.max_open_host_files,
-            max_child_host_bytes: limits.max_child_host_bytes,
+            child_limits: crate::process::ChildLimits::of(limits),
         })
     }
 
@@ -1419,7 +1423,11 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(limits.max_memory_bytes),
         )
-        .with_commands(executor.commands().clone(), limits.max_child_host_bytes);
+        .with_commands(
+            executor.commands().clone(),
+            crate::process::ChildLimits::of(limits),
+            &fd_output,
+        );
         #[cfg(feature = "shell")]
         let vfs_storage = private_vfs_storage(VfsLimits::of(limits));
         #[cfg(feature = "shell")]
@@ -1485,7 +1493,7 @@ impl SessionExecutor {
             vfs_limits: VfsLimits::of(limits),
             #[cfg(feature = "shell")]
             max_open_host_files: limits.max_open_host_files,
-            max_child_host_bytes: limits.max_child_host_bytes,
+            child_limits: crate::process::ChildLimits::of(limits),
         })
     }
 
@@ -1977,7 +1985,11 @@ impl SessionExecutor {
             callback_infos,
             MemoryTracker::new(self.memory_limit),
         )
-        .with_commands(self.executor.commands().clone(), self.max_child_host_bytes);
+        .with_commands(
+            self.executor.commands().clone(),
+            self.child_limits,
+            &self.fd_output,
+        );
         // The shell's /tmp persists across resets, as the VFS does.
         #[cfg(all(feature = "shell", not(feature = "unstable-vfs")))]
         let state = {
@@ -2016,7 +2028,11 @@ impl SessionExecutor {
                     self.max_open_host_files,
                 )?),
             )
-            .with_commands(self.executor.commands().clone(), self.max_child_host_bytes)
+            .with_commands(
+                self.executor.commands().clone(),
+                self.child_limits,
+                &self.fd_output,
+            )
         };
 
         // Create new store
@@ -2521,15 +2537,19 @@ impl ExecutorState {
         self
     }
 
-    /// The external commands the guest can spawn, and the host memory their
-    /// children may hold (see [`ResourceLimits::max_child_host_bytes`]).
+    /// The external commands the guest can spawn, their limits (see
+    /// [`ResourceLimits::max_child_host_bytes`] and
+    /// [`ResourceLimits::max_child_memory_bytes`]), and the guest's stderr,
+    /// where refused spawns are reported.
     pub(crate) fn with_commands(
         mut self,
         commands: crate::process::Commands,
-        max_child_host_bytes: Option<u64>,
+        limits: crate::process::ChildLimits,
+        fd_output: &FdOutput,
     ) -> Self {
         self.commands = commands;
-        self.child_budget = crate::process::ChildBudget::new(max_child_host_bytes);
+        self.child_budget =
+            crate::process::ChildBudget::new(limits, Some(fd_output.stderr.clone()));
         self.memory_tracker.set_children(self.child_budget.memory());
         self
     }

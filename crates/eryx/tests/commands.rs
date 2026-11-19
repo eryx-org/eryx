@@ -338,11 +338,25 @@ async fn empty_arguments_count_against_the_child_limits() {
             stdout.ends_with(&format!("{}={status}\n", 1 << doublings)),
             "{doublings}: {out:?}"
         );
+        let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(
-            String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
+            stderr.contains("tc: limit-exceeded"),
             status == 126,
             "{doublings}: {out:?}"
         );
+        // The shell's stderr says which limit.
+        let notice = match doublings {
+            16 => Some(
+                "eryx: not enough room for tc's arguments (commands' arguments and environments hold 0 of 1 MiB)\n",
+            ),
+            17 => Some("eryx: argument list too long for tc ("),
+            _ => None,
+        };
+        if let Some(notice) = notice {
+            assert!(stderr.contains(notice), "{doublings}: {stderr}");
+        } else {
+            assert!(!stderr.contains("eryx:"), "{doublings}: {stderr}");
+        }
     }
 }
 
@@ -635,10 +649,46 @@ async fn running_children_count_as_live() {
         .execute("for i in {1..70}; do tc busy 50 & tc exit 0; done")
         .await
         .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tc: limit-exceeded"), "{out:?}");
+    // The shell's stderr says which limit, before the shell's own error.
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("tc: limit-exceeded"),
-        "{out:?}"
+        stderr.contains(
+            "eryx: too many commands running (limit 64)\n\
+             error: failed to execute command 'tc': tc: limit-exceeded\n"
+        ),
+        "{stderr}"
     );
+    assert!(!stderr.contains("memory pool"), "{stderr}");
+}
+
+/// When running commands fill the child memory pool
+/// (`max_child_memory_bytes`), the next one isn't started, and the shell's
+/// stderr says why; a larger pool runs them all.
+#[cfg(feature = "coreutils")]
+#[tokio::test]
+async fn a_full_memory_pool_says_so() {
+    // A coreutils command reserves about 4 MiB: three fit 16 MiB, not
+    // eight. A pipeline's stages are all spawned before any is waited on.
+    let script = format!("{}; true", ["sleep 0.2"; 8].join(" | "));
+    let limited = |mib: u64| {
+        shell()
+            .with_resource_limits(ResourceLimits::default().with_max_child_memory_bytes(mib << 20))
+            .build()
+            .unwrap()
+    };
+    let out = limited(16).execute(&script).await.unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("eryx: not enough memory for sleep (child memory pool full: "),
+        "{stderr}"
+    );
+    assert!(stderr.contains(" of 16 MiB in use; "), "{stderr}");
+    assert!(stderr.contains(" commands running)\nsleep: "), "{stderr}");
+    assert!(!stderr.contains("too many commands"), "{stderr}");
+
+    let out = limited(64).execute(&script).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{out:?}");
 }
 
 /// Running children share one pool of memory: two that each fit it alone
@@ -1379,7 +1429,11 @@ async fn piped_children_are_capped_and_killed_with_their_caller() {
         .and_then(|rest| rest.split_once(' '))
         .unwrap_or_else(|| panic!("{out}"));
     assert!(piped.parse::<usize>().unwrap() < 64, "{out}");
-    assert_eq!(error, "error: limit-exceeded", "{out}");
+    // The caller's stderr (after its stdout here) says which limit.
+    assert_eq!(
+        error, "error: limit-exceeded\neryx: too many commands running (limit 64)",
+        "{out}"
+    );
 
     // 25 callers leaking 10 each: more than the 64 slots, unless each
     // caller's exit gives them back.
