@@ -1146,6 +1146,35 @@ async fn node_runs_code_and_pipelines() {
     assert_eq!(stdout, "2\n2\n42\na b\n5\n3893\n0\n1\n", "{stderr}");
 }
 
+/// A command that keeps printing ends when its reader goes, rather than
+/// running until the execution's timeout.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_stops_when_its_reader_goes() {
+    let sandbox = node_shell()
+        .with_resource_limits(
+            eryx::ResourceLimits::default()
+                .with_execution_timeout(std::time::Duration::from_secs(10)),
+        )
+        .build()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let out = sandbox
+        .execute(
+            "node -e 'setInterval(() => console.log(1), 0)' | head -1\n\
+             node -e 'for (;;) console.log(2)' | head -1\n\
+             node -e 'for (;;) process.stdout.write(\"3\\n\")' | head -1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "1\n2\n3\n");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 #[cfg(feature = "javascript")]
 #[tokio::test]
 async fn node_runs_scripts_with_shebangs_and_args() {

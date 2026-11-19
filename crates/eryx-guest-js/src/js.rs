@@ -184,11 +184,17 @@ fn native_invoke<'js>(
 }
 
 /// `__eryx.write(stream, text)`: buffer output for `execute-output` and stream
-/// it to the host as it happens. 0 = stdout, 1 = stderr.
-fn native_write(stream: u32, text: String) {
+/// it to the host as it happens. 0 = stdout, 1 = stderr. A command writes
+/// to its fds instead, and ends when its reader has gone.
+fn native_write(ctx: Ctx<'_>, stream: u32, text: String) -> rquickjs::Result<()> {
     if with_task(|task| task.command).unwrap_or(false) {
-        return crate::command::write(stream + 1, text);
+        return crate::command::write_js(&ctx, stream + 1, &text);
     }
+    buffer_output(stream, text);
+    Ok(())
+}
+
+fn buffer_output(stream: u32, text: String) {
     let bytes = text.into_bytes();
     wit::report_output(stream, &bytes);
     with_task(|task| {
@@ -824,7 +830,13 @@ fn finish(hooks: &Object<'_>, outcome: Result<(), String>) -> u32 {
         && msg != CANCELLED
         && exited.is_none()
     {
-        native_write(1, format!("{msg}\n"));
+        let msg = format!("{msg}\n");
+        if with_task(|task| task.command).unwrap_or(false) {
+            // The command's ending anyway: a closed stderr changes nothing.
+            let _ = crate::command::write(2, &msg);
+        } else {
+            buffer_output(1, msg);
+        }
     }
     let task = TASK
         .with(|task| task.borrow_mut().take())

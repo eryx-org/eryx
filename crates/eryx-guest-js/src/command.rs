@@ -220,7 +220,12 @@ fn quickjs_version() -> String {
 /// (`src/command.js`).
 pub(crate) fn install(ctx: &Ctx<'_>, run: &Run) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
-    native.set("write", Function::new(ctx.clone(), write)?)?;
+    native.set(
+        "write",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, fd: u32, text: String| {
+            write_js(&ctx, fd, &text)
+        })?,
+    )?;
     native.set("exit", Function::new(ctx.clone(), exit)?)?;
     native.set("compile", Function::new(ctx.clone(), compile)?)?;
     native.set("quickjsVersion", quickjs_version())?;
@@ -238,16 +243,33 @@ pub(crate) fn install(ctx: &Ctx<'_>, run: &Run) -> rquickjs::Result<()> {
     ))
 }
 
-/// `write(fd, text)`: straight to stdout (1) or stderr (2).
-pub(crate) fn write(fd: u32, text: String) {
+/// Write `text` straight to stdout (1) or stderr (2).
+pub(crate) fn write(fd: u32, text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    // A closed pipe (`node ... | head -1`) isn't the script's error.
-    let _ = if fd == 2 {
+    if fd == 2 {
         std::io::stderr().write_all(text.as_bytes())
     } else {
         let mut out = std::io::stdout();
         out.write_all(text.as_bytes()).and_then(|()| out.flush())
-    };
+    }
+}
+
+/// The exit status when stdout or stderr's reader has gone, as Node's.
+const BROKEN_PIPE: i32 = 1;
+
+/// `write(fd, text)` for JavaScript (`console.*`, `process.stdout.write`).
+/// When the reader has gone (`node ... | head -1`), the command ends as
+/// `process.exit(1)` would, quietly, so a script that keeps printing
+/// doesn't run until the execution's timeout. Other write errors are
+/// ignored, as before.
+pub(crate) fn write_js(ctx: &Ctx<'_>, fd: u32, text: &str) -> rquickjs::Result<()> {
+    match write(fd, text) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            EXIT.set(Some(BROKEN_PIPE));
+            Err(Exception::throw_message(ctx, "EPIPE: broken pipe, write"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `exit(code)`: record the status and throw, to unwind the script.

@@ -54,6 +54,7 @@ fn code_of(e: &std::io::Error) -> (&'static str, String) {
         K::ReadOnlyFilesystem => ("EROFS", "read-only file system"),
         K::StorageFull => ("ENOSPC", "no space left on device"),
         K::InvalidInput => ("EINVAL", "invalid argument"),
+        K::BrokenPipe => ("EPIPE", "broken pipe"),
         _ => return ("EIO", e.to_string()),
     };
     (known.0, known.1.to_string())
