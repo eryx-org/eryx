@@ -90,6 +90,22 @@
         "wasm-tools",
       ],
     },
+    // The wasmtime CLI (mise aqua tool) must match the wasmtime crate: a
+    // cwasm it builds only loads in that wasmtime. `mise run
+    // update-preview1-adapter` sets it, along with the vendored adapter.
+    {
+      groupName: "wasmtime & wasm-tools",
+      separateMajorMinor: false,
+      matchManagers: ["mise"],
+      matchDepNames: ["aqua:bytecodealliance/wasmtime"],
+    },
+    // wit-component-wasmtime / wit-parser-wasmtime are pinned to the
+    // wit-component wasmtime itself depends on, not the latest wasm-tools
+    // (#1120 bumped them past it). update-preview1-adapter checks the pin.
+    {
+      matchDepNames: ["wit-component-wasmtime", "wit-parser-wasmtime"],
+      enabled: false,
+    },
 
     // ------------------------------------------------------------------
     // wasm-bindgen crate (Cargo) and CLI (mise) must match exactly.
