@@ -260,6 +260,16 @@ fn with_shell<R>(f: impl FnOnce(&mut Shell) -> R) -> R {
     f(lock(&SHELL).get_or_insert_with(new_shell))
 }
 
+/// Say on stderr that `stopped` background jobs were killed at the timeout.
+fn report_stopped_jobs(stopped: usize) {
+    if stopped > 0 {
+        let s = if stopped == 1 { "" } else { "s" };
+        eprintln!(
+            "eryx: killed {stopped} background job{s} still running when the execution timed out"
+        );
+    }
+}
+
 /// Read and unset the result variable. A value that parses as JSON is passed
 /// through; anything else becomes a JSON string.
 fn take_result(shell: &mut Shell) -> String {
@@ -342,12 +352,7 @@ impl Guest for Sandbox {
             (status, jobs::finish_jobs(shell.jobs_mut(), time_left).await)
         })
         .await;
-        if stopped > 0 {
-            let s = if stopped == 1 { "" } else { "s" };
-            eprintln!(
-                "eryx: killed {stopped} background job{s} still running when the execution timed out"
-            );
-        }
+        report_stopped_jobs(stopped);
         let status = status.map(|r| u8::from(r.exit_code));
         let result_json = take_result(&mut shell);
         *lock(&SHELL) = Some(shell);
@@ -419,12 +424,35 @@ impl Guest for Sandbox {
         *lock(&RESULT_VAR) = name;
     }
 
-    async fn run_command(args: Vec<String>, _env: Vec<(String, String)>, _cwd: String) -> i32 {
-        // ponytail: stub until the nested-shell argument parser (#831 PR 1)
-        // lands; `sh`/`bash` as host commands then go through it.
-        let name = args.first().map_or("sh", String::as_str);
-        eprintln!("{name}: running the shell as a command is not supported yet");
-        127
+    async fn run_command(args: Vec<String>, env: Vec<(String, String)>, cwd: String) -> i32 {
+        // `sh`/`bash` run by a command that spawns them (git's aliases and
+        // hooks): a fresh shell on this process's stdio, with the commands
+        // its spawner may run and no callbacks.
+        let (argv0, args) = args
+            .split_first()
+            .map_or(("sh", &[][..]), |(argv0, args)| (argv0.as_str(), args));
+        let name = match argv0.rsplit('/').next() {
+            Some("bash") => "bash",
+            _ => "sh",
+        };
+        let fds = HashMap::from([
+            (OpenFiles::STDIN_FD, std::io::stdin().into()),
+            (OpenFiles::STDOUT_FD, std::io::stdout().into()),
+            (OpenFiles::STDERR_FD, std::io::stderr().into()),
+        ]);
+        let status = run_local(subshell::run_shell(
+            name,
+            args,
+            &env,
+            std::path::Path::new(&cwd),
+            fds,
+            0,
+            true,
+        ))
+        .await;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        i32::from(status)
     }
 }
 
@@ -468,7 +496,16 @@ impl EryxLauncher {
         let name = name.to_owned();
         let depth = self.depth;
         let (_, task) = jobs::spawn_local(async move {
-            subshell::run_shell(&name, &args, &request.env, &request.working_dir, fds, depth).await
+            subshell::run_shell(
+                &name,
+                &args,
+                &request.env,
+                &request.working_dir,
+                fds,
+                depth,
+                false,
+            )
+            .await
         });
         Ok(ChildProcess::from_future(async move {
             Ok(ExecutionResult::new(

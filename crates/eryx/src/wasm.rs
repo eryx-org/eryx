@@ -1610,6 +1610,10 @@ pub struct ExecutorState {
     /// When each callback still running started, for `callback_end`'s
     /// duration.
     pub(crate) trace_clock: TraceClock,
+    /// How a guest run as a command (see [`crate::Command::guest`]) spawns
+    /// commands of its own: its spawner's, one level deeper. `None` for the
+    /// guest an execution runs.
+    pub(crate) nested: Option<crate::process::Spawner>,
     /// When the running execution times out, for `eryx:process/execution`'s
     /// `time-left`; none without a timeout, or between executions.
     pub(crate) deadline: Option<std::time::Instant>,
@@ -1670,6 +1674,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: TraceClock::default(),
+            nested: None,
             deadline: None,
         }
     }
@@ -1802,12 +1807,14 @@ pub(crate) async fn instantiate_store(
 impl ExecutorState {
     /// State for running the guest as a command (see
     /// [`Executor::run_command`]): its stdio is `wasi`'s and its filesystem
-    /// `vfs`, and it gets no callbacks, tracing, network or commands.
+    /// `vfs`, and it gets no callbacks, tracing or network, and only the
+    /// commands `nested` (its spawner's, if its command may spawn) runs.
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     pub(crate) fn for_command(
         wasi: WasiCtx,
         vfs: eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
         memory_tracker: MemoryTracker,
+        nested: Option<crate::process::Spawner>,
     ) -> Self {
         Self {
             wasi,
@@ -1824,10 +1831,14 @@ impl ExecutorState {
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
-            commands: crate::process::Commands::default(),
+            commands: nested
+                .as_ref()
+                .map(crate::process::Spawner::commands)
+                .unwrap_or_default(),
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: TraceClock::default(),
+            nested,
             deadline: None,
         }
     }
@@ -4375,6 +4386,7 @@ impl Executor {
             child_budget,
             child_net: child_net.map(|net| std::sync::Arc::new(std::sync::Mutex::new(net))),
             trace_clock: TraceClock::default(),
+            nested: None,
             deadline: None,
         };
 
@@ -5561,7 +5573,7 @@ mod run_command_tests {
             eryx_vfs::FilePerms::all(),
         );
         let vfs = crate::session::executor::command_vfs_context(&executor, Some(base)).unwrap();
-        let state = ExecutorState::for_command(wasi.build(), vfs, MemoryTracker::new(None));
+        let state = ExecutorState::for_command(wasi.build(), vfs, MemoryTracker::new(None), None);
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
         store.set_fuel(u64::MAX).unwrap();

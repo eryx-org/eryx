@@ -875,16 +875,22 @@ impl Command {
     /// `python3 -c CODE`, through the runtime's `run-command` export: for
     /// Python, register it as `python` and `python3` with
     /// [`SandboxBuilder::with_commands`](crate::SandboxBuilder::with_commands).
-    /// Only Python can run as a command so far.
+    /// Python and the shell can run as commands so far. The embedded shell
+    /// already registers itself as `sh` and `bash`, for commands that
+    /// [spawn](Self::allow_spawn) them (git's aliases and hooks), unless
+    /// [`without_embedded_commands`](crate::SandboxBuilder::without_embedded_commands);
+    /// the shell's own `sh` runs in its guest instead.
     ///
     /// A guest child is a fresh instance of the runtime (for Python, the
     /// pre-initialized interpreter with the embedded standard library). It
     /// sees the shell's filesystem, environment, working directory and
     /// stdio, burns the execution's fuel and counts against the children's
-    /// memory like any child, and gets no callbacks, no network and no
-    /// commands of its own ([`allow_spawn`](Self::allow_spawn) and
-    /// [`with_network`](Self::with_network) don't apply to it, and a
-    /// [`Credential`](crate::net::Credential) can't be for it).
+    /// memory like any child, and gets no callbacks and no network
+    /// ([`with_network`](Self::with_network) doesn't apply to it, and a
+    /// [`Credential`](crate::net::Credential) can't be for it). Python runs
+    /// no commands. The shell runs those of the command that spawned it, as
+    /// a spawning command's child would ([`allow_spawn`](Self::allow_spawn)
+    /// is implied): one level deeper, within its spawner's network.
     ///
     /// # Errors
     ///
@@ -934,9 +940,9 @@ impl Command {
         path: impl AsRef<Path>,
         stdlib: Option<std::path::PathBuf>,
     ) -> Result<Self, Error> {
-        if language != crate::Language::Python {
+        if !matches!(language, crate::Language::Python | crate::Language::Shell) {
             return Err(ErrorKind::Initialization(format!(
-                "{language} can't run as a command yet: only python can"
+                "{language} can't run as a command yet: only python and the shell can"
             ))
             .into());
         }
@@ -946,7 +952,8 @@ impl Command {
         Ok(Self {
             pre: Pre::Guest(Arc::new(executor)),
             tunnels: false,
-            spawns: false,
+            // The shell runs commands; it's what it's for.
+            spawns: language == crate::Language::Shell,
             vmctx: usize::try_from(precompiled_vmctx(&file_tail(path).unwrap_or_default()))
                 .unwrap_or(usize::MAX),
             network: None,
@@ -1230,7 +1237,7 @@ impl ChildLink {
 /// What a child needs to run commands of its own (see
 /// [`Command::allow_spawn`]): its execution's commands, budget and network.
 #[derive(Clone)]
-struct Spawner {
+pub(crate) struct Spawner {
     commands: Commands,
     budget: ChildBudget,
     /// Weak, so a child left unwaited can't keep the execution's proxies
@@ -1246,6 +1253,9 @@ struct Spawner {
     traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
     /// Where the process it spawns for is told why a command was refused.
     notices: Notices,
+    /// When its execution times out, for a guest child's `time-left`.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    deadline: Option<std::time::Instant>,
 }
 
 /// Nested children's process events, queued for the `wait` of the shell's
@@ -1343,6 +1353,12 @@ struct Prepared {
 }
 
 impl Spawner {
+    /// The commands it runs.
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    pub(crate) fn commands(&self) -> Commands {
+        self.commands.clone()
+    }
+
     /// Set up a child running `cmd`: its command, environment, proxy, live
     /// slot and pipes, and its argv and env charged to the budget.
     fn prepare(
@@ -1355,6 +1371,10 @@ impl Spawner {
             eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
         >,
     ) -> Result<Prepared, ProcessError> {
+        if self.depth > MAX_SPAWN_DEPTH {
+            tracing::warn!(cmd, depth = self.depth, "nested spawns too deep");
+            return Err(ProcessError::LimitExceeded);
+        }
         let command = self
             .commands
             .get(&cmd)
@@ -1387,6 +1407,13 @@ impl Spawner {
             _ => None,
         };
         let (network, scope) = network.unzip();
+        // A guest has no proxy, so one that spawns (the shell) holds its
+        // children within its spawner's network instead.
+        let scope = if command.is_guest() {
+            self.within.clone()
+        } else {
+            scope
+        };
         // Python's and JavaScript's wording, naming the command.
         let offline = network.is_none().then(|| {
             let whose = if self.net.is_some() {
@@ -1481,6 +1508,8 @@ impl Spawner {
                 notices: Notices::Child(stderr_tx.clone()),
                 ..self.clone()
             }),
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            deadline: self.deadline,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs,
         };
@@ -2272,6 +2301,9 @@ struct ChildRun {
     notices: Notices,
     /// How it runs commands of its own, if its command may.
     spawner: Option<Spawner>,
+    /// When its execution times out (see [`Spawner`]).
+    #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+    deadline: Option<std::time::Instant>,
     #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
     vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
 }
@@ -2448,7 +2480,9 @@ impl ChildRun {
             Err(e) => return (Err(format!("mounting the runtime's files: {e}")), 0),
         };
         let memory = crate::wasm::MemoryTracker::for_child(self.memory);
-        let state = ExecutorState::for_command(wasi.build(), vfs, memory);
+        let mut state = ExecutorState::for_command(wasi.build(), vfs, memory, self.spawner);
+        // Its execution's, so `time-left` tells it the time it really has.
+        state.deadline = self.deadline;
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
         if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
@@ -2548,6 +2582,9 @@ impl<D> StreamProducer<D> for PipeProducer {
 impl ExecutorState {
     /// How the guest spawns children: the shell's are depth 1.
     fn spawner(&self) -> Spawner {
+        if let Some(nested) = &self.nested {
+            return nested.clone();
+        }
         Spawner {
             commands: self.commands.clone(),
             budget: self.child_budget.clone(),
@@ -2560,6 +2597,8 @@ impl ExecutorState {
                 .stderr
                 .clone()
                 .map_or(Notices::None, Notices::Guest),
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            deadline: self.deadline,
         }
     }
 
@@ -2671,9 +2710,26 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
             tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
         }
-        let trace = accessor.with(|mut access| access.get().trace_process_start(&run.argv));
-        // Its descendants' process events, reported as they come.
-        let nested = run.spawner.as_ref().and_then(|s| s.traces.clone());
+        // A guest run as a command (a nested shell) has no trace of its own:
+        // its children's events join its spawner's queue, for the `wait`
+        // of the shell's child it descends from to report.
+        let queue = accessor.with(|mut access| {
+            let nested = access.get().nested.as_ref();
+            nested.and_then(|s| s.traces.clone())
+        });
+        let (trace, queued, nested) = match queue {
+            Some(queue) => (
+                None,
+                Some(NestedTrace::start(queue, run.argv.clone())),
+                None,
+            ),
+            None => (
+                accessor.with(|mut access| access.get().trace_process_start(&run.argv)),
+                None,
+                // Its descendants' process events, reported as they come.
+                run.spawner.as_ref().and_then(|s| s.traces.clone()),
+            ),
+        };
         let mut reported = HashMap::new();
         let mut report_nested = || {
             let Some(nested) = &nested else { return };
@@ -2757,6 +2813,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                     outcome.as_ref().copied().map_err(String::as_str),
                 )
             });
+        }
+        if let Some(queued) = queued {
+            queued.end(outcome.clone());
         }
         outcome.map_err(|_| ProcessError::SpawnFailed)
     }
@@ -2880,10 +2939,6 @@ async fn run_nested(
         );
         return Err(ProcessError::SpawnFailed);
     };
-    if spawner.depth > MAX_SPAWN_DEPTH {
-        tracing::warn!(cmd, depth = spawner.depth, "nested spawns too deep");
-        return Err(ProcessError::LimitExceeded);
-    }
     let Prepared {
         mut run,
         stdin,
@@ -3550,6 +3605,8 @@ pub(crate) mod tests {
             offline: None,
             notices: Notices::None,
             spawner: None,
+            #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+            deadline: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             vfs: None,
         }

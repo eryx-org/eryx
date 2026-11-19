@@ -28,8 +28,7 @@ use wasmtime::component::{Linker, Resource, ResourceType};
 
 use super::child_bindings::eryx::process::run::RunError;
 use super::{
-    CHILD_FUEL, ChildState, Held, LiveSlot, MAX_SPAWN_DEPTH, NestedTrace, ProcessError,
-    charge_caller, pipe,
+    CHILD_FUEL, ChildState, Held, LiveSlot, NestedTrace, ProcessError, charge_caller, pipe,
 };
 
 /// Most of a piped command's stdout one `read` returns.
@@ -308,10 +307,6 @@ fn spawn(
         );
         return Ok(Err(RunError::SpawnFailed));
     };
-    if spawner.depth > MAX_SPAWN_DEPTH {
-        tracing::warn!(cmd, depth = spawner.depth, "nested spawns too deep");
-        return Ok(Err(RunError::LimitExceeded));
-    }
     let prepared = match spawner.prepare(
         cmd,
         args,

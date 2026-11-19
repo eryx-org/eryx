@@ -2495,6 +2495,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: crate::wasm::TraceClock::default(),
+            nested: None,
             deadline: None,
         }
     }
@@ -2527,6 +2528,7 @@ impl ExecutorState {
             child_budget: crate::process::ChildBudget::default(),
             child_net: None,
             trace_clock: crate::wasm::TraceClock::default(),
+            nested: None,
             deadline: None,
         }
     }

@@ -31,7 +31,9 @@ The Python runtime implements it as `python3`: `-c CODE`, `-m MODULE`, a
 script path, `-` or no argument (the program comes from stdin), `-V`, and the
 no-op flags `-u`, `-B`, `-I`, `-E`, `-s` and `-q`; anything else exits 2. A
 script's top-level `asyncio.run(main())` runs on the guest's event loop, as in
-`execute`. The JavaScript and shell runtimes return 127 for now.
+`execute`. The shell runtime implements it as `sh`/`bash` (`-c`, a script,
+stdin, waiting for its background jobs). The JavaScript runtime returns 127
+for now.
 
 ## Python as a shell command
 
@@ -51,6 +53,32 @@ Each run is a fresh interpreter on the shell's files, env, cwd and stdio,
 within the execution's fuel, timeout and the children's 256 MiB memory pool.
 It has no callbacks and no network, and a credential can't be for it: the
 sandbox fails to build or the execution to start, naming the command.
+
+## The shell as a command, on by default
+
+A command registered with `allow_spawn` (git) that runs `sh -c ...` or
+`bash` used to get `command-not-found`. The embedded shell now registers
+itself as `sh` and `bash` for such commands (`Command::guest(Language::Shell)`):
+a fresh shell guest per run, running only what the command itself may run,
+one nesting level deeper, within its network, with no callbacks or network
+of its own. The shell's own `sh`/`bash` still run in its guest.
+
+- `without_embedded_commands()` (and eryx-server's
+  `--no-shell-embedded-commands`) leaves it out with coreutils.
+- An execution's allowed commands govern both: allow `sh`/`bash` for a
+  child to run them. An allow-list that names `git` but not `sh` makes git's
+  `sh -c` fail as before.
+- A child's `sh` counts towards the nesting depth of 4, so a chain that
+  just fit before can be one level too deep if it goes through `sh`.
+
+Guest commands (`python3` and `sh`) now also get the execution's deadline,
+so `eryx:process/execution`'s `time-left` returns the real time left in
+them instead of none.
+
+Jobs a nested in-guest shell leaves running (`sh -c 'slow &'`) are now
+waited for at the end of the execution, and killed at the timeout with the
+usual stderr line, like the script's own jobs. Before, the execution's end
+didn't wait for them.
 
 ## eryx-server: `--no-shell-coreutils` is now `--no-shell-embedded-commands`
 

@@ -1313,6 +1313,142 @@ async fn nested_spawns_stop_at_the_depth_limit() {
     assert_eq!(out, "error: limit-exceeded\n");
 }
 
+/// A child that spawns runs `sh` and `bash` (as git does for aliases and
+/// hooks): the embedded shell as a command, with the args, stdin, env and
+/// directory it's given, exiting with its script's status. It runs the
+/// commands its spawner may, and waits for its background jobs.
+#[tokio::test]
+async fn spawning_children_run_sh_and_bash() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(
+        &sandbox,
+        r#"
+tc spawn sh -c 'echo $((1+2))'
+tc spawn bash -c 'echo "$0 $1"' me a
+tc spawn sh -c 'exit 7'; echo "status=$?"
+printf 'echo "$1-$2"\nexit 4\n' > /tmp/s.sh
+tc spawn sh /tmp/s.sh a b; echo "status=$?"
+echo 'echo from stdin' | tc spawn sh
+cd /tmp && FOO=bar tc spawn sh -c 'echo "$FOO $(pwd)"'
+tc spawn sh -c 'echo hi | tc; tc exit 3; echo "inner=$?"'
+tc spawn sh -c '{ sleep 0.1; echo late; } & echo early'
+tc spawn sh -c 'nope'; echo "status=$?"
+"#,
+    )
+    .await;
+    assert_eq!(
+        out,
+        "3\nme a\nstatus=7\na-b\nstatus=4\nfrom stdin\nbar /tmp\nHI\ninner=3\nearly\nlate\nstatus=127\n\
+         bye\nerror: command not found: nope\n"
+    );
+}
+
+/// A child's `sh` runs only what the execution allows: it's a command for
+/// the allow-list like the shell's own `sh`, and its own commands are the
+/// execution's too.
+#[tokio::test]
+async fn a_childs_sh_is_held_to_the_allowed_commands() {
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let mut session = SessionExecutor::new(executor, &[]).await.unwrap();
+    let script =
+        "echo x > /tmp/c.txt; tc spawn sh -c 'tc argv0; cat /tmp/c.txt; echo \"cat=$?\"'; true";
+    let run = async |session: &mut SessionExecutor, allowed: &[&str]| {
+        let out = session
+            .execute(script)
+            .with_allowed_commands(allowed.iter().copied())
+            .run()
+            .await
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    assert_eq!(
+        run(&mut session, &["tc", "sh"]).await,
+        "tc\ncat=127\nerror: command not found: cat\n"
+    );
+    assert_eq!(
+        run(&mut session, &["tc", "sh", "cat"]).await,
+        "tc\nx\ncat=0\n"
+    );
+    assert_eq!(
+        run(&mut session, &["tc"]).await,
+        "error: command-not-found\n"
+    );
+}
+
+/// A child's `sh` counts as a level of nesting, and so does each command it
+/// runs; without the embedded commands there's no `sh` for children.
+#[tokio::test]
+async fn a_childs_sh_counts_towards_the_depth_limit() {
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc spawn sh -c 'tc spawn tc argv0'").await;
+    assert_eq!(out, "tc\n");
+    let out = run_script(&sandbox, "tc spawn sh -c 'tc spawn sh -c \"tc argv0\"'").await;
+    assert!(!out.contains("tc\n"), "{out}");
+
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .without_embedded_commands()
+        .build()
+        .unwrap();
+    let out = run_script(&sandbox, "tc spawn sh -c true").await;
+    assert_eq!(out, "error: command-not-found\n");
+}
+
+/// What a child's `sh` and the commands it runs burn is charged to the
+/// execution: its fuel, its timeout and the children's memory pool.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_childs_sh_shares_the_executions_limits() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(ResourceLimits::default().with_max_fuel(100_000_000))
+        .build()
+        .unwrap();
+    for script in [
+        "tc spawn sh -c 'tc spin'",
+        "tc spawn sh -c 'while :; do :; done'",
+    ] {
+        let err = sandbox.execute(script).await.unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+            "{script}: {err:?}"
+        );
+    }
+
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_resource_limits(
+            ResourceLimits::default().with_execution_timeout(Duration::from_millis(300)),
+        )
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let err = sandbox
+        .execute("tc spawn sh -c 'tc spin'")
+        .await
+        .unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "{err:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // The pool is 256 MiB, which the shell's instance shares.
+    let sandbox = shell().with_command("tc", spawning_cmd()).build().unwrap();
+    let out = run_script(&sandbox, "tc spawn sh -c 'echo hi | tc alloc 160'").await;
+    assert_eq!(out, "hi\n");
+    let out = run_script(&sandbox, "tc spawn sh -c 'echo hi | tc alloc 300'").await;
+    assert!(out.contains("OutOfMemory"), "{out}");
+}
+
 /// A nested child burns its execution's fuel, stops at its timeout, and
 /// draws on the children's memory pool.
 #[tokio::test(flavor = "multi_thread")]
@@ -1956,6 +2092,27 @@ async fn nested_children_report_trace_events() {
         out.trace
     );
 
+    // A child's `sh`, and what it runs, are reported like other nested
+    // children.
+    let out = sandbox
+        .execute("tc spawn sh -c 'tc exit 3' || true")
+        .await
+        .unwrap();
+    let mut events = process_events(&out.trace);
+    events.sort_by_key(|&(event, _, pid, ..)| (pid, event == "end"));
+    let named = |name: &str, pid| {
+        [
+            ("start", name.to_string(), pid, None, None),
+            ("end", name.to_string(), pid, Some(3), None),
+        ]
+    };
+    assert_eq!(
+        events,
+        [named("tc", 1), named("sh", 2), named("tc", 3)].concat(),
+        "{:?}",
+        out.trace
+    );
+
     let handler = CollectTrace::default();
     let sandbox = shell()
         .with_command("tc", spawning_cmd())
@@ -2518,6 +2675,61 @@ mod background_jobs {
         assert_eq!(
             stderr(&out),
             "eryx: killed 2 background jobs still running when the execution timed out\n"
+        );
+    }
+
+    /// A nested shell doesn't wait for its jobs, as bash's doesn't, but they
+    /// keep running after it: the execution's end waits for them, and kills
+    /// them at the timeout, keeping the result, as it does the shell's own.
+    #[tokio::test]
+    async fn nested_shells_jobs_end_with_the_execution() {
+        let sandbox = shell().build().unwrap();
+        let out = sandbox
+            .execute("sh -c '(sleep 0.2; echo late) &'; echo first")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "first\nlate\n");
+        assert_eq!(stderr(&out), "");
+
+        let sandbox = shell()
+            .with_resource_limits(
+                ResourceLimits::default().with_execution_timeout(Duration::from_secs(1)),
+            )
+            .build()
+            .unwrap();
+        let out = sandbox
+            .execute("sh -c 'bash -c \"sleep 30 &\"; echo nested'; result=42")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "nested\n");
+        assert_eq!(out.result.as_deref(), Some("42"));
+        assert_eq!(
+            stderr(&out),
+            "eryx: killed 1 background job still running when the execution timed out\n"
+        );
+    }
+
+    /// A child's `sh` waits for its jobs before it exits, until just before
+    /// the execution's timeout: it knows the time left, and kills them then
+    /// and says so, so the script still gets its result.
+    #[tokio::test]
+    async fn a_childs_sh_stops_its_jobs_before_the_timeout() {
+        let sandbox = shell()
+            .with_command("tc", test_cmd().allow_spawn())
+            .with_resource_limits(
+                ResourceLimits::default().with_execution_timeout(Duration::from_secs(1)),
+            )
+            .build()
+            .unwrap();
+        let out = sandbox
+            .execute("tc spawn sh -c 'sleep 30 & echo child'; echo after; result=7")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "child\nafter\n");
+        assert_eq!(out.result.as_deref(), Some("7"));
+        assert_eq!(
+            stderr(&out),
+            "eryx: killed 1 background job still running when the execution timed out\n"
         );
     }
 

@@ -2750,8 +2750,9 @@ impl<R> SandboxBuilder<Shell, R> {
     }
 
     /// Leave out the embedded shell's default commands (uutils coreutils,
-    /// with the `coreutils` feature), so only commands registered with
-    /// [`with_command`](Self::with_command) run.
+    /// with the `coreutils` feature, and `sh`/`bash` for the commands that
+    /// spawn them, see [`Command::guest`](crate::Command::guest)), so only
+    /// commands registered with [`with_command`](Self::with_command) run.
     #[must_use]
     pub fn without_embedded_commands(mut self) -> Self {
         self.embedded_commands = false;
@@ -3378,6 +3379,15 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
                 let coreutils = crate::embedded::coreutils()?;
                 for tool in crate::embedded::COREUTILS_TOOLS {
                     commands.insert_if_absent(tool, &coreutils);
+                }
+                // `sh`/`bash` for commands that run them (git's aliases and
+                // hooks); the shell itself runs them in its own guest.
+                #[cfg(feature = "shell")]
+                {
+                    let sh = crate::embedded::shell_command()?;
+                    for name in ["sh", "bash"] {
+                        commands.insert_if_absent(name, &sh);
+                    }
                 }
             }
             commands

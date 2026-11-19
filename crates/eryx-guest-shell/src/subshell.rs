@@ -135,7 +135,10 @@ pub(crate) fn parse_args(args: &[String]) -> Result<Args, String> {
 /// shells deep, and return its exit status. `fds` are its open files; a
 /// standard stream missing from them is the null device. Call it under the
 /// component's executor (see `run_local`): the shell's pipeline stages and
-/// children run as `spawn_local` tasks.
+/// children run as `spawn_local` tasks. With `wait_for_jobs` (a shell run as
+/// a process of its own, whose jobs would die with it) it waits for its
+/// background jobs before it returns, as an execution does; without, they
+/// keep running after it, until the execution's end waits for them.
 pub(crate) async fn run_shell(
     argv0: &str,
     args: &[String],
@@ -143,6 +146,7 @@ pub(crate) async fn run_shell(
     cwd: &Path,
     mut fds: HashMap<ShellFd, OpenFile>,
     depth: usize,
+    wait_for_jobs: bool,
 ) -> u8 {
     for fd in [0, 1, 2] {
         if let Entry::Vacant(slot) = fds.entry(fd)
@@ -237,7 +241,7 @@ pub(crate) async fn run_shell(
                 .await
         }
     };
-    match result {
+    let status = match result {
         Ok(_) => shell.last_exit_status(),
         Err(e) => {
             let _ = shell.display_error(&mut shell.stderr(), &e);
@@ -253,7 +257,15 @@ pub(crate) async fn run_shell(
                 _ => u8::from(ExecutionExitCode::from(&e)),
             }
         }
+    };
+    if wait_for_jobs {
+        let time_left = crate::eryx::process::execution::time_left();
+        let stopped = crate::jobs::finish_jobs(shell.jobs_mut(), time_left).await;
+        crate::report_stopped_jobs(stopped);
+    } else {
+        crate::jobs::orphan(shell.jobs_mut());
     }
+    status
 }
 
 /// Read `file` to its end, waiting out an empty pipe whose writer still runs.
