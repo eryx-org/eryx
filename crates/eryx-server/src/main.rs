@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use eryx::{PoolConfig, Sandbox, SandboxPool};
+use eryx::{PoolConfig, Sandbox, SandboxBuilder, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::{DEFAULT_JOURNAL_TTL, EryxService, MAX_MESSAGE_SIZE, ServerLimits};
 use eryx_server::telemetry::setup_tracing;
@@ -80,6 +80,17 @@ struct Args {
         value_parser = |s: &str| s.parse::<eryx::Language>()
     )]
     languages: Vec<eryx::Language>,
+
+    /// Directory of environments that requests can mount by name
+    /// (`ExecuteRequest.environment`): one per subdirectory, each packed with
+    /// `eryx-precompile env pack` and named by its manifest. They're loaded
+    /// and checked at startup; one that fails to load, has no name, shares
+    /// another's name, or is for a language the server doesn't serve stops
+    /// the server. Symlinks are followed and `.` entries skipped. Each
+    /// gets its own sandbox pool, sized by the pool flags and created on its
+    /// first request.
+    #[arg(long, env = "ERYX_ENVIRONMENTS")]
+    environments: Option<PathBuf>,
 
     /// Path to a pre-compiled Python runtime (.cwasm) to use instead of the embedded runtime.
     ///
@@ -469,11 +480,30 @@ async fn create_language_pool(
     language: eryx::Language,
     config: PoolConfig,
     shell: ShellCommands,
+    python: PythonRuntime,
+    environment: Option<eryx::environment::Environment>,
 ) -> Result<SandboxPool, eryx::PoolError> {
+    /// `builder`, mounting `environment` if there is one.
+    fn mount<L: eryx::language::GuestLanguage>(
+        builder: SandboxBuilder<L, eryx::state::Has>,
+        environment: Option<&eryx::environment::Environment>,
+    ) -> SandboxBuilder<L, eryx::state::Has> {
+        match environment {
+            Some(environment) => builder.with_environment(environment),
+            None => builder,
+        }
+    }
+    let environment = environment.as_ref();
     match language {
+        eryx::Language::Python => {
+            let builder = python
+                .builder()
+                .map_err(|e| eryx::PoolError::Creation(e.to_string()))?;
+            SandboxPool::new(mount(builder, environment), config).await
+        }
         #[cfg(feature = "javascript")]
         eryx::Language::JavaScript => {
-            SandboxPool::new(Sandbox::embedded().javascript(), config).await
+            SandboxPool::new(mount(Sandbox::embedded().javascript(), environment), config).await
         }
         #[cfg(feature = "shell")]
         eryx::Language::Shell => {
@@ -484,7 +514,7 @@ async fn create_language_pool(
             for (names, command) in shell.commands {
                 builder = builder.with_commands(names, command);
             }
-            SandboxPool::new(builder, config).await
+            SandboxPool::new(mount(builder, environment), config).await
         }
         other => {
             let _ = (config, shell);
@@ -495,11 +525,142 @@ async fn create_language_pool(
     }
 }
 
+/// Python's runtime: --runtime-cwasm and --stdlib.
+#[derive(Clone)]
+struct PythonRuntime {
+    runtime_cwasm: Option<PathBuf>,
+    stdlib: Option<PathBuf>,
+}
+
+impl PythonRuntime {
+    /// A builder for Python sandboxes on this runtime.
+    fn builder(
+        &self,
+    ) -> Result<SandboxBuilder<eryx::language::Python, eryx::state::Has>, Box<dyn std::error::Error>>
+    {
+        Ok(match (&self.runtime_cwasm, &self.stdlib) {
+            // SAFETY: The user is responsible for providing a trusted .cwasm file
+            // that was precompiled with a compatible engine configuration.
+            (Some(cwasm_path), Some(stdlib_path)) => unsafe {
+                // Explicit stdlib path — no embedded feature needed for stdlib
+                Sandbox::builder()
+                    .with_precompiled_file(cwasm_path)
+                    .with_python_stdlib(stdlib_path)
+            },
+            // SAFETY: as above.
+            (Some(cwasm_path), None) => unsafe {
+                // Custom runtime with embedded stdlib
+                Sandbox::builder()
+                    .with_precompiled_file(cwasm_path)
+                    .with_embedded_stdlib()?
+            },
+            (None, Some(_)) => {
+                return Err("--stdlib requires --runtime-cwasm".into());
+            }
+            (None, None) => Sandbox::embedded(),
+        })
+    }
+}
+
+/// The environments in `dir`, one per subdirectory (or symlink to one, as
+/// Kubernetes volumes have; entries starting with `.` are skipped), refusing
+/// one without a name, two with the same name, or one for a language not in
+/// `languages`, the languages the server serves.
+fn load_environments(
+    dir: &std::path::Path,
+    languages: &[eryx::Language],
+) -> Result<Vec<eryx::environment::Environment>, Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| format!("--environments {}: {e}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // Follows symlinks, unlike `entry.file_type()`.
+        if std::fs::metadata(&path)?.is_dir() {
+            paths.push(path);
+        } else {
+            tracing::info!(path = %path.display(), "--environments: skipping a file that isn't a directory");
+        }
+    }
+    paths.sort();
+    let mut names = std::collections::HashMap::new();
+    let mut environments = Vec::new();
+    for path in paths {
+        let environment = eryx::environment::Environment::load(&path)
+            .map_err(|e| format!("environment {}: {e}", path.display()))?;
+        let name = environment.manifest().name.clone();
+        if name.is_empty() {
+            return Err(format!(
+                "environment {} has no name, so no request could select it",
+                path.display()
+            )
+            .into());
+        }
+        if let Some(first) = names.insert(name.clone(), path.clone()) {
+            return Err(format!(
+                "environments {} and {} are both named {name:?}",
+                first.display(),
+                path.display()
+            )
+            .into());
+        }
+        let language = environment.language();
+        if !languages.contains(&language) {
+            return Err(format!(
+                "environment {name:?} ({}) is for {language}, which this server doesn't serve \
+                 (see --languages and the server's cargo features)",
+                path.display()
+            )
+            .into());
+        }
+        environments.push(environment);
+    }
+    Ok(environments)
+}
+
+/// A pool for `language`, mounting `environment` if given, that's created
+/// on its first request.
+fn lazy_pool(
+    language: eryx::Language,
+    environment: Option<eryx::environment::Environment>,
+    config: &PoolConfig,
+    shell: &ShellCommands,
+    python: &PythonRuntime,
+) -> eryx_server::service::PoolFactory {
+    let (config, shell, python) = (config.clone(), shell.clone(), python.clone());
+    Arc::new(move || {
+        let (config, shell, python, environment) = (
+            config.clone(),
+            shell.clone(),
+            python.clone(),
+            environment.clone(),
+        );
+        Box::pin(async move {
+            let name = environment.as_ref().map(|e| e.manifest().name.clone());
+            tracing::info!(%language, environment = name, "creating sandbox pool on first request");
+            let pool = create_language_pool(language, config, shell, python, environment).await?;
+            let pool = Arc::new(pool);
+            spawn_pool_maintenance(language, name, Arc::clone(&pool));
+            Ok(pool)
+        })
+    })
+}
+
 /// Spawn a background task that periodically evicts idle sandboxes and
-/// records pool gauge metrics.
-fn spawn_pool_maintenance(language: eryx::Language, pool: Arc<SandboxPool>) {
+/// records pool gauge metrics, labelled with the pool's language and
+/// environment (empty for none).
+fn spawn_pool_maintenance(
+    language: eryx::Language,
+    environment: Option<String>,
+    pool: Arc<SandboxPool>,
+) {
     tokio::spawn(async move {
         let language = language.as_str();
+        let environment = environment.unwrap_or_default();
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -508,7 +669,10 @@ fn spawn_pool_maintenance(language: eryx::Language, pool: Arc<SandboxPool>) {
                 tracing::debug!(evicted, language, "evicted idle sandboxes");
             }
             let stats = pool.stats();
-            let labels = [("language", language)];
+            let labels = [
+                ("language", language.to_owned()),
+                ("environment", environment.clone()),
+            ];
             metrics::gauge!("eryx_sandbox_pool_in_use", &labels).set(stats.in_use as f64);
             metrics::gauge!("eryx_sandbox_pool_available", &labels).set(stats.available as f64);
             metrics::gauge!("eryx_sandbox_pool_total", &labels).set(stats.total as f64);
@@ -646,33 +810,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Python's pool is built and prewarmed up front, as before; the other
     // languages' on their first request. --runtime-cwasm and --stdlib
     // configure Python; the other languages run their embedded runtimes.
-    let python_builder = match (&args.runtime_cwasm, &args.stdlib) {
-        // SAFETY: The user is responsible for providing a trusted .cwasm file
-        // that was precompiled with a compatible engine configuration.
-        (Some(cwasm_path), Some(stdlib_path)) => unsafe {
-            // Explicit stdlib path — no embedded feature needed for stdlib
-            Sandbox::builder()
-                .with_precompiled_file(cwasm_path)
-                .with_python_stdlib(stdlib_path)
-        },
-        // SAFETY: as above.
-        (Some(cwasm_path), None) => unsafe {
-            // Custom runtime with embedded stdlib
-            Sandbox::builder()
-                .with_precompiled_file(cwasm_path)
-                .with_embedded_stdlib()?
-        },
-        (None, Some(_)) => {
-            return Err("--stdlib requires --runtime-cwasm".into());
-        }
-        (None, None) => Sandbox::embedded(),
+    let python = PythonRuntime {
+        runtime_cwasm: args.runtime_cwasm.clone(),
+        stdlib: args.stdlib.clone(),
     };
+    let python_builder = python.builder()?;
     if !args.languages.contains(&eryx::Language::Python) {
         return Err("--languages must include python".into());
     }
     let python_pool = Arc::new(SandboxPool::new(python_builder, pool_config.clone()).await?);
     // Evict idle sandboxes and record pool gauge metrics every 5 seconds.
-    spawn_pool_maintenance(eryx::Language::Python, Arc::clone(&python_pool));
+    spawn_pool_maintenance(eryx::Language::Python, None, Arc::clone(&python_pool));
 
     let mut commands = load_shell_commands(
         &parse_shell_commands(&args.shell_commands)?,
@@ -728,6 +876,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let mut lazy_pools = Vec::new();
+    // The languages this server serves: those in --languages it was built with.
+    let mut served = vec![eryx::Language::Python];
     for &language in &args.languages {
         let built_in = match language {
             eryx::Language::Python => continue,
@@ -739,21 +889,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(%language, "not serving {language}: built without its cargo feature");
             continue;
         }
-        let config = pool_config.clone();
-        let shell = shell.clone();
-        let create: eryx_server::service::PoolFactory = Arc::new(move || {
-            let config = config.clone();
-            let shell = shell.clone();
-            Box::pin(async move {
-                tracing::info!(%language, "creating sandbox pool on first request");
-                let pool = create_language_pool(language, config, shell).await?;
-                let pool = Arc::new(pool);
-                spawn_pool_maintenance(language, Arc::clone(&pool));
-                Ok(pool)
-            })
-        });
-        lazy_pools.push((language, create));
+        served.push(language);
+        lazy_pools.push((
+            language,
+            lazy_pool(language, None, &pool_config, &shell, &python),
+        ));
     }
+    let environment_pools = match &args.environments {
+        Some(dir) => load_environments(dir, &served)?,
+        None => Vec::new(),
+    }
+    .into_iter()
+    .map(|environment| {
+        tracing::info!(
+            name = environment.manifest().name,
+            language = %environment.language(),
+            hash = environment.manifest().content.hash,
+            root = %environment.root().display(),
+            "serving environment"
+        );
+        let create = lazy_pool(
+            environment.language(),
+            Some(environment.clone()),
+            &pool_config,
+            &shell,
+            &python,
+        );
+        (environment, create)
+    })
+    .collect::<Vec<_>>();
 
     let signer = match &args.journal_signing_key {
         Some(hex_key) => {
@@ -802,6 +966,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         EryxService::with_signer(python_pool, signer),
         |service, (language, create)| service.with_lazy_pool(language, create),
     );
+    let service = environment_pools
+        .into_iter()
+        .fold(service, |service, (environment, create)| {
+            service.with_environment_pool(&environment, create)
+        });
     let service = service
         .with_max_message_size(args.max_message_size)
         .with_limits(limits)
@@ -935,6 +1104,11 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
+            PythonRuntime {
+                runtime_cwasm: None,
+                stdlib: None,
+            },
+            None,
         )
         .await
         .unwrap();
@@ -954,6 +1128,11 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
+            PythonRuntime {
+                runtime_cwasm: None,
+                stdlib: None,
+            },
+            None,
         )
         .await
         .unwrap();
@@ -978,6 +1157,11 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
+            PythonRuntime {
+                runtime_cwasm: None,
+                stdlib: None,
+            },
+            None,
         )
         .await
         .unwrap();
@@ -1001,6 +1185,11 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
+            PythonRuntime {
+                runtime_cwasm: None,
+                stdlib: None,
+            },
+            None,
         )
         .await
         .unwrap();
@@ -1158,5 +1347,76 @@ mod tests {
         for path in cached {
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    /// A one-module environment named `name` for `language`, in `dir`.
+    fn write_environment(dir: &std::path::Path, name: &str, language: eryx::environment::Language) {
+        use eryx::environment::{Builder, Inputs, Manifest};
+        std::fs::create_dir_all(dir.join("modules")).unwrap();
+        std::fs::write(dir.join("modules/m.js"), "export const x = 1;\n").unwrap();
+        let exports = [("m".to_string(), "modules/m.js".to_string())].into();
+        Manifest::new(
+            name,
+            language,
+            Inputs::new(Vec::new()),
+            Builder::new("test"),
+            dir,
+            "modules",
+            exports,
+        )
+        .unwrap()
+        .write(dir)
+        .unwrap();
+    }
+
+    #[test]
+    fn environments_load_by_name_and_are_checked() {
+        use eryx::environment::Language;
+        let all = [eryx::Language::Python, eryx::Language::JavaScript];
+
+        let dir = tempfile::tempdir().unwrap();
+        write_environment(&dir.path().join("a"), "tools", Language::JavaScript);
+        // Files beside the environments are skipped.
+        std::fs::write(dir.path().join("README"), "").unwrap();
+        let environments = load_environments(dir.path(), &all).unwrap();
+        assert_eq!(environments.len(), 1);
+        assert_eq!(environments[0].manifest().name, "tools");
+
+        // A language the server doesn't serve.
+        let err = load_environments(dir.path(), &[eryx::Language::Python]).unwrap_err();
+        assert!(err.to_string().contains("doesn't serve"), "{err}");
+
+        // A symlink to one is followed, and dot-entries are skipped.
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            write_environment(elsewhere.path(), "linked", Language::JavaScript);
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("linked")).unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("..data")).unwrap();
+            let environments = load_environments(dir.path(), &all).unwrap();
+            let names: Vec<_> = environments
+                .iter()
+                .map(|e| e.manifest().name.as_str())
+                .collect();
+            assert_eq!(names, ["tools", "linked"]);
+            std::fs::remove_file(dir.path().join("linked")).unwrap();
+        }
+
+        // One without a name.
+        let unnamed = tempfile::tempdir().unwrap();
+        write_environment(&unnamed.path().join("x"), "", Language::JavaScript);
+        let err = load_environments(unnamed.path(), &all).unwrap_err();
+        assert!(err.to_string().contains("has no name"), "{err}");
+
+        // Two with one name.
+        write_environment(&dir.path().join("b"), "tools", Language::JavaScript);
+        let err = load_environments(dir.path(), &all).unwrap_err();
+        assert!(err.to_string().contains("both named \"tools\""), "{err}");
+
+        // One that doesn't load.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        let err = load_environments(dir.path(), &all).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
     }
 }

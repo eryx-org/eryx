@@ -1626,6 +1626,11 @@ pub struct ExecutorState {
     /// Cancelled by `eryx:process/execution`'s `kill-children`, which kills
     /// the children whose `wait`s hold a clone of it, and starts a new one.
     pub(crate) kill_children: tokio_util::sync::CancellationToken,
+    /// For a guest run as a command: the fuel it was given and where it
+    /// publishes how much of it it has burned, for its spawner's `wait` to
+    /// charge. Its own `wait`s publish its children's burn here as they
+    /// charge it, since its epoch callback doesn't run while it waits.
+    pub(crate) published_fuel: Option<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1660,10 +1665,12 @@ impl Drop for ExecutorState {
 impl ExecutorState {
     /// State for instantiating a store ahead of any execution.
     ///
-    /// Instantiation runs no guest code beyond table initialisation, so the
-    /// guest never observes this state; [`Executor::execute_internal`]
-    /// replaces it wholesale with the real per-execution state before the
-    /// first export call.
+    /// [`Executor::execute_internal`] replaces it wholesale with the real
+    /// per-execution state before the first export call. A pre-initialized
+    /// runtime runs no guest code beyond table initialisation, so it never
+    /// observes this state. One that is not pre-initialized starts Python
+    /// during instantiation: it sees an empty filesystem and traps, and the
+    /// warm pool stops warming it.
     pub(crate) fn placeholder() -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
@@ -1675,7 +1682,7 @@ impl ExecutorState {
             net_tx: None,
             output_tx: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
-            hybrid_vfs_ctx: None,
+            hybrid_vfs_ctx: Some(empty_vfs()),
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
@@ -1686,6 +1693,7 @@ impl ExecutorState {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 
@@ -1854,6 +1862,7 @@ impl ExecutorState {
             nested,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 }
@@ -1871,15 +1880,25 @@ impl WasiView for ExecutorState {
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
-    #[allow(clippy::expect_used)]
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
-        eryx_vfs::HybridVfsState::new(
-            self.hybrid_vfs_ctx
-                .as_mut()
-                .expect("Hybrid VFS not configured for this executor"),
-            &mut self.table,
-        )
+        // Every state the guest runs on sets a context, so a missing one is a
+        // host bug. Fail closed with an empty filesystem rather than panic.
+        let ctx = self.hybrid_vfs_ctx.get_or_insert_with(|| {
+            tracing::error!(
+                "hybrid VFS not configured for this executor; the guest sees an empty filesystem"
+            );
+            empty_vfs()
+        });
+        eryx_vfs::HybridVfsState::new(ctx, &mut self.table)
     }
+}
+
+/// A filesystem with no preopens, so the guest can reach nothing.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+pub(crate) fn empty_vfs() -> eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage> {
+    eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+        eryx_vfs::InMemoryStorage::new(),
+    )))
 }
 
 // Host implementation of the WIT-generated sandbox imports trait.
@@ -2775,6 +2794,15 @@ impl Executor {
     #[must_use]
     pub fn warm_instances_ready(&self) -> usize {
         WarmPool::global().ready(&self.instance_pre)
+    }
+
+    /// Whether the warm pool has given up on this executor's component,
+    /// because instantiating it runs guest code that fails on a placeholder
+    /// state (a runtime that is not pre-initialized).
+    #[cfg(feature = "unstable-internals")]
+    #[must_use]
+    pub fn warm_instances_unsupported(&self) -> bool {
+        WarmPool::global().unsupported(&self.instance_pre)
     }
 
     /// The guest language this executor runs (default [`Language::Python`]).
@@ -4410,6 +4438,7 @@ impl Executor {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode

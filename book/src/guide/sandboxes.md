@@ -132,6 +132,20 @@ the first command, so it doesn't work on endless input (`yes | xargs`). The
 commands get its stdin, which it has read to the end (or, with `-a`, left
 alone). `-p` isn't supported.
 
+`timeout` is a builtin too (uutils' needs processes and signals), so
+`timeout 30 pytest` runs `pytest` looked up like `env`'s command. It takes
+GNU's arguments, `timeout [OPTION] DURATION COMMAND [ARG]...`: `DURATION` is a
+number of seconds with an optional `s`, `m`, `h` or `d` suffix, and `0` means
+no limit. When the time runs out, the command is stopped at once, as `kill`
+stops a job (with its builtins and child commands), and `timeout` exits 124.
+`--preserve-status` makes that 128 plus the signal's number (`-s SIGNAL`, TERM
+by default). `--foreground` and `-k`/`--kill-after` are accepted, and change
+nothing. Otherwise it exits with the command's status: 127 if it isn't there,
+126 if it can't be run, and 125 if `timeout` itself fails. The shell's
+builtins run in the guest, between waits on child commands and pipes, so a
+command that only loops on builtins without waiting (`sh -c 'while :; do :;
+done'`) isn't stopped by `timeout`; the execution's timeout still ends it.
+
 Background jobs work as in bash: `cmd &` runs `cmd` alongside the script, and
 `$!` is its ID. `wait` waits for every job, `wait ID|%N...` for those jobs
 (returning the last one's status), and `wait -n` for the first to finish (127
@@ -499,7 +513,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     and paths allow, whatever the script asks: scope it as narrowly as you
     can. Credentials are Rust-only for now.
 - **Limits:** children count against the execution's `max_fuel` as they
-  run (each may burn at most 10 billion instructions of it), and stop at its
+  run (a child may burn all the fuel the execution has left, so with no
+  `max_fuel` only the timeout bounds it), and stop at its
   `execution_timeout` and cancellation, even mid-computation. They're
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).

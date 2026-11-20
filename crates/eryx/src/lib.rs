@@ -133,8 +133,8 @@ pub mod preinit {
 }
 
 pub use callback::{
-    Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, POSITIONAL_ARGS_KEY,
-    PrefixCallback, PrefixHandler, TypedCallback, empty_schema,
+    Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, NamespacedCallback,
+    POSITIONAL_ARGS_KEY, PrefixCallback, PrefixHandler, TypedCallback, empty_schema,
 };
 pub use error::{Error, ErrorKind};
 pub use language::Language;
@@ -167,7 +167,7 @@ pub use trace::{OutputHandler, TraceEvent, TraceEventKind, TraceHandler};
 // Re-export precompilation utilities and internal types
 #[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
-pub use sandbox::language_preamble;
+pub use sandbox::{globals_preamble, language_preamble};
 #[cfg(feature = "unstable-internals")]
 pub use wasm::{CallbackHostResult, CallbackRequest, NetRequest, OutputRequest, TraceRequest};
 pub use wasm::{

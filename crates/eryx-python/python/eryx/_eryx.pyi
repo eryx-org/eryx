@@ -877,6 +877,7 @@ class Sandbox:
         result_variable: Optional[str] = None,
         commands: Optional[dict[str, Command]] = None,
         child_network: Union[None, Literal["inherit"], NetConfig] = None,
+        callback_namespace: Optional[str] = None,
     ) -> Sandbox:
         """Create a new sandbox with the embedded Python runtime.
 
@@ -921,6 +922,10 @@ class Sandbox:
                 waiting for execution to complete. Receives the output chunk as bytes.
             result_variable: Name of the variable captured from the script and exposed
                 as ``ExecuteResult.result`` (JSON-serialized). Defaults to ``"result"``.
+            callback_namespace: Install the callbacks (and MCP tools) under this
+                name rather than as top-level names: with ``"tools"``, a callback
+                ``get_time`` is ``await tools.get_time()`` (the command
+                ``tools.get_time`` in the shell). Must be an identifier.
             commands: For the shell only: external commands by name, each a
                 `Command`. They replace the uutils coreutils tools (cat, head, ls,
                 sort, ...) of the same name, which the shell gets by default from
@@ -1315,6 +1320,7 @@ class SandboxFactory:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        callback_namespace: Optional[str] = None,
     ) -> Session:
         """Create a persistent session from this factory's preinitialized runtime.
 
@@ -1356,6 +1362,7 @@ class SandboxFactory:
         on_stdout: Optional[Callable[[bytes], None]] = None,
         on_stderr: Optional[Callable[[bytes], None]] = None,
         result_variable: Optional[str] = None,
+        callback_namespace: Optional[str] = None,
     ) -> Sandbox:
         """Create a new sandbox from this factory.
 
@@ -1417,6 +1424,7 @@ class SandboxFactory:
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
+        callback_namespace: Optional[str] = None,
     ) -> SandboxPool:
         """Create a sandbox pool from this factory.
 
@@ -1439,6 +1447,8 @@ class SandboxFactory:
                 Defaults to True when secrets are provided.
             scrub_files: Whether to scrub secret placeholders from file writes.
                 Defaults to True when secrets are provided.
+            callback_namespace: Install each lease's callbacks under this name,
+                as for ``Sandbox``.
 
         Network and secrets are fixed for the pool's lifetime, unlike the
         per-request settings passed to ``acquire()``.
@@ -1566,6 +1576,7 @@ class Session:
         result_variable: Optional[str] = None,
         commands: Optional[dict[str, Command]] = None,
         child_network: Union[None, Literal["inherit"], NetConfig] = None,
+        callback_namespace: Optional[str] = None,
     ) -> Session:
         """Create a new session with the embedded Python runtime.
 

@@ -255,6 +255,122 @@ async fn execute_selects_the_language_pool() {
     assert!(status.message().contains("shell"), "{status:?}");
 }
 
+/// The fixture packages of the eryx crate's JavaScript environment tests
+/// (`crates/eryx/tests/fixtures/js-environment`), as an environment named
+/// `fixtures` in `dir`.
+#[cfg(feature = "javascript")]
+fn fixture_environment(dir: &std::path::Path) -> eryx::environment::Environment {
+    use eryx::environment::{Builder, Environment, Inputs, Language, Manifest};
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../eryx/tests/fixtures/js-environment");
+    let modules = dir.join("modules");
+    std::fs::create_dir_all(&modules).unwrap();
+    for entry in std::fs::read_dir(fixtures.join("modules")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), modules.join(entry.file_name())).unwrap();
+    }
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("bundle.json")).unwrap()).unwrap();
+    let exports = report["entries"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, file)| (name.clone(), format!("modules/{}", file.as_str().unwrap())))
+        .collect();
+    Manifest::new(
+        "fixtures",
+        Language::JavaScript,
+        Inputs::new(vec!["zod@4.6.7".into()]),
+        Builder::new("test"),
+        dir,
+        "modules",
+        exports,
+    )
+    .unwrap()
+    .write(dir)
+    .unwrap();
+    Environment::load(dir).unwrap()
+}
+
+/// A request names an environment to mount; its pool is separate from the
+/// language's, and a name the server doesn't have, or one for another
+/// language, is refused.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn execute_mounts_the_requested_environment() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let dir = tempfile::tempdir().unwrap();
+    let environment = fixture_environment(dir.path());
+    let served = environment.clone();
+    let create =
+        |environment: Option<eryx::environment::Environment>| -> eryx_server::service::PoolFactory {
+            Arc::new(move || {
+                let environment = environment.clone();
+                Box::pin(async move {
+                    let mut builder = Sandbox::embedded().javascript();
+                    if let Some(environment) = &environment {
+                        builder = builder.with_environment(environment);
+                    }
+                    let config = PoolConfig::default().with_max_size(2);
+                    Ok(Arc::new(SandboxPool::new(builder, config).await?))
+                })
+            })
+        };
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool)
+            .with_lazy_pool(eryx::Language::JavaScript, create(None))
+            .with_environment_pool(&served, create(Some(environment)))
+    })
+    .await;
+    let request = |code: &str, language: Language, environment: &str| ExecuteRequest {
+        code: code.to_string(),
+        language: language as i32,
+        environment: environment.to_string(),
+        ..Default::default()
+    };
+    let import = r#"import { z } from "zod";
+console.log(z.string().parse("ok"));"#;
+
+    let result = execute_request(
+        channel.clone(),
+        request(import, Language::Javascript, "fixtures"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.success,
+        "execution failed: {} {}",
+        result.error,
+        result.stderr.to_lossy()
+    );
+    assert_eq!(result.stdout, b"ok\n");
+
+    // Without the environment, there's nothing to import.
+    let result = execute_request(channel.clone(), request(import, Language::Javascript, ""))
+        .await
+        .unwrap();
+    assert!(!result.success);
+
+    let status = execute_request(channel.clone(), request("1", Language::Javascript, "nope"))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("no environment \"nope\""),
+        "{status:?}"
+    );
+
+    let status = execute_request(channel, request("print(1)", Language::Python, "fixtures"))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("is for javascript, not python"),
+        "{status:?}"
+    );
+}
+
 /// A JavaScript session's state survives a snapshot round trip through the
 /// server, and the variables it couldn't keep are named.
 #[cfg(feature = "javascript")]
@@ -304,6 +420,147 @@ async fn javascript_session_state_round_trips() {
     .unwrap();
     assert!(second.success, "second run failed: {}", second.error);
     assert_eq!(second.result, "42");
+}
+
+/// `ExecuteRequest.globals` become JavaScript globals, before leading imports
+/// are rewritten and without shifting line numbers or displacing a leading
+/// `'use strict'` or hashbang; a nested `__proto__` stays data.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_globals_are_injected() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    let request = |code: &str| ExecuteRequest {
+        code: code.to_string(),
+        language: Language::Javascript as i32,
+        globals: r#"{"inputs": [1, 2], "o": {"__proto__": 5}}"#.to_string(),
+        ..Default::default()
+    };
+
+    let result = execute_request(
+        channel.clone(),
+        request(
+            "import { Buffer } from 'node:buffer';\n\
+             console.log(inputs[0] + inputs[1], Object.keys(o).join(), \
+             Object.getPrototypeOf(o) === Object.prototype, Buffer.from('a').length)",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.success,
+        "execution failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"3 __proto__ true 1\n");
+
+    // The preamble runs on its own, so a directive or hashbang the code
+    // starts with is still first.
+    let result = execute_request(
+        channel.clone(),
+        request("'use strict';\nundeclared = inputs.length"),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success, "sloppy mode: {:?}", result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("ReferenceError"), "{stderr}");
+    let result = execute_request(
+        channel.clone(),
+        request("#!/usr/bin/env node\nconsole.log(inputs.length)"),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "hashbang: {}", result.error);
+    assert_eq!(result.stdout, b"2\n");
+
+    let result = execute_request(
+        channel,
+        request(
+            "import { Buffer } from 'node:buffer';\n\nthrow new Error('boom ' + inputs.length)",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("boom 2"), "{stderr}");
+    assert!(stderr.contains(":3:"), "{stderr}");
+}
+
+/// With persisted JavaScript state, a request's globals replace a restored
+/// `let` of the same name rather than hiding behind it; a restored `const`
+/// can't be replaced, so the execution fails.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_globals_replace_restored_state() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    let request = |code: &str, globals: &str, state_snapshot: Vec<u8>| ExecuteRequest {
+        code: code.to_string(),
+        language: Language::Javascript as i32,
+        globals: globals.to_string(),
+        persist_state: true,
+        state_snapshot,
+        ..Default::default()
+    };
+
+    let first = execute_request(
+        channel.clone(),
+        request("let total = 1; const fixed = 1", "", vec![]),
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "first run failed: {}", first.error);
+
+    let second = execute_request(
+        channel.clone(),
+        request(
+            "console.log(total)",
+            r#"{"total": 5}"#,
+            first.state_snapshot.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "second run failed: {}", second.error);
+    assert_eq!(second.stdout, b"5\n");
+
+    let third = execute_request(
+        channel,
+        request(
+            "console.log(fixed)",
+            r#"{"fixed": 5}"#,
+            first.state_snapshot,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(!third.success, "a restored const was replaced");
 }
 
 /// A shell request runs the embedded coreutils, and its result carries the
@@ -956,6 +1213,74 @@ print(f"got: {result}")
         }
     }
     assert!(got_result, "never received ExecuteResult");
+}
+
+/// With `callback_namespace`, the script calls `tools.echo` and the client
+/// is asked for `echo`, its declared name (#964).
+#[tokio::test]
+async fn execute_with_callback_namespace() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel.clone());
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print(await tools.echo(message='hi'))\nprint('echo' in globals())"
+                    .to_string(),
+                callbacks: vec![echo_declaration()],
+                callback_namespace: "tools".to_string(),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stdout = None;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "echo");
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: 0,
+                            result: Some(callback_response::Result::JsonResult(req.arguments_json)),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "execution failed: {}", result.error);
+                stdout = Some(result.stdout);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        stdout.expect("never received ExecuteResult"),
+        b"{'message': 'hi'}\nFalse\n"
+    );
+
+    let status = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "pass".to_string(),
+            callbacks: vec![echo_declaration()],
+            callback_namespace: "to.ols".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
 }
 
 #[tokio::test]
@@ -2356,6 +2681,9 @@ async fn rejects_invalid_replay_before_execution() {
         code,
         state: None,
         callbacks: &[],
+        environment: None,
+        globals: "",
+        callback_namespace: "",
     };
     let echo = [echo_declaration()];
     for scenario in [
@@ -2366,6 +2694,7 @@ async fn rejects_invalid_replay_before_execution() {
         "changed result",
         "changed state",
         "changed callbacks",
+        "changed globals",
         "expired",
         "extended expiry",
     ] {
@@ -2398,6 +2727,14 @@ async fn rejects_invalid_replay_before_execution() {
                 },
                 ttl,
             ),
+            "changed globals" => signer.sign(
+                &mut journal,
+                JournalBinding {
+                    globals: r#"{"a": 1}"#,
+                    ..bound(code)
+                },
+                ttl,
+            ),
             "expired" => signer.sign(&mut journal, bound(code), Duration::ZERO),
             "extended expiry" => {
                 signer.sign(&mut journal, bound(code), ttl);
@@ -2424,6 +2761,130 @@ async fn rejects_invalid_replay_before_execution() {
             "{scenario}"
         );
     }
+}
+
+/// `ExecuteRequest.globals` become Python globals: a script can still start
+/// with a `__future__` import, line numbers don't shift, numbers keep their
+/// exact value, and with persisted state a later request's globals replace
+/// the earlier ones.
+#[tokio::test]
+async fn python_globals_are_injected() {
+    let channel = start_server().await;
+    let request = |code: &str, globals: &str| ExecuteRequest {
+        code: code.to_string(),
+        globals: globals.to_string(),
+        ..Default::default()
+    };
+
+    let result = execute_request(
+        channel.clone(),
+        request(
+            "from __future__ import annotations\nprint(sum(inputs), big)",
+            r#"{"inputs": [1, 2], "big": 123456789012345678901234567890}"#,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert_eq!(result.stdout, b"3 123456789012345678901234567890\n");
+
+    let result = execute_request(
+        channel.clone(),
+        request("x = 1\n\nraise ValueError(inputs)", r#"{"inputs": [1]}"#),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("line 3") && stderr.contains("[1]"),
+        "{stderr}"
+    );
+
+    let first = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            persist_state: true,
+            ..request("kept = g", r#"{"g": 1}"#)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "first run failed: {}", first.error);
+    let second = execute_request(
+        channel,
+        ExecuteRequest {
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            ..request("print(kept, g)", r#"{"g": 2}"#)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "second run failed: {}", second.error);
+    assert_eq!(second.stdout, b"1 2\n");
+}
+
+/// Globals that aren't a JSON object of fresh identifiers are rejected
+/// before anything runs.
+#[tokio::test]
+async fn invalid_globals_are_rejected() {
+    let channel = start_server().await;
+    for (globals, expected) in [
+        ("{", "JSON object"),
+        ("[1]", "JSON object"),
+        (r#"{"a b": 1}"#, "invalid global name"),
+        (r#"{"print": 1}"#, "Python builtin"),
+        (r#"{"__name__": 1}"#, "Python builtin"),
+        (r#"{"__file__": 1}"#, "dunder"),
+        (r#"{"echo": 1}"#, "callback"),
+    ] {
+        let status = execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                code: "pass".to_string(),
+                globals: globals.to_string(),
+                callbacks: vec![echo_declaration()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{globals}");
+        assert!(status.message().contains(expected), "{globals}: {status:?}");
+    }
+}
+
+/// Under a callback namespace, a global may not take the namespace's name,
+/// which the callbacks are installed under, but may take a callback's own
+/// name, which is free (#964, #1159).
+#[tokio::test]
+async fn globals_collide_with_the_callback_namespace() {
+    let channel = start_server().await;
+    let request = |globals: &str| ExecuteRequest {
+        code: "print(get_time, type(tools).__name__)".to_string(),
+        globals: globals.to_string(),
+        callbacks: vec![CallbackDeclaration {
+            name: "get_time".to_string(),
+            ..Default::default()
+        }],
+        callback_namespace: "tools".to_string(),
+        ..Default::default()
+    };
+    let status = execute_request(channel.clone(), request(r#"{"tools": 1}"#))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("collides with the callback"),
+        "{status:?}"
+    );
+
+    let result = execute_request(channel, request(r#"{"get_time": 7}"#))
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.error);
+    assert_eq!(result.stdout, b"7 _EryxNamespace\n");
 }
 
 /// A malformed CIDR in `NetworkConfig` is a client error, not a silently

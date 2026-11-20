@@ -433,9 +433,9 @@ covers = [{ path = "crates/eryx-runtime/libs/wasi_snapshot_preview1.reactor.wasm
 
 [[component]]
 name = "wasi_snapshot_preview1 command adapter (Wasmtime)"
-version = "50.0.3"
+version = "51.0.0"
 license = "Apache-2.0 WITH LLVM-exception"
-url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.3"
+url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v51.0.0"
 # Adapts WASI preview 1 command modules into components (#993): the release
 # asset of the wasmtime eryx links, so a wasmtime bump fails this check until
 # the adapter is replaced with the new release's. `mise run
@@ -447,9 +447,9 @@ url = "https://github.com/bytecodealliance/wasmtime/releases/tag/v50.0.3"
 files = ["third_party/licenses/wasmtime-LICENSE"]
 artifacts = ["host"]
 crate = "wasmtime"
-crate_version = "50.0.3"
+crate_version = "51.0.0"
 update = "mise run update-preview1-adapter"
-covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "517933a625892c18e3d429ef563adef5e35415d61ec04bda24f45353e88eec25" }]
+covers = [{ path = "crates/eryx/adapters/wasi_snapshot_preview1.command.wasm", sha256 = "4e0172e3d210cd5080c08cdd1708cf272a5ea731b1121329c3e56705f5c6f91c" }]
 
 [[component]]
 name = "QuickJS-ng"
@@ -541,15 +541,15 @@ npm = "core-js-pure"
 
 [[component]]
 name = "uutils coreutils"
-version = "0.9.0 (840c36d3)"
+version = "0.13.0 (07b76df4)"
 license = "MIT"
-url = "https://github.com/uutils/coreutils/tree/840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+url = "https://github.com/uutils/coreutils/tree/07b76df463390fd56856725201ae52df5df0a063"
 # The tool itself; the crates it's built from are listed when eryx-build
 # builds it (#837 step 2).
 files = ["third_party/licenses/uutils-coreutils-LICENSE"]
 artifacts = ["coreutils"]
 cli = "clis/coreutils.toml"
-cli_commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+cli_commit = "07b76df463390fd56856725201ae52df5df0a063"
 
 [[component]]
 name = "HACL*"

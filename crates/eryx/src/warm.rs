@@ -180,6 +180,14 @@ impl WarmPool {
             .unwrap_or(0)
     }
 
+    /// Whether `pre`'s component has been found unable to be warmed.
+    #[cfg(feature = "unstable-internals")]
+    pub(crate) fn unsupported(&self, pre: &SandboxPre<ExecutorState>) -> bool {
+        self.lock_slots()
+            .and_then(|slots| slots.map.get(&key(pre)).map(|slot| slot.unsupported))
+            .unwrap_or(false)
+    }
+
     /// Dispose of a store that has run user code (if the caller has not
     /// already) and top the pool back up.
     ///
@@ -223,8 +231,9 @@ impl WarmPool {
             match handle.block_on(instantiate_warm(&pre)) {
                 Ok(instance) => reservation.fulfil(instance),
                 // A runtime that was not pre-initialized starts Python during
-                // instantiation, which traps without the real stdlib mounts.
-                Err(e) if e.is_wasm_trap() => {
+                // instantiation, which exits (or traps) without the real
+                // stdlib mounts.
+                Err(e) if e.is_guest_abort() => {
                     tracing::debug!(error = %e, "component cannot be pre-instantiated; not warming it");
                     reservation.mark_unsupported();
                 }

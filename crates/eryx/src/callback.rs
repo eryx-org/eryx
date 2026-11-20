@@ -800,6 +800,114 @@ impl Callback for PrefixCallback {
     }
 }
 
+/// A callback the guest reaches as `<namespace>.<name>` (#964): `tools.get_time()`
+/// in Python and JavaScript, the command `tools.get_time` in the shell.
+///
+/// [`SandboxBuilder::with_callback_namespace`](crate::SandboxBuilder::with_callback_namespace)
+/// wraps every callback in one. Use it directly to namespace callbacks given
+/// per request, e.g. to a [`PooledSandbox`](crate::PooledSandbox) whose
+/// sandbox wasn't built with a namespace. The wrapped callback sees the name
+/// without the namespace: a prefix callback `mcp.*` wrapped in `tools` is
+/// listed as `tools.mcp.*` and handed `mcp.github.search` for a call of
+/// `tools.mcp.github.search`.
+#[derive(Clone)]
+pub struct NamespacedCallback {
+    /// `<namespace>.<inner name>`.
+    name: String,
+    inner: Arc<dyn Callback>,
+}
+
+impl std::fmt::Debug for NamespacedCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamespacedCallback")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NamespacedCallback {
+    /// Put `inner` under `namespace`.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Initialization`](crate::ErrorKind::Initialization) unless
+    /// `namespace` is an identifier (`[A-Za-z_][A-Za-z0-9_]*`): each guest
+    /// installs it as one name.
+    pub fn new(namespace: &str, inner: Arc<dyn Callback>) -> Result<Self, crate::Error> {
+        Self::check_namespace(namespace)?;
+        Ok(Self {
+            name: format!("{namespace}.{}", inner.name()),
+            inner,
+        })
+    }
+
+    /// Fail unless `namespace` is an identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Initialization`](crate::ErrorKind::Initialization) naming it.
+    pub fn check_namespace(namespace: &str) -> Result<(), crate::Error> {
+        let mut chars = namespace.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if valid {
+            Ok(())
+        } else {
+            Err(crate::ErrorKind::Initialization(format!(
+                "invalid callback namespace {namespace:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            ))
+            .into())
+        }
+    }
+
+    /// The name the wrapped callback knows for an invocation of `name`.
+    fn inner_name<'a>(&self, name: &'a str) -> &'a str {
+        let skip = self.name.len() - self.inner.name().len();
+        name.get(skip..).unwrap_or(name)
+    }
+}
+
+impl Callback for NamespacedCallback {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> Schema {
+        self.inner.parameters_schema()
+    }
+
+    fn invoke(
+        &self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        self.inner.invoke(args)
+    }
+
+    fn invoke_with_raw_args(
+        &self,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        self.inner.invoke_with_raw_args(raw_args, args)
+    }
+
+    fn invoke_named(
+        &self,
+        name: &str,
+        raw_args: &str,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, CallbackError>> + Send + '_>> {
+        self.inner
+            .invoke_named(self.inner_name(name), raw_args, args)
+    }
+}
+
 /// Find the callback that handles an invocation of `name`: the callback
 /// registered under exactly that name, else the prefix callback (`p.*`) for
 /// the longest `p` that `name` is under.
@@ -1655,5 +1763,24 @@ mod tests {
             cb.invoke(json!({})).await,
             Err(CallbackError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn namespaced_callback_strips_the_namespace() {
+        let prefix = PrefixCallback::new("mcp", "tools", |name, _, _| {
+            Box::pin(async move { Ok(json!(name)) })
+        });
+        let cb = NamespacedCallback::new("tools", Arc::new(prefix)).unwrap();
+        assert_eq!(cb.name(), "tools.mcp.*");
+        let out = cb
+            .invoke_named("tools.mcp.github.search", "{}", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(out, json!("mcp.github.search"));
+
+        for bad in ["", "a.b", "1x", "a-b", "a b"] {
+            assert!(NamespacedCallback::check_namespace(bad).is_err(), "{bad:?}");
+        }
+        NamespacedCallback::check_namespace("_tools2").unwrap();
     }
 }

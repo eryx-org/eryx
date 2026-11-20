@@ -138,6 +138,9 @@ pub struct Sandbox {
     executor: Arc<Executor>,
     /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
     callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
+    /// The namespace [`set_callbacks`](Self::set_callbacks) puts callbacks
+    /// under, from [`SandboxBuilder::with_callback_namespace`].
+    callback_namespace: Option<String>,
     /// Python preamble code injected before user code: the secrets'
     /// environment variables, then `library_preamble`.
     preamble: String,
@@ -828,12 +831,19 @@ impl Sandbox {
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
     /// name, or if one collides with a name the guest uses itself (a
     /// JavaScript global, a Python builtin, a shell builtin or command);
-    /// the existing callbacks are left unchanged.
+    /// the existing callbacks are left unchanged. A sandbox built with
+    /// [`with_callback_namespace`](SandboxBuilder::with_callback_namespace)
+    /// puts these under the namespace too.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
         let mut duplicate = None;
         for callback in callbacks {
-            insert_callback(&mut map, &mut duplicate, Arc::from(callback));
+            let callback: Arc<dyn Callback> = Arc::from(callback);
+            let callback = match &self.callback_namespace {
+                Some(ns) => Arc::new(crate::callback::NamespacedCallback::new(ns, callback)?),
+                None => callback,
+            };
+            insert_callback(&mut map, &mut duplicate, callback);
         }
         check_duplicate_callback(duplicate)?;
         crate::reserved::check(
@@ -1022,6 +1032,7 @@ impl Clone for Sandbox {
         Self {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
+            callback_namespace: self.callback_namespace.clone(),
             preamble: self.preamble.clone(),
             library_preamble: self.library_preamble.clone(),
             type_stubs: self.type_stubs.clone(),
@@ -1071,6 +1082,162 @@ fn language_preamble(
     }
 }
 }
+
+/// The code that makes each top-level key of `globals`, a JSON object, a
+/// global in `language`'s guest, to run after the language's preamble.
+/// Empty `globals` means none. The JSON goes to the guest's own parser as
+/// given, so numbers too big for `serde_json` keep their exact value.
+/// In JavaScript each key is assigned by name, so it replaces a `let` of
+/// the same name from restored state.
+///
+/// # Errors
+///
+/// `globals` isn't a JSON object, the guest is the shell, or a key isn't an
+/// identifier, is a keyword, is a name the guest uses itself (a Python
+/// dunder, or one [`crate::reserved`] lists) or is the name one of `callbacks` is
+/// installed under, which the global would replace.
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub fn globals_preamble<'a>(
+    language: Language,
+    globals: &str,
+    callbacks: impl IntoIterator<Item = &'a str>,
+) -> Result<String, Error> {
+    let invalid = |message: String| Err(ErrorKind::Initialization(message).into());
+    if globals.is_empty() {
+        return Ok(String::new());
+    }
+    // Only the keys are read: values are skipped unparsed, so a number
+    // serde_json couldn't represent still reaches the guest's parser.
+    let object: std::collections::BTreeMap<String, serde::de::IgnoredAny> =
+        match serde_json::from_str(globals) {
+            Ok(object) => object,
+            Err(e) => return invalid(format!("globals must be a JSON object: {e}")),
+        };
+    if language == Language::Shell {
+        return invalid("globals are only supported for Python and JavaScript, not shell".into());
+    }
+    let callbacks: Vec<&str> = callbacks
+        .into_iter()
+        .map(|name| crate::reserved::installed_as(language, name))
+        .collect();
+    for name in object.keys() {
+        let identifier = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !identifier {
+            return invalid(format!(
+                "invalid global name {name:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            ));
+        }
+        let keywords = match language {
+            Language::JavaScript => JAVASCRIPT_KEYWORDS,
+            _ => PYTHON_KEYWORDS,
+        };
+        if keywords.contains(&name.as_str()) {
+            return invalid(format!(
+                "global '{name}' is a {language} keyword, which code can't refer to by name; \
+                 give it another name"
+            ));
+        }
+        if let Some(what) = crate::reserved::guest_name(language, name) {
+            return invalid(format!(
+                "global '{name}' collides with {what} '{name}'; give it another name"
+            ));
+        }
+        if language == Language::Python && name.starts_with("__") && name.ends_with("__") {
+            return invalid(format!(
+                "global '{name}' is a dunder name, which Python keeps for itself; give it another name"
+            ));
+        }
+        if callbacks.contains(&name.as_str()) {
+            return invalid(format!(
+                "global '{name}' collides with the callback '{name}', which it would replace; \
+                 give one of them another name"
+            ));
+        }
+    }
+    let literal = python_str_literal(globals);
+    Ok(match language {
+        // Assigned by name rather than set on `globalThis`, so a `let` that
+        // restored state declared takes the new value instead of hiding it;
+        // a restored `const` makes the execution fail. In a `Function` body,
+        // which is sloppy even though the preamble isn't, so an undeclared
+        // name becomes a global. `$` can't be in a key, so `$eryx` can't
+        // clash with one.
+        Language::JavaScript => {
+            let body: String = object
+                .keys()
+                .map(|name| format!("{name} = $eryx.{name};"))
+                .collect();
+            let body = python_str_literal(&body);
+            format!("new Function('$eryx', {body})(JSON.parse({literal}));\n")
+        }
+        _ => format!("globals().update(__import__('json').loads({literal}))\n"),
+    })
+}
+
+/// Reserved words, which can't be a JavaScript variable's name.
+#[cfg(feature = "unstable-internals")]
+const JAVASCRIPT_KEYWORDS: &[&str] = &[
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+];
+
+/// Python's keywords (`keyword.kwlist`), which can't be a variable's name.
+#[cfg(feature = "unstable-internals")]
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
 
 /// `export NAME='placeholder'` for each secret, in name order, with any `'`
 /// in the placeholder escaped. A name that isn't a shell variable name is
@@ -1814,6 +1981,8 @@ pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> 
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
     duplicate_callback: Option<String>,
+    /// The namespace callbacks are installed under (#964), if any.
+    callback_namespace: Option<String>,
     preamble: String,
     type_stubs: String,
     trace_handler: Option<Arc<dyn TraceHandler>>,
@@ -1916,6 +2085,7 @@ impl SandboxBuilder<Python, state::Needs> {
         Self {
             wasm_source: WasmSource::None,
             callbacks: HashMap::new(),
+            callback_namespace: None,
             duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
@@ -1960,6 +2130,7 @@ impl SandboxBuilder<Python, state::Needs> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
             callbacks: HashMap::new(),
+            callback_namespace: None,
             duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
@@ -2005,6 +2176,7 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
             duplicate_callback: self.duplicate_callback,
+            callback_namespace: self.callback_namespace,
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
@@ -2832,6 +3004,29 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
         self
     }
 
+    /// Install the callbacks under `namespace` (#964) rather than as
+    /// top-level names: with `"tools"`, a callback `get_time` is
+    /// `await tools.get_time()` in Python and JavaScript and the command
+    /// `tools.get_time` in the shell, and a prefix callback `mcp.*` is
+    /// `tools.mcp.<server>.<tool>`. Off by default.
+    ///
+    /// Only the namespace then has to stay clear of the guest's own names
+    /// (see [`with_callback`](Self::with_callback)), and it applies to
+    /// callbacks a pool sets per request as well. The callbacks themselves
+    /// still see their own names; `list_callbacks()`, trace events and
+    /// callback journals show the namespaced ones. So does code that calls
+    /// them: a library's preamble or type stubs
+    /// ([`with_library`](Self::with_library)) that call `get_time()` or
+    /// `invoke("get_time")` must say `tools.get_time()` instead.
+    ///
+    /// [`build`](Self::build) fails unless `namespace` is an identifier
+    /// (`[A-Za-z_][A-Za-z0-9_]*`).
+    #[must_use]
+    pub fn with_callback_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.callback_namespace = Some(namespace.into());
+        self
+    }
+
     /// Set a trace handler for execution progress.
     #[must_use]
     pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {
@@ -3120,8 +3315,9 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
     /// The factory keeps the wasm source, language, stdlib and library paths,
-    /// result variable, trace-collection setting and shell commands, and builds fresh
-    /// sandboxes from them on demand. Anything else would be silently lost
+    /// result variable, trace-collection setting, callback namespace and shell
+    /// commands, and builds fresh sandboxes from them on demand. Anything else
+    /// would be silently lost
     /// (per-request settings are reset whenever a sandbox returns to the
     /// pool, and the rest is not carried over), so builders that set it are
     /// rejected; use [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
@@ -3165,6 +3361,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let embedded_commands = self.embedded_commands;
         let child_network = self.child_network;
         let credentials = self.credentials;
+        let callback_namespace = self.callback_namespace;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -3183,6 +3380,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             // without one, children stay offline.
             builder.child_network = child_network.clone();
             builder.credentials = credentials.clone();
+            builder.callback_namespace = callback_namespace.clone();
             builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
@@ -3261,6 +3459,16 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
+        if let Some(ns) = &self.callback_namespace {
+            crate::callback::NamespacedCallback::check_namespace(ns)?;
+            self.callbacks = std::mem::take(&mut self.callbacks)
+                .into_values()
+                .map(|cb| {
+                    let cb = crate::callback::NamespacedCallback::new(ns, cb)?;
+                    Ok((cb.name().to_string(), Arc::new(cb) as Arc<dyn Callback>))
+                })
+                .collect::<Result<_, Error>>()?;
+        }
         self.check_language()?;
         let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.preamble)?;
         crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
@@ -3442,6 +3650,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         Ok(Sandbox {
             executor: Arc::new(executor),
             callbacks: Arc::clone(&built.callbacks),
+            callback_namespace: self.callback_namespace,
             preamble: built.preamble.clone(),
             library_preamble: self.preamble,
             type_stubs: self.type_stubs,
@@ -4771,6 +4980,65 @@ mod tests {
             matches!(err.kind(), ErrorKind::Initialization(msg) if msg.contains("javascript")),
             "{err}"
         );
+    }
+
+    #[cfg(feature = "unstable-internals")]
+    #[test]
+    fn globals_preamble_passes_the_json_through() {
+        let none: [&str; 0] = [];
+        assert_eq!(globals_preamble(Language::Python, "", none).unwrap(), "");
+        // Too big for serde_json's integers: the guest parses the original.
+        // and beyond f64's range: the guest parses the original.
+        let globals =
+            r#"{"x": {"__proto__": 1}, "big": 123456789012345678901234567890, "huge": 1e400}"#;
+        let literal = serde_json::to_string(globals).unwrap();
+        assert_eq!(
+            globals_preamble(Language::Python, globals, none).unwrap(),
+            format!("globals().update(__import__('json').loads({literal}))\n")
+        );
+        assert_eq!(
+            globals_preamble(Language::JavaScript, globals, none).unwrap(),
+            format!(
+                "new Function('$eryx', \"big = $eryx.big;huge = $eryx.huge;x = $eryx.x;\")\
+                 (JSON.parse({literal}));\n"
+            )
+        );
+    }
+
+    #[cfg(feature = "unstable-internals")]
+    #[test]
+    fn globals_preamble_refuses_bad_globals() {
+        let refused = |language, globals: &str, callbacks: &[&str]| {
+            let err = globals_preamble(language, globals, callbacks.iter().copied()).unwrap_err();
+            assert!(matches!(err.kind(), ErrorKind::Initialization(_)), "{err}");
+            err.to_string()
+        };
+        assert!(refused(Language::Python, "{", &[]).contains("JSON object"));
+        assert!(refused(Language::Python, "[1]", &[]).contains("JSON object"));
+        assert!(refused(Language::JavaScript, "1", &[]).contains("JSON object"));
+        assert!(refused(Language::Shell, r#"{"a": 1}"#, &[]).contains("shell"));
+        assert!(refused(Language::Python, r#"{"a-b": 1}"#, &[]).contains("invalid global name"));
+        assert!(refused(Language::Python, r#"{"": 1}"#, &[]).contains("invalid global name"));
+        assert!(refused(Language::Python, r#"{"print": 1}"#, &[]).contains("Python builtin"));
+        assert!(refused(Language::Python, r#"{"__file__": 1}"#, &[]).contains("dunder"));
+        assert!(refused(Language::Python, r#"{"lambda": 1}"#, &[]).contains("keyword"));
+        assert!(refused(Language::JavaScript, r#"{"class": 1}"#, &[]).contains("keyword"));
+        assert!(
+            refused(Language::JavaScript, r#"{"$eryx": 1}"#, &[]).contains("invalid global name")
+        );
+        assert!(
+            refused(Language::JavaScript, r#"{"__proto__": 1}"#, &[]).contains("JavaScript global")
+        );
+        assert!(
+            refused(Language::JavaScript, r#"{"fetch": 1}"#, &[]).contains("JavaScript global")
+        );
+        assert!(
+            refused(Language::Python, r#"{"mcp": 1}"#, &["mcp.github.search"]).contains("callback")
+        );
+        // What one language reserves, another can use.
+        let none: [&str; 0] = [];
+        assert!(globals_preamble(Language::Python, r#"{"fetch": 1}"#, none).is_ok());
+        assert!(globals_preamble(Language::JavaScript, r#"{"__x__": 1}"#, none).is_ok());
     }
 
     #[test]

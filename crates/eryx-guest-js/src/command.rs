@@ -185,12 +185,7 @@ pub(crate) fn prepare(
             };
             argv.push(script.clone());
             argv.extend(rest.into_iter().skip(1));
-            // A `#!` line becomes a comment, keeping the line numbers (the
-            // import rewrite doesn't skip it).
-            let code = match code.strip_prefix("#!") {
-                Some(rest) => format!("//{rest}"),
-                None => code,
-            };
+            // QuickJS skips a `#!` line, and so does the import rewrite.
             (code, script.clone(), false, Some(script))
         }
     };

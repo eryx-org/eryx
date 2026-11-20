@@ -84,6 +84,19 @@ async fn text_encoder_and_decoder() {
     );
 }
 
+/// Imports after a directive prologue are rewritten, and the directive
+/// still applies (#1158).
+#[tokio::test]
+async fn imports_after_use_strict() {
+    let out = ok(r#""use strict";
+import path from "node:path";
+console.log(path.join("a", "b"));
+try { undeclared = 5; console.log("sloppy"); } catch (e) { console.log(e.name); }
+"#)
+    .await;
+    assert_eq!(out, "a/b\nReferenceError\n");
+}
+
 #[tokio::test]
 async fn buffer_events_path_and_string_decoder() {
     let out = ok(r"

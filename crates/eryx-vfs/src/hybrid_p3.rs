@@ -591,7 +591,7 @@ impl<D> StreamProducer<D> for ReadProducer {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         let me = &mut *self;
         if me.pending.is_none() {
-            let size = match dst.remaining(&mut store) {
+            let size = match dst.remaining(&mut store)? {
                 Some(0) => return Poll::Ready(Ok(StreamResult::Completed)),
                 Some(n) => n.min(MAX_READ_CHUNK),
                 None => MAX_READ_CHUNK,
@@ -662,7 +662,7 @@ impl<D> StreamConsumer<D> for WriteConsumer {
         let mut src = src.as_direct(store);
         let me = &mut *self;
         if me.pending.is_none() {
-            let chunk = src.remaining();
+            let chunk = src.remaining()?;
             if chunk.is_empty() {
                 return Poll::Ready(Ok(StreamResult::Completed));
             }

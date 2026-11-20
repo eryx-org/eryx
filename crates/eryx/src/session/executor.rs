@@ -2501,6 +2501,7 @@ impl ExecutorState {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 
@@ -2535,6 +2536,7 @@ impl ExecutorState {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 

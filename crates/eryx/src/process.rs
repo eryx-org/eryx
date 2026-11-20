@@ -28,9 +28,9 @@
 //!   `eryx:process/run`, to completion, or `eryx:process/pipe`, with live
 //!   pipes (see [`piped`]), with the same commands, filesystem, network and
 //!   execution limits, at most `MAX_SPAWN_DEPTH` deep.
-//! - **Limits:** children burn the parent execution's fuel as they run (at
-//!   most `CHILD_FUEL` each), overshooting it by at most one epoch tick of
-//!   work per running child, and stop at its timeout and cancellation. The
+//! - **Limits:** children burn the parent execution's fuel as they run,
+//!   overshooting it by at most one epoch tick of work per running child,
+//!   and stop at its timeout and cancellation. The
 //!   running children share one pool of memory
 //!   ([`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes)),
 //!   on top of the parent's own limit, and the host memory their arguments hold is
@@ -98,12 +98,6 @@ use child_bindings::eryx::process::run::{Output, RunError};
 /// Bytes each of a child's stdin, stdout and stderr pipes holds before its
 /// writer has to wait for the reader.
 const PIPE_CAPACITY: usize = 64 * 1024;
-/// Most fuel one child may burn, taken from the parent's.
-///
-/// A running child is charged to the parent each time it yields, once per
-/// epoch tick, so children together overshoot the parent's fuel by at most
-/// one tick of work each, for up to [`MAX_LIVE_CHILDREN`] of them.
-const CHILD_FUEL: u64 = 10_000_000_000;
 /// Default for [`ResourceLimits::max_child_memory_bytes`](crate::ResourceLimits::max_child_memory_bytes):
 /// the memory an execution's running children may grow to together, on top
 /// of the parent's own limit.
@@ -2291,11 +2285,7 @@ impl eryx_vfs::HybridVfsView for ChildState {
 
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
         // A child without the parent's VFS sees an empty one.
-        let vfs = self.vfs.get_or_insert_with(|| {
-            eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(Arc::new(
-                eryx_vfs::InMemoryStorage::new(),
-            )))
-        });
+        let vfs = self.vfs.get_or_insert_with(crate::wasm::empty_vfs);
         eryx_vfs::HybridVfsState::new(vfs, &mut self.table)
     }
 }
@@ -2546,6 +2536,7 @@ impl ChildRun {
         let mut state = ExecutorState::for_command(wasi.build(), vfs, memory, self.spawner);
         // Its execution's, so `time-left` tells it the time it really has.
         state.deadline = self.deadline;
+        state.published_fuel = Some((self.fuel, Arc::clone(&self.fuel_used)));
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
         if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
@@ -2591,7 +2582,7 @@ impl<D> StreamConsumer<D> for PipeConsumer {
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
         let mut src = src.as_direct(store);
-        let buf = src.remaining();
+        let buf = src.remaining()?;
         // A zero-length write asks whether the pipe is writable; say yes.
         if buf.is_empty() {
             return Poll::Ready(Ok(StreamResult::Completed));
@@ -2625,11 +2616,11 @@ impl<D> StreamProducer<D> for PipeProducer {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         // A zero-length read asks whether output is ready, which a pipe can't
         // tell without reading; say yes.
-        if dst.remaining(store.as_context_mut()) == Some(0) {
+        if dst.remaining(store.as_context_mut())? == Some(0) {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
         let mut dst = dst.as_direct(store, PIPE_CAPACITY);
-        match self.0.poll_read(cx, dst.remaining()) {
+        match self.0.poll_read(cx, dst.remaining()?) {
             // End of file: the child exited, or closed the stream.
             Poll::Ready(0) => Poll::Ready(Ok(StreamResult::Dropped)),
             Poll::Ready(n) => {
@@ -2670,6 +2661,13 @@ impl ExecutorState {
 
     /// Start waiting on `child`: what to run it with, given `fuel` left in
     /// the parent.
+    ///
+    /// The child may burn all of it: it's charged to the parent each time it
+    /// yields, once per epoch tick, so children together overshoot the
+    /// parent's fuel by at most one tick of work each, for up to
+    /// [`MAX_LIVE_CHILDREN`] of them, and one that runs out of its own has
+    /// emptied the parent too. An unlimited parent leaves its children
+    /// bounded only by its timeout.
     fn take_child_run(
         &mut self,
         child: &Resource<ChildProcess>,
@@ -2683,7 +2681,7 @@ impl ExecutorState {
             .get_mut(child)
             .map_err(|_| ProcessError::IoError)?;
         let mut run = child.run.take().ok_or(ProcessError::IoError)?;
-        run.fuel = fuel.min(CHILD_FUEL);
+        run.fuel = fuel;
         Ok(run)
     }
 }
@@ -2776,9 +2774,12 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             access.get().take_child_run(&child, fuel)
         })?;
         // The child is charged on its epoch ticks, so they must run even in
-        // an execution with no timeout or cancellation.
+        // an execution with no timeout or cancellation. Without them it
+        // would be charged only when it exits, and children running at once
+        // could each burn all the fuel the parent has left.
         if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
-            tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
+            tracing::warn!(error = %e, "no epoch ticker to charge the child by; not running it");
+            return Err(ProcessError::SpawnFailed);
         }
         // A guest run as a command (a nested shell) has no trace of its own:
         // its children's events join its spawner's queue, for the `wait`
@@ -2846,6 +2847,13 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
                 // Fuel is always enabled on both engines.
                 let _ = store.set_fuel(left);
+                // A guest run as a command publishes its total for its own
+                // spawner now: its epoch callback doesn't run while it waits,
+                // so its children's burn would otherwise reach the execution
+                // only once it runs again.
+                if let Some((fuel, used)) = &access.get().published_fuel {
+                    used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+                }
                 left > 0
             })
         };
@@ -2998,7 +3006,7 @@ fn charge_caller(
 /// `eryx:process/run`: run `cmd` to completion for the child whose store
 /// this is, as `wait` does for the guest's children.
 ///
-/// The nested child gets the caller's fuel left (at most `CHILD_FUEL`), and
+/// The nested child gets the caller's fuel left, and
 /// what it burns is charged to the caller as it runs, so it rolls up to the
 /// execution. Its argv, env, stdin and captured output are held against
 /// the execution's [`ChildBudget`] until this returns (or is dropped).
@@ -3042,7 +3050,7 @@ async fn run_nested(
         .traces
         .clone()
         .map(|traces| NestedTrace::start(traces, run.argv.clone()));
-    run.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
+    run.fuel = store.get_fuel().unwrap_or(0);
     let fuel_used = Arc::clone(&run.fuel_used);
     let mut running = std::pin::pin!(run.run());
     let mut done = None;
@@ -3659,8 +3667,8 @@ pub(crate) mod tests {
         assert_eq!(names(Some(&allowed), &options, &[&any]), ["gh"]);
     }
 
-    /// A run of `command` with `argv` on the given pipes, with a child's
-    /// default fuel and memory.
+    /// A run of `command` with `argv` on the given pipes, with unlimited
+    /// fuel and a child's default memory.
     fn child_run(
         command: &Command,
         argv: &[&str],
@@ -3675,7 +3683,7 @@ pub(crate) mod tests {
             stdin,
             stdout,
             stderr,
-            fuel: CHILD_FUEL,
+            fuel: u64::MAX,
             fuel_used: Arc::default(),
             memory: ChildMemory::reserve(Arc::default(), DEFAULT_CHILD_MEMORY_BYTES as usize, 0)
                 .unwrap(),

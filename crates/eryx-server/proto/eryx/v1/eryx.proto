@@ -141,6 +141,41 @@ message ExecuteRequest {
   // the server doesn't have, network for a command when child_network gives
   // children none, or setting it for another language is INVALID_ARGUMENT.
   map<string, CommandOptions> commands = 17;
+
+  // The name of one of the server's environments (see its --environments
+  // flag) to mount read-only, so the code can import its packages. Empty: no
+  // environment. A name the server doesn't have, or an environment for
+  // another language than `language`, is INVALID_ARGUMENT. A callback
+  // journal is bound to the environment it was recorded under: its name and
+  // content hash, so repacking an environment invalidates its journals.
+  string environment = 18;
+
+  // Install the callbacks under this namespace rather than as top-level
+  // names: with "tools", the callback get_time is `await tools.get_time()` in
+  // Python and JavaScript and the command `tools.get_time` in the shell.
+  // CallbackRequest.name stays the declared name, without the namespace.
+  // Empty (the default) installs them as top-level names. A namespace that
+  // isn't an identifier ([A-Za-z_][A-Za-z0-9_]*), or that collides with a
+  // name the guest uses itself, is INVALID_ARGUMENT. A callback journal is
+  // bound to the namespace it was recorded under.
+  string callback_namespace = 19;
+
+  // Python and JavaScript: data for the script, as a JSON object whose
+  // top-level keys become globals before the code runs, e.g.
+  // {"inputs": [1, 2], "args": {"verbose": true}}. Each key must match
+  // [A-Za-z_][A-Za-z0-9_]* and must not be a keyword, a name the guest
+  // already has (a Python builtin or dunder, a JavaScript global) or a
+  // callback's name (callback_namespace, when that's set).
+  // The code is passed through untouched, so `from __future__` imports and
+  // leading JavaScript `import`s still work and line numbers don't shift.
+  // Not scrubbed from output: put secrets in `secrets`, not here. With
+  // persist_state the globals are kept in the snapshot like any other
+  // variable, and a later request's globals overwrite them (in JavaScript a
+  // restored `const` can't be, and the execution fails). Counts towards
+  // the server's message size limit like `code`. Empty means none; anything
+  // else that isn't such an object, or setting it for the shell, is
+  // INVALID_ARGUMENT.
+  string globals = 20;
 }
 
 // Per-execution options for one of the server's shell commands; see
@@ -466,9 +501,10 @@ message CallbackJournalEntry {
 // journal starting a new session). The MAC covers
 // both the entries and the script code, so a journal cannot be replayed against
 // a different script. It also covers the state snapshot the run started from,
-// the declared callback names and `expires_at_unix_secs`: a journal replays only
-// into the same script, starting state and callback set, and only until it
-// expires (the server's --journal-ttl-secs after signing).
+// the declared callback names, the environment (name and content hash), the
+// request's `globals` and `expires_at_unix_secs`: a journal replays only into
+// the same script, starting state, callback set, environment and globals, and
+// only until it expires (the server's --journal-ttl-secs after signing).
 //
 // MATCHING: replay matches callbacks by (name, canonical args). Concurrent calls
 // with identical (name, args) are indistinguishable to replay; include a
@@ -477,9 +513,9 @@ message CallbackJournal {
   // Ordered callback invocations, in the order they were initiated.
   repeated CallbackJournalEntry entries = 1;
   // HMAC-SHA256 over the journal entries, script code, starting state,
-  // callback names and expiry. Produced by the server using a configured
-  // signing key. Empty on the first request (no journal to sign yet); the
-  // server returns a signed journal in the result.
+  // callback names, environment, globals and expiry. Produced by the server
+  // using a configured signing key. Empty on the first request (no journal to
+  // sign yet); the server returns a signed journal in the result.
   bytes signature = 2;
   // Unix time (seconds) after which the server rejects this journal. Set by
   // the server when signing; echo it back unchanged.

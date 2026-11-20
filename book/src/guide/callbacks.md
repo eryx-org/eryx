@@ -121,12 +121,25 @@ Callback names must be unique: building a sandbox with two callbacks of the same
 A guest installs each callback under its name (for a dotted name like `http.get`, under its first part, `http`), and keeps what it already has, so a callback named like something of the guest's could only be called through `invoke("name")`. Building such a sandbox fails instead, naming the callback and what it collides with:
 
 - **JavaScript:** the guest's globals (`fetch`, `crypto`, `URL`, `setTimeout`, `console`, `require`, `invoke`, the built-ins like `JSON` and `Map`, ...), including as a dotted name's first part (`fetch.get`, `crypto.*`).
-- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke`, `grep`, `env`, `xargs`, `chmod`, `kill`, `sh` and `bash`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
+- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke`, `grep`, `env`, `xargs`, `chmod`, `kill`, `timeout`, `sh` and `bash`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
 - **Python:** the builtins (`print`, `list`, `open`, ...) and the names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`, ...), including as a dotted name's first part (`json.dumps`).
 
 In JavaScript, `process` is reserved even in a sandbox without secrets, where the guest only defines it when there are some.
 
 The lists are in `crates/eryx/src/reserved/`. Give the callback another name (`fetch_user`, `http_fetch`), or put it under a prefix (`tools.fetch`).
+
+## Callback Namespace
+
+To keep callbacks out of the guest's top-level names altogether, install them under one name. It's off by default, so existing scripts keep working:
+
+| Binding | Option |
+|---------|--------|
+| Rust | `SandboxBuilder::with_callback_namespace("tools")` (or wrap each in `NamespacedCallback`) |
+| pyeryx | `Sandbox(callback_namespace="tools")`, also `Session` and the factory's `create_sandbox`/`create_session` |
+| gRPC | `ExecuteRequest.callback_namespace` |
+| `@eryx-org/eryx` | `new Sandbox({ callbackNamespace: "tools" })` |
+
+A callback `get_time` is then `await tools.get_time()` in Python, `await tools.get_time()` in JavaScript, and the command `tools.get_time` in the shell. A prefix callback `mcp.*` nests under it as `tools.mcp.<server>.<tool>`. Only the namespace has to stay clear of the reserved names above, so `tools.fetch` builds in JavaScript; the namespace must be an identifier. `list_callbacks()`, trace events and callback journals show the namespaced names (`tools.get_time`), while the callback itself (and a gRPC client's `CallbackRequest.name`) sees its own name. A pool built with a namespace puts each lease's callbacks under it too. Code written against the bare names, such as a library preamble that calls `get_time()` or `invoke("get_time")`, has to use the namespaced ones.
 
 ## Parameters and Types
 
