@@ -293,6 +293,9 @@ export async function instantiateSandbox(
       deadline === undefined
         ? undefined
         : BigInt(Math.max(0, Math.round((deadline - Date.now()) * 1e6))),
+    // A child here runs as one call that can't be stopped midway (see
+    // shims/process.js), so there's nothing to kill.
+    killChildren: () => {},
   };
   const fs = createFilesystem({
     adapter: new InMemoryFilesystemAdapter(),

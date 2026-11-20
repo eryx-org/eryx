@@ -109,6 +109,11 @@ pub(crate) async fn finish_jobs(jobs: &mut jobs::JobManager, time_left_ns: Optio
     };
     let mut stopped = 0;
     if !finished {
+        // Kill the children first, all at once: aborting a job cancels its
+        // child's `wait`, which blocks until the host has dropped it, and
+        // meanwhile every other child still running gets a turn, an epoch
+        // tick for a busy one. One by one that eats the margin.
+        crate::eryx::process::execution::kill_children();
         for job in &mut jobs.jobs {
             if matches!(job.poll_done(), Ok(None)) && !matches!(job.state, jobs::JobState::Done) {
                 // As a shell's jobs get SIGHUP when it exits.

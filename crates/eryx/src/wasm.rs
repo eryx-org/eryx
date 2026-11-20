@@ -1623,6 +1623,9 @@ pub struct ExecutorState {
     /// When the running execution times out, for `eryx:process/execution`'s
     /// `time-left`; none without a timeout, or between executions.
     pub(crate) deadline: Option<std::time::Instant>,
+    /// Cancelled by `eryx:process/execution`'s `kill-children`, which kills
+    /// the children whose `wait`s hold a clone of it, and starts a new one.
+    pub(crate) kill_children: tokio_util::sync::CancellationToken,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1682,6 +1685,7 @@ impl ExecutorState {
             trace_clock: TraceClock::default(),
             nested: None,
             deadline: None,
+            kill_children: Default::default(),
         }
     }
 
@@ -1849,6 +1853,7 @@ impl ExecutorState {
             trace_clock: TraceClock::default(),
             nested,
             deadline: None,
+            kill_children: Default::default(),
         }
     }
 }
@@ -4404,6 +4409,7 @@ impl Executor {
             trace_clock: TraceClock::default(),
             nested: None,
             deadline: None,
+            kill_children: Default::default(),
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
