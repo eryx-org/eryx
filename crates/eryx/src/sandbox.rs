@@ -1072,6 +1072,162 @@ fn language_preamble(
 }
 }
 
+/// The code that makes each top-level key of `globals`, a JSON object, a
+/// global in `language`'s guest, to run after the language's preamble.
+/// Empty `globals` means none. The JSON goes to the guest's own parser as
+/// given, so numbers too big for `serde_json` keep their exact value.
+/// In JavaScript each key is assigned by name, so it replaces a `let` of
+/// the same name from restored state.
+///
+/// # Errors
+///
+/// `globals` isn't a JSON object, the guest is the shell, or a key isn't an
+/// identifier, is a keyword, is a name the guest uses itself (a Python
+/// dunder, or one [`crate::reserved`] lists) or is the name one of `callbacks` is
+/// installed under, which the global would replace.
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub fn globals_preamble<'a>(
+    language: Language,
+    globals: &str,
+    callbacks: impl IntoIterator<Item = &'a str>,
+) -> Result<String, Error> {
+    let invalid = |message: String| Err(ErrorKind::Initialization(message).into());
+    if globals.is_empty() {
+        return Ok(String::new());
+    }
+    // Only the keys are read: values are skipped unparsed, so a number
+    // serde_json couldn't represent still reaches the guest's parser.
+    let object: std::collections::BTreeMap<String, serde::de::IgnoredAny> =
+        match serde_json::from_str(globals) {
+            Ok(object) => object,
+            Err(e) => return invalid(format!("globals must be a JSON object: {e}")),
+        };
+    if language == Language::Shell {
+        return invalid("globals are only supported for Python and JavaScript, not shell".into());
+    }
+    let callbacks: Vec<&str> = callbacks
+        .into_iter()
+        .map(|name| crate::reserved::installed_as(language, name))
+        .collect();
+    for name in object.keys() {
+        let identifier = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !identifier {
+            return invalid(format!(
+                "invalid global name {name:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            ));
+        }
+        let keywords = match language {
+            Language::JavaScript => JAVASCRIPT_KEYWORDS,
+            _ => PYTHON_KEYWORDS,
+        };
+        if keywords.contains(&name.as_str()) {
+            return invalid(format!(
+                "global '{name}' is a {language} keyword, which code can't refer to by name; \
+                 give it another name"
+            ));
+        }
+        if let Some(what) = crate::reserved::guest_name(language, name) {
+            return invalid(format!(
+                "global '{name}' collides with {what} '{name}'; give it another name"
+            ));
+        }
+        if language == Language::Python && name.starts_with("__") && name.ends_with("__") {
+            return invalid(format!(
+                "global '{name}' is a dunder name, which Python keeps for itself; give it another name"
+            ));
+        }
+        if callbacks.contains(&name.as_str()) {
+            return invalid(format!(
+                "global '{name}' collides with the callback '{name}', which it would replace; \
+                 give one of them another name"
+            ));
+        }
+    }
+    let literal = python_str_literal(globals);
+    Ok(match language {
+        // Assigned by name rather than set on `globalThis`, so a `let` that
+        // restored state declared takes the new value instead of hiding it;
+        // a restored `const` makes the execution fail. In a `Function` body,
+        // which is sloppy even though the preamble isn't, so an undeclared
+        // name becomes a global. `$` can't be in a key, so `$eryx` can't
+        // clash with one.
+        Language::JavaScript => {
+            let body: String = object
+                .keys()
+                .map(|name| format!("{name} = $eryx.{name};"))
+                .collect();
+            let body = python_str_literal(&body);
+            format!("new Function('$eryx', {body})(JSON.parse({literal}));\n")
+        }
+        _ => format!("globals().update(__import__('json').loads({literal}))\n"),
+    })
+}
+
+/// Reserved words, which can't be a JavaScript variable's name.
+#[cfg(feature = "unstable-internals")]
+const JAVASCRIPT_KEYWORDS: &[&str] = &[
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+];
+
+/// Python's keywords (`keyword.kwlist`), which can't be a variable's name.
+#[cfg(feature = "unstable-internals")]
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+];
+
 /// `export NAME='placeholder'` for each secret, in name order, with any `'`
 /// in the placeholder escaped. A name that isn't a shell variable name is
 /// refused.
@@ -4771,6 +4927,65 @@ mod tests {
             matches!(err.kind(), ErrorKind::Initialization(msg) if msg.contains("javascript")),
             "{err}"
         );
+    }
+
+    #[cfg(feature = "unstable-internals")]
+    #[test]
+    fn globals_preamble_passes_the_json_through() {
+        let none: [&str; 0] = [];
+        assert_eq!(globals_preamble(Language::Python, "", none).unwrap(), "");
+        // Too big for serde_json's integers: the guest parses the original.
+        // and beyond f64's range: the guest parses the original.
+        let globals =
+            r#"{"x": {"__proto__": 1}, "big": 123456789012345678901234567890, "huge": 1e400}"#;
+        let literal = serde_json::to_string(globals).unwrap();
+        assert_eq!(
+            globals_preamble(Language::Python, globals, none).unwrap(),
+            format!("globals().update(__import__('json').loads({literal}))\n")
+        );
+        assert_eq!(
+            globals_preamble(Language::JavaScript, globals, none).unwrap(),
+            format!(
+                "new Function('$eryx', \"big = $eryx.big;huge = $eryx.huge;x = $eryx.x;\")\
+                 (JSON.parse({literal}));\n"
+            )
+        );
+    }
+
+    #[cfg(feature = "unstable-internals")]
+    #[test]
+    fn globals_preamble_refuses_bad_globals() {
+        let refused = |language, globals: &str, callbacks: &[&str]| {
+            let err = globals_preamble(language, globals, callbacks.iter().copied()).unwrap_err();
+            assert!(matches!(err.kind(), ErrorKind::Initialization(_)), "{err}");
+            err.to_string()
+        };
+        assert!(refused(Language::Python, "{", &[]).contains("JSON object"));
+        assert!(refused(Language::Python, "[1]", &[]).contains("JSON object"));
+        assert!(refused(Language::JavaScript, "1", &[]).contains("JSON object"));
+        assert!(refused(Language::Shell, r#"{"a": 1}"#, &[]).contains("shell"));
+        assert!(refused(Language::Python, r#"{"a-b": 1}"#, &[]).contains("invalid global name"));
+        assert!(refused(Language::Python, r#"{"": 1}"#, &[]).contains("invalid global name"));
+        assert!(refused(Language::Python, r#"{"print": 1}"#, &[]).contains("Python builtin"));
+        assert!(refused(Language::Python, r#"{"__file__": 1}"#, &[]).contains("dunder"));
+        assert!(refused(Language::Python, r#"{"lambda": 1}"#, &[]).contains("keyword"));
+        assert!(refused(Language::JavaScript, r#"{"class": 1}"#, &[]).contains("keyword"));
+        assert!(
+            refused(Language::JavaScript, r#"{"$eryx": 1}"#, &[]).contains("invalid global name")
+        );
+        assert!(
+            refused(Language::JavaScript, r#"{"__proto__": 1}"#, &[]).contains("JavaScript global")
+        );
+        assert!(
+            refused(Language::JavaScript, r#"{"fetch": 1}"#, &[]).contains("JavaScript global")
+        );
+        assert!(
+            refused(Language::Python, r#"{"mcp": 1}"#, &["mcp.github.search"]).contains("callback")
+        );
+        // What one language reserves, another can use.
+        let none: [&str; 0] = [];
+        assert!(globals_preamble(Language::Python, r#"{"fetch": 1}"#, none).is_ok());
+        assert!(globals_preamble(Language::JavaScript, r#"{"__x__": 1}"#, none).is_ok());
     }
 
     #[test]

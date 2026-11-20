@@ -19,10 +19,11 @@
 //! [`JournalSigner`] provides HMAC-SHA256 signing and verification. The MAC
 //! covers the journal entries (via deterministic protobuf encoding), its expiry
 //! time, and the [`JournalBinding`]: the script code, the state snapshot the run
-//! started from, and the declared callback names. A journal therefore only
-//! replays into the same script, starting state and callback set that produced
-//! it, and only until it expires. This is correct for the primary replay use
-//! case (re-running the same script); for edit-and-retry, the signature won't
+//! started from, the declared callback names, the environment and the
+//! request's globals. A journal therefore only replays into the same script,
+//! starting state, callback set, environment and globals that produced it, and
+//! only until it expires. This is correct for the primary replay use case
+//! (re-running the same script); for edit-and-retry, the signature won't
 //! verify and the server rejects the replay before executing the script.
 //! Starting an edited script requires a new execution without the old journal.
 //!
@@ -48,11 +49,13 @@ type HmacSha256 = Hmac<Sha256>;
 /// fail verification instead of being read under the new one.
 const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
 
-/// [`MAC_DOMAIN`] for a run with an environment, whose name and content hash
-/// are fed next. A
-/// separate domain rather than an extra field, so journals recorded without
-/// an environment keep the signatures they had before environments.
-const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"eryx-journal-v2-environment";
+/// The MAC domain names the optional inputs fed right after it, in this
+/// order: `-environment` (its name and content hash) and `-globals` (the
+/// request's globals). A run with neither feeds [`MAC_DOMAIN`] alone, so
+/// journals recorded without them keep the signatures they had before.
+const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"-environment";
+/// See [`MAC_DOMAIN_ENVIRONMENT`].
+const MAC_DOMAIN_GLOBALS: &[u8] = b"-globals";
 
 /// The request context a journal is bound to, besides its entries.
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +69,9 @@ pub struct JournalBinding<'a> {
     pub callbacks: &'a [pb::CallbackDeclaration],
     /// The environment the run mounted, if any.
     pub environment: Option<BoundEnvironment<'a>>,
+    /// The request's globals (JSON), which the script reads like its code;
+    /// empty for none.
+    pub globals: &'a str,
 }
 
 /// An environment a journal is bound to: its name and its content hash, so a
@@ -166,13 +172,20 @@ impl JournalSigner {
             mac.update(&(bytes.len() as u64).to_le_bytes());
             mac.update(bytes);
         };
-        match binding.environment {
-            None => feed(MAC_DOMAIN),
-            Some(environment) => {
-                feed(MAC_DOMAIN_ENVIRONMENT);
-                feed(environment.name.as_bytes());
-                feed(environment.hash.as_bytes());
-            }
+        let mut domain = MAC_DOMAIN.to_vec();
+        if binding.environment.is_some() {
+            domain.extend_from_slice(MAC_DOMAIN_ENVIRONMENT);
+        }
+        if !binding.globals.is_empty() {
+            domain.extend_from_slice(MAC_DOMAIN_GLOBALS);
+        }
+        feed(&domain);
+        if let Some(environment) = binding.environment {
+            feed(environment.name.as_bytes());
+            feed(environment.hash.as_bytes());
+        }
+        if !binding.globals.is_empty() {
+            feed(binding.globals.as_bytes());
         }
         feed(&journal.expires_at_unix_secs.to_le_bytes());
         feed(binding.code.as_bytes());
@@ -328,6 +341,7 @@ mod tests {
             state: None,
             callbacks: &[],
             environment: None,
+            globals: "",
         }
     }
 
@@ -431,6 +445,109 @@ mod tests {
         assert!(!signer.verify(&journal, binding("code")));
         let journal = signed(&signer, binding("code"));
         assert!(!signer.verify(&journal, with("tools", "sha256-a")));
+    }
+
+    #[test]
+    fn journal_is_bound_to_globals() {
+        let with = |globals| JournalBinding {
+            globals,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with(r#"{"a":1}"#));
+        assert!(signer.verify(&journal, with(r#"{"a":1}"#)));
+        assert!(!signer.verify(&journal, with(r#"{"a":2}"#)));
+        assert!(!signer.verify(&journal, with("")));
+        let journal = signed(&signer, with(""));
+        assert!(!signer.verify(&journal, with(r#"{"a":1}"#)));
+    }
+
+    /// The MAC for each combination of the optional inputs, computed
+    /// independently of this code from the length-prefixed layout: without
+    /// them it's the `eryx-journal-v2` MAC from before they were bound, so
+    /// old journals still verify, and an environment alone keeps the MAC it
+    /// had before globals.
+    #[test]
+    fn journal_macs_match_the_documented_layout() {
+        let decl = |name: &str| pb::CallbackDeclaration {
+            name: name.into(),
+            ..Default::default()
+        };
+        let callbacks = [decl("b"), decl("a")];
+        let journal = pb::CallbackJournal {
+            expires_at_unix_secs: 4_000_000_000,
+            ..Default::default()
+        };
+        let tools = Some(BoundEnvironment {
+            name: "tools",
+            hash: "sha256-a",
+        });
+        for (environment, globals, expected) in [
+            (
+                None,
+                "",
+                "c9447c6e913cd079bce4a81d635afce91e45798dd60605795edd1b45b741a1d2",
+            ),
+            (
+                tools,
+                "",
+                "a862b3d29dae2dd89bebbb28c3f378190b5a4421b7b8f3c6e27cca924969fa01",
+            ),
+            (
+                None,
+                r#"{"a":1}"#,
+                "b999e87c720acc4e5fccee2abe29b8f7d22df9c86c27fb75bb4fac22b81b9501",
+            ),
+            (
+                tools,
+                r#"{"a":1}"#,
+                "48d647fcbc9f38208e572e49ab08d5705a167a4bbef0dda665a7a44444b3871e",
+            ),
+        ] {
+            let mut mac = JournalSigner::from_key([7; 32]).new_mac();
+            JournalSigner::feed_mac(
+                &mut mac,
+                &journal,
+                JournalBinding {
+                    state: Some(b"state"),
+                    callbacks: &callbacks,
+                    environment,
+                    globals,
+                    ..binding("code")
+                },
+            );
+            assert_eq!(
+                hex::encode(mac.finalize().into_bytes()),
+                expected,
+                "{environment:?} {globals}"
+            );
+        }
+    }
+
+    /// With both an environment and globals, the journal is bound to each.
+    #[test]
+    fn journal_is_bound_to_environment_and_globals() {
+        let with = |name, globals| JournalBinding {
+            environment: Some(BoundEnvironment {
+                name,
+                hash: "sha256-a",
+            }),
+            globals,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with("tools", r#"{"a":1}"#));
+        assert!(signer.verify(&journal, with("tools", r#"{"a":1}"#)));
+        assert!(!signer.verify(&journal, with("other", r#"{"a":1}"#)));
+        assert!(!signer.verify(&journal, with("tools", r#"{"a":2}"#)));
+        assert!(!signer.verify(&journal, with("tools", "")));
+        assert!(!signer.verify(
+            &journal,
+            JournalBinding {
+                globals: r#"{"a":1}"#,
+                ..binding("code")
+            }
+        ));
     }
 
     #[test]
