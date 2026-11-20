@@ -114,7 +114,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
             _ if arg.starts_with("-k") => (None, Some(value("k", &arg[2..])?)),
             _ if arg.starts_with("--") => return Err(format!("unrecognized option '{arg}'")),
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                return Err(format!("invalid option -- '{}'", &arg[1..2]));
+                let option = arg.chars().nth(1).unwrap_or_default();
+                return Err(format!("invalid option -- '{option}'"));
             }
             _ => break arg,
         };
@@ -316,6 +317,7 @@ mod tests {
             "-k x 1 cmd",
             "--bogus 1 cmd",
             "-v 1 cmd",
+            "-é 1 cmd",
             "--signalx 1 cmd",
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad}");

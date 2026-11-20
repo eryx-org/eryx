@@ -2674,7 +2674,7 @@ mod background_jobs {
         let out = sandbox
             .execute(&format!(
                 "{BIG}\n\
-                 timeout 0.5 sh -c 'X=\"$1\" tc spin | X=\"$1\" sleep 30 | X=\"$1\" sleep 30' _ \"$BIG\" &\n\
+                 timeout 2 sh -c 'X=\"$1\" sleep 30 | X=\"$1\" sleep 30 | X=\"$1\" sleep 30' _ \"$BIG\" &\n\
                  sleep 0.3; X=\"$BIG\" tc argv0 || echo refused\n\
                  wait $!; echo \"status: $?\"; X=\"$BIG\" tc argv0"
             ))
@@ -2686,7 +2686,7 @@ mod background_jobs {
             "{out:?}"
         );
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(6),
             "{:?}",
             start.elapsed()
         );

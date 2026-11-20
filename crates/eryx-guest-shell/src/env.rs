@@ -148,7 +148,7 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for EnvCommand {
                 writeln!(out, "{var}")?;
             }
             return Ok(ExecutionResult::success());
-        };
+        }
         let shell = ShellForCommand::OwnedShell {
             target: shell,
             parent: context.shell,
