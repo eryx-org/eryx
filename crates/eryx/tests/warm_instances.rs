@@ -255,10 +255,18 @@ async fn warm_instances_are_kept_for_a_bounded_number_of_components() {
 
 /// A runtime that is not pre-initialized starts Python while it is being
 /// instantiated, so it needs the real stdlib mounts at that point. Warming it
-/// against a placeholder context traps, and executions must still run on a
-/// correctly initialised instance.
+/// against a placeholder context fails, and executions must still run on a
+/// correctly initialised instance. Warming must not panic the host either:
+/// the background task's panic is swallowed by Tokio, so a hook catches it.
 #[tokio::test(flavor = "multi_thread")]
 async fn runtimes_without_preinit_are_not_warmed() {
+    static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        PANICKED.store(true, std::sync::atomic::Ordering::SeqCst);
+        default_hook(info);
+    }));
+
     let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../eryx-runtime/runtime-python.wasm");
     let stdlib = eryx::embedded::EmbeddedResources::get().unwrap().stdlib();
@@ -277,4 +285,18 @@ async fn runtimes_without_preinit_are_not_warmed() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert_eq!(sandbox.executor().warm_instances_ready(), 0);
+    for _ in 0..500 {
+        if sandbox.executor().warm_instances_unsupported() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        sandbox.executor().warm_instances_unsupported(),
+        "the failed warm attempt marks the runtime unsupported, so it is not retried"
+    );
+    assert!(
+        !PANICKED.load(std::sync::atomic::Ordering::SeqCst),
+        "warming the runtime panicked"
+    );
 }

@@ -70,12 +70,15 @@ impl Error {
         self.output_truncated
     }
 
-    /// Whether this is a component error caused by a wasm trap.
-    pub(crate) fn is_wasm_trap(&self) -> bool {
+    /// Whether this is a component error caused by the guest: a wasm trap,
+    /// or the guest exiting (`proc_exit`).
+    pub(crate) fn is_guest_abort(&self) -> bool {
         match &self.kind {
             ErrorKind::WasmComponent(source) => source
                 .downcast_ref::<WasmtimeSource>()
-                .is_some_and(|source| source.0.is::<wasmtime::Trap>()),
+                .is_some_and(|source| {
+                    source.0.is::<wasmtime::Trap>() || source.0.is::<wasmtime_wasi::I32Exit>()
+                }),
             _ => false,
         }
     }
