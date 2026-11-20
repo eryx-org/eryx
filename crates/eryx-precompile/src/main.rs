@@ -52,6 +52,28 @@ use clap::{Parser, Subcommand};
 use eryx::{CpuFeatureLevel, Session}; // For execute() method and CPU features
 use sha2::{Digest, Sha256};
 
+// Every `print!`/`println!` in this file goes through these, so output piped
+// into something that closes early (`commands inspect ... | head`) ends the
+// program quietly instead of panicking (#1135).
+macro_rules! print {
+    ($($arg:tt)*) => { write_stdout(format_args!($($arg)*)) };
+}
+
+macro_rules! println {
+    () => { print!("\n") };
+    ($($arg:tt)*) => { print!("{}\n", format_args!($($arg)*)) };
+}
+
+/// Write to stdout; exit 0 if the reader has gone, as ripgrep does, and
+/// otherwise fail as `std::println!` would.
+fn write_stdout(args: std::fmt::Arguments<'_>) {
+    match std::io::stdout().lock().write_fmt(args) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(e) => panic!("failed printing to stdout: {e}"),
+    }
+}
+
 /// Largest component (e.g. `runtime-python.wasm`) that `setup` will download
 /// (the real Python runtime is ~50 MB).
 const MAX_RUNTIME_WASM_BYTES: u64 = 256 * 1024 * 1024;
