@@ -106,6 +106,16 @@ struct Args {
     #[arg(long, env = "ERYX_STDLIB")]
     stdlib: Option<PathBuf>,
 
+    /// Path to the site-packages directory --runtime-cwasm was
+    /// pre-initialized with (`eryx-precompile compile --preinit
+    /// --site-packages DIR`), mounted read-only at `/site-packages` as it was
+    /// then, for Python sandboxes and --shell-python. Without it, only the
+    /// modules imported during pre-initialization exist, and any a package
+    /// imports later (e.g. `numpy.rec` for pandas' `describe()`) fails with
+    /// `ModuleNotFoundError`. Only used with --runtime-cwasm.
+    #[arg(long, env = "ERYX_SITE_PACKAGES")]
+    site_packages: Option<PathBuf>,
+
     /// Hex-encoded 32-byte HMAC key for signing callback replay journals.
     ///
     /// All server replicas must share the same key so that journals are portable
@@ -435,17 +445,14 @@ struct ShellCommands {
 }
 
 /// `python`/`python3` for the shell (--shell-python): the server's Python
-/// runtime, `runtime_cwasm` with `stdlib` (the embedded stdlib if `None`), or
-/// the embedded one.
-fn python_command(
-    runtime_cwasm: Option<&std::path::Path>,
-    stdlib: Option<&std::path::Path>,
-) -> Result<eryx::Command, String> {
+/// runtime, `runtime_cwasm` with `stdlib` (the embedded stdlib if `None`) and
+/// `site_packages`, or the embedded one.
+fn python_command(python: &PythonRuntime) -> Result<eryx::Command, String> {
     let fail = |e: eryx::Error| format!("--shell-python: {e}");
-    match runtime_cwasm {
+    let command = match &python.runtime_cwasm {
         Some(path) => {
-            let stdlib = match stdlib {
-                Some(stdlib) => stdlib.to_path_buf(),
+            let stdlib = match &python.stdlib {
+                Some(stdlib) => stdlib.clone(),
                 None => eryx::embedded::EmbeddedResources::get()
                     .map_err(fail)?
                     .stdlib()
@@ -459,9 +466,13 @@ fn python_command(
                     Some(stdlib),
                 )
             }
-            .map_err(fail)
+            .map_err(fail)?
         }
-        None => eryx::Command::guest(eryx::Language::Python).map_err(fail),
+        None => eryx::Command::guest(eryx::Language::Python).map_err(fail)?,
+    };
+    match &python.site_packages {
+        Some(dir) => command.with_site_packages(dir).map_err(fail),
+        None => Ok(command),
     }
 }
 
@@ -525,11 +536,12 @@ async fn create_language_pool(
     }
 }
 
-/// Python's runtime: --runtime-cwasm and --stdlib.
-#[derive(Clone)]
+/// Python's runtime: --runtime-cwasm, --stdlib and --site-packages.
+#[derive(Clone, Default)]
 struct PythonRuntime {
     runtime_cwasm: Option<PathBuf>,
     stdlib: Option<PathBuf>,
+    site_packages: Option<PathBuf>,
 }
 
 impl PythonRuntime {
@@ -538,7 +550,10 @@ impl PythonRuntime {
         &self,
     ) -> Result<SandboxBuilder<eryx::language::Python, eryx::state::Has>, Box<dyn std::error::Error>>
     {
-        Ok(match (&self.runtime_cwasm, &self.stdlib) {
+        if self.runtime_cwasm.is_none() && self.site_packages.is_some() {
+            return Err("--site-packages requires --runtime-cwasm".into());
+        }
+        let builder = match (&self.runtime_cwasm, &self.stdlib) {
             // SAFETY: The user is responsible for providing a trusted .cwasm file
             // that was precompiled with a compatible engine configuration.
             (Some(cwasm_path), Some(stdlib_path)) => unsafe {
@@ -558,6 +573,10 @@ impl PythonRuntime {
                 return Err("--stdlib requires --runtime-cwasm".into());
             }
             (None, None) => Sandbox::embedded(),
+        };
+        Ok(match &self.site_packages {
+            Some(dir) => builder.with_site_packages(dir),
+            None => builder,
         })
     }
 }
@@ -791,6 +810,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http2_keepalive_timeout_secs = args.http2_keepalive_timeout_secs,
         runtime_cwasm = ?args.runtime_cwasm,
         stdlib = ?args.stdlib,
+        site_packages = ?args.site_packages,
         metrics_addr = %args.metrics_addr,
         "starting eryx gRPC server"
     );
@@ -808,11 +828,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%args.metrics_addr, "prometheus metrics endpoint started");
 
     // Python's pool is built and prewarmed up front, as before; the other
-    // languages' on their first request. --runtime-cwasm and --stdlib
-    // configure Python; the other languages run their embedded runtimes.
+    // languages' on their first request. --runtime-cwasm, --stdlib and
+    // --site-packages configure Python; the other languages run their
+    // embedded runtimes.
     let python = PythonRuntime {
         runtime_cwasm: args.runtime_cwasm.clone(),
         stdlib: args.stdlib.clone(),
+        site_packages: args.site_packages.clone(),
     };
     let python_builder = python.builder()?;
     if !args.languages.contains(&eryx::Language::Python) {
@@ -830,7 +852,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.shell_python {
         commands.push((
             vec!["python".to_owned(), "python3".to_owned()],
-            python_command(args.runtime_cwasm.as_deref(), args.stdlib.as_deref())?,
+            python_command(&python)?,
         ));
     }
     if args.shell_node {
@@ -1104,10 +1126,7 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
-            PythonRuntime {
-                runtime_cwasm: None,
-                stdlib: None,
-            },
+            PythonRuntime::default(),
             None,
         )
         .await
@@ -1128,10 +1147,7 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
-            PythonRuntime {
-                runtime_cwasm: None,
-                stdlib: None,
-            },
+            PythonRuntime::default(),
             None,
         )
         .await
@@ -1149,7 +1165,7 @@ mod tests {
         let shell = ShellCommands {
             commands: vec![(
                 vec!["python".into(), "python3".into()],
-                python_command(None, None).unwrap(),
+                python_command(&PythonRuntime::default()).unwrap(),
             )],
             embedded: true,
         };
@@ -1157,10 +1173,7 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
-            PythonRuntime {
-                runtime_cwasm: None,
-                stdlib: None,
-            },
+            PythonRuntime::default(),
             None,
         )
         .await
@@ -1171,6 +1184,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.stdout_utf8().unwrap(), "6\n");
+    }
+
+    /// `--site-packages` mounts the directory for the Python pool and for
+    /// `--shell-python`, so modules the snapshot didn't import load.
+    #[cfg(feature = "shell")]
+    #[tokio::test]
+    async fn site_packages_are_mounted_for_python_and_shell_python() {
+        let site = tempfile::tempdir().unwrap();
+        std::fs::write(site.path().join("lazy_mod.py"), "VALUE = 42\n").unwrap();
+        let python = PythonRuntime {
+            runtime_cwasm: Some(
+                eryx::embedded::runtime_path(eryx::Language::Python)
+                    .unwrap()
+                    .unwrap()
+                    .to_path_buf(),
+            ),
+            stdlib: None,
+            site_packages: Some(site.path().to_path_buf()),
+        };
+
+        let pool = create_language_pool(
+            eryx::Language::Python,
+            PoolConfig::default().with_max_size(1),
+            ShellCommands {
+                commands: Vec::new(),
+                embedded: true,
+            },
+            python.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("import lazy_mod; print(lazy_mod.VALUE)")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "42\n");
+
+        let shell = ShellCommands {
+            commands: vec![(vec!["python3".into()], python_command(&python).unwrap())],
+            embedded: true,
+        };
+        let pool = create_language_pool(
+            eryx::Language::Shell,
+            PoolConfig::default().with_max_size(1),
+            shell,
+            python,
+            None,
+        )
+        .await
+        .unwrap();
+        let sandbox = pool.acquire().await.unwrap();
+        let out = sandbox
+            .execute("python3 -c 'import lazy_mod; print(lazy_mod.VALUE)'")
+            .await
+            .unwrap();
+        assert_eq!(out.stdout_utf8().unwrap(), "42\n");
+    }
+
+    /// `--site-packages` without `--runtime-cwasm` is refused.
+    #[test]
+    fn site_packages_requires_runtime_cwasm() {
+        let python = PythonRuntime {
+            site_packages: Some(PathBuf::from("/site")),
+            ..PythonRuntime::default()
+        };
+        assert!(python.builder().is_err());
     }
 
     /// `--shell-node` registers the embedded JavaScript as `node` and `js`.
@@ -1185,10 +1266,7 @@ mod tests {
             eryx::Language::Shell,
             PoolConfig::default().with_max_size(1),
             shell,
-            PythonRuntime {
-                runtime_cwasm: None,
-                stdlib: None,
-            },
+            PythonRuntime::default(),
             None,
         )
         .await

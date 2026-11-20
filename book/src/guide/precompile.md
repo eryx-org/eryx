@@ -152,6 +152,8 @@ eryx-precompile compile -o runtime-python.cwasm \
 
 Supported package formats: `.whl`, `.tar.gz`, and directories. Native extensions (`.so` files) are detected and linked automatically.
 
+The snapshot holds only the modules imported during pre-initialization. A sandbox running the runtime still needs the packages mounted at `/site-packages` for anything they import later (pandas' `describe()` imports `numpy.rec`, for example): `SandboxBuilder::with_site_packages` in Rust, or `--site-packages` for the [gRPC server](./grpc-server.md).
+
 ### Setup Code
 
 Beyond importing modules, you can execute arbitrary Python code during pre-initialization. The resulting state (variables, objects, environments) is captured in the memory snapshot — each sandbox starts with that state in copy-on-write memory, preserving full isolation.

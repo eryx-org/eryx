@@ -980,6 +980,45 @@ impl Command {
         })
     }
 
+    /// Mount `path` read-only as a Python guest command's site-packages, as
+    /// [`SandboxBuilder::with_site_packages`](crate::SandboxBuilder::with_site_packages)
+    /// does for a sandbox: at `/site-packages` the first time, where
+    /// `eryx-precompile --site-packages` mounted the packages a runtime was
+    /// pre-initialized with, so the modules they import lazily load.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this isn't a Python guest command (see
+    /// [`guest_from_precompiled_file`](Self::guest_from_precompiled_file)),
+    /// or it has been cloned: call this first.
+    #[cfg(all(
+        any(feature = "embedded", feature = "preinit"),
+        any(feature = "unstable-vfs", feature = "shell")
+    ))]
+    pub fn with_site_packages(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, Error> {
+        let Pre::Guest(executor) = self.pre else {
+            return Err(
+                ErrorKind::Initialization("only a guest command has site-packages".into()).into(),
+            );
+        };
+        if executor.language() != crate::Language::Python {
+            return Err(ErrorKind::Initialization(
+                "only a Python guest command has site-packages".into(),
+            )
+            .into());
+        }
+        let executor = Arc::try_unwrap(executor).map_err(|_| {
+            ErrorKind::Initialization(
+                "add site-packages to a guest command before cloning it".into(),
+            )
+        })?;
+        self.pre = Pre::Guest(Arc::new(executor.with_library_path(path)));
+        Ok(self)
+    }
+
     /// Whether it runs a guest runtime (see [`guest`](Self::guest)).
     fn is_guest(&self) -> bool {
         #[cfg(all(
