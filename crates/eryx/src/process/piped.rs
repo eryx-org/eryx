@@ -27,9 +27,7 @@ use wasmtime::StoreContextMut;
 use wasmtime::component::{Linker, Resource, ResourceType};
 
 use super::child_bindings::eryx::process::run::RunError;
-use super::{
-    CHILD_FUEL, ChildState, Held, LiveSlot, NestedTrace, ProcessError, charge_caller, pipe,
-};
+use super::{ChildState, Held, LiveSlot, NestedTrace, ProcessError, charge_caller, pipe};
 
 /// Most of a piped command's stdout one `read` returns.
 const MAX_READ: u64 = 64 * 1024;
@@ -323,7 +321,7 @@ fn spawn(
         .clone()
         .map(|traces| NestedTrace::start(traces, prepared.run.argv.clone()));
     let mut command = prepared.run;
-    command.fuel = store.get_fuel().unwrap_or(0).min(CHILD_FUEL);
+    command.fuel = store.get_fuel().unwrap_or(0);
     let live = command._live.take();
     let run = Run {
         fuel_used: Arc::clone(&command.fuel_used),
