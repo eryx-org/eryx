@@ -611,12 +611,14 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let files = execute_req.files;
         let result_variable = execute_req.result_variable;
         let scrub_result = execute_req.scrub_result;
+        let globals = execute_req.globals;
 
         let binding = crate::replay::JournalBinding {
             code: &code,
             state: persist_state.then_some(state_snapshot.as_slice()),
             callbacks: &declarations,
             environment: bound_environment(&environment, &environment_hash),
+            globals: &globals,
         };
         // A rejected replay must not become a fresh run: completed callbacks
         // and direct script effects may already have happened.
@@ -704,6 +706,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 "invalid result_variable {result_variable:?}: must match [A-Za-z_][A-Za-z0-9_]*"
             )));
         }
+        // Checked before the supporting files are copied in.
+        let globals_preamble = eryx::globals_preamble(
+            language,
+            &globals,
+            declarations.iter().map(|d| d.name.as_str()),
+        )
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let vfs_storage = if files.is_empty() {
             None
         } else {
@@ -722,8 +731,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             eryx::Language::Python => BUILTINS_INJECT.to_owned(),
             _ => String::new(),
         };
-        let preamble = eryx::language_preamble(language, &secrets, &library_preamble)
+        let mut preamble = eryx::language_preamble(language, &secrets, &library_preamble)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        // The client's data as globals, after eryx's own preamble.
+        preamble.push_str(&globals_preamble);
 
         let has_secrets = !secrets.is_empty();
         let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
@@ -909,6 +920,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             async move {
                 let params = SessionParams {
                     code: &code,
+                    globals: &globals,
                     language,
                     vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
@@ -1146,6 +1158,8 @@ async fn create_vfs_with_files(
 /// Parameters for a single session execution.
 struct SessionParams<'a> {
     code: &'a str,
+    /// The request's globals, which the replay journal is bound to.
+    globals: &'a str,
     /// The guest language: only Python gets the (Python) preamble.
     language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
@@ -1521,6 +1535,7 @@ async fn execute_with_session(
                 state: params.state,
                 callbacks: params.declarations,
                 environment: params.environment,
+                globals: params.globals,
             };
             params
                 .journal_signer

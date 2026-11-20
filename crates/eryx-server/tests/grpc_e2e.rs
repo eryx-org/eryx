@@ -422,6 +422,147 @@ async fn javascript_session_state_round_trips() {
     assert_eq!(second.result, "42");
 }
 
+/// `ExecuteRequest.globals` become JavaScript globals, before leading imports
+/// are rewritten and without shifting line numbers or displacing a leading
+/// `'use strict'` or hashbang; a nested `__proto__` stays data.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_globals_are_injected() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    let request = |code: &str| ExecuteRequest {
+        code: code.to_string(),
+        language: Language::Javascript as i32,
+        globals: r#"{"inputs": [1, 2], "o": {"__proto__": 5}}"#.to_string(),
+        ..Default::default()
+    };
+
+    let result = execute_request(
+        channel.clone(),
+        request(
+            "import { Buffer } from 'node:buffer';\n\
+             console.log(inputs[0] + inputs[1], Object.keys(o).join(), \
+             Object.getPrototypeOf(o) === Object.prototype, Buffer.from('a').length)",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.success,
+        "execution failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"3 __proto__ true 1\n");
+
+    // The preamble runs on its own, so a directive or hashbang the code
+    // starts with is still first.
+    let result = execute_request(
+        channel.clone(),
+        request("'use strict';\nundeclared = inputs.length"),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success, "sloppy mode: {:?}", result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("ReferenceError"), "{stderr}");
+    let result = execute_request(
+        channel.clone(),
+        request("#!/usr/bin/env node\nconsole.log(inputs.length)"),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "hashbang: {}", result.error);
+    assert_eq!(result.stdout, b"2\n");
+
+    let result = execute_request(
+        channel,
+        request(
+            "import { Buffer } from 'node:buffer';\n\nthrow new Error('boom ' + inputs.length)",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("boom 2"), "{stderr}");
+    assert!(stderr.contains(":3:"), "{stderr}");
+}
+
+/// With persisted JavaScript state, a request's globals replace a restored
+/// `let` of the same name rather than hiding behind it; a restored `const`
+/// can't be replaced, so the execution fails.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_globals_replace_restored_state() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    let request = |code: &str, globals: &str, state_snapshot: Vec<u8>| ExecuteRequest {
+        code: code.to_string(),
+        language: Language::Javascript as i32,
+        globals: globals.to_string(),
+        persist_state: true,
+        state_snapshot,
+        ..Default::default()
+    };
+
+    let first = execute_request(
+        channel.clone(),
+        request("let total = 1; const fixed = 1", "", vec![]),
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "first run failed: {}", first.error);
+
+    let second = execute_request(
+        channel.clone(),
+        request(
+            "console.log(total)",
+            r#"{"total": 5}"#,
+            first.state_snapshot.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "second run failed: {}", second.error);
+    assert_eq!(second.stdout, b"5\n");
+
+    let third = execute_request(
+        channel,
+        request(
+            "console.log(fixed)",
+            r#"{"fixed": 5}"#,
+            first.state_snapshot,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(!third.success, "a restored const was replaced");
+}
+
 /// A shell request runs the embedded coreutils, and its result carries the
 /// script's exit status: 0 on success, N for `exit N`. Python leaves it unset.
 #[cfg(feature = "shell")]
@@ -2473,6 +2614,7 @@ async fn rejects_invalid_replay_before_execution() {
         state: None,
         callbacks: &[],
         environment: None,
+        globals: "",
     };
     let echo = [echo_declaration()];
     for scenario in [
@@ -2483,6 +2625,7 @@ async fn rejects_invalid_replay_before_execution() {
         "changed result",
         "changed state",
         "changed callbacks",
+        "changed globals",
         "expired",
         "extended expiry",
     ] {
@@ -2515,6 +2658,14 @@ async fn rejects_invalid_replay_before_execution() {
                 },
                 ttl,
             ),
+            "changed globals" => signer.sign(
+                &mut journal,
+                JournalBinding {
+                    globals: r#"{"a": 1}"#,
+                    ..bound(code)
+                },
+                ttl,
+            ),
             "expired" => signer.sign(&mut journal, bound(code), Duration::ZERO),
             "extended expiry" => {
                 signer.sign(&mut journal, bound(code), ttl);
@@ -2540,6 +2691,98 @@ async fn rejects_invalid_replay_before_execution() {
             error.message().contains("replay was not executed"),
             "{scenario}"
         );
+    }
+}
+
+/// `ExecuteRequest.globals` become Python globals: a script can still start
+/// with a `__future__` import, line numbers don't shift, numbers keep their
+/// exact value, and with persisted state a later request's globals replace
+/// the earlier ones.
+#[tokio::test]
+async fn python_globals_are_injected() {
+    let channel = start_server().await;
+    let request = |code: &str, globals: &str| ExecuteRequest {
+        code: code.to_string(),
+        globals: globals.to_string(),
+        ..Default::default()
+    };
+
+    let result = execute_request(
+        channel.clone(),
+        request(
+            "from __future__ import annotations\nprint(sum(inputs), big)",
+            r#"{"inputs": [1, 2], "big": 123456789012345678901234567890}"#,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert_eq!(result.stdout, b"3 123456789012345678901234567890\n");
+
+    let result = execute_request(
+        channel.clone(),
+        request("x = 1\n\nraise ValueError(inputs)", r#"{"inputs": [1]}"#),
+    )
+    .await
+    .unwrap();
+    assert!(!result.success);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("line 3") && stderr.contains("[1]"),
+        "{stderr}"
+    );
+
+    let first = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            persist_state: true,
+            ..request("kept = g", r#"{"g": 1}"#)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "first run failed: {}", first.error);
+    let second = execute_request(
+        channel,
+        ExecuteRequest {
+            persist_state: true,
+            state_snapshot: first.state_snapshot,
+            ..request("print(kept, g)", r#"{"g": 2}"#)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "second run failed: {}", second.error);
+    assert_eq!(second.stdout, b"1 2\n");
+}
+
+/// Globals that aren't a JSON object of fresh identifiers are rejected
+/// before anything runs.
+#[tokio::test]
+async fn invalid_globals_are_rejected() {
+    let channel = start_server().await;
+    for (globals, expected) in [
+        ("{", "JSON object"),
+        ("[1]", "JSON object"),
+        (r#"{"a b": 1}"#, "invalid global name"),
+        (r#"{"print": 1}"#, "Python builtin"),
+        (r#"{"__name__": 1}"#, "Python builtin"),
+        (r#"{"__file__": 1}"#, "dunder"),
+        (r#"{"echo": 1}"#, "callback"),
+    ] {
+        let status = execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                code: "pass".to_string(),
+                globals: globals.to_string(),
+                callbacks: vec![echo_declaration()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{globals}");
+        assert!(status.message().contains(expected), "{globals}: {status:?}");
     }
 }
 
