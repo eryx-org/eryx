@@ -124,7 +124,9 @@ the execution's. Two things in common toolchains lose it:
 
 - **Rust:** returning an `ExitCode` from `main` on
   `wasm32-wasip2` or `wasm32-wasip3` reports only success or failure, so any
-  non-zero status becomes 1. `std::process::exit(n)` keeps `n`.
+  non-zero status becomes 1, with or without eryx-build (a fix in eryx-build
+  is tracked in [#1131](https://github.com/eryx-org/eryx/issues/1131)).
+  `std::process::exit(n)` keeps `n`.
 - **C with plain wasi-sdk:** wasi-libc's `exit` reports only success or
   failure too. eryx-build's C lane fixes this (below).
 
@@ -250,8 +252,13 @@ stubs out what WASI lacks.
 Go is experimental. Upstream Go's `GOOS=wasip1` builds preview 1 modules,
 which eryx adapts but which report only 0 or 1 as their status. eryx-build's
 Go lane instead builds WASI 0.3 commands with a fork of Go ported to WASI
-0.3 (as implemented by the wasmtime eryx uses), found at
-`ERYX_GO_WASIP3_ROOT`, and componentizes them with `wasm-tools`:
+0.3 (as implemented by the wasmtime eryx uses), and componentizes them with
+`wasm-tools`. The fork is the `wasip3-0.3.0-go1.27.4-exit-code` branch of
+[sd2k/go](https://github.com/sd2k/go/tree/wasip3-0.3.0-go1.27.4-exit-code)
+(commit `331bf58b`): build it with its `src/make.bash` and point
+`ERYX_GO_WASIP3_ROOT` at the checkout. eryx-build bootstrapping the fork
+itself is coming in [#1132](https://github.com/eryx-org/eryx/issues/1132).
+A manifest's Go-specific parts:
 
 ```toml
 lang = "go"
@@ -263,8 +270,10 @@ package = "./cmd/tool"
 world = "command"
 ```
 
-eryx's `gh` is built this way. The fork isn't part of upstream Go, and
-a Go lane build still reports any non-zero `os.Exit` status as 1.
+eryx's `gh` is built this way. Commands built with that branch start in
+the shell's directory and keep their `os.Exit` status; earlier builds of the
+fork report any non-zero status as 1. The fork's version string doesn't
+change between commits, so build with a fresh `GOCACHE` after moving it.
 
 ## When a command won't load
 
