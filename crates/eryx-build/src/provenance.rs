@@ -46,15 +46,27 @@ struct Provenance<'a> {
 #[derive(Debug, Serialize)]
 struct Upstream<'a> {
     name: &'a str,
-    url: &'a str,
+    /// Absent for a local `path` source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
     /// The pinned ref from the manifest.
     #[serde(rename = "ref")]
     git_ref: &'a str,
-    /// The pinned commit, for git sources.
-    commit: Option<&'a str>,
+    /// The pinned commit, for git sources; for a `path` source that's a git
+    /// checkout, its `HEAD` (not a pin).
+    commit: Option<String>,
     /// The pinned sha256 of the download, for archives.
     sha256: Option<&'a str>,
     license: &'a str,
+    /// A local `path` source's absolute path. Its presence marks the build
+    /// unpinned: publishing tools must refuse it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// For a `path` source: true unless it's a git checkout with no
+    /// uncommitted changes (`git status --porcelain` empty). A clean
+    /// checkout's `commit` may still be unpushed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,24 +102,19 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
         description: &manifest.description,
         license: &manifest.license,
         lang: format!("{:?}", manifest.lang).to_lowercase(),
-        source: Upstream {
-            name: &manifest.name,
-            url: &manifest.source.repo,
-            git_ref: &manifest.source.git_ref,
-            commit: manifest.source.commit.as_deref(),
-            sha256: manifest.source.sha256.as_deref(),
-            license: &manifest.license,
-        },
+        source: source(manifest),
         deps: manifest
             .deps
             .iter()
             .map(|d| Upstream {
                 name: &d.name,
-                url: &d.url,
+                url: Some(&d.url),
                 git_ref: &d.git_ref,
-                commit: d.commit.as_deref(),
+                commit: d.commit.clone(),
                 sha256: d.sha256.as_deref(),
                 license: &d.license,
+                path: None,
+                dirty: None,
             })
             .collect(),
         patches,
@@ -119,6 +126,42 @@ pub fn write(manifest: &Manifest, manifest_path: &Path) -> Result<()> {
     std::fs::write(&out, json + "\n").with_context(|| format!("writing {}", out.display()))?;
     eprintln!("  → {}", out.display());
     Ok(())
+}
+
+/// The `source` entry: the manifest's pin, or for a local `path` source its
+/// path, git `HEAD` and whether it's dirty.
+fn source(manifest: &Manifest) -> Upstream<'_> {
+    let src = &manifest.source;
+    let mut upstream = Upstream {
+        name: &manifest.name,
+        url: Some(&src.repo),
+        git_ref: &src.git_ref,
+        commit: src.commit.clone(),
+        sha256: src.sha256.as_deref(),
+        license: &manifest.license,
+        path: None,
+        dirty: None,
+    };
+    if let Some(path) = &src.path {
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        // A tree inside a git checkout (`path` may be a subdirectory).
+        let head = git(&["rev-parse", "HEAD"]);
+        let status = git(&["status", "--porcelain", "--", "."]);
+        upstream.url = None;
+        upstream.dirty = Some(status.is_none_or(|s| !s.is_empty()));
+        upstream.commit = head;
+        upstream.path = Some(path.to_string_lossy().into_owned());
+    }
+    upstream
 }
 
 /// The `patches` entries: every [`Manifest::repo_inputs`] file, hashed.
@@ -277,6 +320,65 @@ mod tests {
             ]
         );
         assert_eq!(got[1].sha256, hex::encode(Sha256::digest(b"s")));
+    }
+
+    /// A `path` source is recorded with its path, no URL, its git `HEAD`
+    /// and whether it has uncommitted changes, which the build's own
+    /// `target/` counts as unless ignored.
+    #[test]
+    fn path_source_is_recorded_as_local() {
+        let root =
+            std::env::temp_dir().join(format!("eryx-build-prov-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tool")).unwrap();
+        let manifest_path = root.join("tool.toml");
+        std::fs::write(
+            &manifest_path,
+            "name = \"tool\"\nlicense = \"MIT\"\nlang = \"rust\"\n\
+             [source]\npath = \"tool\"\n[build]\nbin = \"tool\"\n[output]\ndir = \"out\"\n",
+        )
+        .unwrap();
+        let record = || {
+            let manifest = Manifest::load(&manifest_path).unwrap();
+            serde_json::to_value(source(&manifest)).unwrap()
+        };
+
+        // Not a git checkout: no commit, dirty.
+        let v = record();
+        let abs = std::fs::canonicalize(root.join("tool")).unwrap();
+        assert_eq!(v["path"], abs.to_string_lossy().as_ref());
+        assert!(v.get("url").is_none(), "{v}");
+        assert_eq!(v["commit"], serde_json::Value::Null);
+        assert_eq!(v["dirty"], true);
+
+        // A clean checkout records HEAD, not dirty; an edit makes it dirty.
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(root.join("tool"))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(root.join("tool/main.rs"), "fn main() {}").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        let v = record();
+        assert_eq!(v["commit"].as_str().map(str::len), Some(40), "{v}");
+        assert_eq!(v["dirty"], false);
+        std::fs::write(root.join("tool/main.rs"), "fn main() { }").unwrap();
+        assert_eq!(record()["dirty"], true);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

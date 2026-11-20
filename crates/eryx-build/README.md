@@ -12,7 +12,8 @@ cargo install eryx-build
 eryx-build <name>          Build clis/<name>.toml
 eryx-build <path.toml>     Build a manifest at an explicit path
 eryx-build --list          List the manifests in clis/ (and clis/gpl/*/)
-eryx-build --check         Validate every manifest without building
+eryx-build --check         Validate every manifest without building, refusing
+                           local `path` sources
 ```
 
 The published commands' manifests (`eryx:rg`, `eryx-gpl:git` and the rest)
@@ -45,6 +46,27 @@ failure (any non-zero status became 1). Rust's std already uses it.
 Upstream sources are pinned by content: a git `commit`, or the `sha256` of an
 archive. A checkout or download that doesn't match fails the build.
 
+### Local sources
+
+To build a command you're working on, give the manifest a local `path`
+instead of a pinned upstream:
+
+```toml
+[source]
+path = "../my-cli"   # relative to the manifest's directory, or absolute
+```
+
+eryx-build builds that tree in place. Nothing is fetched, and build outputs
+(`target/`, Go's `vendor/`, C objects) land in the tree as in a native build.
+It doesn't run patches on a tree it doesn't own: a `path` source can't have
+`build.vendor_patch` or a dep `config_patch`, nor `repo`, `commit`, `sha256` or
+`dir`. The Rust lane doesn't pass `--locked`, so the lockfile can change as
+you go. In `provenance.json`, `source` gets `path` in place of `url`, the
+checkout's `HEAD` as `commit` (`null` outside git), and `dirty`, which is false
+only for a git checkout with nothing uncommitted under `path`. A build like
+this isn't reproducible: `--check` refuses manifests with a `path` source, and
+anything that publishes builds should refuse a `source.path` in provenance.
+
 ## Output
 
 The manifest's `[output] dir` gets:
@@ -58,7 +80,7 @@ The manifest's `[output] dir` gets:
 | `format` | Layout version (1). Fields are only added within a version. |
 | `eryx_build` | The eryx-build version that made the component. |
 | `name`, `description`, `license`, `lang` | From the manifest. `license` is the upstream's SPDX expression. |
-| `source`, `deps` | Each upstream's URL, ref, pinned commit or sha256, and licence. |
+| `source`, `deps` | Each upstream's URL, ref, pinned commit or sha256, and licence. A local `path` source has `path` and `dirty` instead of `url` (see [Local sources](#local-sources)). |
 | `patches` | The repo files the build applies, compiles or links (`build.vendor_patch`, `build.shims`, the `build.wit` file or every file in that directory, each dep's `config_patch` and `shims`), with their sha256. |
 | `artifacts` | The built files, with their sha256. |
 | `imports` | The WIT packages `component.wasm` imports, with versions, sorted: `wasi:cli@0.2.12`, `eryx:process@0.1.0`, `wasi:cli@0.3.0-rc-…`. This is what a host must provide to run it, and tells a WASI 0.2 command from a 0.3 one. |
