@@ -1871,14 +1871,18 @@ impl WasiView for ExecutorState {
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
-    #[allow(clippy::expect_used)]
+    /// The configured filesystem, or an empty one (no preopens) for a state
+    /// that has none, such as the [placeholder](ExecutorState::placeholder)
+    /// a warm instance is instantiated with. A runtime that is not
+    /// pre-initialized asks for its preopens during instantiation; it must
+    /// see none and trap, as it does on plain WASI, not panic the host.
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
-        eryx_vfs::HybridVfsState::new(
-            self.hybrid_vfs_ctx
-                .as_mut()
-                .expect("Hybrid VFS not configured for this executor"),
-            &mut self.table,
-        )
+        let ctx = self.hybrid_vfs_ctx.get_or_insert_with(|| {
+            eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+                eryx_vfs::InMemoryStorage::new(),
+            )))
+        });
+        eryx_vfs::HybridVfsState::new(ctx, &mut self.table)
     }
 }
 
