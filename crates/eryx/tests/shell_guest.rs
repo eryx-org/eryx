@@ -977,6 +977,36 @@ async fn python3_streams_through_a_pipeline() {
     );
 }
 
+/// `timeout` stops a CPU-bound guest child: Python spinning never waits,
+/// but the host still polls the shell, whose timer kills it.
+///
+/// 0.3 s keeps it under the host's per-child fuel cap (`CHILD_FUEL` in
+/// src/process.rs): a busy Python loop exhausts it in about 0.8 s and the
+/// child dies of that first (134), so `timeout 1` would never see it run out.
+#[tokio::test]
+async fn timeout_stops_a_busy_python3() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let start = std::time::Instant::now();
+    let out = sandbox
+        .execute("timeout 0.3 python3 -c 'while True: pass'; echo \"s=$?\"")
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "s=124\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn python3_shares_the_shells_files_env_and_cwd() {
     let Some(builder) = python_shell() else {
