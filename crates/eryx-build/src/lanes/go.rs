@@ -11,6 +11,9 @@
 //!   [`default_goroot`]). It must be a checkout at the pinned commit. The
 //!   WIT dir is derived from it.
 //! - `wasm-tools` and `wasmtime` are taken from `PATH` (mise provides them).
+//!
+//! The lane always sets `GOCACHE` to a per-commit dir ([`gocache`]),
+//! overriding any inherited one.
 
 use std::path::{Path, PathBuf};
 
@@ -26,9 +29,8 @@ use crate::manifest::{GoToolchain, Manifest};
 /// math/bits and the crypto behind TLS; wasmtime enables it by default.
 const GOWASM: &str = "widearith";
 
-/// Where `eryx-build toolchain go` puts a fork commit unless told otherwise:
-/// `$XDG_CACHE_HOME/eryx-build/go-wasip3/<commit>` (or `~/.cache/…`).
-pub fn default_goroot(fork: &GoToolchain) -> Result<PathBuf> {
+/// `$XDG_CACHE_HOME/eryx-build/<sub>/<commit>` (or `~/.cache/…`).
+fn cache_dir(sub: &str, fork: &GoToolchain) -> Result<PathBuf> {
     let cache = match std::env::var_os("XDG_CACHE_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(
@@ -36,7 +38,21 @@ pub fn default_goroot(fork: &GoToolchain) -> Result<PathBuf> {
         )
         .join(".cache"),
     };
-    Ok(cache.join("eryx-build/go-wasip3").join(&fork.commit))
+    Ok(cache.join("eryx-build").join(sub).join(&fork.commit))
+}
+
+/// Where `eryx-build toolchain go` puts a fork commit unless told otherwise:
+/// `$XDG_CACHE_HOME/eryx-build/go-wasip3/<commit>` (or `~/.cache/…`).
+pub fn default_goroot(fork: &GoToolchain) -> Result<PathBuf> {
+    cache_dir("go-wasip3", fork)
+}
+
+/// The `GOCACHE` the lane builds with: one per fork commit. Every commit of
+/// the fork reports the same version (`go1.27.4`), which Go's build cache
+/// keys on, so a shared cache would reuse objects from the old compiler
+/// after a pin bump.
+fn gocache(fork: &GoToolchain) -> Result<PathBuf> {
+    cache_dir("go-build", fork)
 }
 
 /// Fetch `fork` into `dir` (shallowly, at its commit) and build it with
@@ -126,6 +142,7 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         .with_context(|| format!("creating output dir {}", output_dir.display()))?;
 
     let goroot_s = path_str(&goroot)?;
+    let gocache_s = path_str(&gocache(&manifest.build.go_toolchain)?)?;
     let go_bin_s = path_str(&go_bin)?;
     let wit_s = path_str(&wit_dir)?;
     let out_wasm = output_dir.join(format!("{}.wasm", manifest.name));
@@ -136,7 +153,7 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         &go_bin_s,
         &["mod", "vendor"],
         &source_dir,
-        &[("GOROOT", &goroot_s)],
+        &[("GOROOT", &goroot_s), ("GOCACHE", &gocache_s)],
     )?;
 
     if let Some(patch) = &manifest.build.vendor_patch {
@@ -169,6 +186,7 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         &source_dir,
         &[
             ("GOROOT", &goroot_s),
+            ("GOCACHE", &gocache_s),
             ("GOOS", "wasip3"),
             ("GOARCH", "wasm32"),
         ],

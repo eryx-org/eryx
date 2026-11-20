@@ -58,7 +58,11 @@ the eryx-build version (or the pinned commit) and the directory it prints.
 
 The lane uses that directory, or `ERYX_GO_WASIP3_ROOT` when set
 (`--dir <dir>` builds somewhere else). Either way the toolchain must be a
-checkout at the pinned commit, or the build fails. A manifest that needs
+checkout at the pinned commit, or the build fails. Every commit of the fork
+reports the same Go version, which Go's build cache keys on, so the lane
+builds with its own `GOCACHE` per commit,
+`$XDG_CACHE_HOME/eryx-build/go-build/<commit>`, and a pin bump starts from a
+cold cache. A manifest that needs
 another commit of the fork sets all three fields of
 
 ```toml
