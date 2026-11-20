@@ -194,7 +194,9 @@ eryx-build count     # or: eryx-build clis/count.toml
 Run it from the directory holding `clis/`: every path in a manifest is
 relative to it. A git source must be pinned by `commit` (an archive URL by
 `sha256` instead), and the Rust lane builds with `--locked`, so commit a
-`Cargo.lock`. A `file://…/.git` URL works for building a local repository.
+`Cargo.lock`. To build a local tree you're working on, set
+`[source] path = "../my-cli"` instead; nothing is pinned, so `--check` and
+anything that publishes builds refuse such a manifest.
 The component lands in `out/count/component.wasm`, next to `provenance.json`.
 
 The [eryx-build README](https://github.com/eryx-org/eryx/tree/main/crates/eryx-build)
@@ -255,10 +257,11 @@ Go lane instead builds WASI 0.3 commands with a fork of Go ported to WASI
 0.3 (as implemented by the wasmtime eryx uses), and componentizes them with
 `wasm-tools`. The fork is the `wasip3-0.3.0-go1.27.4-exit-code` branch of
 [sd2k/go](https://github.com/sd2k/go/tree/wasip3-0.3.0-go1.27.4-exit-code)
-(commit `331bf58b`): build it with its `src/make.bash` and point
-`ERYX_GO_WASIP3_ROOT` at the checkout. eryx-build bootstrapping the fork
-itself is coming in [#1132](https://github.com/eryx-org/eryx/issues/1132).
-A manifest's Go-specific parts:
+at a commit eryx-build pins. Run `eryx-build toolchain go` once: it fetches
+and builds the pinned fork (with `GOWASM=widearith`) into eryx-build's cache,
+where the lane finds it. Set `ERYX_GO_WASIP3_ROOT` (or pass `--dir`) only to
+use another location, and `[build.go_toolchain]` in a manifest to pin another
+commit of the fork. A manifest's Go-specific parts:
 
 ```toml
 lang = "go"
@@ -272,8 +275,7 @@ world = "command"
 
 eryx's `gh` is built this way. Commands built with that branch start in
 the shell's directory and keep their `os.Exit` status; earlier builds of the
-fork report any non-zero status as 1. The fork's version string doesn't
-change between commits, so build with a fresh `GOCACHE` after moving it.
+fork report any non-zero status as 1.
 
 ## When a command won't load
 
