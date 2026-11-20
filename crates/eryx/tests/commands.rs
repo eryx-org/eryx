@@ -449,6 +449,50 @@ async fn a_busy_child_of_an_unlimited_parent_runs_to_completion() {
     assert!(fuel > 20_000_000_000, "{fuel}");
 }
 
+/// A child killed between epoch ticks is charged what it burned since its
+/// last one: each `tc work-then-sleep 4` here does its work and sleeps,
+/// likely before a tick publishes it, and `kill` drops it asleep. The limit
+/// is four times what the loop costs with no work in the children, so the
+/// children's work runs it out within a few rounds. Left uncharged, they
+/// would get through about 15 of the 30.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn killed_children_are_charged_their_last_tick() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let script = |work: u32| {
+        format!(
+            "for i in $(seq 1 30); do echo $i > /data/rounds; \
+             tc work-then-sleep {work} & sleep 0.05; kill $!; done"
+        )
+    };
+    let base = session.execute(script(0)).run().await.unwrap();
+    let limit = base.fuel_consumed.unwrap() * 4;
+    let err = session
+        .execute(script(4))
+        .with_fuel_limit(limit)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let rounds = String::from_utf8(storage.read("/data/rounds").await.unwrap()).unwrap();
+    let rounds: u32 = rounds.trim().parse().unwrap();
+    assert!(rounds <= 6, "{rounds} rounds under the limit");
+}
+
 /// A running child's argv and env count against `max_child_host_bytes` for
 /// as long as it runs, not just until the shell waits on it: with three
 /// children each holding 1 MiB running, a fourth doesn't fit a 3.5 MiB

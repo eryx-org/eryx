@@ -289,6 +289,16 @@ fn main() {
             let read = children.first().map(|child| child.read(1));
             Ok(format!("{read:?}\n"))
         }
+        // N million rounds of work, then a long sleep: killed asleep, it has
+        // burned its work since its last epoch tick, likely all of it.
+        ["work-then-sleep", millions] => {
+            let mut x = 0u64;
+            for i in 0..u64::from(millions.parse().unwrap_or(0u32)) * 1_000_000 {
+                x = std::hint::black_box(x.wrapping_add(i));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            Ok(String::new())
+        }
         ["spin"] => loop {
             std::hint::spin_loop();
         },

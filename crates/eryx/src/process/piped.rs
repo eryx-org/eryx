@@ -27,7 +27,9 @@ use wasmtime::StoreContextMut;
 use wasmtime::component::{Linker, Resource, ResourceType};
 
 use super::child_bindings::eryx::process::run::RunError;
-use super::{ChildState, Held, LiveSlot, NestedTrace, ProcessError, charge_caller, pipe};
+use super::{
+    ChildBudget, ChildState, Held, LiveSlot, NestedTrace, ProcessError, charge_caller, pipe,
+};
 
 /// Most of a piped command's stdout one `read` returns.
 const MAX_READ: u64 = 64 * 1024;
@@ -61,6 +63,9 @@ struct Run {
     /// that its caller has been charged.
     fuel_used: Arc<AtomicU64>,
     charged: u64,
+    /// Its execution's, owed what it burned uncharged if it's dropped with
+    /// its caller's store.
+    budget: ChildBudget,
     trace: Option<NestedTrace>,
     /// Its live-child slot, held until the handle is dropped rather than
     /// only while it runs: an ended command whose handle is kept still holds
@@ -102,12 +107,23 @@ impl Run {
         }
     }
 
-    /// Fuel burned since the last charge, marked charged.
+    /// Fuel burned since the last charge, marked charged. Stop it first
+    /// (`running = None`) for its final count.
     fn take_fuel(&mut self) -> u64 {
         let used = self.fuel_used.load(Ordering::Relaxed);
         let delta = used.saturating_sub(self.charged);
         self.charged = self.charged.max(used);
         delta
+    }
+}
+
+impl Drop for Run {
+    /// Killed with its caller (whose store is going away), it owes its
+    /// execution what it burned since its caller was last charged.
+    fn drop(&mut self) {
+        self.running = None;
+        let owed = self.take_fuel();
+        self.budget.owe_fuel(owed);
     }
 }
 
@@ -159,6 +175,8 @@ pub(super) fn add_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result
         // Dropping the run kills it if it's still going; its trace records a
         // kill. What it burned since its last charge is charged now.
         if let Some(mut run) = store.data_mut().piped.runs.remove(&id) {
+            // Stopped first, so its store publishes its final count.
+            run.running = None;
             let burned = run.take_fuel();
             // One that exited but wasn't waited for ends its trace with how
             // it ended, not as killed.
@@ -332,6 +350,7 @@ fn spawn(
         stderr: Some(prepared.stderr),
         pending: Vec::new(),
         charged: 0,
+        budget: spawner.budget.clone(),
         trace,
         _live: live,
     };
