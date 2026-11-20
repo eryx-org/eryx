@@ -13,9 +13,9 @@ use std::time::Duration;
 ///
 /// `None` means pyeryx's default (`eryx::ResourceLimits::default()`: 30s
 /// execution, 10s callbacks, 128 MiB, 1000 callback invocations, fuel off), or
-/// no limit when `unlimited_by_default` is set. `max_vfs_bytes`, `max_vfs_entries` and
-/// `max_open_host_files` keep their default caps either way, since they bound host resources. The
-/// default value is `ResourceLimits()`.
+/// no limit when `unlimited_by_default` is set. `max_vfs_bytes`, `max_vfs_entries`
+/// and `max_open_host_files` keep their default caps either way, since they
+/// bound host resources. The default value is `ResourceLimits()`.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     pub execution_timeout_ms: Option<u64>,

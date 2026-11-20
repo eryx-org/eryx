@@ -259,9 +259,8 @@ except OSError as e:
     print(created, errno.errorcode[e.errno])
 """
         )
-        created, code = result.stdout.split()
-        assert code == b"ENOSPC"
-        assert int(created) < 8
+        # The root, the mount point and one more entry exist before the script runs.
+        assert result.stdout == b"5 ENOSPC\n"
 
 
 class TestSandboxFactoryVolumes:
