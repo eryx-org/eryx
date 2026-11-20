@@ -557,6 +557,10 @@ pub(crate) struct ChildBudget {
     /// The guest's stderr, where refusals of its own spawns are reported
     /// (see [`Notices`]).
     stderr: Option<crate::wasm::FdCapture>,
+    /// Fuel children burned that their caller was never charged, because
+    /// the run was dropped before its final charge (see [`Owed`]). The
+    /// execution's guest is charged it on its next spawn or charge.
+    owed_fuel: Arc<AtomicU64>,
 }
 
 impl Default for ChildBudget {
@@ -577,7 +581,19 @@ impl ChildBudget {
             memory: Arc::default(),
             memory_limit: usize::try_from(memory).unwrap_or(usize::MAX),
             stderr,
+            owed_fuel: Arc::default(),
         }
+    }
+
+    /// Take the fuel owed by dropped runs (see [`Owed`]), to charge the
+    /// execution's guest.
+    fn take_owed_fuel(&self) -> u64 {
+        self.owed_fuel.swap(0, Ordering::Relaxed)
+    }
+
+    /// Owe the execution `fuel` a dropped run burned uncharged.
+    fn owe_fuel(&self, fuel: u64) {
+        self.owed_fuel.fetch_add(fuel, Ordering::Relaxed);
     }
 
     /// What a child running `cmd` is told when the memory pool can't fit it.
@@ -2144,8 +2160,9 @@ pub(crate) struct ChildState {
     table: ResourceTable,
     limits: ChildMemory,
     sockets: ChildSockets,
-    /// Fuel it may burn, and has burned as of its last epoch tick or
-    /// nested run (which charges it its own children's).
+    /// Fuel it may burn, and has burned as of its last epoch tick, nested
+    /// run (which charges it its own children's) or, once its store is
+    /// dropped, its end (see [`Metered`]).
     fuel: u64,
     fuel_used: Arc<AtomicU64>,
     /// How it runs commands of its own, if its command may.
@@ -2346,7 +2363,8 @@ struct ChildRun {
     stderr: pipe::Writer,
     /// Fuel the child may burn.
     fuel: u64,
-    /// Fuel it has burned so far, as of its last epoch tick.
+    /// Fuel it has burned so far, as of its last epoch tick, or its end
+    /// once its store is dropped (see [`Metered`]).
     fuel_used: Arc<AtomicU64>,
     /// Its share of the execution's pool of child memory, holding its
     /// instances' metadata from spawn.
@@ -2380,26 +2398,67 @@ struct ChildRun {
 
 /// Meter a child's `store`: it may burn `fuel`, and publishes what it has
 /// burned to `fuel_used` on every epoch tick, for `wait` to charge the
-/// parent.
+/// parent, and once more when the store is dropped (see [`Metered`]).
 fn meter_child<T: 'static>(
-    store: &mut Store<T>,
+    mut store: Store<T>,
     fuel: u64,
     fuel_used: Arc<AtomicU64>,
-) -> Result<(), String> {
+) -> Result<Metered<T>, String> {
     // Without this, a loop with no calls keeps its fuel count in a
     // register, and the epoch callback below reads a stale count.
-    crate::wasm::sync_fuel_periodically(store).map_err(|e| e.to_string())?;
+    crate::wasm::sync_fuel_periodically(&mut store).map_err(|e| e.to_string())?;
     // Yield on every epoch tick, publishing the fuel burned so far. The
     // parent's timeout and cancellation race its whole execution, so
     // yielding also lets them drop a CPU-bound child as they would a guest
     // blocked in `time.sleep`.
     store.set_epoch_deadline(1);
+    let published = Arc::clone(&fuel_used);
     store.epoch_deadline_callback(move |store| {
         let left = store.as_context().get_fuel().unwrap_or(0);
-        fuel_used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+        published.store(fuel.saturating_sub(left), Ordering::Relaxed);
         Ok(UpdateDeadline::Yield(1))
     });
-    store.set_fuel(fuel).map_err(|e| e.to_string())
+    store.set_fuel(fuel).map_err(|e| e.to_string())?;
+    Ok(Metered {
+        store,
+        fuel,
+        fuel_used,
+    })
+}
+
+/// A child's store, which publishes the fuel it has burned when it's
+/// dropped: a child killed between epoch ticks, or whose `wait` is
+/// cancelled, would otherwise leave what it burned since its last tick
+/// uncharged.
+struct Metered<T: 'static> {
+    store: Store<T>,
+    fuel: u64,
+    fuel_used: Arc<AtomicU64>,
+}
+
+impl<T> std::ops::Deref for Metered<T> {
+    type Target = Store<T>;
+
+    fn deref(&self) -> &Store<T> {
+        &self.store
+    }
+}
+
+impl<T> std::ops::DerefMut for Metered<T> {
+    fn deref_mut(&mut self) -> &mut Store<T> {
+        &mut self.store
+    }
+}
+
+impl<T> Drop for Metered<T> {
+    fn drop(&mut self) {
+        // Fuel is always enabled on both engines; without it, keep the last
+        // count rather than charge the whole grant.
+        if let Ok(left) = self.store.get_fuel() {
+            self.fuel_used
+                .store(self.fuel.saturating_sub(left), Ordering::Relaxed);
+        }
+    }
 }
 
 impl ChildRun {
@@ -2509,9 +2568,10 @@ impl ChildRun {
             },
         );
         store.limiter(|s| &mut s.limits);
-        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
-            return (Err(e), 0);
-        }
+        let mut store = match meter_child(store, self.fuel, self.fuel_used) {
+            Ok(store) => store,
+            Err(e) => return (Err(e), 0),
+        };
 
         let code = async {
             match self.pre.run(&mut store).await {
@@ -2562,9 +2622,10 @@ impl ChildRun {
         state.published_fuel = Some((self.fuel, Arc::clone(&self.fuel_used)));
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
-        if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
-            return (Err(e), 0);
-        }
+        let mut store = match meter_child(store, self.fuel, self.fuel_used) {
+            Ok(store) => store,
+            Err(e) => return (Err(e), 0),
+        };
         // `prepare` put the shell's directory in PWD.
         let cwd = self
             .env
@@ -2657,6 +2718,16 @@ impl<D> StreamProducer<D> for PipeProducer {
 }
 
 impl ExecutorState {
+    /// Take the fuel dropped runs owe (see [`Owed`]), to charge this guest
+    /// if it's the execution's: a guest run as a command leaves it to the
+    /// execution's own guest, whose `wait` is charging it as it runs.
+    fn take_owed_fuel(&self) -> u64 {
+        if self.nested.is_some() {
+            return 0;
+        }
+        self.child_budget.take_owed_fuel()
+    }
+
     /// How the guest spawns children: the shell's are depth 1.
     fn spawner(&self) -> Spawner {
         if let Some(nested) = &self.nested {
@@ -2690,8 +2761,9 @@ impl ExecutorState {
     /// yields, once per epoch tick, so children together overshoot the
     /// parent's fuel by at most one tick of work each, for up to
     /// [`MAX_LIVE_CHILDREN`] of them, and one that runs out of its own has
-    /// emptied the parent too. An unlimited parent leaves its children
-    /// bounded only by its timeout.
+    /// emptied the parent too. A child stopped between ticks is charged the
+    /// rest when it's dropped (see [`Owed`]). An unlimited parent leaves its
+    /// children bounded only by its timeout.
     fn take_child_run(
         &mut self,
         child: &Resource<ChildProcess>,
@@ -2746,10 +2818,23 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         cwd: String,
         stdin: StreamReader<u8>,
     ) -> Result<Spawned, ProcessError> {
-        let state = host.get();
-        if state.suspended.is_some() {
+        if host.get().suspended.is_some() {
             return Err(ProcessError::SpawnFailed);
         }
+        // Charge what dropped runs owe here too: a script that keeps
+        // spawning and killing children may never finish a `wait`.
+        let owed = host.get().take_owed_fuel();
+        if owed > 0 {
+            let mut store = host.as_context_mut();
+            let left = store.get_fuel().unwrap_or(0).saturating_sub(owed);
+            // Fuel is always enabled on both engines.
+            let _ = store.set_fuel(left);
+            // The guest traps (`FuelExhausted`) as soon as it resumes.
+            if left == 0 {
+                return Err(ProcessError::SpawnFailed);
+            }
+        }
+        let state = host.get();
         let Prepared {
             run,
             stdin: stdin_tx,
@@ -2872,13 +2957,20 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         // `kill-children` ends the run without polling it again.
         let killed = accessor.with(|mut access| access.get().kill_children.clone());
         let mut killed = std::pin::pin!(killed.cancelled_owned());
-        let mut charged = 0;
-        // Move what the child has burned since the last charge to the parent;
-        // false once the parent has none left.
+        // Before `running`, so a `wait` the guest cancels drops the child
+        // first and then owes what it burned since its last charge.
+        let mut owed = Owed {
+            budget: run._args.budget.clone(),
+            fuel_used: Arc::clone(&fuel_used),
+            charged: 0,
+        };
+        // Move what the child has burned since the last charge to the parent,
+        // with what dropped runs owe; false once the parent has none left.
         let mut charge = |used: u64| {
-            let delta = used.saturating_sub(charged);
-            charged = charged.max(used);
+            let delta = used.saturating_sub(owed.charged);
+            owed.charged = owed.charged.max(used);
             accessor.with(|mut access| {
+                let delta = delta.saturating_add(access.get().take_owed_fuel());
                 let mut store = access.as_context_mut();
                 let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
                 // Fuel is always enabled on both engines.
@@ -2914,8 +3006,10 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         drop(running);
         report_nested();
         const OUT_OF_FUEL: &str = "the parent ran out of fuel";
+        // A killed child's count was read before it was dropped, and its
+        // store published its last one as it was.
         let outcome = match finished {
-            Some((code, used)) if charge(used) => code,
+            Some((code, used)) if charge(used.max(fuel_used.load(Ordering::Relaxed))) => code,
             _ => {
                 tracing::warn!("parent ran out of fuel; killed its child");
                 Err(OUT_OF_FUEL.to_owned())
@@ -2938,6 +3032,41 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             queued.end(outcome.clone());
         }
         outcome.map_err(|_| ProcessError::SpawnFailed)
+    }
+}
+
+/// Owes a run's uncharged fuel to its execution if the run is dropped
+/// before its final charge: a `wait` the guest cancels (`kill` of a job),
+/// or a caller killed midway. Declared before the run's future, so the run
+/// (and its [`Metered`] store, which publishes its final count) is dropped
+/// first.
+struct Owed {
+    budget: ChildBudget,
+    fuel_used: Arc<AtomicU64>,
+    /// How much of `fuel_used` has been charged to the caller.
+    charged: u64,
+}
+
+impl Drop for Owed {
+    fn drop(&mut self) {
+        let owed = self
+            .fuel_used
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.charged);
+        self.budget.owe_fuel(owed);
+    }
+}
+
+/// Charge the execution's guest what dropped runs still owe (see
+/// [`Owed`]), once its call has returned: a child killed after the guest's
+/// last spawn or `wait` would otherwise go uncharged, and a session's next
+/// execution would pay for it.
+pub(crate) fn settle_owed_fuel(store: &mut Store<ExecutorState>) {
+    let owed = store.data().take_owed_fuel();
+    if owed > 0 {
+        let left = store.get_fuel().unwrap_or(0).saturating_sub(owed);
+        // Fuel is always enabled on both engines.
+        let _ = store.set_fuel(left);
     }
 }
 
@@ -3085,7 +3214,16 @@ async fn run_nested(
     let trace = NestedTrace::start(&spawner, &mut run);
     run.fuel = store.get_fuel().unwrap_or(0);
     let fuel_used = Arc::clone(&run.fuel_used);
-    let mut running = std::pin::pin!(run.run());
+    // Before `running`, so a caller killed midway drops the child first and
+    // then owes what it burned since its last charge.
+    let mut owed = Owed {
+        budget: held.budget.clone(),
+        fuel_used: Arc::clone(&fuel_used),
+        charged: 0,
+    };
+    // Boxed, so it can be dropped (publishing its final count) before the
+    // last charge.
+    let mut running = Box::pin(run.run());
     let mut done = None;
     let mut stdin = Some(stdin);
     let mut fed = 0;
@@ -3097,12 +3235,11 @@ async fn run_nested(
         reader: Some(stderr),
         data: Vec::new(),
     };
-    let mut charged_fuel = 0;
     // Move what the child has burned since the last charge to the caller
     // (and publish the caller's total, for its own parent to charge);
     // false once the caller has none left.
     let mut charge = |store: &mut StoreContextMut<'_, ChildState>, used: u64| {
-        charge_caller(store, &mut charged_fuel, used)
+        charge_caller(store, &mut owed.charged, used)
     };
     let result = std::future::poll_fn(|cx| {
         while let Some(writer) = &stdin {
@@ -3139,6 +3276,9 @@ async fn run_nested(
     })
     .await;
     drop(held);
+    // Stopped if it's still running (its output was over the limit), so its
+    // store publishes its final count.
+    drop(running);
     // Charge what it burned however it ended, before any error returns.
     let used = match &result {
         Ok(Some((_, used))) => *used,

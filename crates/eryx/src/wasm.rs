@@ -4659,6 +4659,7 @@ impl Executor {
         } else {
             run.await
         };
+        crate::process::settle_owed_fuel(store);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
