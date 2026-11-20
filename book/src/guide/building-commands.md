@@ -54,7 +54,8 @@ fn main() {
             status = 2;
         }
     }
-    // Not `ExitCode` from `main`: on wasm32-wasip2 that reports only 0 or 1.
+    // Not `ExitCode` from `main`: built without eryx-build, that reports
+    // only 0 or 1 on wasm32-wasip2.
     std::process::exit(status);
 }
 ```
@@ -122,11 +123,10 @@ under several names for a multicall binary, which picks its tool from
 The shell sees a command's exit status as `$?`, and a script's last one is
 the execution's. Two things in common toolchains lose it:
 
-- **Rust:** returning an `ExitCode` from `main` on
+- **Rust without eryx-build:** returning an `ExitCode` from `main` on
   `wasm32-wasip2` or `wasm32-wasip3` reports only success or failure, so any
-  non-zero status becomes 1, with or without eryx-build (a fix in eryx-build
-  is tracked in [#1131](https://github.com/eryx-org/eryx/issues/1131)).
-  `std::process::exit(n)` keeps `n`.
+  non-zero status becomes 1. `std::process::exit(n)` keeps `n`, so use it
+  for plain builds. eryx-build's Rust lane keeps an `ExitCode` (below).
 - **C with plain wasi-sdk:** wasi-libc's `exit` reports only success or
   failure too. eryx-build's C lane fixes this (below).
 
@@ -150,7 +150,8 @@ top of a plain build, it:
 - links a start-up constructor that moves the command into `$PWD` (Rust and
   C);
 - in the C lane, links a shim that exits with
-  `wasi:cli/exit.exit-with-code`, so statuses above 1 reach the shell;
+  `wasi:cli/exit.exit-with-code`, and in the Rust lane passes an `ExitCode`
+  returned from `main` on to it, so statuses above 1 reach the shell;
 - writes `provenance.json` next to the component: the source pins, patches,
   the eryx-build version, the built file's sha256, and the WIT packages it
   imports;
