@@ -28,6 +28,7 @@ mod grep;
 mod input;
 mod jobs;
 mod subshell;
+mod timeout;
 mod xargs;
 
 use std::cell::{Cell, RefCell};
@@ -213,6 +214,10 @@ fn register_builtins(shell: &mut Shell) {
     shell
         .builtins_mut()
         .register("kill", builtins::Registration::of::<jobs::KillCommand>());
+    shell.builtins_mut().register(
+        "timeout",
+        builtins::Registration::of::<timeout::TimeoutCommand>(),
+    );
     // The host lists `grep` when this execution's allowed commands include
     // it (or there's no allow-list), so it can be narrowed like a command.
     let commands = eryx::process::process::list_commands();
@@ -879,7 +884,7 @@ mod tests {
                 .into_keys()
                 .chain(
                     [
-                        "invoke", "grep", "env", "xargs", "chmod", "kill", "sh", "bash",
+                        "invoke", "grep", "env", "xargs", "chmod", "kill", "timeout", "sh", "bash",
                     ]
                     .map(String::from),
                 )

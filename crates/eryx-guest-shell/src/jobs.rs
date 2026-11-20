@@ -144,7 +144,7 @@ const USAGE: &str =
 
 /// A signal named or numbered as `kill` takes it: `TERM`, `SIGTERM`, `term`
 /// or `15`, and `0` for none.
-fn parse_signal(spec: &str) -> Option<i32> {
+pub(crate) fn parse_signal(spec: &str) -> Option<i32> {
     if let Ok(n) = spec.parse::<i32>() {
         return (n == 0 || SIGNALS.iter().any(|&(_, m)| m == n)).then_some(n);
     }

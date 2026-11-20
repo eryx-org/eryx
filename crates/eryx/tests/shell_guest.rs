@@ -1490,6 +1490,56 @@ env -S 'a b'; echo "bad=$?"
     assert!(stderr.contains("env: invalid option"), "{stderr}");
 }
 
+/// `timeout` is a builtin (uutils' needs processes and signals): it runs its
+/// command, found as `env`'s is, and passes its status through; GNU's
+/// statuses for its own failures and a command that can't be found.
+#[tokio::test]
+async fn timeout_runs_commands_and_passes_their_status_through() {
+    let (stdout, stderr) = run_shell(
+        r#"
+type timeout
+timeout 5 echo hi; echo "s=$?"
+timeout 5 sh -c 'exit 3'; echo "s=$?"
+timeout 0 sh -c 'echo none'; echo "s=$?"
+timeout 1m grep -c x /dev/null; echo "s=$?"
+timeout 1 nosuchcmd; echo "missing=$?"
+timeout x echo; echo "bad=$?"
+timeout --help | head -n 1
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "timeout is a shell builtin\nhi\ns=0\ns=3\nnone\ns=0\n0\ns=1\nmissing=127\nbad=125\n\
+         Usage: timeout [OPTION] DURATION COMMAND [ARG]...\n"
+    );
+    assert!(
+        stderr.contains("timeout: invalid time interval 'x'"),
+        "{stderr}"
+    );
+}
+
+/// A command still running when the duration is up is stopped at once:
+/// `timeout` exits 124, or 128 plus the signal under `--preserve-status`.
+#[tokio::test]
+async fn timeout_stops_a_command_that_runs_too_long() {
+    let start = std::time::Instant::now();
+    let (stdout, stderr) = run_shell(
+        r#"
+timeout 0.2 sleep 5; echo "s=$?"
+timeout --preserve-status -s KILL 0.2 sh -c 'sleep 5; echo late'; echo "s=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "s=124\ns=137\n");
+    assert_eq!(stderr, "");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 /// A background job made only of builtins (no child processes) runs, and
 /// `kill` stops one that would loop forever, with its pipeline stages.
 #[tokio::test]

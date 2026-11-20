@@ -339,6 +339,7 @@ export const RESERVED_CALLBACK_NAMES = Object.freeze({
     "test",
     "then",
     "time",
+    "timeout",
     "trap",
     "true",
     "type",
