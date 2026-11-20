@@ -111,7 +111,7 @@ eryx-server --environments envs
 - **At startup:** each environment is loaded and its content hash checked. One that fails to load, one with an empty name, two with the same name, or one for a language the server doesn't serve (not in `--languages`, or built without its cargo feature) stops the server. Symlinks to environments are followed, and entries starting with `.` are skipped, so a mounted volume works.
 - **Requests:** an empty `environment` mounts none. A name the server doesn't have, or an environment for another language than the request's, is `INVALID_ARGUMENT`.
 - **Pools:** each environment gets its own sandbox pool, sized by the pool flags like a language's and created on its first request. The pool metrics have an `environment` label, empty for the languages' own pools.
-- **Replay:** a callback journal is bound to the environment it was recorded under.
+- **Replay:** a callback journal is bound to the environment it was recorded under, by name and content hash, so repacking an environment (even under the same name) invalidates the journals recorded with the old one.
 
 ### Request limits
 
@@ -260,7 +260,7 @@ When a callback suspends, the server **halts the guest immediately** (no further
 
 Replayed journal entries are returned to Python **verbatim** — the server does not re-execute the callback to validate them. A journal is therefore a **trusted input**: a crafted journal could inject arbitrary values into a script. Because the server hands a recorded journal back to the client (who echoes it on the next run), it must defend against tampering when that journal round-trips through storage or an intermediary.
 
-The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, the `environment` (when one is set), and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state, callback set and environment that produced it. On an incoming replay request the server:
+The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, the `environment`'s name and content hash (when one is set), and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state, callback set and environment that produced it. On an incoming replay request the server:
 
 - **Verifies** the signature against the request's `code`, `state_snapshot` and callback names before matching, and checks the journal has not expired.
 - **Rejects** an unsigned non-empty, mis-signed, expired, or mismatched journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.

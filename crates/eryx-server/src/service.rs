@@ -318,6 +318,15 @@ impl ServerLimits {
 /// Default for how long a signed callback journal can be replayed (7 days).
 pub const DEFAULT_JOURNAL_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// The environment `name` with content hash `hash`, as journals are bound
+/// to it; `None` for an empty `name` (no environment).
+fn bound_environment<'a>(
+    name: &'a str,
+    hash: &'a str,
+) -> Option<crate::replay::BoundEnvironment<'a>> {
+    (!name.is_empty()).then_some(crate::replay::BoundEnvironment { name, hash })
+}
+
 /// Why a request for `language`, which has no pool, is rejected.
 fn unserved_language(language: eryx::Language) -> String {
     let feature = match language {
@@ -369,6 +378,15 @@ impl std::fmt::Debug for LanguagePool {
     }
 }
 
+/// An environment requests can name, and the pool of sandboxes mounting it.
+#[derive(Debug)]
+struct EnvironmentPool {
+    language: eryx::Language,
+    /// Its content hash, which journals recorded under it are bound to.
+    hash: String,
+    pool: LanguagePool,
+}
+
 /// The Eryx gRPC service.
 ///
 /// Holds a shared [`SandboxPool`] per guest language for efficient sandbox
@@ -376,9 +394,8 @@ impl std::fmt::Debug for LanguagePool {
 #[derive(Debug)]
 pub struct EryxService {
     pools: HashMap<eryx::Language, LanguagePool>,
-    /// The pools of the environments requests can name, by name, with each
-    /// environment's language.
-    environments: HashMap<String, (eryx::Language, LanguagePool)>,
+    /// The environments requests can name, by name.
+    environments: HashMap<String, EnvironmentPool>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
@@ -430,27 +447,28 @@ impl EryxService {
         self
     }
 
-    /// Serve the environment `name` (`ExecuteRequest.environment`), for
-    /// `language`, from a pool that `create` makes on its first request. The
-    /// pool's sandboxes should mount the environment
+    /// Serve `environment` under its manifest name
+    /// (`ExecuteRequest.environment`), from a pool that `create` makes on its
+    /// first request. The pool's sandboxes should mount it
     /// (`SandboxBuilder::with_environment`); requests naming it for another
-    /// language are refused.
+    /// language are refused, and journals recorded under it are bound to its
+    /// name and content hash.
     #[must_use]
     pub fn with_environment_pool(
         mut self,
-        name: impl Into<String>,
-        language: eryx::Language,
+        environment: &eryx::environment::Environment,
         create: PoolFactory,
     ) -> Self {
         self.environments.insert(
-            name.into(),
-            (
-                language,
-                LanguagePool::Lazy {
+            environment.manifest().name.clone(),
+            EnvironmentPool {
+                language: environment.language(),
+                hash: environment.manifest().content.hash.clone(),
+                pool: LanguagePool::Lazy {
                     pool: tokio::sync::OnceCell::new(),
                     create,
                 },
-            ),
+            },
         );
         self
     }
@@ -556,6 +574,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             }
         };
         let environment = execute_req.environment;
+        let mut environment_hash = String::new();
         let pool = if environment.is_empty() {
             self.pools
                 .get(&language)
@@ -566,18 +585,19 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     Status::unavailable(format!("failed to create the {language} pool: {e}"))
                 })?
         } else {
-            let (environment_language, pool) =
-                self.environments.get(&environment).ok_or_else(|| {
-                    Status::invalid_argument(format!(
-                        "this server has no environment {environment:?} (see --environments)"
-                    ))
-                })?;
-            if *environment_language != language {
+            let served = self.environments.get(&environment).ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "this server has no environment {environment:?} (see --environments)"
+                ))
+            })?;
+            if served.language != language {
                 return Err(Status::invalid_argument(format!(
-                    "environment {environment:?} is for {environment_language}, not {language}"
+                    "environment {environment:?} is for {}, not {language}",
+                    served.language
                 )));
             }
-            pool.get().await.map_err(|e| {
+            environment_hash.clone_from(&served.hash);
+            served.pool.get().await.map_err(|e| {
                 Status::unavailable(format!(
                     "failed to create the pool for environment {environment:?}: {e}"
                 ))
@@ -596,7 +616,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             code: &code,
             state: persist_state.then_some(state_snapshot.as_slice()),
             callbacks: &declarations,
-            environment: &environment,
+            environment: bound_environment(&environment, &environment_hash),
         };
         // A rejected replay must not become a fresh run: completed callbacks
         // and direct script effects may already have happened.
@@ -906,7 +926,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_signer: journal_signer.clone(),
                     journal_ttl,
                     declarations: &declarations,
-                    environment: &environment,
+                    environment: bound_environment(&environment, &environment_hash),
                     max_output_bytes,
                     allowed_commands,
                     command_options,
@@ -1155,9 +1175,9 @@ struct SessionParams<'a> {
     journal_ttl: Duration,
     /// The request's callback declarations, which outgoing journals are bound to.
     declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
-    /// The environment the request named (empty for none), which outgoing
-    /// journals are also bound to.
-    environment: &'a str,
+    /// The environment the request mounted, which outgoing journals are
+    /// also bound to.
+    environment: Option<crate::replay::BoundEnvironment<'a>>,
     /// Cap on stdout plus stderr bytes kept and streamed.
     max_output_bytes: usize,
     /// The commands the execution may spawn (shell); `None` allows all.

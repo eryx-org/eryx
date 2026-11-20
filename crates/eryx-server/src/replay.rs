@@ -48,7 +48,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// fail verification instead of being read under the new one.
 const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
 
-/// [`MAC_DOMAIN`] for a run with an environment, whose name is fed next. A
+/// [`MAC_DOMAIN`] for a run with an environment, whose name and content hash
+/// are fed next. A
 /// separate domain rather than an extra field, so journals recorded without
 /// an environment keep the signatures they had before environments.
 const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"eryx-journal-v2-environment";
@@ -63,9 +64,19 @@ pub struct JournalBinding<'a> {
     pub state: Option<&'a [u8]>,
     /// The declared callbacks; their names are bound, in any order.
     pub callbacks: &'a [pb::CallbackDeclaration],
-    /// The environment the run mounted (`ExecuteRequest.environment`), empty
-    /// for none.
-    pub environment: &'a str,
+    /// The environment the run mounted, if any.
+    pub environment: Option<BoundEnvironment<'a>>,
+}
+
+/// An environment a journal is bound to: its name and its content hash, so a
+/// journal recorded before the environment was repacked under the same name
+/// doesn't verify against the new packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundEnvironment<'a> {
+    /// Its name (`ExecuteRequest.environment`).
+    pub name: &'a str,
+    /// Its content hash (the manifest's `content.hash`).
+    pub hash: &'a str,
 }
 
 fn now_unix_secs() -> u64 {
@@ -155,11 +166,13 @@ impl JournalSigner {
             mac.update(&(bytes.len() as u64).to_le_bytes());
             mac.update(bytes);
         };
-        if binding.environment.is_empty() {
-            feed(MAC_DOMAIN);
-        } else {
-            feed(MAC_DOMAIN_ENVIRONMENT);
-            feed(binding.environment.as_bytes());
+        match binding.environment {
+            None => feed(MAC_DOMAIN),
+            Some(environment) => {
+                feed(MAC_DOMAIN_ENVIRONMENT);
+                feed(environment.name.as_bytes());
+                feed(environment.hash.as_bytes());
+            }
         }
         feed(&journal.expires_at_unix_secs.to_le_bytes());
         feed(binding.code.as_bytes());
@@ -314,7 +327,7 @@ mod tests {
             code,
             state: None,
             callbacks: &[],
-            environment: "",
+            environment: None,
         }
     }
 
@@ -405,17 +418,19 @@ mod tests {
 
     #[test]
     fn journal_is_bound_to_environment() {
-        let with = |environment| JournalBinding {
-            environment,
+        let with = |name, hash| JournalBinding {
+            environment: Some(BoundEnvironment { name, hash }),
             ..binding("code")
         };
         let signer = JournalSigner::random();
-        let journal = signed(&signer, with("tools"));
-        assert!(signer.verify(&journal, with("tools")));
-        assert!(!signer.verify(&journal, with("other")));
-        assert!(!signer.verify(&journal, with("")));
-        let journal = signed(&signer, with(""));
-        assert!(!signer.verify(&journal, with("tools")));
+        let journal = signed(&signer, with("tools", "sha256-a"));
+        assert!(signer.verify(&journal, with("tools", "sha256-a")));
+        assert!(!signer.verify(&journal, with("other", "sha256-a")));
+        // Repacked under the same name.
+        assert!(!signer.verify(&journal, with("tools", "sha256-b")));
+        assert!(!signer.verify(&journal, binding("code")));
+        let journal = signed(&signer, binding("code"));
+        assert!(!signer.verify(&journal, with("tools", "sha256-a")));
     }
 
     #[test]

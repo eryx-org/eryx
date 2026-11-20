@@ -146,7 +146,8 @@ message ExecuteRequest {
   // flag) to mount read-only, so the code can import its packages. Empty: no
   // environment. A name the server doesn't have, or an environment for
   // another language than `language`, is INVALID_ARGUMENT. A callback
-  // journal is bound to the environment it was recorded under.
+  // journal is bound to the environment it was recorded under: its name and
+  // content hash, so repacking an environment invalidates its journals.
   string environment = 18;
 }
 

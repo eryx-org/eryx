@@ -302,6 +302,7 @@ async fn execute_mounts_the_requested_environment() {
 
     let dir = tempfile::tempdir().unwrap();
     let environment = fixture_environment(dir.path());
+    let served = environment.clone();
     let create =
         |environment: Option<eryx::environment::Environment>| -> eryx_server::service::PoolFactory {
             Arc::new(move || {
@@ -319,11 +320,7 @@ async fn execute_mounts_the_requested_environment() {
     let channel = start_server_with(4, |pool| {
         EryxService::new(pool)
             .with_lazy_pool(eryx::Language::JavaScript, create(None))
-            .with_environment_pool(
-                "fixtures",
-                eryx::Language::JavaScript,
-                create(Some(environment)),
-            )
+            .with_environment_pool(&served, create(Some(environment)))
     })
     .await;
     let request = |code: &str, language: Language, environment: &str| ExecuteRequest {
@@ -2475,7 +2472,7 @@ async fn rejects_invalid_replay_before_execution() {
         code,
         state: None,
         callbacks: &[],
-        environment: "",
+        environment: None,
     };
     let echo = [echo_declaration()];
     for scenario in [

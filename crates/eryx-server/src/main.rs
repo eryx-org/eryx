@@ -901,11 +901,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .into_iter()
     .map(|environment| {
-        let name = environment.manifest().name.clone();
-        let language = environment.language();
-        tracing::info!(name, %language, root = %environment.root().display(), "serving environment");
-        let create = lazy_pool(language, Some(environment), &pool_config, &shell, &python);
-        (name, language, create)
+        tracing::info!(
+            name = environment.manifest().name,
+            language = %environment.language(),
+            hash = environment.manifest().content.hash,
+            root = %environment.root().display(),
+            "serving environment"
+        );
+        let create = lazy_pool(
+            environment.language(),
+            Some(environment.clone()),
+            &pool_config,
+            &shell,
+            &python,
+        );
+        (environment, create)
     })
     .collect::<Vec<_>>();
 
@@ -958,8 +968,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let service = environment_pools
         .into_iter()
-        .fold(service, |service, (name, language, create)| {
-            service.with_environment_pool(name, language, create)
+        .fold(service, |service, (environment, create)| {
+            service.with_environment_pool(&environment, create)
         });
     let service = service
         .with_max_message_size(args.max_message_size)
