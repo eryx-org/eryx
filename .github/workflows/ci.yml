@@ -967,11 +967,11 @@ jobs:
       # checks each was signed by eryx-commands' publish workflow on main,
       # and its wasm layer is fetched by the digest that signed manifest
       # names, which eryx-commands' commands.lock records too.
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         if: github.event_name == 'push'
         with:
           cosign-release: v3.1.4
-      - uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+      - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
         if: github.event_name == 'push'
         with:
           version: 1.3.6
