@@ -82,9 +82,9 @@ class ResourceLimits:
     ``ValueError`` when you run code, since the service uses its own.
 
     ``unlimited_by_default=True`` (what ``unlimited()`` returns) makes the
-    ``None`` fields mean no limit in pyeryx, except ``max_vfs_bytes`` and
-    ``max_open_host_files``, which keep their default caps since both bound
-    host memory. Fields you set
+    ``None`` fields mean no limit in pyeryx, except ``max_vfs_bytes``,
+    ``max_vfs_entries`` and ``max_open_host_files``, which keep their default
+    caps since they bound host memory. Fields you set
     still apply, so ``dataclasses.replace(ResourceLimits.unlimited(),
     execution_timeout_ms=5000)`` turns off all but the timeout. On eryx.run it
     means your org's limits.
@@ -98,6 +98,10 @@ class ResourceLimits:
     max_callback_invocations: Optional[int] = None
     max_fuel: Optional[int] = None
     max_vfs_bytes: Optional[int] = None
+    max_vfs_entries: Optional[int] = None
+    """Cap on the files and directories in the in-memory VFS pyeryx creates.
+    ``None`` keeps the default of 65,536; like ``max_vfs_bytes``,
+    ``unlimited_by_default`` doesn't clear it."""
     max_open_host_files: Optional[int] = None
     unlimited_by_default: bool = False
 
@@ -117,6 +121,7 @@ class ResourceLimits:
                 "max_memory_bytes",
                 "max_callback_invocations",
                 "max_vfs_bytes",
+                "max_vfs_entries",
                 "max_open_host_files",
             )
             if getattr(self, name) is not None
