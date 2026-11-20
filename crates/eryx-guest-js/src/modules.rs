@@ -604,7 +604,11 @@ impl<'a> Scanner<'a> {
     /// such as `"a" + b`.
     fn skip_header(&mut self) {
         if self.rest().starts_with("#!") {
-            self.pos += self.rest().find('\n').unwrap_or(self.rest().len());
+            // Up to a line terminator, as QuickJS's `skip_shebang` reads it.
+            let rest = self.rest();
+            self.pos += rest
+                .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .unwrap_or(rest.len());
         }
         loop {
             self.skip_trivia();
@@ -627,6 +631,16 @@ impl<'a> Scanner<'a> {
             }
             self.pos += 1 + len + 1;
             self.skip_horizontal();
+            // A block comment that ends on the same line.
+            while let Some(after) = self.rest().strip_prefix("/*") {
+                match after.find("*/") {
+                    Some(end) if !after[..end].contains(['\n', '\r']) => {
+                        self.pos += 2 + end + 2;
+                        self.skip_horizontal();
+                    }
+                    _ => break,
+                }
+            }
             let rest = self.rest();
             if rest.starts_with(';') {
                 self.pos += 1;
@@ -901,6 +915,8 @@ mod tests {
             "\"use strict\";\n",
             "'use strict'\n",
             "#!/usr/bin/env node\n// why\n'use strict'; \"other \\\" directive\" // x\n",
+            "#!/usr/bin/env node\r\n\"use strict\"\r\n",
+            "#!/usr/bin/env node\r'use strict' /* why */ /* not */\n",
         ] {
             let code = format!("{header}import x from \"m\"\nconsole.log(x)\n");
             assert_eq!(
@@ -918,6 +934,8 @@ mod tests {
             "#!/usr/bin/env node\nconsole.log(1)\n",
             "\"a\" + b;\nimport x from \"m\"\n",
             "\"a\".length\nimport x from \"m\"\n",
+            "\"a\" /* a\n */ + b\nimport x from \"m\"\n",
+            "#!/usr/bin/env node",
         ] {
             assert_eq!(rewrite(code), code, "{code}");
         }
