@@ -82,7 +82,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime-python.cwasm
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -303,7 +303,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime-python.cwasm
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -529,7 +529,7 @@ jobs:
       - name: Mark cwasm as up-to-date
         run: touch crates/eryx-runtime/runtime-python.cwasm
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -642,7 +642,7 @@ jobs:
         run: touch crates/eryx-runtime/runtime-python.cwasm
 
       # Use uv to manage Python - more reliable than setup-python on some runners
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -762,7 +762,7 @@ jobs:
         shell: bash
         run: touch crates/eryx-runtime/runtime-python.cwasm
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -929,7 +929,7 @@ jobs:
         env:
           ERYX_PRECOMPILE_BOOTSTRAP: "1"
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
@@ -1023,7 +1023,7 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: false
           python-version: "3.12"
