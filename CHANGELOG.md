@@ -34,6 +34,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## `eryx` - [0.16.0](https://github.com/eryx-org/eryx/compare/eryx-v0.15.2...eryx-v0.16.0) - 2026-11-20
 
+eryx now runs JavaScript and a bash-compatible shell as well as Python, and the shell runs sandboxed child commands: coreutils, your own WASI programs, git, and Python, JavaScript or another shell as commands, with network through a proxy that the host controls. Almost every package has breaking changes, and precompiled runtimes from 0.15.x don't load. Read **Upgrade notes** before upgrading.
+
+### Security
+- **`eryx:net` request parsing is stricter** ([#1087](https://github.com/eryx-org/eryx/pull/1087)). Where eryx parses requests as HTTP (connections with secrets or HTTP rules, and the new child proxy), it now refuses a request whose `Host` header isn't a plain `host[:port]` (no userinfo, path or query, a port in range, IPv6 only in brackets), and a `Transfer-Encoding` header on an HTTP/1.0 request. Before, a server could read such a request's host or body differently from the checks. This parsing was in 0.15.x too, for the Python guest. This is hardening, so there is no advisory. Python's `http.client` (urllib, requests, httpx), JS `fetch`, curl and Go's `net/http` already send requests that pass.
+- **wasmtime 50.0.3**, which fixes a WASI filesystem sandbox escape on Windows through a drive-prefixed path component ([GHSA-f2pq-268w-886c](https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-f2pq-268w-886c)). Only Windows hosts can be affected ([#1124](https://github.com/eryx-org/eryx/pull/1124)).
+
+### Highlights
+- **JavaScript guest** on QuickJS (quickjs-ng) ([#862](https://github.com/eryx-org/eryx/pull/862)): `Sandbox::embedded().javascript()`, `Sandbox(language="javascript")` in pyeryx, and `language` in eryx-server and `@eryx-org/eryx`. It has session snapshots, preinit, `fetch` over `eryx:net` with secrets in `process.env`, timers, Node built-ins (`buffer`, `events`, `path`, `util`, `crypto`, `node:fs`, ...), web crypto and `URL`, and callbacks, replay and suspension like Python ([#872](https://github.com/eryx-org/eryx/pull/872), [#874](https://github.com/eryx-org/eryx/pull/874), [#880](https://github.com/eryx-org/eryx/pull/880), [#924](https://github.com/eryx-org/eryx/pull/924), [#929](https://github.com/eryx-org/eryx/pull/929), [#953](https://github.com/eryx-org/eryx/pull/953), [#969](https://github.com/eryx-org/eryx/pull/969), [#1104](https://github.com/eryx-org/eryx/pull/1104)).
+- **JavaScript environments:** npm packages installed ahead of time and packed with `eryx-precompile env pack` into a directory that sandboxes mount read-only and `import` or `require` from (`with_environment`). eryx doesn't resolve or fetch packages ([#914](https://github.com/eryx-org/eryx/pull/914), [#1025](https://github.com/eryx-org/eryx/pull/1025), [#1030](https://github.com/eryx-org/eryx/pull/1030)).
+- **Shell guest** built on brush ([#863](https://github.com/eryx-org/eryx/pull/863)): `Sandbox::embedded().shell()`, `language="shell"`. A failed script's exit status is in `ErrorKind::ScriptFailed { exit_code, .. }` and `ExecuteResult.exit_code`. Scripts get a baseline Unix environment (`/tmp`, `/dev/null`, `HOME`, `PATH`, ...) ([#910](https://github.com/eryx-org/eryx/pull/910)).
+- **Sandboxed child commands** ([#871](https://github.com/eryx-org/eryx/pull/871)). External commands run as separate WASI components on the shell's files, charged to the execution's fuel, timeout and a shared child memory pool, with stdio streamed between pipeline stages ([#881](https://github.com/eryx-org/eryx/pull/881), [#891](https://github.com/eryx-org/eryx/pull/891), [#976](https://github.com/eryx-org/eryx/pull/976)).
+  - uutils coreutils are embedded and registered by default ([#902](https://github.com/eryx-org/eryx/pull/902)).
+  - Register your own commands: WASI 0.2 and 0.3 components and preview 1 modules, from a file or pinned to a digest and compiled once into a cache ([#928](https://github.com/eryx-org/eryx/pull/928), [#1005](https://github.com/eryx-org/eryx/pull/1005), [#1013](https://github.com/eryx-org/eryx/pull/1013)).
+  - Commands can run commands of their own, with live pipes, so git can run `sh -c` ([#951](https://github.com/eryx-org/eryx/pull/951), [#1037](https://github.com/eryx-org/eryx/pull/1037)).
+  - Per-execution allowed commands and command options ([#954](https://github.com/eryx-org/eryx/pull/954), [#1028](https://github.com/eryx-org/eryx/pull/1028)).
+- **Network for commands through an HTTP(S) child proxy**, within the sandbox's policy and one network budget per execution. Each command can have its own network, and the proxy can add credentials to a command's requests without the sandbox seeing them ([#896](https://github.com/eryx-org/eryx/pull/896), [#912](https://github.com/eryx-org/eryx/pull/912), [#983](https://github.com/eryx-org/eryx/pull/983), [#1055](https://github.com/eryx-org/eryx/pull/1055), [#1056](https://github.com/eryx-org/eryx/pull/1056)).
+- **Guests as commands.** `sh` and `bash` run as nested shells, and as commands for children that spawn them. Any file runs as a script by its shebang. `python3` and `node` are opt-in commands (`Command::guest(Language::Python)`, `eryx.Command.python()`, `--shell-python`; `Command::guest(Language::JavaScript)`, `eryx.Command.node()`, `--shell-node`) ([#1075](https://github.com/eryx-org/eryx/pull/1075), [#1077](https://github.com/eryx-org/eryx/pull/1077), [#1078](https://github.com/eryx-org/eryx/pull/1078), [#1103](https://github.com/eryx-org/eryx/pull/1103), [#1104](https://github.com/eryx-org/eryx/pull/1104)).
+- **Background jobs:** `cmd &`, `$!`, `wait`, `jobs` and `kill`. The execution waits for jobs still running when the script ends, and kills them at the timeout ([#1097](https://github.com/eryx-org/eryx/pull/1097), [#1128](https://github.com/eryx-org/eryx/pull/1128)).
+- **New shell builtins:** `xargs`, `env` and `chmod` ([#1108](https://github.com/eryx-org/eryx/pull/1108), [#1086](https://github.com/eryx-org/eryx/pull/1086), [#1093](https://github.com/eryx-org/eryx/pull/1093)).
+- **One runtime per language** ([#846](https://github.com/eryx-org/eryx/pull/846)). eryx builds, precompiles, embeds and releases `runtime-python`, `runtime-javascript` and `runtime-shell`. The pyeryx wheel still has only Python; the others come from the new PyPI packages `pyeryx-runtime-javascript` and `pyeryx-runtime-shell` (`pip install pyeryx[javascript]`, `pyeryx[shell]` or `pyeryx[all]`). eryx-server serves all three by default.
+
+### Upgrade notes
+
+Each item below summarises a longer note in `docs/`; read the linked note for the details.
+
+**All users**
+- **Precompiled runtimes and saved factories from 0.15.x don't load**, as after every release: they're stamped with the eryx version that built them and fail with `Error::IncompatiblePrecompiled` (`InitializationError` in pyeryx). Rebuild them with this release: `eryx-precompile upgrade OLD -o NEW`, `eryx-precompile compile`, or `python -m eryx factory upgrade` / `SandboxFactory.load(..., rebuild_if_incompatible=True)`. Run `eryx-precompile setup` again too. Its cache is now named `runtime-<language>-v<version>-...` ([#714](https://github.com/eryx-org/eryx/pull/714), [#846](https://github.com/eryx-org/eryx/pull/846)).
+- **The runtime release assets are named after their language:** `runtime.wasm` is now `runtime-python.wasm`, next to `runtime-javascript.wasm`, `runtime-shell.wasm` and `coreutils.wasm`, each with a `.sha256`. Scripts that download `runtime.wasm` need the new name. [Multi-runtime notes](https://github.com/eryx-org/eryx/blob/eryx-v0.16.0/docs/upgrade-notes-multi-runtime.md).
+- **State snapshots use format version 2**, which records the guest language. 0.16.0 reads every older snapshot, but older releases can't read 0.16.0's. Upgrade every process that restores snapshots before any starts writing them ([#842](https://github.com/eryx-org/eryx/pull/842)).
+- **Positional callback arguments bind in schema declaration order**, not alphabetically. A callback declared `zip, city` called as `f("10001", "NYC")` used to get `city="10001"`. Check callers that pass arguments by position. JSON that eryx builds now keeps insertion order, and runtimes or factories with baked callbacks (`compile --callbacks`, `SandboxFactory(callbacks=...)`) should be rebuilt from their source declarations, or they set callbacks up on every execution. [Schema-order notes](https://github.com/eryx-org/eryx/blob/eryx-v0.16.0/docs/upgrade-notes-schema-order.md) ([#869](https://github.com/eryx-org/eryx/pull/869)).
+- **A callback can't be named like something the guest already has**: Python builtins and the guest's own names (`print`, `open`, `json`, `invoke`, ...), JavaScript globals (`fetch`, `console`, ...), and shell builtins, reserved words and commands. Building such a sandbox now fails (`ErrorKind::Initialization`, `InitializationError`, `TypeError`). Rename the callback or put it under a prefix (`tools.print`). [Reserved-name notes](https://github.com/eryx-org/eryx/blob/eryx-v0.16.0/docs/upgrade-notes-reserved-callback-names.md) ([#970](https://github.com/eryx-org/eryx/pull/970), [#991](https://github.com/eryx-org/eryx/pull/991)).
+- **`peak_memory_bytes` includes the memory of a shell's child commands**, so it can exceed `max_memory_bytes`, which limits only the guest's own memory ([#1095](https://github.com/eryx-org/eryx/pull/1095)).
+- **Child commands share a memory pool**, `ResourceLimits::max_child_memory_bytes` (default 256 MiB per execution or session, not cleared by `unlimited()`), on top of `max_memory_bytes`. When it's full, a command fails to start and stderr says why. eryx-server takes it as `resource_limits.max_child_memory_bytes` (proto field 7) under `--max-child-memory-bytes` / `ERYX_MAX_CHILD_MEMORY_BYTES`. pyeryx doesn't expose it yet ([#1098](https://github.com/eryx-org/eryx/pull/1098)).
+
+**Rust (`eryx` crate)** ([rename notes](https://github.com/eryx-org/eryx/blob/eryx-v0.16.0/docs/upgrade-notes-multi-guest-rename.md))
+- `ErrorKind::PythonException { traceback, .. }` is now `ErrorKind::ScriptFailed { message, exit_code, .. }`, with no alias. `message` is the traceback for Python.
+- `SandboxBuilder<Runtime, Stdlib>` is now `SandboxBuilder<Lang, Runtime>` (`eryx::language::{Python, JavaScript, Shell}`). Code that only chains builder methods compiles unchanged; code that names the type changes. `build()` is available once a runtime is set and finds the stdlib itself; `with_auto_stdlib()` and `with_embedded_stdlib()` return `Result`.
+- `ErrorKind::MissingPythonStdlib` is now `MissingStdlib { language }`, and there's a new `MissingRuntime { language }`.
+- `PythonExecutor`, `PythonStateSnapshot` and several `Executor` methods are renamed, with deprecated aliases that go in the next minor release.
+- New cargo features `python` (default), `javascript` and `shell`. With `embedded`, each enabled language's runtime is embedded.
+- `eryx` now turns on serde_json's `preserve_order`, and Cargo unifies it across your build: `serde_json::Map` keeps insertion order everywhere.
+- `Executor::precompile*` fails when `ERYX_CPU_FEATURES` or `ERYX_CRANELIFT_FLAGS` is set in a build without `embedded` or `preinit`, instead of ignoring it.
+
+**Custom runtimes and hosts (WIT)** ([guest-command notes](https://github.com/eryx-org/eryx/blob/eryx-v0.16.0/docs/upgrade-notes-guest-commands.md))
+- `execution-options.python-tracing` is now `tracing`, `state-snapshot.skipped-globals` is `skipped`, and `execute-error` has a new `exit-code` field.
+- The `sandbox` world exports `run-command(args, env, cwd) -> s32`. A runtime built against the old world fails to load; add the export (returning 127 is enough) and rebuild.
+- The shell guest imports a new interface, `eryx:process/execution` (`time-left` and `kill-children`), so a host that runs the shell guest must provide it. The `sandbox` world, and so the Python and JavaScript guests, don't use it ([#1097](https://github.com/eryx-org/eryx/pull/1097), [#1128](https://github.com/eryx-org/eryx/pull/1128)).
+
+**gRPC server (`sd2k/eryx-server`)**
+- **The plain image tags (`latest`, `X.Y.Z`, `X.Y`) are now the all-languages image**, about 17 MB larger compressed. For the Python-only image, the same size as before, use the `-python` tags (`0.16.0-python`, `latest-python`).
+- New `ExecuteRequest.language` and `--languages` (default `python,javascript,shell`; JavaScript and shell pools start on their first request). `ExecuteResult.exit_code` is set for the shell. The pool metrics have a `language` label.
+- `FAILURE_KIND_SCRIPT_EXCEPTION` is renamed `FAILURE_KIND_SCRIPT_FAILED`, with the old name kept as an alias for the same number.
+- New shell flags: `--shell-command`, `--shell-command-tunnels`, `--no-shell-embedded-commands`, `--shell-python`, `--shell-node` and `--max-child-memory-bytes`, and `NetworkConfig.child_network` for commands' network.
+
+**Python (`pyeryx`)**
+- `Sandbox(language=...)` and `Session(language=...)`; an unknown language raises `ValueError`. The JavaScript and shell runtimes come from `runtime_path=`, `ERYX_RUNTIME_CWASM_JAVASCRIPT` / `ERYX_RUNTIME_CWASM_SHELL`, the companion packages, or `eryx-precompile setup --language <lang>`. The companion packages must be the same version as pyeryx.
+- Shell sandboxes take `commands={"name": eryx.Command, ...}`. A failed shell script's `PythonExceptionError` has `exit_code`.
+
+**JavaScript (`@eryx-org/eryx`)**
+- New `language` option. The JavaScript and shell runtimes are separate files, loaded on first use.
+- **Behaviour change:** writes to fds 1 and 2 (`os.write(1, ...)`, `sys.__stdout__`) are captured into the result's `stdout`/`stderr` instead of going to the console.
+- Script failures in a `timeoutMs` sandbox reject with `PythonExceptionError`, not a bare `Error`.
+
+**JavaScript guest behaviour**
+- A promise rejection nothing handles fails the execute (`Uncaught (in promise) ...`), and a callback the script starts without awaiting is waited for before the execute ends, within its timeout, so its failure is reported too. Python is unchanged: an un-awaited coroutine never runs ([#1079](https://github.com/eryx-org/eryx/issues/1079), [#1082](https://github.com/eryx-org/eryx/pull/1082), [#1085](https://github.com/eryx-org/eryx/pull/1085)).
+
 ### Added
 - *(shell)* add an xargs builtin
 - *(process)* node and js as opt-in shell commands
