@@ -2291,11 +2291,7 @@ impl eryx_vfs::HybridVfsView for ChildState {
 
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
         // A child without the parent's VFS sees an empty one.
-        let vfs = self.vfs.get_or_insert_with(|| {
-            eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(Arc::new(
-                eryx_vfs::InMemoryStorage::new(),
-            )))
-        });
+        let vfs = self.vfs.get_or_insert_with(crate::wasm::empty_vfs);
         eryx_vfs::HybridVfsState::new(vfs, &mut self.table)
     }
 }

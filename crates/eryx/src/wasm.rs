@@ -1660,10 +1660,12 @@ impl Drop for ExecutorState {
 impl ExecutorState {
     /// State for instantiating a store ahead of any execution.
     ///
-    /// Instantiation runs no guest code beyond table initialisation, so the
-    /// guest never observes this state; [`Executor::execute_internal`]
-    /// replaces it wholesale with the real per-execution state before the
-    /// first export call.
+    /// [`Executor::execute_internal`] replaces it wholesale with the real
+    /// per-execution state before the first export call. A pre-initialized
+    /// runtime runs no guest code beyond table initialisation, so it never
+    /// observes this state. One that is not pre-initialized starts Python
+    /// during instantiation: it sees an empty filesystem and traps, and the
+    /// warm pool stops warming it.
     pub(crate) fn placeholder() -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
@@ -1675,7 +1677,7 @@ impl ExecutorState {
             net_tx: None,
             output_tx: None,
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
-            hybrid_vfs_ctx: None,
+            hybrid_vfs_ctx: Some(empty_vfs()),
             suspended: None,
             reuse_empty_callbacks: true,
             stream_budget: StreamBudget::default(),
@@ -1871,19 +1873,25 @@ impl WasiView for ExecutorState {
 impl eryx_vfs::HybridVfsView for ExecutorState {
     type Storage = eryx_vfs::ArcStorage;
 
-    /// The configured filesystem, or an empty one (no preopens) for a state
-    /// that has none, such as the [placeholder](ExecutorState::placeholder)
-    /// a warm instance is instantiated with. A runtime that is not
-    /// pre-initialized asks for its preopens during instantiation; it must
-    /// see none and trap, as it does on plain WASI, not panic the host.
     fn hybrid_vfs(&mut self) -> eryx_vfs::HybridVfsState<'_, Self::Storage> {
+        // Every state the guest runs on sets a context, so a missing one is a
+        // host bug. Fail closed with an empty filesystem rather than panic.
         let ctx = self.hybrid_vfs_ctx.get_or_insert_with(|| {
-            eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
-                eryx_vfs::InMemoryStorage::new(),
-            )))
+            tracing::error!(
+                "hybrid VFS not configured for this executor; the guest sees an empty filesystem"
+            );
+            empty_vfs()
         });
         eryx_vfs::HybridVfsState::new(ctx, &mut self.table)
     }
+}
+
+/// A filesystem with no preopens, so the guest can reach nothing.
+#[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+pub(crate) fn empty_vfs() -> eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage> {
+    eryx_vfs::HybridVfsCtx::new(eryx_vfs::ArcStorage::new(std::sync::Arc::new(
+        eryx_vfs::InMemoryStorage::new(),
+    )))
 }
 
 // Host implementation of the WIT-generated sandbox imports trait.
@@ -2779,6 +2787,15 @@ impl Executor {
     #[must_use]
     pub fn warm_instances_ready(&self) -> usize {
         WarmPool::global().ready(&self.instance_pre)
+    }
+
+    /// Whether the warm pool has given up on this executor's component,
+    /// because instantiating it runs guest code that fails on a placeholder
+    /// state (a runtime that is not pre-initialized).
+    #[cfg(feature = "unstable-internals")]
+    #[must_use]
+    pub fn warm_instances_unsupported(&self) -> bool {
+        WarmPool::global().unsupported(&self.instance_pre)
     }
 
     /// The guest language this executor runs (default [`Language::Python`]).
