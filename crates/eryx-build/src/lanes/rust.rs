@@ -7,12 +7,15 @@
 //! `cargo build --release --target wasm32-wasip2 --bin <bin>` and the artifact
 //! is `target/wasm32-wasip2/release/<bin>.wasm`.
 //!
+//! Every build links `src/exit_code.rs` with `--wrap=__main_void`, so an
+//! `ExitCode` returned from `main` survives (#1131).
+//!
 //! The `wasm32-wasip2` rustup target must be installed
 //! (`rustup target add wasm32-wasip2`). cargo comes from PATH.
 
 use anyhow::{Context, Result, bail};
 
-use super::{compile_cwasm, path_str, run};
+use super::{compile_cwasm, path_str, run, rust_obj};
 use crate::manifest::Manifest;
 
 pub fn build(manifest: &Manifest) -> Result<()> {
@@ -42,9 +45,11 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     }
 
     let cwd_obj = super::cwd_from_pwd_obj(&output_dir)?;
+    let exit_obj = rust_obj(&output_dir, "exit_code", include_str!("../exit_code.rs"))?;
     eprintln!("=== [{}] cargo build → wasip2 component ===", manifest.name);
-    // `cargo rustc`, to link the start-in-$PWD constructor (#978) into the
-    // binary alone without replacing the project's own RUSTFLAGS.
+    // `cargo rustc`, to link the start-in-$PWD constructor (#978) and the
+    // exit status wrapper (#1131) into the binary alone without replacing
+    // the project's own RUSTFLAGS.
     // `cargo rustc` needs the package, which a workspace root (jaq's) doesn't
     // imply.
     // Build exactly the pinned lockfile (after any vendor_patch updates it),
@@ -65,7 +70,8 @@ pub fn build(manifest: &Manifest) -> Result<()> {
         args.push("--locked".into());
     }
     args.extend(manifest.build.cargo_flags.iter().cloned());
-    args.extend(["--".into(), "-C".into(), format!("link-arg={cwd_obj}")]);
+    args.extend(["--".into()]);
+    args.extend(link_args(&cwd_obj, &exit_obj));
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     // Pin the target dir to the source tree: a `.cargo/config.toml` or
     // CARGO_TARGET_DIR inherited from the eryx checkout would otherwise send
@@ -100,6 +106,14 @@ pub fn build(manifest: &Manifest) -> Result<()> {
 
     eprintln!("=== [{}] done → {} ===", manifest.name, component.display());
     Ok(())
+}
+
+/// `rustc` flags linking the start-up objects into the binary.
+fn link_args(cwd_obj: &str, exit_obj: &str) -> Vec<String> {
+    [cwd_obj, exit_obj, "--wrap=__main_void"]
+        .into_iter()
+        .flat_map(|arg| ["-C".into(), format!("link-arg={arg}")])
+        .collect()
 }
 
 /// The package in the workspace at `source_dir` that has the binary `bin`,
@@ -139,4 +153,54 @@ fn package_of(source_dir: &std::path::Path, bin: &str, locked: bool) -> Result<S
         "no package in {} has a binary named '{bin}'",
         source_dir.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An `ExitCode` returned from `main` survives, as does
+    /// `process::exit`'s. Opt-in: it needs the `wasm32-wasip2` Rust target,
+    /// and `wasmtime` on PATH (`mise exec --` provides it).
+    #[test]
+    #[ignore = "needs the wasm32-wasip2 target and wasmtime"]
+    fn exit_statuses_survive() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("eryx-build-rust-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join("t.rs"),
+            "fn main() -> std::process::ExitCode {\n\
+                 let args: Vec<String> = std::env::args().collect();\n\
+                 if let Some(n) = args.get(2) { std::process::exit(n.parse().unwrap_or(99)); }\n\
+                 std::process::ExitCode::from(args[1].parse::<u8>().unwrap_or(99))\n\
+             }\n",
+        )?;
+        let cwd_obj = crate::lanes::cwd_from_pwd_obj(&dir)?;
+        let exit_obj = rust_obj(&dir, "exit_code", include_str!("../exit_code.rs"))?;
+        let component = dir.join("t.wasm");
+        let status = std::process::Command::new("rustc")
+            .args(["--edition", "2024", "--target", "wasm32-wasip2", "-O", "-o"])
+            .arg(&component)
+            .arg(dir.join("t.rs"))
+            .args(link_args(&cwd_obj, &exit_obj))
+            .status()?;
+        anyhow::ensure!(status.success(), "rustc exited with {status}");
+        let cases: [(&[&str], i32); 5] = [
+            (&["0"], 0),
+            (&["3"], 3),
+            (&["255"], 255),
+            (&["0", "7"], 7),
+            (&["0", "255"], 255),
+        ];
+        for (args, want) in cases {
+            let status = std::process::Command::new("wasmtime")
+                .arg("run")
+                .arg(&component)
+                .args(args)
+                .status()?;
+            assert_eq!(status.code(), Some(want), "t {args:?}");
+        }
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
 }

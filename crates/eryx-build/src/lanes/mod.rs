@@ -32,13 +32,23 @@ pub(crate) fn path_str(p: &Path) -> Result<String> {
 
 /// Compile `src/cwd_from_pwd.rs`'s constructor to a `wasm32-wasip2`
 /// object in `output_dir`, for the C and Rust lanes to link into every
-/// component (#978). Built with `rustc`, which both lanes have.
+/// component (#978).
 pub(crate) fn cwd_from_pwd_obj(output_dir: &Path) -> Result<String> {
-    let source = output_dir.join("cwd_from_pwd.rs");
-    std::fs::write(&source, include_str!("../cwd_from_pwd.rs"))
-        .with_context(|| format!("writing {}", source.display()))?;
-    let obj = path_str(&output_dir.join("cwd_from_pwd.o"))?;
-    let source_s = path_str(&source)?;
+    rust_obj(
+        output_dir,
+        "cwd_from_pwd",
+        include_str!("../cwd_from_pwd.rs"),
+    )
+}
+
+/// Compile the `#![no_std]` Rust `source` to `<output_dir>/<name>.o` for
+/// `wasm32-wasip2`. Built with `rustc`, which the C and Rust lanes both have.
+pub(crate) fn rust_obj(output_dir: &Path, name: &str, source: &str) -> Result<String> {
+    let source_path = output_dir.join(format!("{name}.rs"));
+    std::fs::write(&source_path, source)
+        .with_context(|| format!("writing {}", source_path.display()))?;
+    let obj = path_str(&output_dir.join(format!("{name}.o")))?;
+    let source_s = path_str(&source_path)?;
     run(
         "rustc",
         &[
@@ -58,7 +68,7 @@ pub(crate) fn cwd_from_pwd_obj(output_dir: &Path) -> Result<String> {
         output_dir,
         &[],
     )
-    .context("building the start-in-$PWD object needs the wasm32-wasip2 Rust target (`rustup target add wasm32-wasip2`)")?;
+    .with_context(|| format!("building {name}.o needs the wasm32-wasip2 Rust target (`rustup target add wasm32-wasip2`)"))?;
     Ok(obj)
 }
 
