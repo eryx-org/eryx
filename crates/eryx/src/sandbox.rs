@@ -3014,7 +3014,10 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     /// (see [`with_callback`](Self::with_callback)), and it applies to
     /// callbacks a pool sets per request as well. The callbacks themselves
     /// still see their own names; `list_callbacks()`, trace events and
-    /// callback journals show the namespaced ones.
+    /// callback journals show the namespaced ones. So does code that calls
+    /// them: a library's preamble or type stubs
+    /// ([`with_library`](Self::with_library)) that call `get_time()` or
+    /// `invoke("get_time")` must say `tools.get_time()` instead.
     ///
     /// [`build`](Self::build) fails unless `namespace` is an identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`).

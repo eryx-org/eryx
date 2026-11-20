@@ -19,9 +19,10 @@
 //! [`JournalSigner`] provides HMAC-SHA256 signing and verification. The MAC
 //! covers the journal entries (via deterministic protobuf encoding), its expiry
 //! time, and the [`JournalBinding`]: the script code, the state snapshot the run
-//! started from, the declared callback names, the environment and the
-//! request's globals. A journal therefore only replays into the same script,
-//! starting state, callback set, environment and globals that produced it, and
+//! started from, the declared callback names, the environment, the
+//! request's globals and its callback namespace. A journal therefore only
+//! replays into the same script, starting state, callback set, environment,
+//! globals and callback namespace that produced it, and
 //! only until it expires. This is correct for the primary replay use case
 //! (re-running the same script); for edit-and-retry, the signature won't
 //! verify and the server rejects the replay before executing the script.
@@ -50,12 +51,15 @@ type HmacSha256 = Hmac<Sha256>;
 const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
 
 /// The MAC domain names the optional inputs fed right after it, in this
-/// order: `-environment` (its name and content hash) and `-globals` (the
-/// request's globals). A run with neither feeds [`MAC_DOMAIN`] alone, so
-/// journals recorded without them keep the signatures they had before.
+/// order: `-environment` (its name and content hash), `-globals` (the
+/// request's globals) and `-callback-namespace`. A run with none feeds
+/// [`MAC_DOMAIN`] alone, so journals recorded without them keep the
+/// signatures they had before.
 const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"-environment";
 /// See [`MAC_DOMAIN_ENVIRONMENT`].
 const MAC_DOMAIN_GLOBALS: &[u8] = b"-globals";
+/// See [`MAC_DOMAIN_ENVIRONMENT`].
+const MAC_DOMAIN_CALLBACK_NAMESPACE: &[u8] = b"-callback-namespace";
 
 /// The request context a journal is bound to, besides its entries.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +76,9 @@ pub struct JournalBinding<'a> {
     /// The request's globals (JSON), which the script reads like its code;
     /// empty for none.
     pub globals: &'a str,
+    /// The request's callback namespace, which the journal's callback names
+    /// carry; empty for none.
+    pub callback_namespace: &'a str,
 }
 
 /// An environment a journal is bound to: its name and its content hash, so a
@@ -179,6 +186,9 @@ impl JournalSigner {
         if !binding.globals.is_empty() {
             domain.extend_from_slice(MAC_DOMAIN_GLOBALS);
         }
+        if !binding.callback_namespace.is_empty() {
+            domain.extend_from_slice(MAC_DOMAIN_CALLBACK_NAMESPACE);
+        }
         feed(&domain);
         if let Some(environment) = binding.environment {
             feed(environment.name.as_bytes());
@@ -186,6 +196,9 @@ impl JournalSigner {
         }
         if !binding.globals.is_empty() {
             feed(binding.globals.as_bytes());
+        }
+        if !binding.callback_namespace.is_empty() {
+            feed(binding.callback_namespace.as_bytes());
         }
         feed(&journal.expires_at_unix_secs.to_le_bytes());
         feed(binding.code.as_bytes());
@@ -342,6 +355,7 @@ mod tests {
             callbacks: &[],
             environment: None,
             globals: "",
+            callback_namespace: "",
         }
     }
 
@@ -522,6 +536,24 @@ mod tests {
                 "{environment:?} {globals}"
             );
         }
+    }
+
+    /// A journal is bound to its callback namespace: replayed under another
+    /// (or none), its namespaced entries would all miss and the callbacks
+    /// would run again.
+    #[test]
+    fn journal_is_bound_to_callback_namespace() {
+        let with = |callback_namespace| JournalBinding {
+            callback_namespace,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with("tools"));
+        assert!(signer.verify(&journal, with("tools")));
+        assert!(!signer.verify(&journal, with("other")));
+        assert!(!signer.verify(&journal, with("")));
+        let journal = signed(&signer, with(""));
+        assert!(!signer.verify(&journal, with("tools")));
     }
 
     /// With both an environment and globals, the journal is bound to each.

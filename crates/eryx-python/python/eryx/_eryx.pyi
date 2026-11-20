@@ -1424,6 +1424,7 @@ class SandboxFactory:
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
+        callback_namespace: Optional[str] = None,
     ) -> SandboxPool:
         """Create a sandbox pool from this factory.
 
@@ -1446,6 +1447,8 @@ class SandboxFactory:
                 Defaults to True when secrets are provided.
             scrub_files: Whether to scrub secret placeholders from file writes.
                 Defaults to True when secrets are provided.
+            callback_namespace: Install each lease's callbacks under this name,
+                as for ``Sandbox``.
 
         Network and secrets are fixed for the pool's lifetime, unlike the
         per-request settings passed to ``acquire()``.

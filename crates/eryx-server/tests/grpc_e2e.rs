@@ -2683,6 +2683,7 @@ async fn rejects_invalid_replay_before_execution() {
         callbacks: &[],
         environment: None,
         globals: "",
+        callback_namespace: "",
     };
     let echo = [echo_declaration()];
     for scenario in [
@@ -2852,6 +2853,38 @@ async fn invalid_globals_are_rejected() {
         assert_eq!(status.code(), tonic::Code::InvalidArgument, "{globals}");
         assert!(status.message().contains(expected), "{globals}: {status:?}");
     }
+}
+
+/// Under a callback namespace, a global may not take the namespace's name,
+/// which the callbacks are installed under, but may take a callback's own
+/// name, which is free (#964, #1159).
+#[tokio::test]
+async fn globals_collide_with_the_callback_namespace() {
+    let channel = start_server().await;
+    let request = |globals: &str| ExecuteRequest {
+        code: "print(get_time, type(tools).__name__)".to_string(),
+        globals: globals.to_string(),
+        callbacks: vec![CallbackDeclaration {
+            name: "get_time".to_string(),
+            ..Default::default()
+        }],
+        callback_namespace: "tools".to_string(),
+        ..Default::default()
+    };
+    let status = execute_request(channel.clone(), request(r#"{"tools": 1}"#))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("collides with the callback"),
+        "{status:?}"
+    );
+
+    let result = execute_request(channel, request(r#"{"get_time": 7}"#))
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.error);
+    assert_eq!(result.stdout, b"7 _EryxNamespace\n");
 }
 
 /// A malformed CIDR in `NetworkConfig` is a client error, not a silently

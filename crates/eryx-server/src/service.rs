@@ -620,6 +620,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             callbacks: &declarations,
             environment: bound_environment(&environment, &environment_hash),
             globals: &globals,
+            callback_namespace: &callback_namespace,
         };
         // A rejected replay must not become a fresh run: completed callbacks
         // and direct script effects may already have happened.
@@ -951,6 +952,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 let params = SessionParams {
                     code: &code,
                     globals: &globals,
+                    callback_namespace: &callback_namespace,
                     language,
                     vfs_storage,
                     state: persist_state.then_some(state_snapshot.as_slice()),
@@ -1190,6 +1192,8 @@ struct SessionParams<'a> {
     code: &'a str,
     /// The request's globals, which the replay journal is bound to.
     globals: &'a str,
+    /// The request's callback namespace, which the replay journal is bound to.
+    callback_namespace: &'a str,
     /// The guest language: only Python gets the (Python) preamble.
     language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
@@ -1566,6 +1570,7 @@ async fn execute_with_session(
                 callbacks: params.declarations,
                 environment: params.environment,
                 globals: params.globals,
+                callback_namespace: params.callback_namespace,
             };
             params
                 .journal_signer

@@ -156,7 +156,8 @@ message ExecuteRequest {
   // CallbackRequest.name stays the declared name, without the namespace.
   // Empty (the default) installs them as top-level names. A namespace that
   // isn't an identifier ([A-Za-z_][A-Za-z0-9_]*), or that collides with a
-  // name the guest uses itself, is INVALID_ARGUMENT.
+  // name the guest uses itself, is INVALID_ARGUMENT. A callback journal is
+  // bound to the namespace it was recorded under.
   string callback_namespace = 19;
 
   // Python and JavaScript: data for the script, as a JSON object whose

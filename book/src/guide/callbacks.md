@@ -139,7 +139,7 @@ To keep callbacks out of the guest's top-level names altogether, install them un
 | gRPC | `ExecuteRequest.callback_namespace` |
 | `@eryx-org/eryx` | `new Sandbox({ callbackNamespace: "tools" })` |
 
-A callback `get_time` is then `await tools.get_time()` in Python, `await tools.get_time()` in JavaScript, and the command `tools.get_time` in the shell. A prefix callback `mcp.*` nests under it as `tools.mcp.<server>.<tool>`. Only the namespace has to stay clear of the reserved names above, so `tools.fetch` builds in JavaScript; the namespace must be an identifier. `list_callbacks()`, trace events and callback journals show the namespaced names (`tools.get_time`), while the callback itself (and a gRPC client's `CallbackRequest.name`) sees its own name. A pool built with a namespace puts each lease's callbacks under it too.
+A callback `get_time` is then `await tools.get_time()` in Python, `await tools.get_time()` in JavaScript, and the command `tools.get_time` in the shell. A prefix callback `mcp.*` nests under it as `tools.mcp.<server>.<tool>`. Only the namespace has to stay clear of the reserved names above, so `tools.fetch` builds in JavaScript; the namespace must be an identifier. `list_callbacks()`, trace events and callback journals show the namespaced names (`tools.get_time`), while the callback itself (and a gRPC client's `CallbackRequest.name`) sees its own name. A pool built with a namespace puts each lease's callbacks under it too. Code written against the bare names, such as a library preamble that calls `get_time()` or `invoke("get_time")`, has to use the namespaced ones.
 
 ## Parameters and Types
 
