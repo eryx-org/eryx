@@ -32,7 +32,7 @@ depends = ["rust"]
 # Cargo.lock, since a cwasm only loads in the wasmtime version that built it:
 # `mise run update-preview1-adapter` sets it to Cargo.lock's.
 [tools."aqua:bytecodealliance/wasmtime"]
-version = "50.0.3"
+version = "51.0.0"
 
 # `wit-bindgen c`, for the C lane's `[build] wit` (git's eryx:process/run
 # bindings). Same version as the guests' wit-bindgen crate.

@@ -90,16 +90,16 @@ wasmparser = "0.263"
 # wasmtime v40+ required for the async component model.
 # 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE).
 wasmtime = { version = "50.0.0", features = ["component-model", "async"] }
-wasmtime-wasi = "50.0.0"
-wasmtime-wasi-io = "50.0.0"
+wasmtime-wasi = "51.0.0"
+wasmtime-wasi-io = "51.0.0"
 # Only for `VMOffsets`, to size children's instance metadata (#942). It
 # must be exactly the version wasmtime itself uses: move this pin with every
 # wasmtime bump (Renovate groups it with wasmtime). A hand bump of wasmtime
 # alone leaves a second wasmtime-environ in the tree, sizing with the old
 # layout; process.rs's instance_metadata_estimates_match_wasmtime test, which
 # checks the estimate against wasmtime's own figure, is what catches that.
-wasmtime-environ = "=50.0.3"
-wasmtime-wizer = { version = "50.0.0", features = ["component-model", "wasmtime"] }
+wasmtime-environ = "=51.0.0"
+wasmtime-wizer = { version = "51.0.0", features = ["component-model", "wasmtime"] }
 wat = "1"
 webpki-roots = "1.0.11" # TLS trust roots (>=1.0.11 drops all compromised eMudhra CAs)
 wit-component = "0.263"
