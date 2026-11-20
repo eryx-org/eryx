@@ -2591,7 +2591,7 @@ impl<D> StreamConsumer<D> for PipeConsumer {
         finish: bool,
     ) -> Poll<wasmtime::Result<StreamResult>> {
         let mut src = src.as_direct(store);
-        let buf = src.remaining();
+        let buf = src.remaining()?;
         // A zero-length write asks whether the pipe is writable; say yes.
         if buf.is_empty() {
             return Poll::Ready(Ok(StreamResult::Completed));
@@ -2625,11 +2625,11 @@ impl<D> StreamProducer<D> for PipeProducer {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         // A zero-length read asks whether output is ready, which a pipe can't
         // tell without reading; say yes.
-        if dst.remaining(store.as_context_mut()) == Some(0) {
+        if dst.remaining(store.as_context_mut())? == Some(0) {
             return Poll::Ready(Ok(StreamResult::Completed));
         }
         let mut dst = dst.as_direct(store, PIPE_CAPACITY);
-        match self.0.poll_read(cx, dst.remaining()) {
+        match self.0.poll_read(cx, dst.remaining()?) {
             // End of file: the child exited, or closed the stream.
             Poll::Ready(0) => Poll::Ready(Ok(StreamResult::Dropped)),
             Poll::Ready(n) => {
