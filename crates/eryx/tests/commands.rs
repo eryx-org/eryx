@@ -659,6 +659,61 @@ async fn concurrent_children_share_the_fuel_limit() {
     assert!(done >= 20, "{done} rounds done under a 30-round limit");
 }
 
+/// As above, through a guest run as a command: each stage is a child's
+/// `sh` running `tc burn`. The `sh` waiting on its `tc` runs no code of its
+/// own, so its `wait` publishes what `tc` burns for the execution to charge;
+/// otherwise each stage could burn the execution's whole remaining fuel
+/// before the execution was charged for any of it.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_child_shells_share_the_fuel_limit() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", spawning_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let fuel = async |session: &mut SessionExecutor, rounds: u32| {
+        let out = session
+            .execute(format!("tc spawn sh -c 'tc burn /data/c {rounds}'"))
+            .run()
+            .await
+            .unwrap();
+        out.fuel_consumed.unwrap()
+    };
+    let base = fuel(&mut session, 0).await;
+    let round = (fuel(&mut session, 10).await - base) / 10;
+
+    // Room for 30 rounds: each stage's 20 fit, both stages' 40 don't.
+    let limit = base * 2 + round * 30;
+    let err = session
+        .execute("tc spawn sh -c 'tc burn /data/a 20' | tc spawn sh -c 'tc burn /data/b 20'")
+        .with_fuel_limit(limit)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let mut done = 0;
+    for path in ["/data/a", "/data/b"] {
+        let rounds = storage.read(path).await.unwrap_or_default();
+        done += String::from_utf8(rounds)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap_or(0);
+    }
+    assert!(done <= 30 + 2, "{done} rounds done under a 30-round limit");
+    assert!(done >= 20, "{done} rounds done under a 30-round limit");
+}
+
 /// A child's resource handles are capped: one that keeps opening files
 /// fails well before wasmtime's default of a million, and the next child
 /// starts with a fresh table.

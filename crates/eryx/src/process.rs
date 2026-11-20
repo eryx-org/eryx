@@ -2540,6 +2540,7 @@ impl ChildRun {
         let mut state = ExecutorState::for_command(wasi.build(), vfs, memory, self.spawner);
         // Its execution's, so `time-left` tells it the time it really has.
         state.deadline = self.deadline;
+        state.published_fuel = Some((self.fuel, Arc::clone(&self.fuel_used)));
         let mut store = Store::new(executor.engine(), state);
         store.limiter(|s| &mut s.memory_tracker);
         if let Err(e) = meter_child(&mut store, self.fuel, self.fuel_used) {
@@ -2777,9 +2778,12 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             access.get().take_child_run(&child, fuel)
         })?;
         // The child is charged on its epoch ticks, so they must run even in
-        // an execution with no timeout or cancellation.
+        // an execution with no timeout or cancellation. Without them it
+        // would be charged only when it exits, and children running at once
+        // could each burn all the fuel the parent has left.
         if let Err(e) = crate::wasm::ensure_epoch_ticker(run.pre.engine()) {
-            tracing::warn!(error = %e, "no epoch ticker; the child is charged only when it exits");
+            tracing::warn!(error = %e, "no epoch ticker to charge the child by; not running it");
+            return Err(ProcessError::SpawnFailed);
         }
         // A guest run as a command (a nested shell) has no trace of its own:
         // its children's events join its spawner's queue, for the `wait`
@@ -2847,6 +2851,13 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 let left = store.get_fuel().unwrap_or(0).saturating_sub(delta);
                 // Fuel is always enabled on both engines.
                 let _ = store.set_fuel(left);
+                // A guest run as a command publishes its total for its own
+                // spawner now: its epoch callback doesn't run while it waits,
+                // so its children's burn would otherwise reach the execution
+                // only once it runs again.
+                if let Some((fuel, used)) = &access.get().published_fuel {
+                    used.store(fuel.saturating_sub(left), Ordering::Relaxed);
+                }
                 left > 0
             })
         };

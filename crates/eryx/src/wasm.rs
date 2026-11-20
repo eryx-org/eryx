@@ -1626,6 +1626,11 @@ pub struct ExecutorState {
     /// Cancelled by `eryx:process/execution`'s `kill-children`, which kills
     /// the children whose `wait`s hold a clone of it, and starts a new one.
     pub(crate) kill_children: tokio_util::sync::CancellationToken,
+    /// For a guest run as a command: the fuel it was given and where it
+    /// publishes how much of it it has burned, for its spawner's `wait` to
+    /// charge. Its own `wait`s publish its children's burn here as they
+    /// charge it, since its epoch callback doesn't run while it waits.
+    pub(crate) published_fuel: Option<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>,
 }
 
 impl std::fmt::Debug for ExecutorState {
@@ -1686,6 +1691,7 @@ impl ExecutorState {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 
@@ -1854,6 +1860,7 @@ impl ExecutorState {
             nested,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         }
     }
 }
@@ -4410,6 +4417,7 @@ impl Executor {
             nested: None,
             deadline: None,
             kill_children: Default::default(),
+            published_fuel: None,
         };
 
         // Set up fuel for tracking/limiting. We use u64::MAX for tracking-only mode
