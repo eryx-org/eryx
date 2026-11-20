@@ -2701,6 +2701,10 @@ impl bindings::eryx::process::execution::Host for ExecutorState {
             .saturating_duration_since(std::time::Instant::now());
         Some(u64::try_from(left.as_nanos()).unwrap_or(u64::MAX))
     }
+
+    async fn kill_children(&mut self) {
+        std::mem::take(&mut self.kill_children).cancel();
+    }
 }
 
 impl HostChild for ExecutorState {
@@ -2828,6 +2832,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
             });
         };
         let fuel_used = Arc::clone(&run.fuel_used);
+        // `kill-children` ends the run without polling it again.
+        let killed = accessor.with(|mut access| access.get().kill_children.clone());
+        let mut killed = std::pin::pin!(killed.cancelled_owned());
         let mut charged = 0;
         // Move what the child has burned since the last charge to the parent;
         // false once the parent has none left.
@@ -2846,6 +2853,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         // last report.
         let mut running = Box::pin(run.run());
         let finished = std::future::poll_fn(|cx| {
+            if killed.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Some((Ok(KILLED), fuel_used.load(Ordering::Relaxed))));
+            }
             let polled = running.as_mut().poll(cx);
             report_nested();
             match polled {
@@ -2886,6 +2896,9 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         outcome.map_err(|_| ProcessError::SpawnFailed)
     }
 }
+
+/// A child's exit code when `kill-children` stops it: `SIGKILL`'s.
+const KILLED: i32 = 128 + 9;
 
 /// Link `eryx:process/run` for children (see [`run_nested`]).
 fn add_run_to_linker(linker: &mut Linker<ChildState>) -> wasmtime::Result<()> {

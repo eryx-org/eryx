@@ -2500,6 +2500,7 @@ impl ExecutorState {
             trace_clock: crate::wasm::TraceClock::default(),
             nested: None,
             deadline: None,
+            kill_children: Default::default(),
         }
     }
 
@@ -2533,6 +2534,7 @@ impl ExecutorState {
             trace_clock: crate::wasm::TraceClock::default(),
             nested: None,
             deadline: None,
+            kill_children: Default::default(),
         }
     }
 

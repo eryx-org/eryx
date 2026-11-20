@@ -132,6 +132,15 @@ interface execution {
     /// How long the execution has left before its timeout, in nanoseconds;
     /// none if it has no timeout.
     time-left: func() -> option<u64>;
+    /// Kill the children this process spawned that are still running: each
+    /// one's `wait` returns 137, as if it got `SIGKILL`, without running it
+    /// any further. Children spawned afterwards run as usual.
+    ///
+    /// The shell kills its background jobs' children with this when they
+    /// would outlive the execution. Cancelling their `wait`s one at a time
+    /// instead blocks the guest on each, and every child still running gets
+    /// a turn (an epoch tick, for a busy one) each time.
+    kill-children: func();
 }
 
 /// Host side: links just the process and execution interfaces next to

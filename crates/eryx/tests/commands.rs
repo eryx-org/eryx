@@ -2681,6 +2681,10 @@ mod background_jobs {
     /// A job still running when the execution would time out, once the
     /// script itself has finished, is killed and said to be; the execution
     /// keeps the script's result instead of failing.
+    ///
+    /// However many busy children there are: they're killed all at once, as
+    /// killing them one at a time gave each of the others an epoch tick per
+    /// kill, which ran past the deadline from four of them.
     #[tokio::test]
     async fn jobs_outliving_the_timeout_are_killed_and_the_result_kept() {
         let sandbox = shell()
@@ -2692,7 +2696,10 @@ mod background_jobs {
             .unwrap();
         let start = Instant::now();
         let out = sandbox
-            .execute("sleep 30 & tc spin & (sleep 0.1; echo quick) & echo script ends; result=42")
+            .execute(
+                "sleep 30 & for i in 1 2 3 4 5 6; do tc spin & done\n\
+                 (sleep 0.1; echo quick) & echo script ends; result=42",
+            )
             .await
             .unwrap();
         assert!(
@@ -2704,7 +2711,7 @@ mod background_jobs {
         assert_eq!(out.result.as_deref(), Some("42"));
         assert_eq!(
             stderr(&out),
-            "eryx: killed 2 background jobs still running when the execution timed out\n"
+            "eryx: killed 7 background jobs still running when the execution timed out\n"
         );
     }
 
