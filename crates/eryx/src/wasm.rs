@@ -1540,6 +1540,8 @@ impl RunningChild {
 #[must_use]
 pub(crate) struct ProcessTrace {
     key: u64,
+    /// The child's pid, the `ppid` of the children it spawns.
+    pub(crate) pid: u32,
 }
 
 impl ProcessTrace {
@@ -1729,10 +1731,15 @@ impl ExecutorState {
         }
     }
 
-    /// Report that a child process `argv` started, numbering it; `None` if
-    /// tracing is off or the start wasn't sent, so no end is reported either.
-    pub(crate) fn trace_process_start(&mut self, argv: &[String]) -> Option<ProcessTrace> {
-        self.trace_process_start_at(argv, std::time::Instant::now())
+    /// Report that a child process `argv` started, numbering it, spawned by
+    /// the child `ppid` (`None` for the guest's own); `None` if tracing is
+    /// off or the start wasn't sent, so no end is reported either.
+    pub(crate) fn trace_process_start(
+        &mut self,
+        argv: &[String],
+        ppid: Option<u32>,
+    ) -> Option<ProcessTrace> {
+        self.trace_process_start_at(argv, ppid, std::time::Instant::now())
     }
 
     /// [`trace_process_start`](Self::trace_process_start), for a child that
@@ -1740,6 +1747,7 @@ impl ExecutorState {
     pub(crate) fn trace_process_start_at(
         &mut self,
         argv: &[String],
+        ppid: Option<u32>,
         started: std::time::Instant,
     ) -> Option<ProcessTrace> {
         /// Tells apart children of different executions of one session, whose
@@ -1747,7 +1755,10 @@ impl ExecutorState {
         static KEYS: AtomicU64 = AtomicU64::new(0);
         let (name, args) = argv.split_first()?;
         let pid = self.trace_clock.last_pid + 1;
-        let event = serde_json::json!({ "type": "process_start", "name": name, "pid": pid });
+        let mut event = serde_json::json!({ "type": "process_start", "name": name, "pid": pid });
+        if let Some(ppid) = ppid {
+            event["ppid"] = ppid.into();
+        }
         let context = serde_json::json!({ "args": args });
         if !self.send_trace(0, event.to_string(), context.to_string()) {
             return None;
@@ -1760,7 +1771,7 @@ impl ExecutorState {
             pid,
             started,
         });
-        Some(ProcessTrace { key })
+        Some(ProcessTrace { key, pid })
     }
 
     /// Report every child still running as killed: its execution is ending
@@ -4648,6 +4659,7 @@ impl Executor {
         } else {
             run.await
         };
+        crate::process::settle_owed_fuel(store);
 
         // Classify errors using proper type matching. wasmtime::Error is anyhow::Error,
         // so we downcast to wasmtime::Trap for WASM-level traps (Interrupt, OutOfFuel).
@@ -4863,13 +4875,19 @@ pub fn parse_trace_event(request: &TraceRequest) -> std::result::Result<TraceEve
                     .map(str::to_owned)
             };
             let name = str_field("name").unwrap_or_else(|| "<unknown>".to_owned());
-            let pid = event_data
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pid| u32::try_from(pid).ok())
-                .unwrap_or(0);
+            let u32_field = |key: &str| {
+                event_data
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+            };
+            let pid = u32_field("pid").unwrap_or(0);
             if event_type == "process_start" {
-                crate::trace::TraceEventKind::ProcessStart { name, pid }
+                crate::trace::TraceEventKind::ProcessStart {
+                    name,
+                    pid,
+                    ppid: u32_field("ppid"),
+                }
             } else {
                 crate::trace::TraceEventKind::ProcessEnd {
                     name,
@@ -5088,13 +5106,13 @@ mod tests {
         let mut state = ExecutorState::placeholder();
         state.trace_tx = Some(tx);
         let argv = ["tc".to_owned(), "spin".to_owned()];
-        let _running = state.trace_process_start(&argv).unwrap();
+        let _running = state.trace_process_start(&argv, None).unwrap();
         let start: serde_json::Value =
             serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();
         assert_eq!(start["type"], "process_start");
 
         state.stream_budget.trace = 0;
-        assert!(state.trace_process_start(&argv).is_none());
+        assert!(state.trace_process_start(&argv, None).is_none());
         state.end_running_children();
         let end: serde_json::Value =
             serde_json::from_str(&rx.try_recv().unwrap().event_json).unwrap();

@@ -1,5 +1,6 @@
 """Tests for the eryx CLI (__main__.py)."""
 
+import argparse
 import os
 import subprocess
 import sys
@@ -280,3 +281,23 @@ class TestCliPipedInput:
             assert result == 0
             captured = capsys.readouterr()
             assert "piped" in captured.out
+
+
+class TestCliLanguage:
+    """Tests for -l/--language."""
+
+    def test_shell(self, monkeypatch, capsys):
+        runtime = Path(__file__).parents[2] / "eryx-runtime" / "runtime-shell.cwasm"
+        if not runtime.is_file():
+            if os.environ.get("CI"):
+                pytest.fail(f"{runtime} is missing")
+            pytest.skip(f"{runtime} not built")
+        monkeypatch.setenv("ERYX_RUNTIME_CWASM_SHELL", str(runtime))
+        assert main(["-l", "shell", "-c", "echo hi"]) == 0
+        assert capsys.readouterr().out == "hi\n"
+
+    def test_repl_is_python_only(self, capsys):
+        from eryx.__main__ import _repl
+
+        assert _repl(argparse.Namespace(language="javascript")) == 2
+        assert "REPL is Python-only" in capsys.readouterr().err

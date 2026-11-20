@@ -1796,6 +1796,7 @@ impl SessionExecutor {
         // instance (snapshot/restore/clear) made after the timeout window.
         crate::wasm::arm_epoch_deadline(&mut store, None);
         store.data_mut().deadline = None;
+        crate::process::settle_owed_fuel(&mut store);
 
         // Clear channels after execution and capture peak memory
         // Capture any suspension reason before the store is restored: a callback
@@ -2424,6 +2425,7 @@ impl SessionExecutor {
             .await
             .unwrap_or_else(|_elapsed| Err(wasmtime::Error::from(wasmtime::Trap::Interrupt)));
         crate::wasm::arm_epoch_deadline(&mut store, None);
+        crate::process::settle_owed_fuel(&mut store);
 
         let result = result.and_then(|r| r);
         if let Err(e) = &result

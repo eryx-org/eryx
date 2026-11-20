@@ -96,7 +96,7 @@ A request with `language = LANGUAGE_SHELL` runs a shell script against the serve
 - **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.
 - **Limits:** `resource_limits.max_child_host_bytes` bounds their arguments and environments, under `--max-child-host-bytes`, and `resource_limits.max_child_memory_bytes` the memory they hold together, under `--max-child-memory-bytes`.
-- **Results:** `ExecuteResult.exit_code` is the script's exit status. Trace events report each command as `process_start` and `process_end`, with `pid` and `exit_code`.
+- **Results:** `ExecuteResult.exit_code` is the script's exit status. Trace events report each command as `process_start` and `process_end`, with `pid` and `exit_code`; a command spawned by another command carries its spawner's pid as `ppid`.
 - **Sessions:** `persist_state` and `state_snapshot` carry the shell's variables and functions across requests, as for the other guests.
 
 ### Environments
@@ -171,7 +171,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |
 | `files` | [Supporting files](./vfs.md) written into the sandbox VFS — `FILE_KIND_MODULE` files go on `sys.path`, `FILE_KIND_DATA` files are readable but not importable. |
 | `persist_state` / `state_snapshot` | [Session state](./sessions.md): when `persist_state` is true the server snapshots state into `ExecuteResult.state_snapshot`; supplying `state_snapshot` restores it before execution. |
-| `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid` and `exit_code`). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
+| `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid`, `exit_code`, and `ppid` for a nested child). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `globals` | Data for the script: a JSON object, as a string, whose top-level keys become globals before the code runs (Python and JavaScript; the shell rejects it). See [Globals](#globals). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |

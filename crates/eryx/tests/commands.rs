@@ -449,6 +449,76 @@ async fn a_busy_child_of_an_unlimited_parent_runs_to_completion() {
     assert!(fuel > 20_000_000_000, "{fuel}");
 }
 
+/// A child killed between epoch ticks is charged what it burned since its
+/// last one. Each round, `tc work` does a fixed amount of work, says so,
+/// and sleeps (a host call, where no tick publishes its count) until `kill`
+/// drops it. The limit is what the loop costs with no work in the children
+/// plus ten rounds of work, so it runs out around round ten. Left uncharged,
+/// the work all but disappears and the loop gets through all 30 rounds.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn killed_children_are_charged_their_last_tick() {
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let executor = shell()
+        .with_command("tc", test_cmd())
+        .build()
+        .unwrap()
+        .executor();
+    let storage = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
+        .await
+        .unwrap();
+    let mut fuel = async |script: String| {
+        let out = session.execute(script).run().await.unwrap();
+        out.fuel_consumed.unwrap()
+    };
+    // One round's work, run to completion.
+    let work =
+        fuel("tc work 2 /data/w 0".to_owned()).await - fuel("tc work 0 /data/w 0".to_owned()).await;
+    let script = |millions: u32| {
+        format!(
+            "for i in $(seq 1 30); do echo $i > /data/rounds; rm -f /data/ready; \
+             tc work {millions} /data/ready 60 & \
+             while [ ! -e /data/ready ]; do sleep 0.005; done; kill $!; done"
+        )
+    };
+    // A kill as the execution's last act is charged to it, not to the
+    // session's next execution.
+    let kill_last = |millions: u32| {
+        format!(
+            "rm -f /data/ready; tc work {millions} /data/ready 60 & \\
+             while [ ! -e /data/ready ]; do sleep 0.005; done; kill $!"
+        )
+    };
+    let idle = fuel("true".to_owned()).await;
+    let without = fuel(kill_last(0)).await;
+    let with = fuel(kill_last(2)).await;
+    // Within the shell's own polling noise.
+    assert!(
+        with >= without + work / 10 * 9,
+        "{with} charged, {without} without the work, {work} of work"
+    );
+    let next = fuel("true".to_owned()).await;
+    assert!(next < idle + work / 2, "{next} after {idle}");
+
+    let limit = fuel(script(0)).await + work * 10;
+    let err = session
+        .execute(script(2))
+        .with_fuel_limit(limit)
+        .run()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::FuelExhausted { .. }),
+        "{err:?}"
+    );
+    let rounds = String::from_utf8(storage.read("/data/rounds").await.unwrap()).unwrap();
+    let rounds: u32 = rounds.trim().parse().unwrap();
+    assert!(rounds <= 15, "{rounds} rounds under a limit of about ten");
+}
+
 /// A running child's argv and env count against `max_child_host_bytes` for
 /// as long as it runs, not just until the shell waits on it: with three
 /// children each holding 1 MiB running, a fourth doesn't fit a 3.5 MiB
@@ -2167,6 +2237,51 @@ async fn a_session_reports_a_child_its_timeout_killed() {
             ("end", "tc".to_string(), 1, Some(0), None),
         ],
         "{events:?}"
+    );
+}
+
+/// A nested child's `process_start` carries its caller's pid as `ppid`,
+/// through `run`, `pipe` and a nested shell's `spawn`; the shell's own
+/// children have none.
+#[tokio::test]
+async fn nested_children_report_their_parents_pid() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "tc spawn tc spawn tc exit 0; tc pipe tc exit 0; \
+             tc spawn sh -c 'tc exit 0'; tc exit 0",
+        )
+        .await
+        .unwrap();
+    let starts: Vec<_> = out
+        .trace
+        .iter()
+        .filter_map(|e| match &e.event {
+            eryx::TraceEventKind::ProcessStart {
+                name, pid, ppid, ..
+            } => Some((name.as_str(), *pid, *ppid)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            ("tc", 1, None),
+            ("tc", 2, Some(1)),
+            ("tc", 3, Some(2)),
+            ("tc", 4, None),
+            ("tc", 5, Some(4)),
+            ("tc", 6, None),
+            ("sh", 7, Some(6)),
+            ("tc", 8, Some(7)),
+            ("tc", 9, None),
+        ],
+        "{:?}",
+        out.trace
     );
 }
 
