@@ -29,10 +29,18 @@ fn reserved(language: Language) -> (&'static str, &'static str) {
     }
 }
 
+/// What `name` is in `language`'s guest, if the guest already uses it
+/// itself (as a JavaScript global, a Python builtin, a shell builtin or
+/// reserved word).
+pub(crate) fn guest_name(language: Language, name: &str) -> Option<&'static str> {
+    let (list, what) = reserved(language);
+    names(list).any(|reserved| reserved == name).then_some(what)
+}
+
 /// The name a guest installs a callback under: the first part of a dotted
 /// name (`mcp.github.*` is installed as `mcp`), except in the shell, where
 /// the whole name is the command.
-fn installed_as(language: Language, name: &str) -> &str {
+pub(crate) fn installed_as(language: Language, name: &str) -> &str {
     if language == Language::Shell {
         return name;
     }
@@ -47,9 +55,8 @@ fn collision(
     name: &str,
     commands: &std::collections::HashSet<&str>,
 ) -> Option<String> {
-    let (list, what) = reserved(language);
     let root = installed_as(language, name);
-    if names(list).any(|reserved| reserved == root) {
+    if let Some(what) = guest_name(language, root) {
         Some(format!(
             "callback '{name}' collides with {what} '{root}': the guest keeps its own, \
              so the callback could only be reached through invoke(); give it another name"
