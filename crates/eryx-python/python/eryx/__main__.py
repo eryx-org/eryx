@@ -1,4 +1,4 @@
-"""Eryx CLI: run Python code in a WebAssembly sandbox.
+"""Eryx CLI: run Python, JavaScript or shell code in a WebAssembly sandbox.
 
 Usage:
     python -m eryx                     # Interactive REPL
@@ -36,7 +36,7 @@ from eryx._cli import (
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="eryx",
-        description="Run Python code in an Eryx WebAssembly sandbox.",
+        description="Run Python, JavaScript or shell code in an Eryx WebAssembly sandbox.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             examples:
@@ -48,6 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
               eryx --net -c 'import requests'   allow any public host
               eryx --allow-host api.x.com ...   allow only api.x.com
               eryx -s numpy.cwasm script.py     run in a custom precompiled runtime
+              eryx -l shell -c 'echo hi'        run shell code (pyeryx[shell])
+              eryx -l javascript script.js      run JavaScript (pyeryx[javascript])
               eryx serve                        start MCP server
               eryx serve --mcp                  MCP server with inner tools
               eryx factory upgrade OLD NEW      rebuild a saved factory
@@ -72,7 +74,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "script",
         nargs="?",
         default=None,
-        help="Python file to execute (use '-' for stdin)",
+        help="file to execute (use '-' for stdin)",
+    )
+
+    parser.add_argument(
+        "-l",
+        "--language",
+        choices=["python", "javascript", "shell"],
+        default="python",
+        help="guest language (default: python); javascript and shell need their "
+        "runtime, e.g. pip install 'pyeryx[javascript]' or 'pyeryx[shell]'",
     )
 
     parser.add_argument(
@@ -80,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--precompiled",
         metavar="PATH",
         default=None,
-        help="run in the precompiled Python runtime (.cwasm) at PATH, e.g. one "
+        help="run in the precompiled runtime (.cwasm) at PATH, for --language, e.g. one "
         "built by eryx-precompile with packages baked in, instead of the built-in one; "
         "only use files you trust, a precompiled runtime is native code",
     )
@@ -115,7 +126,11 @@ def _write_stderr(chunk: bytes) -> None:
 def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Execute code in a stateless Sandbox and print the result."""
     net = make_net_config(args)
-    kwargs: dict = {"resource_limits": make_resource_limits(args), "runtime_path": args.precompiled}
+    kwargs: dict = {
+        "resource_limits": make_resource_limits(args),
+        "runtime_path": args.precompiled,
+        "language": args.language,
+    }
     if net is not None:
         kwargs["network"] = net
     if args.volume:
@@ -147,7 +162,11 @@ def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = 
 
 def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Run an interactive REPL using Session for persistent state."""
-    kwargs: dict = {"resource_limits": make_resource_limits(args), "runtime_path": args.precompiled}
+    kwargs: dict = {
+        "resource_limits": make_resource_limits(args),
+        "runtime_path": args.precompiled,
+        "language": args.language,
+    }
     net = make_net_config(args)
     if net is not None:
         kwargs["network"] = net

@@ -280,3 +280,17 @@ class TestCliPipedInput:
             assert result == 0
             captured = capsys.readouterr()
             assert "piped" in captured.out
+
+
+class TestCliLanguage:
+    """Tests for -l/--language."""
+
+    def test_shell(self, monkeypatch, capsys):
+        runtime = Path(__file__).parents[2] / "eryx-runtime" / "runtime-shell.cwasm"
+        if not runtime.is_file():
+            if os.environ.get("CI"):
+                pytest.fail(f"{runtime} is missing")
+            pytest.skip(f"{runtime} not built")
+        monkeypatch.setenv("ERYX_RUNTIME_CWASM_SHELL", str(runtime))
+        assert main(["-l", "shell", "-c", "echo hi"]) == 0
+        assert capsys.readouterr().out == "hi\n"
