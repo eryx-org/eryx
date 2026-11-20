@@ -19,7 +19,7 @@ shell = ["eryx/shell"]
 [dependencies]
 clap = { workspace = true } #unified
 dashmap.workspace = true
-eryx = { workspace = true, features = ["embedded", "unstable-vfs", "unstable-internals"] }
+eryx = { workspace = true, features = ["embedded", "environment", "unstable-vfs", "unstable-internals"] }
 hex.workspace = true
 hmac.workspace = true
 metrics.workspace = true

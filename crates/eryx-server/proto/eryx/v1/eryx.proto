@@ -141,6 +141,14 @@ message ExecuteRequest {
   // the server doesn't have, network for a command when child_network gives
   // children none, or setting it for another language is INVALID_ARGUMENT.
   map<string, CommandOptions> commands = 17;
+
+  // The name of one of the server's environments (see its --environments
+  // flag) to mount read-only, so the code can import its packages. Empty: no
+  // environment. A name the server doesn't have, or an environment for
+  // another language than `language`, is INVALID_ARGUMENT. A callback
+  // journal is bound to the environment it was recorded under: its name and
+  // content hash, so repacking an environment invalidates its journals.
+  string environment = 18;
 }
 
 // Per-execution options for one of the server's shell commands; see

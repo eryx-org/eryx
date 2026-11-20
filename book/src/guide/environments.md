@@ -113,6 +113,9 @@ include the bundler. The sandbox builder's `build()` refuses an environment
 for another language, and checks the environment still hashes to what it did
 when it was loaded, as pools and factories do for every sandbox they make.
 
+eryx-server serves a directory of environments with `--environments`, and
+requests pick one by name; see [gRPC Server](./grpc-server.md#environments).
+
 ## Importing in JavaScript
 
 - **`import` declarations** at the top of a script work as usual: eryx
