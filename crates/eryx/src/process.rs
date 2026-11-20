@@ -2849,7 +2849,12 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                                 None => root_pid,
                                 Some(parent) => reported.get(&parent).map(|trace| trace.pid),
                             };
-                            if let Some(trace) = state.trace_process_start_at(&argv, ppid, at) {
+                            // A child whose parent's start wasn't sent (the
+                            // trace budget ran out) isn't reported either, so
+                            // it can't pass for the shell's own child.
+                            let Some(ppid) = ppid else { continue };
+                            if let Some(trace) = state.trace_process_start_at(&argv, Some(ppid), at)
+                            {
                                 reported.insert(id, trace);
                             }
                         }

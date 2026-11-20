@@ -67,6 +67,8 @@ pub enum TraceEventKind {
         pid: u32,
         /// The `pid` of the child that spawned it (through `eryx:process`'s
         /// `run`, `pipe` or `spawn`); `None` for a child of the guest itself.
+        /// A nested child whose parent's start wasn't reported (the trace
+        /// budget ran out) isn't reported either.
         ppid: Option<u32>,
     },
     /// A child process ended.
