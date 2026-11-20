@@ -77,7 +77,7 @@ pub fn sources(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn fetch(url: &str, pin: Pin<'_>, dir: &Path) -> Result<()> {
+pub(crate) fn fetch(url: &str, pin: Pin<'_>, dir: &Path) -> Result<()> {
     if dir.exists() {
         return verify_existing(dir, pin);
     }
@@ -129,7 +129,7 @@ fn fetch(url: &str, pin: Pin<'_>, dir: &Path) -> Result<()> {
 }
 
 /// Check that an already-fetched dir matches its pin.
-fn verify_existing(dir: &Path, pin: Pin<'_>) -> Result<()> {
+pub(crate) fn verify_existing(dir: &Path, pin: Pin<'_>) -> Result<()> {
     let what = dir.display().to_string();
     match pin {
         Pin::Git(commit) => {

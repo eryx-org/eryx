@@ -14,6 +14,8 @@ eryx-build <path.toml>     Build a manifest at an explicit path
 eryx-build --list          List the manifests in clis/ (and clis/gpl/*/)
 eryx-build --check         Validate every manifest without building, refusing
                            local `path` sources
+eryx-build toolchain go [<name|path.toml>] [--dir <dir>]
+                           Fetch and build the wasip3 Go fork; prints its GOROOT
 ```
 
 The published commands' manifests (`eryx:rg`, `eryx-gpl:git` and the rest)
@@ -30,11 +32,43 @@ relative to that root, and sources are fetched into its `scratch/` dir.
 |---|---|---|
 | `rust` | `cargo build --release --target wasm32-wasip2` | `cargo` and the `wasm32-wasip2` target |
 | `c` | wasi-sdk's clang: plain, CMake, autotools or make | `WASI_SDK_PATH` pointing at wasi-sdk, `wit-bindgen`, and `rustc` with the `wasm32-wasip2` target |
-| `go` | the wasip3 Go fork, componentized with `wasm-tools` | the fork, at `ERYX_GO_WASIP3_ROOT` (default `scratch/go-wasip3`) |
+| `go` | the wasip3 Go fork, componentized with `wasm-tools` | the fork, built by `eryx-build toolchain go` (see below) |
 
 All lanes need `git`, `curl` and `wasm-tools` on `PATH`, and `wasmtime` when
 a manifest enables `[cwasm]` or builds with the Go lane. The manifest format
 is documented on the `Manifest` type in `src/manifest.rs`.
+
+### The Go fork
+
+The Go lane needs a WASI 0.3 port of Go: the `wasip3-0.3.0-go1.27.4-exit-code`
+branch of [sd2k/go](https://github.com/sd2k/go), at the commit eryx-build pins
+(`GoToolchain::default` in `src/manifest.rs`). Build it once with
+
+```text
+eryx-build toolchain go
+```
+
+which fetches the pinned commit into
+`$XDG_CACHE_HOME/eryx-build/go-wasip3/<commit>` (or `~/.cache/…`), builds it
+with the fork's own `make.bash` and a host Go new enough to bootstrap Go 1.27
+(on `PATH`, or at `GOROOT_BOOTSTRAP`), sets `GOWASM=widearith` in its `go.env`, and prints
+the GOROOT. A later run with the toolchain already built only rewrites
+`go.env`. Building takes several minutes; to cache it in CI, key the cache on
+the eryx-build version (or the pinned commit) and the directory it prints.
+
+The lane uses that directory, or `ERYX_GO_WASIP3_ROOT` when set
+(`--dir <dir>` builds somewhere else). Either way the toolchain must be a
+checkout at the pinned commit, or the build fails. A manifest that needs
+another commit of the fork sets all three fields of
+
+```toml
+[build.go_toolchain]
+repo = "https://github.com/sd2k/go.git"
+ref = "my-branch"
+commit = "<40 hex digits>"
+```
+
+and `eryx-build toolchain go <manifest>` builds that commit.
 
 The C and Rust lanes link a small start-up object, compiled with
 `rustc --target wasm32-wasip2`, that moves the command into `$PWD` when it

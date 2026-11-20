@@ -224,6 +224,12 @@ pub struct Build {
     /// e.g. to stamp the version a CLI reports.
     #[serde(default)]
     pub ldflags: String,
+    /// Go lane: the wasip3 Go fork to build with. Defaults to the fork
+    /// eryx-build pins ([`GoToolchain::default`]); set all three fields to
+    /// build with another commit (`eryx-build toolchain go <manifest>`
+    /// builds it).
+    #[serde(default)]
+    pub go_toolchain: GoToolchain,
     /// Rust lane: cargo binary to build (`cargo build --bin <bin>`); the wasm
     /// artifact is `<bin>.wasm`. Required for the Rust lane.
     #[serde(default)]
@@ -246,6 +252,33 @@ pub struct WitBindings {
     pub path: PathBuf,
     /// The world, e.g. `eryx:process/child`.
     pub world: String,
+}
+
+/// A commit of the wasip3 Go fork (see [`Build::go_toolchain`]).
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct GoToolchain {
+    /// Git URL of the fork.
+    pub repo: String,
+    /// Branch or tag `commit` is on; a label, like a source's `ref`.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// The pinned commit (40 hex digits). The toolchain is fetched and
+    /// checked at it.
+    pub commit: String,
+}
+
+impl Default for GoToolchain {
+    /// The fork eryx-build builds Go commands with: WASI 0.3.0 as the
+    /// wasmtime version eryx uses implements it, with `os.Exit` codes above
+    /// 1 kept (eryx-org/eryx-commands#32). This is the one place the default
+    /// pin lives; bump all three together.
+    fn default() -> Self {
+        Self {
+            repo: "https://github.com/sd2k/go.git".into(),
+            git_ref: "wasip3-0.3.0-go1.27.4-exit-code".into(),
+            commit: "331bf58bd2672eda182895f30fd2c688721deba7".into(),
+        }
+    }
 }
 
 fn default_package() -> String {
@@ -616,6 +649,44 @@ mod tests {
         assert_eq!(m.build.package, "./cmd/gh");
         assert!(m.build.sources.is_empty());
         assert!(m.build.cflags.is_empty());
+        assert_eq!(m.build.go_toolchain, GoToolchain::default());
+    }
+
+    /// `[build.go_toolchain]` overrides the default fork pin, and needs all
+    /// of its fields.
+    #[test]
+    fn go_toolchain_override() {
+        let manifest = |table: &str| {
+            toml::from_str::<Manifest>(&format!(
+                r#"
+                name = "gh"
+                license = "MIT"
+                lang = "go"
+                [source]
+                repo = "https://github.com/cli/cli.git"
+                ref = "v2.87.3"
+                dir = "scratch/gh-cli"
+                [build]
+                package = "./cmd/gh"
+                [build.go_toolchain]
+                {table}
+                [output]
+                dir = "scratch/gh-component"
+                "#
+            ))
+        };
+        let m = manifest(
+            r#"repo = "https://example.com/go.git"
+            ref = "test"
+            commit = "0123456789012345678901234567890123456789""#,
+        )
+        .expect("override should parse");
+        assert_eq!(m.build.go_toolchain.repo, "https://example.com/go.git");
+        assert_eq!(
+            m.build.go_toolchain.commit,
+            "0123456789012345678901234567890123456789"
+        );
+        assert!(manifest(r#"commit = "0123456789012345678901234567890123456789""#).is_err());
     }
 
     /// A `path` source resolves against the manifest's directory and becomes
