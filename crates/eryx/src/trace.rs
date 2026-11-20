@@ -65,6 +65,9 @@ pub enum TraceEventKind {
         /// Numbers the execution's children, to pair this with its
         /// [`ProcessEnd`](Self::ProcessEnd).
         pid: u32,
+        /// The `pid` of the child that spawned it (through `eryx:process`'s
+        /// `run`, `pipe` or `spawn`); `None` for a child of the guest itself.
+        ppid: Option<u32>,
     },
     /// A child process ended.
     #[non_exhaustive]

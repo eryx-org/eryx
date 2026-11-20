@@ -316,11 +316,8 @@ fn spawn(
         Ok(prepared) => prepared,
         Err(e) => return Ok(Err(run_error(e))),
     };
-    let trace = spawner
-        .traces
-        .clone()
-        .map(|traces| NestedTrace::start(traces, prepared.run.argv.clone()));
     let mut command = prepared.run;
+    let trace = NestedTrace::start(&spawner, &mut command);
     command.fuel = store.get_fuel().unwrap_or(0);
     let live = command._live.take();
     let run = Run {
