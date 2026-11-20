@@ -541,15 +541,15 @@ npm = "core-js-pure"
 
 [[component]]
 name = "uutils coreutils"
-version = "0.9.0 (840c36d3)"
+version = "0.13.0 (07b76df4)"
 license = "MIT"
-url = "https://github.com/uutils/coreutils/tree/840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+url = "https://github.com/uutils/coreutils/tree/07b76df463390fd56856725201ae52df5df0a063"
 # The tool itself; the crates it's built from are listed when eryx-build
 # builds it (#837 step 2).
 files = ["third_party/licenses/uutils-coreutils-LICENSE"]
 artifacts = ["coreutils"]
 cli = "clis/coreutils.toml"
-cli_commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+cli_commit = "07b76df463390fd56856725201ae52df5df0a063"
 
 [[component]]
 name = "HACL*"

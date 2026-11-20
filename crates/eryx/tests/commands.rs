@@ -887,14 +887,18 @@ async fn the_embedded_shell_runs_common_script_tools_on_files() {
             "echo x > /tmp/f && touch -d @100000 /tmp/f && date -r /tmp/f +%s",
             "100000\n",
         ),
-        // WASI has no file modes, so cp doesn't try to copy them (#982).
+        // WASI has no file modes: cp ignores that when the mode is optional
+        // (directory modes under -r), but -p asks for it, so it fails as GNU
+        // cp -p does where it can't preserve permissions (#982, #984).
+        // Timestamps alone can be preserved.
         (
             "mkdir -p /tmp/a/s && echo x > /tmp/a/f && touch -d @100000 /tmp/a/f; \
              cp -r /tmp/a /tmp/b 2>&1; echo r=$?; \
-             cp -p /tmp/a/f /tmp/g 2>&1; echo p=$?; \
-             cp -rp /tmp/a /tmp/c 2>&1; echo rp=$?; \
-             cat /tmp/b/f /tmp/g /tmp/c/f; date -r /tmp/g +%s",
-            "r=0\np=0\nrp=0\nx\nx\nx\n100000\n",
+             cp -p /tmp/a/f /tmp/g 2>/dev/null; echo p=$?; \
+             cp -rp /tmp/a /tmp/c 2>/dev/null; echo rp=$?; \
+             cp --preserve=timestamps /tmp/a/f /tmp/t 2>&1; echo t=$?; \
+             cat /tmp/b/f /tmp/g /tmp/c/f /tmp/t; date -r /tmp/t +%s",
+            "r=0\np=1\nrp=1\nt=0\nx\nx\nx\nx\n100000\n",
         ),
         // `touch -r` reads the reference file's times.
         (
@@ -1069,8 +1073,8 @@ async fn coreutils_see_the_root_and_dev() {
     // Nothing above the mounts can be changed, and outside them is empty.
     let sandbox = shell().build().unwrap();
     for (script, message) in [
-        ("mkdir /etc", "mkdir: Permission denied"),
-        ("mv /tmp /tmp2", "mv: Operation not permitted"),
+        ("mkdir /etc", "'/etc': Permission denied"),
+        ("mv /tmp /tmp2", "cannot move '/tmp'"),
         ("rm /dev/null", "Permission denied"),
         ("touch /new", "Permission denied"),
         ("cat /etc/passwd", "No such file or directory"),

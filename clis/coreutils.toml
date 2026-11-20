@@ -19,32 +19,34 @@ lang = "rust"
 
 [source]
 repo = "https://github.com/uutils/coreutils.git"
-ref = "0.9.0"
-commit = "840c36d3964833e1dc107fcb9ade9c0ad63076c0"
+ref = "0.13.0"
+commit = "07b76df463390fd56856725201ae52df5df0a063"
 # Local working copy the driver builds from; fetched on first build.
 dir = "scratch/uutils"
 
 [build]
 # Multicall binary; the artifact is coreutils.wasm.
 bin = "coreutils"
-# uucore uses unstable std::os::wasi on wasip2 — add #![feature(wasip2)].
+# Read devices (/dev/null etc.) as devices on WASI; see the script.
 vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
 # The utils that replace the shell builtins, plus common script tools (#897)
 # and checksums for checking downloads (#1081; the five sums and printenv add
 # ~0.9 MB to the 6.6 MB component, as they share uucore's checksum code).
 # Keep the set tight: each util can pull wasi-incompatible deps, and every
 # one grows the embedded cwasm. nl and expr (regex, ~2.8 and ~1.4 MB) are
-# left out for size; chmod, df, du, env, id, stat, tac, test, timeout, whoami
-# and yes don't build for wasip2 (env would also need to run its command
-# through eryx:process, as WASI has no exec), and ln can't work: the VFS
-# refuses links and symlinks.
+# left out for size, as are tac, test and yes (they build since 0.13.0; test
+# is a shell builtin anyway); chmod, df, du, env, id, stat, timeout and whoami
+# don't build for wasip2 (env would also need to run its command through
+# eryx:process, as WASI has no exec), and ln can't work: the VFS refuses
+# links and symlinks.
 # Must match COREUTILS_TOOLS in crates/eryx/src/embedded.rs (a test checks).
 cargo_flags = [
     "--no-default-features",
     "--features",
     "cat,head,tail,ls,wc,cp,mv,rm,mkdir,touch,sort,seq,cut,tr,uniq,basename,dirname,tee,sleep,paste,comm,date,base64,realpath,readlink,rmdir,md5sum,sha1sum,sha256sum,sha512sum,b2sum,printenv",
 ]
-# Let the pinned stable toolchain use the unstable wasip2 feature.
+# Let the pinned stable toolchain use the unstable wasip2 and wasi_ext
+# features the patch needs.
 [build.env]
 RUSTC_BOOTSTRAP = "1"
 
