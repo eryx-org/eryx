@@ -12,6 +12,8 @@
 //! eryx-build <path.toml>     Build a manifest at an explicit path
 //! eryx-build --list          List available manifests in clis/
 //! eryx-build --check         Validate all manifests without building (CI gate)
+//! eryx-build toolchain go [<name|path.toml>] [--dir <dir>]
+//!                            Fetch and build the wasip3 Go fork; prints its GOROOT
 //! ```
 //!
 //! Run from the repo root (the mise `build-cli` task does this). A missing
@@ -20,7 +22,7 @@
 //! `provenance`).
 //! Toolchains (`cargo`, `wasm-tools`, `wasmtime`, `git`, `curl`) come from
 //! PATH; the C lane also needs `WASI_SDK_PATH`, and the Go lane the wasip3 Go
-//! fork (see `lanes::go`).
+//! fork, which `eryx-build toolchain go` builds (see `lanes::go`).
 
 mod fetch;
 mod lanes;
@@ -56,6 +58,7 @@ fn run(args: &[String]) -> Result<()> {
         }
         Some("--list") => list_manifests(),
         Some("--check") => check_all_manifests(),
+        Some("toolchain") => toolchain(&args[1..]),
         Some(arg) => {
             let path = resolve_manifest_path(arg);
             let manifest = Manifest::load(&path)?;
@@ -72,6 +75,33 @@ fn run(args: &[String]) -> Result<()> {
             provenance::write(&manifest, &path)
         }
     }
+}
+
+/// `toolchain go [<manifest>] [--dir <dir>]`: build the Go fork the
+/// manifest pins (the default pin without one) and print its GOROOT.
+fn toolchain(args: &[String]) -> Result<()> {
+    let Some(("go", rest)) = args.split_first().map(|(lang, rest)| (lang.as_str(), rest)) else {
+        bail!("usage: eryx-build toolchain go [<name|path.toml>] [--dir <dir>]");
+    };
+    let mut manifest = None;
+    let mut dir = None;
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--dir" => dir = Some(PathBuf::from(rest.next().context("--dir needs a value")?)),
+            _ if manifest.is_none() => {
+                manifest = Some(Manifest::load(&resolve_manifest_path(arg))?)
+            }
+            _ => bail!("unexpected argument {arg:?}"),
+        }
+    }
+    let fork = manifest.map(|m| m.build.go_toolchain).unwrap_or_default();
+    let dir = match dir {
+        Some(dir) => dir,
+        None => lanes::go::default_goroot(&fork)?,
+    };
+    println!("{}", lanes::go::bootstrap(&fork, &dir)?.display());
+    Ok(())
 }
 
 /// Map a CLI argument to a manifest path: a `.toml` path is used as-is,
@@ -184,7 +214,9 @@ fn print_usage() {
          eryx-build <name>        Build clis/<name>.toml\n  \
          eryx-build <path.toml>   Build a manifest at an explicit path\n  \
          eryx-build --list        List available manifests\n  \
-         eryx-build --check       Validate all manifests (no build)"
+         eryx-build --check       Validate all manifests (no build)\n  \
+         eryx-build toolchain go [<name|path.toml>] [--dir <dir>]\n                           \
+         Build the wasip3 Go fork; prints its GOROOT"
     );
 }
 
