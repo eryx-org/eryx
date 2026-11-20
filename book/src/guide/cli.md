@@ -75,6 +75,23 @@ python -m eryx --timeout 5000 -c 'print("quick")'
 python -m eryx --max-memory 67108864 script.py   # 64MB limit
 ```
 
+### Runtime
+
+| Flag                         | Description                                                    |
+| ---------------------------- | -------------------------------------------------------------- |
+| `-s`, `--precompiled PATH`   | Run in the precompiled Python runtime (`.cwasm`) at PATH instead of the built-in one |
+
+Build one with packages baked in using [`eryx-precompile`](./precompile.md#bundling-packages), then run code in it.
+Only use files you trust: a precompiled runtime is native code.
+
+```bash
+eryx-precompile compile -o numpy.cwasm \
+  --preinit --stdlib ./python-stdlib \
+  --package numpy-2.2.3-wasi.tar.gz --import numpy
+
+python -m eryx --precompiled numpy.cwasm -c 'import numpy; print(numpy.array([1, 2, 3]).sum())'
+```
+
 ### Networking
 
 | Flag                   | Description                                                                 |

@@ -1,8 +1,10 @@
 """Tests for the eryx CLI (__main__.py)."""
 
+import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
 import eryx
@@ -110,6 +112,27 @@ class TestCliNetworking:
         assert result == 0
         captured = capsys.readouterr()
         assert "ok" in captured.out
+
+
+class TestCliPrecompiled:
+    """Tests for -s/--precompiled."""
+
+    def test_runs_in_the_precompiled_runtime(self, capsys):
+        runtime = Path(__file__).parents[2] / "eryx-runtime" / "runtime-python.cwasm"
+        if not runtime.is_file():
+            if os.environ.get("CI"):
+                pytest.fail(f"{runtime} is missing")
+            pytest.skip(f"{runtime} not built")
+        result = main(["--precompiled", str(runtime), "-c", "print(6 * 7)"])
+        assert result == 0
+        assert "42" in capsys.readouterr().out
+
+    def test_missing_file_is_an_error(self, tmp_path, capsys):
+        result = main(["-s", str(tmp_path / "missing.cwasm"), "-c", 'print("hi")'])
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "missing.cwasm" in err
+        assert "Traceback" not in err
 
 
 class TestCliNetConfig:
