@@ -143,6 +143,14 @@ export interface SandboxOptions {
    * new Sandbox({ callbacks: { get_user: async ({ id }) => ({ id, name: "Ada" }) } });
    */
   callbacks?: Callbacks;
+  /**
+   * Install the callbacks under this name rather than as top-level names
+   * (#964): with `"tools"`, `get_user` is `await tools.get_user(id=1)` in
+   * Python, `await tools.get_user({ id: 1 })` in JavaScript and the command
+   * `tools.get_user --id 1` in the shell. Only the namespace then has to stay
+   * clear of the guest's own names. Must be an identifier. Unset by default.
+   */
+  callbackNamespace?: string;
   /** Handler for trace events from the Python runtime. */
   traceHandler?:
     | ((lineno: number, eventJson: string, contextJson: string) => void)

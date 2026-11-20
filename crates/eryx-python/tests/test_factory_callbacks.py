@@ -56,6 +56,24 @@ class TestFactoryCallbacks:
         )
         assert result.stdout.strip() == b"['ping'] pong"
 
+    def test_namespace_replaces_the_baked_top_level_names(self, callback_factory):
+        """Under a namespace, the baked bare names are gone, not left behind
+        next to the namespaced ones (#964)."""
+        check = (
+            "print((await tools.add(a=1, b=2))['sum'], 'add' in globals(), "
+            "'get_time' in globals())"
+        )
+        sandbox = callback_factory.create_sandbox(callback_namespace="tools")
+        assert sandbox.execute(check).stdout.strip() == b"3 False False"
+        session = callback_factory.create_session(callback_namespace="tools")
+        assert session.execute(check).stdout.strip() == b"3 False False"
+        pool = callback_factory.create_pool(max_size=1, min_idle=0, callback_namespace="tools")
+        try:
+            with pool.acquire() as pooled:
+                assert pooled.execute(check).stdout.strip() == b"3 False False"
+        finally:
+            pool.close()
+
     def test_session_registers_factory_callbacks_by_default(self, callback_factory):
         session = callback_factory.create_session()
         result = session.execute("print((await get_time())['timestamp'])")

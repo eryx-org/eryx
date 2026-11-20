@@ -118,6 +118,7 @@ impl Session {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         factory_files: Option<crate::preinit::FactoryFiles>,
+        callback_namespace: Option<String>,
     ) -> PyResult<Self> {
         let language = executor.language();
         let net_config: Option<eryx::NetConfig> = network.map(Into::into);
@@ -138,6 +139,20 @@ impl Session {
                     let arc: Arc<dyn eryx::Callback> = Arc::new(c);
                     map.insert(arc.name().to_string(), arc);
                 }
+            }
+            if let Some(namespace) = &callback_namespace {
+                eryx::NamespacedCallback::check_namespace(namespace).map_err(eryx_error_to_py)?;
+                map = map
+                    .into_values()
+                    .map(|cb| {
+                        let cb = eryx::NamespacedCallback::new(namespace, cb)?;
+                        Ok((
+                            cb.name().to_string(),
+                            Arc::new(cb) as Arc<dyn eryx::Callback>,
+                        ))
+                    })
+                    .collect::<Result<_, eryx::Error>>()
+                    .map_err(eryx_error_to_py)?;
             }
             Arc::new(map)
         };
@@ -240,6 +255,8 @@ impl Session {
     ///     max_fuel: Overrides `resource_limits.max_fuel`.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     callback_namespace: Install the callbacks under this name, as for
+    ///         `Sandbox`.
     ///     commands: For the shell only: external commands by name, as for
     ///         `Sandbox`.
     ///     child_network: For the shell only, with `network`: its commands'
@@ -271,7 +288,7 @@ impl Session {
     ///         {"name": "get_time", "fn": get_time, "description": "Returns current time"}
     ///     ])
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, vfs=None, vfs_mount_path=None, resource_limits=None, execution_timeout_ms=None, max_fuel=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -291,6 +308,7 @@ impl Session {
         result_variable: Option<String>,
         commands: Option<crate::command::Commands<'_>>,
         child_network: Option<Bound<'_, PyAny>>,
+        callback_namespace: Option<String>,
     ) -> PyResult<Self> {
         let runtime = crate::error::make_runtime()?;
 
@@ -332,6 +350,7 @@ impl Session {
             on_stdout,
             on_stderr,
             None,
+            callback_namespace,
         )
         .map(|session| Self {
             child_network,

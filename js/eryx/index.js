@@ -312,6 +312,24 @@ function checkCallbackNames(language, names, commands) {
 }
 
 /**
+ * The callbacks under `namespace` (#964): `tools.get_user` for `get_user`.
+ * @param {import("@eryx-org/eryx-run/shared").Callbacks} callbacks
+ * @param {string | undefined} namespace
+ */
+function namespaced(callbacks, namespace) {
+  if (namespace === undefined) return callbacks;
+  if (typeof namespace !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(namespace)) {
+    throw new TypeError(
+      `invalid callbackNamespace ${JSON.stringify(namespace)}: must match [A-Za-z_][A-Za-z0-9_]*`,
+    );
+  }
+  if (Array.isArray(callbacks) || typeof callbacks !== "object" || callbacks === null) {
+    return callbacks; // createCallbackHost explains what callbacks should be
+  }
+  return Object.fromEntries(Object.entries(callbacks).map(([name, cb]) => [`${namespace}.${name}`, cb]));
+}
+
+/**
  * A sandbox's external commands, checked: names with the URLs they load from.
  * @param {string} language
  * @param {SandboxOptions} options
@@ -462,11 +480,12 @@ export class Sandbox {
           "e.g. { get_user: async ({ id }) => ... }",
       );
     }
-    checkCallbackNames(language, Object.keys(options.callbacks ?? {}), [
+    const callbacks = namespaced(options.callbacks ?? {}, options.callbackNamespace);
+    checkCallbackNames(language, Object.keys(callbacks), [
       ...(this.#commands.coreutils ? COREUTILS_TOOLS : []),
       ...Object.keys(this.#commands.commands),
     ]);
-    this.#host = createCallbackHost(options);
+    this.#host = createCallbackHost({ ...options, callbacks });
     if (options.netConfig !== undefined) this.#net.setNetConfig(options.netConfig);
     if (timeoutMs !== undefined) _workerReaper.register(this, this.#slot, this.#slot);
     this.#start();

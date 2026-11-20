@@ -604,13 +604,15 @@ impl SandboxFactory {
     ///     on_stdout: Optional stdout streaming callback.
     ///     on_stderr: Optional stderr streaming callback.
     ///     result_variable: Optional variable whose value is returned by execute.
+    ///     callback_namespace: Install the callbacks under this name, as for
+    ///         `Sandbox`.
     ///
     /// Returns:
     ///     A new persistent `Session`.
     ///
     /// Raises:
     ///     InitializationError: If the session cannot be initialized.
-    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, vfs=None, vfs_mount_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_session(
         &self,
@@ -625,6 +627,7 @@ impl SandboxFactory {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        callback_namespace: Option<String>,
     ) -> PyResult<Session> {
         // SAFETY: the bytes were produced by `Executor::precompile` or
         // loaded from a factory file created by this same API.
@@ -654,6 +657,7 @@ impl SandboxFactory {
             on_stdout,
             on_stderr,
             Some(self.files()),
+            callback_namespace,
         )
     }
 
@@ -677,6 +681,8 @@ impl SandboxFactory {
     ///         Defaults to False.
     ///     result_variable: Variable captured as `ExecuteResult.result`.
     ///         Defaults to `"result"`.
+    ///     callback_namespace: Install the callbacks under this name, as for
+    ///         `Sandbox`.
     ///
     /// Returns:
     ///     A new Sandbox ready to execute Python code.
@@ -706,7 +712,7 @@ impl SandboxFactory {
     ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
     ///         network=NetConfig(allowed_hosts=["api.example.com"]),
     ///     )
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None))]
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
@@ -725,6 +731,7 @@ impl SandboxFactory {
         on_stdout: Option<Py<PyAny>>,
         on_stderr: Option<Py<PyAny>>,
         result_variable: Option<String>,
+        callback_namespace: Option<String>,
     ) -> PyResult<Sandbox> {
         // Use provided site_packages or fall back to the one from initialization
         let site_packages_path = site_packages.or_else(|| self.site_packages_path.clone());
@@ -754,6 +761,10 @@ impl SandboxFactory {
 
         if let Some(net) = network {
             builder = builder.with_network(net.into());
+        }
+
+        if let Some(namespace) = callback_namespace {
+            builder = builder.with_callback_namespace(namespace);
         }
 
         // Apply the caller's callbacks, or the factory's own (whose
@@ -848,6 +859,8 @@ impl SandboxFactory {
     ///     secrets: Optional secrets for every pooled sandbox, as for `Sandbox`.
     ///     scrub_stdout, scrub_stderr, scrub_files: Scrub secret placeholders
     ///         from that output. Default to True when secrets are provided.
+    ///     callback_namespace: Install each lease's callbacks under this
+    ///         name, as for `Sandbox`.
     ///
     /// Network and secrets are fixed for the pool's lifetime, unlike the
     /// per-request settings passed to ``acquire()``.
@@ -864,7 +877,7 @@ impl SandboxFactory {
     ///     with pool.acquire() as sandbox:
     ///         result = sandbox.execute('import json; print(json.dumps([1]))')
     ///     pool.close()
-    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000, network=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None))]
+    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000, network=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_pool(
         &self,
@@ -878,6 +891,7 @@ impl SandboxFactory {
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
+        callback_namespace: Option<String>,
     ) -> PyResult<crate::pool::SandboxPool> {
         use std::time::Duration;
 
@@ -901,6 +915,9 @@ impl SandboxFactory {
         let scrub_stdout = scrub_stdout.unwrap_or(has_secrets);
         let scrub_stderr = scrub_stderr.unwrap_or(has_secrets);
         let scrub_files = scrub_files.unwrap_or(has_secrets);
+        if let Some(namespace) = &callback_namespace {
+            eryx::NamespacedCallback::check_namespace(namespace).map_err(eryx_error_to_py)?;
+        }
 
         let builder_fn = move || {
             // SAFETY: the bytes were produced by `Executor::precompile`
@@ -919,6 +936,9 @@ impl SandboxFactory {
             }
             for (name, value, allowed_hosts) in secrets.iter().flatten() {
                 builder = builder.with_secret(name, value, allowed_hosts.clone());
+            }
+            if let Some(ref namespace) = callback_namespace {
+                builder = builder.with_callback_namespace(namespace);
             }
             builder
                 .scrub_stdout(scrub_stdout)

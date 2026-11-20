@@ -138,6 +138,9 @@ pub struct Sandbox {
     executor: Arc<Executor>,
     /// Registered callbacks that Python code can invoke (wrapped in Arc to avoid cloning the map on each execute).
     callbacks: Arc<HashMap<String, Arc<dyn Callback>>>,
+    /// The namespace [`set_callbacks`](Self::set_callbacks) puts callbacks
+    /// under, from [`SandboxBuilder::with_callback_namespace`].
+    callback_namespace: Option<String>,
     /// Python preamble code injected before user code: the secrets'
     /// environment variables, then `library_preamble`.
     preamble: String,
@@ -828,12 +831,19 @@ impl Sandbox {
     /// Returns [`ErrorKind::Initialization`] naming the callback if two share a
     /// name, or if one collides with a name the guest uses itself (a
     /// JavaScript global, a Python builtin, a shell builtin or command);
-    /// the existing callbacks are left unchanged.
+    /// the existing callbacks are left unchanged. A sandbox built with
+    /// [`with_callback_namespace`](SandboxBuilder::with_callback_namespace)
+    /// puts these under the namespace too.
     pub fn set_callbacks(&mut self, callbacks: Vec<Box<dyn Callback>>) -> Result<(), Error> {
         let mut map = HashMap::new();
         let mut duplicate = None;
         for callback in callbacks {
-            insert_callback(&mut map, &mut duplicate, Arc::from(callback));
+            let callback: Arc<dyn Callback> = Arc::from(callback);
+            let callback = match &self.callback_namespace {
+                Some(ns) => Arc::new(crate::callback::NamespacedCallback::new(ns, callback)?),
+                None => callback,
+            };
+            insert_callback(&mut map, &mut duplicate, callback);
         }
         check_duplicate_callback(duplicate)?;
         crate::reserved::check(
@@ -1022,6 +1032,7 @@ impl Clone for Sandbox {
         Self {
             executor: Arc::clone(&self.executor),
             callbacks: Arc::clone(&self.callbacks),
+            callback_namespace: self.callback_namespace.clone(),
             preamble: self.preamble.clone(),
             library_preamble: self.library_preamble.clone(),
             type_stubs: self.type_stubs.clone(),
@@ -1970,6 +1981,8 @@ pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> 
     callbacks: HashMap<String, Arc<dyn Callback>>,
     /// First callback name registered twice; `build()` fails if set.
     duplicate_callback: Option<String>,
+    /// The namespace callbacks are installed under (#964), if any.
+    callback_namespace: Option<String>,
     preamble: String,
     type_stubs: String,
     trace_handler: Option<Arc<dyn TraceHandler>>,
@@ -2072,6 +2085,7 @@ impl SandboxBuilder<Python, state::Needs> {
         Self {
             wasm_source: WasmSource::None,
             callbacks: HashMap::new(),
+            callback_namespace: None,
             duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
@@ -2116,6 +2130,7 @@ impl SandboxBuilder<Python, state::Needs> {
         SandboxBuilder {
             wasm_source: WasmSource::EmbeddedRuntime,
             callbacks: HashMap::new(),
+            callback_namespace: None,
             duplicate_callback: None,
             preamble: String::new(),
             type_stubs: String::new(),
@@ -2161,6 +2176,7 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
             wasm_source: self.wasm_source,
             callbacks: self.callbacks,
             duplicate_callback: self.duplicate_callback,
+            callback_namespace: self.callback_namespace,
             preamble: self.preamble,
             type_stubs: self.type_stubs,
             trace_handler: self.trace_handler,
@@ -2988,6 +3004,29 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
         self
     }
 
+    /// Install the callbacks under `namespace` (#964) rather than as
+    /// top-level names: with `"tools"`, a callback `get_time` is
+    /// `await tools.get_time()` in Python and JavaScript and the command
+    /// `tools.get_time` in the shell, and a prefix callback `mcp.*` is
+    /// `tools.mcp.<server>.<tool>`. Off by default.
+    ///
+    /// Only the namespace then has to stay clear of the guest's own names
+    /// (see [`with_callback`](Self::with_callback)), and it applies to
+    /// callbacks a pool sets per request as well. The callbacks themselves
+    /// still see their own names; `list_callbacks()`, trace events and
+    /// callback journals show the namespaced ones. So does code that calls
+    /// them: a library's preamble or type stubs
+    /// ([`with_library`](Self::with_library)) that call `get_time()` or
+    /// `invoke("get_time")` must say `tools.get_time()` instead.
+    ///
+    /// [`build`](Self::build) fails unless `namespace` is an identifier
+    /// (`[A-Za-z_][A-Za-z0-9_]*`).
+    #[must_use]
+    pub fn with_callback_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.callback_namespace = Some(namespace.into());
+        self
+    }
+
     /// Set a trace handler for execution progress.
     #[must_use]
     pub fn with_trace_handler<H: TraceHandler + 'static>(mut self, handler: H) -> Self {
@@ -3276,8 +3315,9 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     /// Convert this builder into a reusable factory closure.
     ///
     /// The factory keeps the wasm source, language, stdlib and library paths,
-    /// result variable, trace-collection setting and shell commands, and builds fresh
-    /// sandboxes from them on demand. Anything else would be silently lost
+    /// result variable, trace-collection setting, callback namespace and shell
+    /// commands, and builds fresh sandboxes from them on demand. Anything else
+    /// would be silently lost
     /// (per-request settings are reset whenever a sandbox returns to the
     /// pool, and the rest is not carried over), so builders that set it are
     /// rejected; use [`SandboxPool::with_builder`](crate::SandboxPool::with_builder)
@@ -3321,6 +3361,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         let embedded_commands = self.embedded_commands;
         let child_network = self.child_network;
         let credentials = self.credentials;
+        let callback_namespace = self.callback_namespace;
 
         Ok(Box::new(move || {
             let mut builder = SandboxBuilder::new();
@@ -3339,6 +3380,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             // without one, children stay offline.
             builder.child_network = child_network.clone();
             builder.credentials = credentials.clone();
+            builder.callback_namespace = callback_namespace.clone();
             builder.network_per_request = true;
             builder.transition::<L, state::Has>().build()
         }))
@@ -3417,6 +3459,16 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
     )]
     pub fn build(mut self) -> Result<Sandbox, Error> {
         check_duplicate_callback(self.duplicate_callback.take())?;
+        if let Some(ns) = &self.callback_namespace {
+            crate::callback::NamespacedCallback::check_namespace(ns)?;
+            self.callbacks = std::mem::take(&mut self.callbacks)
+                .into_values()
+                .map(|cb| {
+                    let cb = crate::callback::NamespacedCallback::new(ns, cb)?;
+                    Ok((cb.name().to_string(), Arc::new(cb) as Arc<dyn Callback>))
+                })
+                .collect::<Result<_, Error>>()?;
+        }
         self.check_language()?;
         let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.preamble)?;
         crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
@@ -3598,6 +3650,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         Ok(Sandbox {
             executor: Arc::new(executor),
             callbacks: Arc::clone(&built.callbacks),
+            callback_namespace: self.callback_namespace,
             preamble: built.preamble.clone(),
             library_preamble: self.preamble,
             type_stubs: self.type_stubs,
