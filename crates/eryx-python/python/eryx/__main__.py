@@ -47,6 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
               eryx --timeout 5000 script.py     set execution timeout
               eryx --net -c 'import requests'   allow any public host
               eryx --allow-host api.x.com ...   allow only api.x.com
+              eryx -s numpy.cwasm script.py     run in a custom precompiled runtime
               eryx serve                        start MCP server
               eryx serve --mcp                  MCP server with inner tools
               eryx factory upgrade OLD NEW      rebuild a saved factory
@@ -72,6 +73,16 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="Python file to execute (use '-' for stdin)",
+    )
+
+    parser.add_argument(
+        "-s",
+        "--precompiled",
+        metavar="PATH",
+        default=None,
+        help="run in the precompiled Python runtime (.cwasm) at PATH, e.g. one "
+        "built by eryx-precompile with packages baked in, instead of the built-in one; "
+        "only use files you trust, a precompiled runtime is native code",
     )
 
     add_sandbox_args(parser)
@@ -104,7 +115,7 @@ def _write_stderr(chunk: bytes) -> None:
 def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Execute code in a stateless Sandbox and print the result."""
     net = make_net_config(args)
-    kwargs: dict = {"resource_limits": make_resource_limits(args)}
+    kwargs: dict = {"resource_limits": make_resource_limits(args), "runtime_path": args.precompiled}
     if net is not None:
         kwargs["network"] = net
     if args.volume:
@@ -116,9 +127,8 @@ def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = 
     kwargs["on_stdout"] = _write_stdout
     kwargs["on_stderr"] = _write_stderr
 
-    sandbox = eryx.Sandbox(**kwargs)
     try:
-        sandbox.execute(code)
+        eryx.Sandbox(**kwargs).execute(code)
     except eryx.TimeoutError as exc:
         print(f"eryx: timeout: {exc}", file=sys.stderr)
         return 1
@@ -137,7 +147,7 @@ def _run_once(code: str, args: argparse.Namespace, mcp_manager: object | None = 
 
 def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     """Run an interactive REPL using Session for persistent state."""
-    kwargs: dict = {"resource_limits": make_resource_limits(args)}
+    kwargs: dict = {"resource_limits": make_resource_limits(args), "runtime_path": args.precompiled}
     net = make_net_config(args)
     if net is not None:
         kwargs["network"] = net
@@ -150,7 +160,11 @@ def _repl(args: argparse.Namespace, mcp_manager: object | None = None) -> int:
     kwargs["on_stdout"] = _write_stdout
     kwargs["on_stderr"] = _write_stderr
 
-    session = eryx.Session(**kwargs)
+    try:
+        session = eryx.Session(**kwargs)
+    except eryx.EryxError as exc:
+        print(f"eryx: {exc}", file=sys.stderr)
+        return 1
 
     print(f"Eryx {eryx.__version__} (sandbox REPL)")
     print('Type "exit()" or Ctrl-D to quit.')
