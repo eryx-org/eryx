@@ -150,12 +150,21 @@ message ExecuteRequest {
   // content hash, so repacking an environment invalidates its journals.
   string environment = 18;
 
+  // Install the callbacks under this namespace rather than as top-level
+  // names: with "tools", the callback get_time is `await tools.get_time()` in
+  // Python and JavaScript and the command `tools.get_time` in the shell.
+  // CallbackRequest.name stays the declared name, without the namespace.
+  // Empty (the default) installs them as top-level names. A namespace that
+  // isn't an identifier ([A-Za-z_][A-Za-z0-9_]*), or that collides with a
+  // name the guest uses itself, is INVALID_ARGUMENT.
+  string callback_namespace = 19;
+
   // Python and JavaScript: data for the script, as a JSON object whose
   // top-level keys become globals before the code runs, e.g.
   // {"inputs": [1, 2], "args": {"verbose": true}}. Each key must match
   // [A-Za-z_][A-Za-z0-9_]* and must not be a keyword, a name the guest
   // already has (a Python builtin or dunder, a JavaScript global) or a
-  // callback's name.
+  // callback's name (callback_namespace, when that's set).
   // The code is passed through untouched, so `from __future__` imports and
   // leading JavaScript `import`s still work and line numbers don't shift.
   // Not scrubbed from output: put secrets in `secrets`, not here. With

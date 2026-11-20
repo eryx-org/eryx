@@ -1309,3 +1309,18 @@ def test_callback_named_like_a_builtin_is_refused():
     invoke(), so building the sandbox fails, naming it (#962)."""
     with pytest.raises(eryx.InitializationError, match="collides with the Python builtin 'print'"):
         eryx.Sandbox(callbacks=[{"name": "print", "fn": lambda: "called", "description": ""}])
+
+
+def test_callback_namespace():
+    """With callback_namespace, callbacks are reached under it, and only the
+    namespace has to stay clear of the builtins (#964)."""
+    callbacks = [{"name": "print", "fn": lambda: "called", "description": ""}]
+    sandbox = eryx.Sandbox(callbacks=callbacks, callback_namespace="tools")
+    result = sandbox.execute("print(await tools.print())")
+    assert result.stdout == b"called\n"
+
+    session = eryx.Session(callbacks=callbacks, callback_namespace="tools")
+    assert session.execute("print(await tools.print())").stdout == b"called\n"
+
+    with pytest.raises(eryx.InitializationError, match="invalid callback namespace"):
+        eryx.Sandbox(callback_namespace="to.ols")

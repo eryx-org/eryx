@@ -1215,6 +1215,74 @@ print(f"got: {result}")
     assert!(got_result, "never received ExecuteResult");
 }
 
+/// With `callback_namespace`, the script calls `tools.echo` and the client
+/// is asked for `echo`, its declared name (#964).
+#[tokio::test]
+async fn execute_with_callback_namespace() {
+    let channel = start_server().await;
+    let mut client = EryxClient::new(channel.clone());
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print(await tools.echo(message='hi'))\nprint('echo' in globals())"
+                    .to_string(),
+                callbacks: vec![echo_declaration()],
+                callback_namespace: "tools".to_string(),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stdout = None;
+    while let Some(msg) = stream.message().await.unwrap() {
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "echo");
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        eryx_server::proto::eryx::v1::CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: 0,
+                            result: Some(callback_response::Result::JsonResult(req.arguments_json)),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert!(result.success, "execution failed: {}", result.error);
+                stdout = Some(result.stdout);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        stdout.expect("never received ExecuteResult"),
+        b"{'message': 'hi'}\nFalse\n"
+    );
+
+    let status = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "pass".to_string(),
+            callbacks: vec![echo_declaration()],
+            callback_namespace: "to.ols".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
+}
+
 #[tokio::test]
 async fn execute_with_callback_error() {
     let channel = start_server().await;

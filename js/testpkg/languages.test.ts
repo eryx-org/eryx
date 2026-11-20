@@ -14,6 +14,14 @@ result = { ok: true };
     expect(result.result).toEqual({ ok: true });
   });
 
+  it("calls callbacks under a namespace (#964)", async () => {
+    using sandbox = new Sandbox({ language: "javascript", callbacks, callbackNamespace: "tools" });
+    const result = await sandbox.execute(
+      "console.log(await tools.add({ a: 2, b: 3 }), typeof add)",
+    );
+    expect(result.stdout).toBe("5 undefined\n");
+  });
+
   it("keeps state across calls", async () => {
     using sandbox = new Sandbox({ language: "javascript" });
     await sandbox.execute("globalThis.x = 41");
@@ -153,6 +161,19 @@ describe("reserved callback names", () => {
     );
     using free = new Sandbox({ language: "shell", coreutils: false, callbacks: { cat: () => 1 } });
     expect(free).toBeDefined();
+  });
+
+  it("checks the namespace rather than each callback under one (#964)", () => {
+    using ok = new Sandbox({
+      language: "javascript",
+      callbackNamespace: "tools",
+      callbacks: { fetch: () => 1 },
+    });
+    expect(ok).toBeDefined();
+    expect(
+      () => new Sandbox({ language: "javascript", callbackNamespace: "crypto", callbacks: { a: () => 1 } }),
+    ).toThrow("callback 'crypto.a' collides with the JavaScript global 'crypto'");
+    expect(() => new Sandbox({ callbackNamespace: "to.ols" })).toThrow("invalid callbackNamespace");
   });
 
   it("refuses Python builtins", () => {

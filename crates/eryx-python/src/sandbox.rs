@@ -114,6 +114,10 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     callback_namespace: Install the callbacks (and MCP tools) under
+    ///         this name rather than as top-level names: with "tools", a
+    ///         callback `get_time` is `await tools.get_time()` (the command
+    ///         `tools.get_time` in the shell). Must be an identifier.
     ///     commands: For the shell only: external commands by name, each an
     ///         `eryx.Command`. They replace the uutils coreutils tools
     ///         (cat, head, ls, sort, ...) of the same name, which the shell
@@ -169,7 +173,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -190,6 +194,7 @@ impl Sandbox {
         result_variable: Option<String>,
         commands: Option<crate::command::Commands<'_>>,
         child_network: Option<Bound<'_, PyAny>>,
+        callback_namespace: Option<String>,
     ) -> PyResult<Self> {
         let language = parse_language(language)?;
         let child_network = parse_child_network(language, network.is_some(), child_network)?;
@@ -215,6 +220,10 @@ impl Sandbox {
         // Apply network config if provided
         if let Some(net) = network {
             builder = builder.with_network(net.into());
+        }
+
+        if let Some(namespace) = callback_namespace {
+            builder = builder.with_callback_namespace(namespace);
         }
 
         // Apply callbacks if provided

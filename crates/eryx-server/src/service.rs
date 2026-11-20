@@ -610,6 +610,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
         let result_variable = execute_req.result_variable;
+        let callback_namespace = execute_req.callback_namespace;
         let scrub_result = execute_req.scrub_result;
         let globals = execute_req.globals;
 
@@ -706,11 +707,27 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 "invalid result_variable {result_variable:?}: must match [A-Za-z_][A-Za-z0-9_]*"
             )));
         }
-        // Checked before the supporting files are copied in.
+        if !callback_namespace.is_empty() && !is_identifier(&callback_namespace) {
+            return Err(Status::invalid_argument(format!(
+                "invalid callback_namespace {callback_namespace:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            )));
+        }
+        // Checked before the supporting files are copied in. Under a
+        // namespace, the callbacks' root name is the namespace.
+        let callback_names: Vec<String> = declarations
+            .iter()
+            .map(|d| {
+                if callback_namespace.is_empty() {
+                    d.name.clone()
+                } else {
+                    format!("{callback_namespace}.{}", d.name)
+                }
+            })
+            .collect();
         let globals_preamble = eryx::globals_preamble(
             language,
             &globals,
-            declarations.iter().map(|d| d.name.as_str()),
+            callback_names.iter().map(String::as_str),
         )
         .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let vfs_storage = if files.is_empty() {
@@ -793,6 +810,19 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             Arc::clone(&pending),
             inbound_closed.clone(),
         );
+        // The client still sees the declared names: the wrapper strips the
+        // namespace before a call reaches it.
+        let cbs = if callback_namespace.is_empty() {
+            cbs
+        } else {
+            cbs.into_iter()
+                .map(|cb| {
+                    eryx::NamespacedCallback::new(&callback_namespace, Arc::from(cb))
+                        .map(|cb| Box::new(cb) as Box<dyn eryx::Callback>)
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|e| Status::invalid_argument(e.to_string()))?
+        };
 
         // 5. Acquire sandbox from pool and configure for this request.
         let acquire_start = Instant::now();
