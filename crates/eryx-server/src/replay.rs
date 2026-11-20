@@ -48,6 +48,11 @@ type HmacSha256 = Hmac<Sha256>;
 /// fail verification instead of being read under the new one.
 const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
 
+/// [`MAC_DOMAIN`] for a run with an environment, whose name is fed next. A
+/// separate domain rather than an extra field, so journals recorded without
+/// an environment keep the signatures they had before environments.
+const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"eryx-journal-v2-environment";
+
 /// The request context a journal is bound to, besides its entries.
 #[derive(Debug, Clone, Copy)]
 pub struct JournalBinding<'a> {
@@ -58,6 +63,9 @@ pub struct JournalBinding<'a> {
     pub state: Option<&'a [u8]>,
     /// The declared callbacks; their names are bound, in any order.
     pub callbacks: &'a [pb::CallbackDeclaration],
+    /// The environment the run mounted (`ExecuteRequest.environment`), empty
+    /// for none.
+    pub environment: &'a str,
 }
 
 fn now_unix_secs() -> u64 {
@@ -147,7 +155,12 @@ impl JournalSigner {
             mac.update(&(bytes.len() as u64).to_le_bytes());
             mac.update(bytes);
         };
-        feed(MAC_DOMAIN);
+        if binding.environment.is_empty() {
+            feed(MAC_DOMAIN);
+        } else {
+            feed(MAC_DOMAIN_ENVIRONMENT);
+            feed(binding.environment.as_bytes());
+        }
         feed(&journal.expires_at_unix_secs.to_le_bytes());
         feed(binding.code.as_bytes());
         match binding.state {
@@ -301,6 +314,7 @@ mod tests {
             code,
             state: None,
             callbacks: &[],
+            environment: "",
         }
     }
 
@@ -387,6 +401,21 @@ mod tests {
         assert!(signer.verify(&journal, with(&ba)), "order must not matter");
         assert!(!signer.verify(&journal, with(&ac)));
         assert!(!signer.verify(&journal, with(&ab[..1])));
+    }
+
+    #[test]
+    fn journal_is_bound_to_environment() {
+        let with = |environment| JournalBinding {
+            environment,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with("tools"));
+        assert!(signer.verify(&journal, with("tools")));
+        assert!(!signer.verify(&journal, with("other")));
+        assert!(!signer.verify(&journal, with("")));
+        let journal = signed(&signer, with(""));
+        assert!(!signer.verify(&journal, with("tools")));
     }
 
     #[test]

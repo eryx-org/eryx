@@ -41,6 +41,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--metrics-addr` | `ERYX_METRICS_ADDR` | `0.0.0.0:9090` | Address of the Prometheus `/metrics` endpoint. |
 | `--runtime-cwasm` | `ERYX_RUNTIME_CWASM` | *(embedded)* | Path to a [pre-compiled runtime](./precompile.md) (e.g. with numpy/polars baked in). |
 | `--stdlib` | `ERYX_STDLIB` | *(embedded)* | Python stdlib directory; only used with `--runtime-cwasm`. |
+| `--environments` | `ERYX_ENVIRONMENTS` | *(none)* | Directory of [environments](#environments), one per subdirectory, that requests mount by name. |
 | `--journal-signing-key` | `ERYX_JOURNAL_SIGNING_KEY` | *(random)* | Hex-encoded 32-byte HMAC key for signing replay journals. Prefer the env var, which keeps the key out of the process list. See [Journal signing](#journal-signing-and-the-trust-boundary). |
 | `--journal-ttl-secs` | `ERYX_JOURNAL_TTL_SECS` | `604800` (7 days) | How long a signed journal can be replayed. |
 | `--max-execution-timeout-ms` | `ERYX_MAX_EXECUTION_TIMEOUT_MS` | `300000` | Ceiling on `resource_limits.execution_timeout_ms`. |
@@ -97,6 +98,20 @@ A request with `language = LANGUAGE_SHELL` runs a shell script against the serve
 - **Limits:** `resource_limits.max_child_host_bytes` bounds their arguments and environments, under `--max-child-host-bytes`, and `resource_limits.max_child_memory_bytes` the memory they hold together, under `--max-child-memory-bytes`.
 - **Results:** `ExecuteResult.exit_code` is the script's exit status. Trace events report each command as `process_start` and `process_end`, with `pid` and `exit_code`.
 - **Sessions:** `persist_state` and `state_snapshot` carry the shell's variables and functions across requests, as for the other guests.
+
+### Environments
+
+`--environments <dir>` (`ERYX_ENVIRONMENTS`) serves the [environments](./environments.md) in `dir`, one per subdirectory, each packed with `eryx-precompile env pack`. A request mounts one read-only by its manifest name, in `ExecuteRequest.environment`, and imports its packages.
+
+```sh
+eryx-precompile env pack ./tools --name tools --out envs/tools
+eryx-server --environments envs
+```
+
+- **At startup:** each environment is loaded and its content hash checked. One that fails to load, two with the same name, or one for a language not in `--languages` stops the server.
+- **Requests:** an empty `environment` mounts none. A name the server doesn't have, or an environment for another language than the request's, is `INVALID_ARGUMENT`.
+- **Pools:** each environment gets its own sandbox pool, sized by the pool flags like a language's and created on its first request. The pool metrics have an `environment` label, empty for the languages' own pools.
+- **Replay:** a callback journal is bound to the environment it was recorded under.
 
 ### Request limits
 
@@ -160,6 +175,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |
 | `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. The shell's `grep` builtin and its nested `sh`/`bash` count as commands; other builtins and callbacks aren't restricted. Setting it for another language is `INVALID_ARGUMENT`. |
+| `environment` | The name of one of the server's `--environments` to mount (empty: none). It must be for the request's `language`. |
 | `commands` | Shell only: per-command options for this request, by the server's command names (`CommandOptions`). `network` gives that command's children `MODE_NONE`, `MODE_INHERIT` (the request's `child_network`) or `MODE_NARROW` (only what both `narrow` and the request's allow, counted against both's limits); `no_tunnels` and `no_spawn` turn off what the server's `--shell-command-tunnels` and `--shell-command-spawn` grant. A command spawned by another gets its own options, not its caller's, so pair a `MODE_NONE` or `MODE_NARROW` network with `no_spawn` to stop it reaching a command with more network. Options can only take away: a name the server doesn't have, network for a command when `child_network` gives children none, or `commands` on another language is `INVALID_ARGUMENT`. |
 
 ## Reading the result
@@ -244,7 +260,7 @@ When a callback suspends, the server **halts the guest immediately** (no further
 
 Replayed journal entries are returned to Python **verbatim** — the server does not re-execute the callback to validate them. A journal is therefore a **trusted input**: a crafted journal could inject arbitrary values into a script. Because the server hands a recorded journal back to the client (who echoes it on the next run), it must defend against tampering when that journal round-trips through storage or an intermediary.
 
-The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state and callback set that produced it. On an incoming replay request the server:
+The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, the `environment` (when one is set), and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state, callback set and environment that produced it. On an incoming replay request the server:
 
 - **Verifies** the signature against the request's `code`, `state_snapshot` and callback names before matching, and checks the journal has not expired.
 - **Rejects** an unsigned non-empty, mis-signed, expired, or mismatched journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.

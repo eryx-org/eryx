@@ -376,6 +376,9 @@ impl std::fmt::Debug for LanguagePool {
 #[derive(Debug)]
 pub struct EryxService {
     pools: HashMap<eryx::Language, LanguagePool>,
+    /// The pools of the environments requests can name, by name, with each
+    /// environment's language.
+    environments: HashMap<String, (eryx::Language, LanguagePool)>,
     journal_signer: crate::replay::JournalSigner,
     max_message_size: usize,
     limits: ServerLimits,
@@ -397,6 +400,7 @@ impl EryxService {
     pub fn with_signer(pool: Arc<SandboxPool>, signer: crate::replay::JournalSigner) -> Self {
         Self {
             pools: HashMap::from([(eryx::Language::Python, LanguagePool::Ready(pool))]),
+            environments: HashMap::new(),
             journal_signer: signer,
             max_message_size: MAX_MESSAGE_SIZE,
             limits: ServerLimits::default(),
@@ -422,6 +426,31 @@ impl EryxService {
                 pool: tokio::sync::OnceCell::new(),
                 create,
             },
+        );
+        self
+    }
+
+    /// Serve the environment `name` (`ExecuteRequest.environment`), for
+    /// `language`, from a pool that `create` makes on its first request. The
+    /// pool's sandboxes should mount the environment
+    /// (`SandboxBuilder::with_environment`); requests naming it for another
+    /// language are refused.
+    #[must_use]
+    pub fn with_environment_pool(
+        mut self,
+        name: impl Into<String>,
+        language: eryx::Language,
+        create: PoolFactory,
+    ) -> Self {
+        self.environments.insert(
+            name.into(),
+            (
+                language,
+                LanguagePool::Lazy {
+                    pool: tokio::sync::OnceCell::new(),
+                    create,
+                },
+            ),
         );
         self
     }
@@ -526,15 +555,34 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 )));
             }
         };
-        let pool = self
-            .pools
-            .get(&language)
-            .ok_or_else(|| Status::invalid_argument(unserved_language(language)))?
-            .get()
-            .await
-            .map_err(|e| {
-                Status::unavailable(format!("failed to create the {language} pool: {e}"))
-            })?;
+        let environment = execute_req.environment;
+        let pool = if environment.is_empty() {
+            self.pools
+                .get(&language)
+                .ok_or_else(|| Status::invalid_argument(unserved_language(language)))?
+                .get()
+                .await
+                .map_err(|e| {
+                    Status::unavailable(format!("failed to create the {language} pool: {e}"))
+                })?
+        } else {
+            let (environment_language, pool) =
+                self.environments.get(&environment).ok_or_else(|| {
+                    Status::invalid_argument(format!(
+                        "this server has no environment {environment:?} (see --environments)"
+                    ))
+                })?;
+            if *environment_language != language {
+                return Err(Status::invalid_argument(format!(
+                    "environment {environment:?} is for {environment_language}, not {language}"
+                )));
+            }
+            pool.get().await.map_err(|e| {
+                Status::unavailable(format!(
+                    "failed to create the pool for environment {environment:?}: {e}"
+                ))
+            })?
+        };
         let code = execute_req.code;
         let declarations = execute_req.callbacks;
         let enable_tracing = execute_req.enable_tracing;
@@ -548,6 +596,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             code: &code,
             state: persist_state.then_some(state_snapshot.as_slice()),
             callbacks: &declarations,
+            environment: &environment,
         };
         // A rejected replay must not become a fresh run: completed callbacks
         // and direct script effects may already have happened.
@@ -857,6 +906,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     journal_signer: journal_signer.clone(),
                     journal_ttl,
                     declarations: &declarations,
+                    environment: &environment,
                     max_output_bytes,
                     allowed_commands,
                     command_options,
@@ -1105,6 +1155,9 @@ struct SessionParams<'a> {
     journal_ttl: Duration,
     /// The request's callback declarations, which outgoing journals are bound to.
     declarations: &'a [crate::proto::eryx::v1::CallbackDeclaration],
+    /// The environment the request named (empty for none), which outgoing
+    /// journals are also bound to.
+    environment: &'a str,
     /// Cap on stdout plus stderr bytes kept and streamed.
     max_output_bytes: usize,
     /// The commands the execution may spawn (shell); `None` allows all.
@@ -1447,6 +1500,7 @@ async fn execute_with_session(
                 code: params.code,
                 state: params.state,
                 callbacks: params.declarations,
+                environment: params.environment,
             };
             params
                 .journal_signer

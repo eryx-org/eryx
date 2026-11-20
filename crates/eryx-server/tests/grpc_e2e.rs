@@ -255,6 +255,125 @@ async fn execute_selects_the_language_pool() {
     assert!(status.message().contains("shell"), "{status:?}");
 }
 
+/// The fixture packages of the eryx crate's JavaScript environment tests
+/// (`crates/eryx/tests/fixtures/js-environment`), as an environment named
+/// `fixtures` in `dir`.
+#[cfg(feature = "javascript")]
+fn fixture_environment(dir: &std::path::Path) -> eryx::environment::Environment {
+    use eryx::environment::{Builder, Environment, Inputs, Language, Manifest};
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../eryx/tests/fixtures/js-environment");
+    let modules = dir.join("modules");
+    std::fs::create_dir_all(&modules).unwrap();
+    for entry in std::fs::read_dir(fixtures.join("modules")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), modules.join(entry.file_name())).unwrap();
+    }
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("bundle.json")).unwrap()).unwrap();
+    let exports = report["entries"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, file)| (name.clone(), format!("modules/{}", file.as_str().unwrap())))
+        .collect();
+    Manifest::new(
+        "fixtures",
+        Language::JavaScript,
+        Inputs::new(vec!["zod@4.6.7".into()]),
+        Builder::new("test"),
+        dir,
+        "modules",
+        exports,
+    )
+    .unwrap()
+    .write(dir)
+    .unwrap();
+    Environment::load(dir).unwrap()
+}
+
+/// A request names an environment to mount; its pool is separate from the
+/// language's, and a name the server doesn't have, or one for another
+/// language, is refused.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn execute_mounts_the_requested_environment() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let dir = tempfile::tempdir().unwrap();
+    let environment = fixture_environment(dir.path());
+    let create =
+        |environment: Option<eryx::environment::Environment>| -> eryx_server::service::PoolFactory {
+            Arc::new(move || {
+                let environment = environment.clone();
+                Box::pin(async move {
+                    let mut builder = Sandbox::embedded().javascript();
+                    if let Some(environment) = &environment {
+                        builder = builder.with_environment(environment);
+                    }
+                    let config = PoolConfig::default().with_max_size(2);
+                    Ok(Arc::new(SandboxPool::new(builder, config).await?))
+                })
+            })
+        };
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool)
+            .with_lazy_pool(eryx::Language::JavaScript, create(None))
+            .with_environment_pool(
+                "fixtures",
+                eryx::Language::JavaScript,
+                create(Some(environment)),
+            )
+    })
+    .await;
+    let request = |code: &str, language: Language, environment: &str| ExecuteRequest {
+        code: code.to_string(),
+        language: language as i32,
+        environment: environment.to_string(),
+        ..Default::default()
+    };
+    let import = r#"import { z } from "zod";
+console.log(z.string().parse("ok"));"#;
+
+    let result = execute_request(
+        channel.clone(),
+        request(import, Language::Javascript, "fixtures"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.success,
+        "execution failed: {} {}",
+        result.error,
+        result.stderr.to_lossy()
+    );
+    assert_eq!(result.stdout, b"ok\n");
+
+    // Without the environment, there's nothing to import.
+    let result = execute_request(channel.clone(), request(import, Language::Javascript, ""))
+        .await
+        .unwrap();
+    assert!(!result.success);
+
+    let status = execute_request(channel.clone(), request("1", Language::Javascript, "nope"))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("no environment \"nope\""),
+        "{status:?}"
+    );
+
+    let status = execute_request(channel, request("print(1)", Language::Python, "fixtures"))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(
+        status.message().contains("is for javascript, not python"),
+        "{status:?}"
+    );
+}
+
 /// A JavaScript session's state survives a snapshot round trip through the
 /// server, and the variables it couldn't keep are named.
 #[cfg(feature = "javascript")]
@@ -2356,6 +2475,7 @@ async fn rejects_invalid_replay_before_execution() {
         code,
         state: None,
         callbacks: &[],
+        environment: "",
     };
     let echo = [echo_declaration()];
     for scenario in [
