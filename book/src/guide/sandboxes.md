@@ -234,8 +234,8 @@ A shell sandbox can run WASI command programs as external commands: WASI
 1 command modules (`wasm32-wasip1`, or any `wasi_snapshot_preview1` CLI),
 which eryx adapts into 0.2 components when it loads them, with the adapter
 of the wasmtime it links. A preview 1 command's exit status reaches the
-shell only as success (0) or failure (1). Register them by name on a shell
-builder:
+shell only as success (0) or failure (1). [Building Commands](./building-commands.md)
+walks through building one. Register them by name on a shell builder:
 
 ```rust,ignore
 use eryx::{Command, Sandbox};

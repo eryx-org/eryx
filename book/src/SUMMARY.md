@@ -11,6 +11,7 @@
 # User Guide
 
 - [Sandboxes](./guide/sandboxes.md)
+- [Building Commands](./guide/building-commands.md)
 - [Callbacks](./guide/callbacks.md)
 - [Callback Replay & Suspension](./guide/callback-replay.md)
 - [Sessions](./guide/sessions.md)
