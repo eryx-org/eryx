@@ -531,8 +531,11 @@ fn caught(ctx: &Ctx<'_>, error: Error) -> String {
 ///   `import x, { a } from "m"`, `import * as ns from "m"`,
 ///   `import x, * as ns from "m"` and `import "m"`.
 ///
-/// Returns the code unchanged unless it starts (after comments and
-/// whitespace) with imports this understands completely: anything else
+/// A leading `#!` line and directive prologue (`"use strict";`) stay where
+/// they are, before the rewritten imports.
+///
+/// Returns the code unchanged unless it starts (after comments, whitespace
+/// and that header) with imports this understands completely: anything else
 /// (import attributes, string export names, escapes in the specifier,
 /// non-ASCII names) is left for QuickJS to report as a syntax error, rather
 /// than rewritten wrongly. Also returns what the imports bind, in order.
@@ -540,6 +543,7 @@ pub(crate) fn rewrite_imports(code: &str) -> (std::borrow::Cow<'_, str>, Vec<Imp
     let mut out = String::new();
     let mut records = Vec::new();
     let mut scanner = Scanner { code, pos: 0 };
+    scanner.skip_header();
     let mut copied = 0;
     loop {
         scanner.skip_trivia();
@@ -590,6 +594,59 @@ impl<'a> Scanner<'a> {
                     None => return,
                 }
             } else {
+                return;
+            }
+        }
+    }
+
+    /// Skip a `#!` line and a directive prologue: string-literal statements
+    /// each ended by `;` or the end of the line. Stops before anything else,
+    /// such as `"a" + b`.
+    fn skip_header(&mut self) {
+        if self.rest().starts_with("#!") {
+            // Up to a line terminator, as QuickJS's `skip_shebang` reads it.
+            let rest = self.rest();
+            self.pos += rest
+                .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                .unwrap_or(rest.len());
+        }
+        loop {
+            self.skip_trivia();
+            let start = self.pos;
+            let rest = self.rest();
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                return;
+            };
+            // The closing quote, past any escapes.
+            let mut escaped = false;
+            let Some(len) = rest[1..].find(|c| {
+                let close = !escaped && c == quote;
+                escaped = !escaped && c == '\\';
+                close
+            }) else {
+                return;
+            };
+            if rest[1..1 + len].contains(['\n', '\r']) {
+                return;
+            }
+            self.pos += 1 + len + 1;
+            self.skip_horizontal();
+            // A block comment that ends on the same line.
+            while let Some(after) = self.rest().strip_prefix("/*") {
+                match after.find("*/") {
+                    Some(end) if !after[..end].contains(['\n', '\r']) => {
+                        self.pos += 2 + end + 2;
+                        self.skip_horizontal();
+                    }
+                    _ => break,
+                }
+            }
+            let rest = self.rest();
+            if rest.starts_with(';') {
+                self.pos += 1;
+            } else if !(rest.is_empty() || rest.starts_with(['\n', '\r']) || rest.starts_with("//"))
+            {
+                self.pos = start;
                 return;
             }
         }
@@ -848,6 +905,40 @@ mod tests {
         // One it can't handle leaves the whole script for QuickJS to report.
         let code = "import a from 'a'\nimport b from 'b' with { type: 'json' }\n";
         assert_eq!(rewrite(code), code);
+    }
+
+    #[test]
+    fn keeps_a_hashbang_and_directives_before_the_imports() {
+        let import = r#"__eryx_loading(); var x = __eryx_import(await import("m"), ["default"], "m").default; __eryx_bound({x});"#;
+        for header in [
+            "#!/usr/bin/env node\n",
+            "\"use strict\";\n",
+            "'use strict'\n",
+            "#!/usr/bin/env node\n// why\n'use strict'; \"other \\\" directive\" // x\n",
+            "#!/usr/bin/env node\r\n\"use strict\"\r\n",
+            "#!/usr/bin/env node\r'use strict' /* why */ /* not */\n",
+        ] {
+            let code = format!("{header}import x from \"m\"\nconsole.log(x)\n");
+            assert_eq!(
+                rewrite(&code),
+                format!("{header}{import}\nconsole.log(x)\n"),
+                "{header}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_header_alone_or_a_non_directive_string_is_left_alone() {
+        for code in [
+            "\"use strict\";\nconsole.log(1)\n",
+            "#!/usr/bin/env node\nconsole.log(1)\n",
+            "\"a\" + b;\nimport x from \"m\"\n",
+            "\"a\".length\nimport x from \"m\"\n",
+            "\"a\" /* a\n */ + b\nimport x from \"m\"\n",
+            "#!/usr/bin/env node",
+        ] {
+            assert_eq!(rewrite(code), code, "{code}");
+        }
     }
 
     #[test]

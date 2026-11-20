@@ -1185,11 +1185,13 @@ node s.js a b
 ./s.js c
 printf 'module.exports = 6\n' > six.js
 node -e 'console.log(require("./six") * 7)'
+printf '%s\n' '#!/usr/bin/env node' '"use strict"' 'import path from "node:path"' 'console.log(path.join("d", "e"))' > i.js
+./i.js
 "#,
     )
     .await;
     assert_eq!(
-        stdout, "[\"a\",\"b\"] /tmp/s.js\n[\"c\"] /tmp/s.js\n42\n",
+        stdout, "[\"a\",\"b\"] /tmp/s.js\n[\"c\"] /tmp/s.js\n42\nd/e\n",
         "{stderr}"
     );
 }
