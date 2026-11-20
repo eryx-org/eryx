@@ -499,7 +499,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     and paths allow, whatever the script asks: scope it as narrowly as you
     can. Credentials are Rust-only for now.
 - **Limits:** children count against the execution's `max_fuel` as they
-  run (each may burn at most 10 billion instructions of it), and stop at its
+  run (a child may burn all the fuel the execution has left, so with no
+  `max_fuel` only the timeout bounds it), and stop at its
   `execution_timeout` and cancellation, even mid-computation. They're
   charged once per 10 ms epoch tick, so together they can overshoot
   `max_fuel` by at most one tick of work per running child (at most 64).

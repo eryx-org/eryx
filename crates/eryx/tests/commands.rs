@@ -416,8 +416,8 @@ async fn children_burn_the_parents_fuel() {
     );
 }
 
-/// A CPU-bound child stops at the parent's timeout, not when its own fuel
-/// runs out (seconds later).
+/// A CPU-bound child of a parent with no fuel limit stops at the parent's
+/// timeout.
 #[tokio::test]
 async fn a_spinning_child_stops_at_the_parents_timeout() {
     let sandbox = shell()
@@ -435,6 +435,18 @@ async fn a_spinning_child_stops_at_the_parents_timeout() {
         "{:?}",
         start.elapsed()
     );
+}
+
+/// A child of a parent with no fuel limit may burn as much as its timeout
+/// allows: it once had a lifetime cap of 1e10 fuel (under a second of CPU),
+/// past which it died as `spawn-failed` (#1155).
+#[tokio::test]
+async fn a_busy_child_of_an_unlimited_parent_runs_to_completion() {
+    let sandbox = shell().with_command("tc", test_cmd()).build().unwrap();
+    let out = sandbox.execute("tc busy 150 && echo done").await.unwrap();
+    assert_eq!(out.stdout_utf8().unwrap(), "done\n");
+    let fuel = out.stats.fuel_consumed.unwrap();
+    assert!(fuel > 20_000_000_000, "{fuel}");
 }
 
 /// A running child's argv and env count against `max_child_host_bytes` for
