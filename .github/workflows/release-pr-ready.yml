@@ -1,0 +1,51 @@
+# Start the full CI on the release PR when it gets the `ready-to-release`
+# label (see the note at the top of ci.yml).
+#
+# CI, js and Release Dry Run don't trigger on `labeled` themselves: every
+# label change on every PR would start a run that cancels the real one, and
+# its skipped jobs would replace the real results for the same commit. So
+# this pushes an empty commit to the release PR's branch instead, with the
+# App token so the push starts those workflows, and they run in full because
+# the PR now has the label. release-plz drops the commit the next time it
+# rebuilds the branch, and the label keeps later runs full.
+
+name: Release PR ready
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  run-full-ci:
+    name: Run the full CI
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.label.name == 'ready-to-release'
+      && startsWith(github.head_ref, 'release-plz-')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ vars.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Checkout the release PR's branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: true
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Push an empty commit
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          git -c user.name="eryx-release-plz[bot]" -c user.email="eryx-release-plz[bot]@users.noreply.github.com" \
+            commit --allow-empty -m "chore: run the full CI for the release"
+          git push origin "HEAD:refs/heads/$BRANCH"

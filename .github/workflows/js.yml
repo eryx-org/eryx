@@ -65,10 +65,13 @@ jobs:
     name: JavaScript bindings
     runs-on: ubuntu-latest
     needs: changes
+    # The release PR skips it until it has the ready-to-release label (see ci.yml).
     if: >-
       github.event_name == 'push'
       || (github.base_ref == 'multi-guest' && needs.changes.outputs.js-dir == 'true')
-      || (github.base_ref != 'multi-guest' && needs.changes.outputs.js == 'true')
+      || (github.base_ref != 'multi-guest' && needs.changes.outputs.js == 'true'
+      && !(startsWith(github.head_ref, 'release-plz-')
+      && !contains(github.event.pull_request.labels.*.name, 'ready-to-release')))
     steps:
       - name: Free disk space
         run: |
