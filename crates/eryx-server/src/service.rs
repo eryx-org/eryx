@@ -1875,6 +1875,7 @@ fn trace_event(
         pid: number("pid")
             .and_then(|pid| u32::try_from(pid).ok())
             .unwrap_or(0),
+        ppid: number("ppid").and_then(|ppid| u32::try_from(ppid).ok()),
         exit_code: map
             .get("exit_code")
             .and_then(serde_json::Value::as_i64)
@@ -1954,6 +1955,12 @@ mod tests {
             (killed.exit_code, killed.message.as_str()),
             (None, "killed")
         );
+        let nested = event(serde_json::json!({
+            "type": "process_start", "name": "cat", "pid": 5, "ppid": 4,
+        }));
+        assert_eq!((nested.pid, nested.ppid), (5, Some(4)));
+        let top = event(serde_json::json!({"type": "process_start", "name": "ls", "pid": 1}));
+        assert_eq!(top.ppid, None);
     }
 
     #[test]

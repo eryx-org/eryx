@@ -693,6 +693,11 @@ message TraceEvent {
   // A child's exit code ("process_end" events); unset if it failed instead
   // of exiting.
   optional int32 exit_code = 9;
+
+  // The pid of the child that spawned this one ("process_start" events of
+  // nested children, spawned through eryx:process run, pipe or spawn);
+  // unset for a child of the guest itself.
+  optional uint32 ppid = 10;
 }
 
 // Execution statistics.

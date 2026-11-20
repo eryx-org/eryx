@@ -2170,6 +2170,51 @@ async fn a_session_reports_a_child_its_timeout_killed() {
     );
 }
 
+/// A nested child's `process_start` carries its caller's pid as `ppid`,
+/// through `run`, `pipe` and a nested shell's `spawn`; the shell's own
+/// children have none.
+#[tokio::test]
+async fn nested_children_report_their_parents_pid() {
+    let sandbox = shell()
+        .with_command("tc", spawning_cmd())
+        .with_trace_collection(true)
+        .build()
+        .unwrap();
+    let out = sandbox
+        .execute(
+            "tc spawn tc spawn tc exit 0; tc pipe tc exit 0; \
+             tc spawn sh -c 'tc exit 0'; tc exit 0",
+        )
+        .await
+        .unwrap();
+    let starts: Vec<_> = out
+        .trace
+        .iter()
+        .filter_map(|e| match &e.event {
+            eryx::TraceEventKind::ProcessStart {
+                name, pid, ppid, ..
+            } => Some((name.as_str(), *pid, *ppid)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            ("tc", 1, None),
+            ("tc", 2, Some(1)),
+            ("tc", 3, Some(2)),
+            ("tc", 4, None),
+            ("tc", 5, Some(4)),
+            ("tc", 6, None),
+            ("sh", 7, Some(6)),
+            ("tc", 8, Some(7)),
+            ("tc", 9, None),
+        ],
+        "{:?}",
+        out.trace
+    );
+}
+
 /// Nested children (see `Command::allow_spawn`) report their process events
 /// too, numbered in the same execution, and are reported killed with their
 /// caller when the timeout stops them.

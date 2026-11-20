@@ -1278,6 +1278,9 @@ pub(crate) struct Spawner {
     /// Where its children's process events go, for the shell's `wait` to
     /// report: shared by every descendant of one of the shell's children.
     traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
+    /// The [`NestedTrace`] id of the process it spawns for, as its
+    /// children's parent: `None` for the shell's child (or untraced).
+    parent: Option<u64>,
     /// Where the process it spawns for is told why a command was refused.
     notices: Notices,
     /// When its execution times out, for a guest child's `time-left`.
@@ -1299,6 +1302,8 @@ struct NestedTraces {
 enum NestedEvent {
     Start {
         id: u64,
+        /// Its caller's id; `None` for the shell's child.
+        parent: Option<u64>,
         argv: Vec<String>,
         at: std::time::Instant,
     },
@@ -1329,7 +1334,10 @@ struct NestedTrace {
 }
 
 impl NestedTrace {
-    fn start(traces: Arc<std::sync::Mutex<NestedTraces>>, argv: Vec<String>) -> Self {
+    /// Start `run`'s trace, if `spawner` (its caller's) traces, and make it
+    /// the parent of the children `run` spawns.
+    fn start(spawner: &Spawner, run: &mut ChildRun) -> Option<Self> {
+        let traces = spawner.traces.clone()?;
         let id = {
             let mut queue = traces
                 .lock()
@@ -1338,12 +1346,25 @@ impl NestedTrace {
             queue.next
         };
         let at = std::time::Instant::now();
-        NestedTraces::push(&traces, NestedEvent::Start { id, argv, at });
-        Self {
+        let parent = spawner.parent;
+        let argv = run.argv.clone();
+        NestedTraces::push(
+            &traces,
+            NestedEvent::Start {
+                id,
+                parent,
+                argv,
+                at,
+            },
+        );
+        if let Some(spawner) = &mut run.spawner {
+            spawner.parent = Some(id);
+        }
+        Some(Self {
             traces,
             id,
             ended: false,
-        }
+        })
     }
 
     fn end(mut self, outcome: Result<i32, String>) {
@@ -1538,6 +1559,8 @@ impl Spawner {
                 within: scope,
                 depth: self.depth + 1,
                 traces: Some(self.traces.clone().unwrap_or_default()),
+                // Set once its trace starts (`NestedTrace::start`).
+                parent: None,
                 notices: Notices::Child(stderr_tx.clone()),
                 ..self.clone()
             }),
@@ -2646,6 +2669,7 @@ impl ExecutorState {
             within: Some(NetScope::execution()),
             depth: 1,
             traces: None,
+            parent: None,
             notices: self
                 .child_budget
                 .stderr
@@ -2769,7 +2793,7 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         accessor: &Accessor<T, Self>,
         child: Resource<ChildProcess>,
     ) -> Result<i32, ProcessError> {
-        let run = accessor.with(|mut access| {
+        let mut run = accessor.with(|mut access| {
             let fuel = access.as_context_mut().get_fuel().unwrap_or(0);
             access.get().take_child_run(&child, fuel)
         })?;
@@ -2784,24 +2808,22 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
         // A guest run as a command (a nested shell) has no trace of its own:
         // its children's events join its spawner's queue, for the `wait`
         // of the shell's child it descends from to report.
-        let queue = accessor.with(|mut access| {
+        let spawner = accessor.with(|mut access| {
             let nested = access.get().nested.as_ref();
-            nested.and_then(|s| s.traces.clone())
+            nested.filter(|s| s.traces.is_some()).cloned()
         });
-        let (trace, queued, nested) = match queue {
-            Some(queue) => (
-                None,
-                Some(NestedTrace::start(queue, run.argv.clone())),
-                None,
-            ),
+        let (trace, queued, nested) = match spawner {
+            Some(spawner) => (None, NestedTrace::start(&spawner, &mut run), None),
             None => (
-                accessor.with(|mut access| access.get().trace_process_start(&run.argv)),
+                accessor.with(|mut access| access.get().trace_process_start(&run.argv, None)),
                 None,
                 // Its descendants' process events, reported as they come.
                 run.spawner.as_ref().and_then(|s| s.traces.clone()),
             ),
         };
-        let mut reported = HashMap::new();
+        let mut reported: HashMap<u64, crate::wasm::ProcessTrace> = HashMap::new();
+        // The shell's child, the parent of the queue's top-level children.
+        let root_pid = trace.as_ref().map(|trace| trace.pid);
         let mut report_nested = || {
             let Some(nested) = &nested else { return };
             let events = std::mem::take(
@@ -2817,8 +2839,22 @@ impl<T: Send> HostChildWithStore<T> for HasSelf<ExecutorState> {
                 let state = access.get();
                 for event in events {
                     match event {
-                        NestedEvent::Start { id, argv, at } => {
-                            if let Some(trace) = state.trace_process_start_at(&argv, at) {
+                        NestedEvent::Start {
+                            id,
+                            parent,
+                            argv,
+                            at,
+                        } => {
+                            let ppid = match parent {
+                                None => root_pid,
+                                Some(parent) => reported.get(&parent).map(|trace| trace.pid),
+                            };
+                            // A child whose parent's start wasn't sent (the
+                            // trace budget ran out) isn't reported either, so
+                            // it can't pass for the shell's own child.
+                            let Some(ppid) = ppid else { continue };
+                            if let Some(trace) = state.trace_process_start_at(&argv, Some(ppid), at)
+                            {
                                 reported.insert(id, trace);
                             }
                         }
@@ -3041,15 +3077,12 @@ async fn run_nested(
     )?;
     // Its input and output; the run holds its argv and env.
     let mut held = Held {
-        budget: spawner.budget,
+        budget: spawner.budget.clone(),
         bytes: 0,
     };
     held.charge(input.len() as u64)?;
     // Only once it can't be refused, so a refused child reports nothing.
-    let trace = spawner
-        .traces
-        .clone()
-        .map(|traces| NestedTrace::start(traces, run.argv.clone()));
+    let trace = NestedTrace::start(&spawner, &mut run);
     run.fuel = store.get_fuel().unwrap_or(0);
     let fuel_used = Arc::clone(&run.fuel_used);
     let mut running = std::pin::pin!(run.run());
