@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Python sandbox powered by WebAssembly"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["eryx-run>=0.3"]
+dependencies = ["eryx-run>=0.4"]
 license = "MIT OR Apache-2.0"
 # eryx's licences (the repo root's) and the third-party notices of everything
 # the wheel ships (scripts/notices.py's `host`), which CI copies here before

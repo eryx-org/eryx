@@ -264,6 +264,11 @@ unlimited = eryx.ResourceLimits.unlimited()
 only_timeout = dataclasses.replace(unlimited, execution_timeout_ms=5000)
 ```
 
+`max_vfs_bytes` (default 64 MiB) and `max_vfs_entries` (default 65,536 files
+and directories) cap the in-memory VFS a session creates for itself; scripts
+that hit either see `OSError` (`ENOSPC`). A `VfsStorage` you pass in keeps its
+own caps.
+
 ### `NetConfig`
 
 Configure network access for sandboxed code. By default, **all network access is disabled**.
@@ -617,8 +622,8 @@ and saves the rebuilt factory to `NEW`, leaving `OLD` alone.
 Factory sessions default to `ResourceLimits()` (30-second execution timeout,
 128 MB memory, 10-second callback timeout, 1000 callback invocations). A
 caller-provided `VfsStorage` retains its own quota (`VfsStorage(max_bytes=...)`,
-64 MiB by default); `max_vfs_bytes` applies to
-storage created internally for the session. Extracted package storage is kept
+64 MiB by default); `max_vfs_bytes` and `max_vfs_entries` (65,536 files and
+directories by default) apply to storage created internally for the session. Extracted package storage is kept
 alive by each session, so imports continue to work after dropping the factory.
 
 ### `Session`

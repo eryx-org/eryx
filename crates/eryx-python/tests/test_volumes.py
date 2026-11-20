@@ -241,6 +241,28 @@ print(f"host={host}, vfs={vfs}")
         result = session.execute('print(open("/mnt/data/auto.txt").read())')
         assert b"auto vfs" in result.stdout
 
+    def test_session_auto_vfs_applies_max_vfs_entries(self, tmp_path):
+        """The auto-created VFS takes its entry cap from the resource limits."""
+        session = eryx.Session(
+            volumes=[(str(tmp_path), "/mnt/data", True)],
+            resource_limits=eryx.ResourceLimits(max_vfs_entries=8),
+        )
+        result = session.execute(
+            """
+import errno
+created = 0
+try:
+    for i in range(100):
+        open(f"/data/f{i}", "w").close()
+        created += 1
+except OSError as e:
+    print(created, errno.errorcode[e.errno])
+"""
+        )
+        created, code = result.stdout.split()
+        assert code == b"ENOSPC"
+        assert int(created) < 8
+
 
 class TestSandboxFactoryVolumes:
     """Test volume mounts with SandboxFactory-created sandboxes."""

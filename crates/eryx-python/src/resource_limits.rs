@@ -13,8 +13,8 @@ use std::time::Duration;
 ///
 /// `None` means pyeryx's default (`eryx::ResourceLimits::default()`: 30s
 /// execution, 10s callbacks, 128 MiB, 1000 callback invocations, fuel off), or
-/// no limit when `unlimited_by_default` is set. `max_vfs_bytes` and `max_open_host_files`
-/// keep their default caps either way, since both bound host resources. The
+/// no limit when `unlimited_by_default` is set. `max_vfs_bytes`, `max_vfs_entries` and
+/// `max_open_host_files` keep their default caps either way, since they bound host resources. The
 /// default value is `ResourceLimits()`.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
@@ -24,6 +24,7 @@ pub struct ResourceLimits {
     pub max_callback_invocations: Option<u32>,
     pub max_fuel: Option<u64>,
     pub max_vfs_bytes: Option<u64>,
+    pub max_vfs_entries: Option<usize>,
     pub max_open_host_files: Option<usize>,
     pub unlimited_by_default: bool,
 }
@@ -46,6 +47,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ResourceLimits {
             max_callback_invocations: obj.getattr("max_callback_invocations")?.extract()?,
             max_fuel: obj.getattr("max_fuel")?.extract()?,
             max_vfs_bytes: obj.getattr("max_vfs_bytes")?.extract()?,
+            max_vfs_entries: obj.getattr("max_vfs_entries")?.extract()?,
             max_open_host_files: obj.getattr("max_open_host_files")?.extract()?,
             unlimited_by_default: obj.getattr("unlimited_by_default")?.extract()?,
         })
@@ -68,6 +70,7 @@ impl From<&ResourceLimits> for eryx::ResourceLimits {
             .or(out.max_callback_invocations);
         out.max_fuel = limits.max_fuel.or(out.max_fuel);
         out.max_vfs_bytes = limits.max_vfs_bytes.or(out.max_vfs_bytes);
+        out.max_vfs_entries = limits.max_vfs_entries.or(out.max_vfs_entries);
         out.max_open_host_files = limits.max_open_host_files.or(out.max_open_host_files);
         out
     }
