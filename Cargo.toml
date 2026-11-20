@@ -89,7 +89,36 @@ wasm-encoder = "0.263"
 wasmparser = "0.263"
 # wasmtime v40+ required for the async component model.
 # 44.0.2 patches GHSA-2r75-cxrj-cmph (WASI path_open TRUNCATE bypasses FilePerms::WRITE).
-wasmtime = { version = "51.0.0", features = ["component-model", "async"] }
+# wasmtime's defaults minus `cache` (its on-disk compilation cache, which eryx
+# doesn't use): from 51 it pulls in `directories` -> `option-ext`, MPL-2.0,
+# a licence about.toml doesn't accept. Recheck this list on wasmtime bumps.
+wasmtime = { version = "51.0.0", default-features = false, features = [
+    "addr2line",
+    "anyhow",
+    "async",
+    "backtrace",
+    "compile-time-builtins",
+    "component-model",
+    "component-model-async",
+    "coredump",
+    "cranelift",
+    "debug",
+    "debug-builtins",
+    "demangle",
+    "gc",
+    "gc-copying",
+    "gc-drc",
+    "gc-null",
+    "parallel-compilation",
+    "pooling-allocator",
+    "profiling",
+    "runtime",
+    "stack-switching",
+    "std",
+    "threads",
+    "wat",
+    "wit-parser",
+] }
 wasmtime-wasi = "51.0.0"
 wasmtime-wasi-io = "51.0.0"
 # Only for `VMOffsets`, to size children's instance metadata (#942). It
