@@ -134,6 +134,9 @@ def test_local_only_arguments_say_what_to_use() -> None:
     limits = eryx.ResourceLimits(max_memory_bytes=1 << 20)
     with pytest.raises(ValueError, match="max_memory_bytes"):
         sandbox(resource_limits=limits).execute("pass")
+    limits = eryx.ResourceLimits(max_vfs_entries=10)
+    with pytest.raises(ValueError, match="max_vfs_entries"):
+        sandbox(resource_limits=limits).execute("pass")
 
 
 def test_a_missing_key_is_explained(monkeypatch: pytest.MonkeyPatch) -> None:
