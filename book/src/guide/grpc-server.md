@@ -108,7 +108,7 @@ eryx-precompile env pack ./tools --name tools --out envs/tools
 eryx-server --environments envs
 ```
 
-- **At startup:** each environment is loaded and its content hash checked. One that fails to load, two with the same name, or one for a language not in `--languages` stops the server.
+- **At startup:** each environment is loaded and its content hash checked. One that fails to load, one with an empty name, two with the same name, or one for a language the server doesn't serve (not in `--languages`, or built without its cargo feature) stops the server. Symlinks to environments are followed, and entries starting with `.` are skipped, so a mounted volume works.
 - **Requests:** an empty `environment` mounts none. A name the server doesn't have, or an environment for another language than the request's, is `INVALID_ARGUMENT`.
 - **Pools:** each environment gets its own sandbox pool, sized by the pool flags like a language's and created on its first request. The pool metrics have an `environment` label, empty for the languages' own pools.
 - **Replay:** a callback journal is bound to the environment it was recorded under.

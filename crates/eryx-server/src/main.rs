@@ -84,8 +84,9 @@ struct Args {
     /// Directory of environments that requests can mount by name
     /// (`ExecuteRequest.environment`): one per subdirectory, each packed with
     /// `eryx-precompile env pack` and named by its manifest. They're loaded
-    /// and checked at startup; one that fails to load, two with the same
-    /// name, or one for a language not in --languages stops the server. Each
+    /// and checked at startup; one that fails to load, has no name, shares
+    /// another's name, or is for a language the server doesn't serve stops
+    /// the server. Symlinks are followed and `.` entries skipped. Each
     /// gets its own sandbox pool, sized by the pool flags and created on its
     /// first request.
     #[arg(long, env = "ERYX_ENVIRONMENTS")]
@@ -561,8 +562,10 @@ impl PythonRuntime {
     }
 }
 
-/// The environments in `dir`, one per subdirectory, refusing two with the
-/// same name or one for a language not in `languages`.
+/// The environments in `dir`, one per subdirectory (or symlink to one, as
+/// Kubernetes volumes have; entries starting with `.` are skipped), refusing
+/// one without a name, two with the same name, or one for a language not in
+/// `languages`, the languages the server serves.
 fn load_environments(
     dir: &std::path::Path,
     languages: &[eryx::Language],
@@ -572,8 +575,15 @@ fn load_environments(
         std::fs::read_dir(dir).map_err(|e| format!("--environments {}: {e}", dir.display()))?
     {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            paths.push(entry.path());
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // Follows symlinks, unlike `entry.file_type()`.
+        if std::fs::metadata(&path)?.is_dir() {
+            paths.push(path);
+        } else {
+            tracing::info!(path = %path.display(), "--environments: skipping a file that isn't a directory");
         }
     }
     paths.sort();
@@ -583,6 +593,13 @@ fn load_environments(
         let environment = eryx::environment::Environment::load(&path)
             .map_err(|e| format!("environment {}: {e}", path.display()))?;
         let name = environment.manifest().name.clone();
+        if name.is_empty() {
+            return Err(format!(
+                "environment {} has no name, so no request could select it",
+                path.display()
+            )
+            .into());
+        }
         if let Some(first) = names.insert(name.clone(), path.clone()) {
             return Err(format!(
                 "environments {} and {} are both named {name:?}",
@@ -594,7 +611,8 @@ fn load_environments(
         let language = environment.language();
         if !languages.contains(&language) {
             return Err(format!(
-                "environment {name:?} ({}) is for {language}, which isn't in --languages",
+                "environment {name:?} ({}) is for {language}, which this server doesn't serve \
+                 (see --languages and the server's cargo features)",
                 path.display()
             )
             .into());
@@ -858,6 +876,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let mut lazy_pools = Vec::new();
+    // The languages this server serves: those in --languages it was built with.
+    let mut served = vec![eryx::Language::Python];
     for &language in &args.languages {
         let built_in = match language {
             eryx::Language::Python => continue,
@@ -869,13 +889,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!(%language, "not serving {language}: built without its cargo feature");
             continue;
         }
+        served.push(language);
         lazy_pools.push((
             language,
             lazy_pool(language, None, &pool_config, &shell, &python),
         ));
     }
     let environment_pools = match &args.environments {
-        Some(dir) => load_environments(dir, &args.languages)?,
+        Some(dir) => load_environments(dir, &served)?,
         None => Vec::new(),
     }
     .into_iter()
@@ -1353,7 +1374,29 @@ mod tests {
 
         // A language the server doesn't serve.
         let err = load_environments(dir.path(), &[eryx::Language::Python]).unwrap_err();
-        assert!(err.to_string().contains("isn't in --languages"), "{err}");
+        assert!(err.to_string().contains("doesn't serve"), "{err}");
+
+        // A symlink to one is followed, and dot-entries are skipped.
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            write_environment(elsewhere.path(), "linked", Language::JavaScript);
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("linked")).unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("..data")).unwrap();
+            let environments = load_environments(dir.path(), &all).unwrap();
+            let names: Vec<_> = environments
+                .iter()
+                .map(|e| e.manifest().name.as_str())
+                .collect();
+            assert_eq!(names, ["tools", "linked"]);
+            std::fs::remove_file(dir.path().join("linked")).unwrap();
+        }
+
+        // One without a name.
+        let unnamed = tempfile::tempdir().unwrap();
+        write_environment(&unnamed.path().join("x"), "", Language::JavaScript);
+        let err = load_environments(unnamed.path(), &all).unwrap_err();
+        assert!(err.to_string().contains("has no name"), "{err}");
 
         // Two with one name.
         write_environment(&dir.path().join("b"), "tools", Language::JavaScript);
