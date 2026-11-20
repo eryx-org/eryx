@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/eryx-org/eryx/compare/eryx-run-python-v0.3.0...eryx-run-python-v0.4.0) (2026-11-20)
+
+
+### Features
+
+* **sdk:** add ResourceLimits.max_vfs_entries ([#1144](https://github.com/eryx-org/eryx/issues/1144)) ([e32e3e2](https://github.com/eryx-org/eryx/commit/e32e3e262fd1759c24c0246415b93be5afe309e9))
+
 ## [0.3.0](https://github.com/eryx-org/eryx/compare/eryx-run-python-v0.2.0...eryx-run-python-v0.3.0) (2026-11-12)
 
 
