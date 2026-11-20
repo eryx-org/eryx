@@ -1073,8 +1073,14 @@ async fn coreutils_see_the_root_and_dev() {
     // Nothing above the mounts can be changed, and outside them is empty.
     let sandbox = shell().build().unwrap();
     for (script, message) in [
-        ("mkdir /etc", "'/etc': Permission denied"),
-        ("mv /tmp /tmp2", "cannot move '/tmp'"),
+        (
+            "mkdir /etc",
+            "cannot create directory '/etc': Permission denied",
+        ),
+        (
+            "mv /tmp /tmp2",
+            "cannot move '/tmp' to '/tmp2': Permission denied",
+        ),
         ("rm /dev/null", "Permission denied"),
         ("touch /new", "Permission denied"),
         ("cat /etc/passwd", "No such file or directory"),
