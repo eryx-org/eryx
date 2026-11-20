@@ -450,11 +450,11 @@ async fn a_busy_child_of_an_unlimited_parent_runs_to_completion() {
 }
 
 /// A child killed between epoch ticks is charged what it burned since its
-/// last one: each `tc work-then-sleep 4` here does its work and sleeps,
-/// likely before a tick publishes it, and `kill` drops it asleep. The limit
-/// is four times what the loop costs with no work in the children, so the
-/// children's work runs it out within a few rounds. Left uncharged, they
-/// would get through about 15 of the 30.
+/// last one. Each round, `tc work` does a fixed amount of work, says so,
+/// and sleeps (a host call, where no tick publishes its count) until `kill`
+/// drops it. The limit is what the loop costs with no work in the children
+/// plus ten rounds of work, so it runs out around round ten. Left uncharged,
+/// the work all but disappears and the loop gets through all 30 rounds.
 #[cfg(feature = "unstable-vfs")]
 #[tokio::test]
 async fn killed_children_are_charged_their_last_tick() {
@@ -470,16 +470,42 @@ async fn killed_children_are_charged_their_last_tick() {
     let mut session = SessionExecutor::new_with_vfs(executor, &[], storage.clone())
         .await
         .unwrap();
-    let script = |work: u32| {
+    let mut fuel = async |script: String| {
+        let out = session.execute(script).run().await.unwrap();
+        out.fuel_consumed.unwrap()
+    };
+    // One round's work, run to completion.
+    let work =
+        fuel("tc work 2 /data/w 0".to_owned()).await - fuel("tc work 0 /data/w 0".to_owned()).await;
+    let script = |millions: u32| {
         format!(
-            "for i in $(seq 1 30); do echo $i > /data/rounds; \
-             tc work-then-sleep {work} & sleep 0.05; kill $!; done"
+            "for i in $(seq 1 30); do echo $i > /data/rounds; rm -f /data/ready; \
+             tc work {millions} /data/ready 60 & \
+             while [ ! -e /data/ready ]; do sleep 0.005; done; kill $!; done"
         )
     };
-    let base = session.execute(script(0)).run().await.unwrap();
-    let limit = base.fuel_consumed.unwrap() * 4;
+    // A kill as the execution's last act is charged to it, not to the
+    // session's next execution.
+    let kill_last = |millions: u32| {
+        format!(
+            "rm -f /data/ready; tc work {millions} /data/ready 60 & \\
+             while [ ! -e /data/ready ]; do sleep 0.005; done; kill $!"
+        )
+    };
+    let idle = fuel("true".to_owned()).await;
+    let without = fuel(kill_last(0)).await;
+    let with = fuel(kill_last(2)).await;
+    // Within the shell's own polling noise.
+    assert!(
+        with >= without + work / 10 * 9,
+        "{with} charged, {without} without the work, {work} of work"
+    );
+    let next = fuel("true".to_owned()).await;
+    assert!(next < idle + work / 2, "{next} after {idle}");
+
+    let limit = fuel(script(0)).await + work * 10;
     let err = session
-        .execute(script(4))
+        .execute(script(2))
         .with_fuel_limit(limit)
         .run()
         .await
@@ -490,7 +516,7 @@ async fn killed_children_are_charged_their_last_tick() {
     );
     let rounds = String::from_utf8(storage.read("/data/rounds").await.unwrap()).unwrap();
     let rounds: u32 = rounds.trim().parse().unwrap();
-    assert!(rounds <= 6, "{rounds} rounds under the limit");
+    assert!(rounds <= 15, "{rounds} rounds under a limit of about ten");
 }
 
 /// A running child's argv and env count against `max_child_host_bytes` for

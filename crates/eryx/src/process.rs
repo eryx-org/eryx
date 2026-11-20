@@ -2137,8 +2137,9 @@ pub(crate) struct ChildState {
     table: ResourceTable,
     limits: ChildMemory,
     sockets: ChildSockets,
-    /// Fuel it may burn, and has burned as of its last epoch tick or
-    /// nested run (which charges it its own children's).
+    /// Fuel it may burn, and has burned as of its last epoch tick, nested
+    /// run (which charges it its own children's) or, once its store is
+    /// dropped, its end (see [`Metered`]).
     fuel: u64,
     fuel_used: Arc<AtomicU64>,
     /// How it runs commands of its own, if its command may.
@@ -2339,7 +2340,8 @@ struct ChildRun {
     stderr: pipe::Writer,
     /// Fuel the child may burn.
     fuel: u64,
-    /// Fuel it has burned so far, as of its last epoch tick.
+    /// Fuel it has burned so far, as of its last epoch tick, or its end
+    /// once its store is dropped (see [`Metered`]).
     fuel_used: Arc<AtomicU64>,
     /// Its share of the execution's pool of child memory, holding its
     /// instances' metadata from spawn.
@@ -2427,9 +2429,12 @@ impl<T> std::ops::DerefMut for Metered<T> {
 
 impl<T> Drop for Metered<T> {
     fn drop(&mut self) {
-        let left = self.store.get_fuel().unwrap_or(0);
-        self.fuel_used
-            .store(self.fuel.saturating_sub(left), Ordering::Relaxed);
+        // Fuel is always enabled on both engines; without it, keep the last
+        // count rather than charge the whole grant.
+        if let Ok(left) = self.store.get_fuel() {
+            self.fuel_used
+                .store(self.fuel.saturating_sub(left), Ordering::Relaxed);
+        }
     }
 }
 
@@ -2732,8 +2737,9 @@ impl ExecutorState {
     /// yields, once per epoch tick, so children together overshoot the
     /// parent's fuel by at most one tick of work each, for up to
     /// [`MAX_LIVE_CHILDREN`] of them, and one that runs out of its own has
-    /// emptied the parent too. An unlimited parent leaves its children
-    /// bounded only by its timeout.
+    /// emptied the parent too. A child stopped between ticks is charged the
+    /// rest when it's dropped (see [`Owed`]). An unlimited parent leaves its
+    /// children bounded only by its timeout.
     fn take_child_run(
         &mut self,
         child: &Resource<ChildProcess>,
@@ -3015,6 +3021,19 @@ impl Drop for Owed {
     }
 }
 
+/// Charge the execution's guest what dropped runs still owe (see
+/// [`Owed`]), once its call has returned: a child killed after the guest's
+/// last spawn or `wait` would otherwise go uncharged, and a session's next
+/// execution would pay for it.
+pub(crate) fn settle_owed_fuel(store: &mut Store<ExecutorState>) {
+    let owed = store.data().take_owed_fuel();
+    if owed > 0 {
+        let left = store.get_fuel().unwrap_or(0).saturating_sub(owed);
+        // Fuel is always enabled on both engines.
+        let _ = store.set_fuel(left);
+    }
+}
+
 /// A child's exit code when `kill-children` stops it: `SIGKILL`'s.
 const KILLED: i32 = 128 + 9;
 
@@ -3169,7 +3188,9 @@ async fn run_nested(
         fuel_used: Arc::clone(&fuel_used),
         charged: 0,
     };
-    let mut running = std::pin::pin!(run.run());
+    // Boxed, so it can be dropped (publishing its final count) before the
+    // last charge.
+    let mut running = Box::pin(run.run());
     let mut done = None;
     let mut stdin = Some(stdin);
     let mut fed = 0;
@@ -3222,6 +3243,9 @@ async fn run_nested(
     })
     .await;
     drop(held);
+    // Stopped if it's still running (its output was over the limit), so its
+    // store publishes its final count.
+    drop(running);
     // Charge what it burned however it ended, before any error returns.
     let used = match &result {
         Ok(Some((_, used))) => *used,
