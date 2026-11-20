@@ -1,3 +1,14 @@
+# CI.
+#
+# The release PR (branch release-plz-*, rebuilt by release-plz on every push
+# to main) runs only the cheap jobs: the heavy ones (the runtime builds,
+# Lint, Test, feature checks, Python bindings, book, Docker...) check
+# `needs.changes.outputs.heavy` or `full` and skip. Add the
+# `ready-to-release` label before merging it: that runs everything, here and
+# in js.yml and release-dry-run.yml (release-pr-ready.yml pushes an empty
+# commit to start the runs), and every later update to the PR runs
+# everything too. Without the label the required "Deploy Demo" check fails.
+
 name: CI
 
 on:
@@ -67,7 +78,12 @@ jobs:
       # subset (lint, fmt, Linux tests and what they need, feature checks);
       # everything else (pushes, PRs into main, tags) runs everything. The
       # jobs left out check `full` in their `if:`, so they report as skipped.
-      full: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
+      # The release PR (release-plz-*) runs only the cheap jobs until it has
+      # the `ready-to-release` label; see the note at the top of this file.
+      full: ${{ (github.event_name != 'pull_request' || github.base_ref == 'main') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-') && !contains(github.event.pull_request.labels.*.name, 'ready-to-release')) }}
+      # False only on that unlabelled release PR: the jobs `full` doesn't
+      # cover but the multi-guest subset still runs check it too.
+      heavy: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-') && !contains(github.event.pull_request.labels.*.name, 'ready-to-release')) }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
       python: ${{ steps.filter.outputs.python }}
@@ -263,14 +279,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.examples == 'true'
       || needs.changes.outputs.server == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true'
+      || needs.changes.outputs.demo == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -443,14 +460,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.examples == 'true'
       || needs.changes.outputs.server == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true'
+      || needs.changes.outputs.demo == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -539,14 +557,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.examples == 'true'
       || needs.changes.outputs.server == 'true'
       || needs.changes.outputs.js == 'true'
-      || needs.changes.outputs.demo == 'true'
+      || needs.changes.outputs.demo == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -698,7 +717,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true'
       || needs.changes.outputs.book == 'true'
@@ -706,7 +726,7 @@ jobs:
       || needs.changes.outputs.server == 'true'
       || needs.changes.outputs.js == 'true'
       || needs.changes.outputs.demo == 'true'
-      || needs.changes.outputs.bundler == 'true'
+      || needs.changes.outputs.bundler == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -780,9 +800,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.server == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -849,9 +870,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true'
+      || needs.changes.outputs.server == 'true')
     permissions:
       contents: read # to check out the repository
       packages: read # to pull eryx-org/eryx-commands' published gh and git below
@@ -1302,8 +1324,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
-      github.event_name == 'push'
-      || needs.changes.outputs.core == 'true'
+      needs.changes.outputs.heavy == 'true'
+      && (github.event_name == 'push'
+      || needs.changes.outputs.core == 'true')
     env:
       MISE_DISABLE_TOOLS: ""
     steps:
@@ -2110,12 +2133,24 @@ jobs:
   # The actual deploy is skipped for fork PRs (no secrets), but GitHub
   # treats skipped required checks as failing. This job passes when the
   # deploy is skipped, so fork/dependabot PRs aren't blocked.
+  #
+  # It also keeps the release PR from merging on the cheap run: the jobs
+  # skipped there count as passing, so this required check fails instead
+  # until the PR has the `ready-to-release` label.
   deploy-demo-status:
     name: Deploy Demo
     runs-on: ubuntu-latest
     needs: [deploy-demo]
     if: always()
     steps:
+      - name: Release PR has the ready-to-release label
+        if: >-
+          github.event_name == 'pull_request'
+          && startsWith(github.head_ref, 'release-plz-')
+          && !contains(github.event.pull_request.labels.*.name, 'ready-to-release')
+        run: |
+          echo "::error::Add the ready-to-release label to run the full CI before merging the release PR."
+          exit 1
       - name: Check deploy result
         run: |
           result="${{ needs.deploy-demo.result }}"

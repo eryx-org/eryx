@@ -55,6 +55,8 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
+  # The PR runs only the cheap CI jobs until it has the `ready-to-release`
+  # label: add it before merging (see the note at the top of ci.yml).
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
