@@ -12,10 +12,9 @@ use std::future::Future;
 use std::io::Write as _;
 use std::pin::Pin;
 
-use brush_core::commands::{ShellForCommand, SimpleCommand};
+use brush_core::commands::ShellForCommand;
 use brush_core::{
-    CommandArg, ExecutionContext, ExecutionExitCode, ExecutionResult, ShellExtensions, builtins,
-    error,
+    ExecutionContext, ExecutionExitCode, ExecutionResult, ShellExtensions, builtins, error,
 };
 
 const USAGE: &str = "usage: xargs [-0rtx] [-a FILE] [-d DELIM] [-E EOF] [-I REPLACE] [-L MAX] \
@@ -534,18 +533,11 @@ async fn run<SE: ShellExtensions>(
             let name = argv[0].clone();
             // Children get our stdin: read to its end, or untouched with
             // `-a`, as GNU leaves it.
-            let mut cmd = SimpleCommand::new(
-                ShellForCommand::OwnedShell {
-                    target: Box::new(context.shell.clone()),
-                    parent: &mut *context.shell,
-                },
-                context.params.clone(),
-                name.clone(),
-                argv.iter().map(|a| CommandArg::from(a.as_str())),
-            );
-            // As GNU's: it runs programs, not functions.
-            cmd.use_functions = false;
-            let started = cmd.execute().await;
+            let shell = ShellForCommand::OwnedShell {
+                target: Box::new(context.shell.clone()),
+                parent: &mut *context.shell,
+            };
+            let started = crate::env::start_program(shell, context.params.clone(), &argv).await;
             running.push(Box::pin(async move {
                 let result = match started {
                     Ok(started) => started.wait().await.map(Into::into),

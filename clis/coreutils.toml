@@ -37,8 +37,8 @@ vendor_patch = "clis/patches/patch-uucore-wasip2.sh"
 # left out for size, as are tac, test and yes (they build since 0.13.0; test
 # is a shell builtin anyway); chmod, df, du, env, id, stat, timeout and whoami
 # don't build for wasip2 (env would also need to run its command through
-# eryx:process, as WASI has no exec), and ln can't work: the VFS refuses
-# links and symlinks.
+# eryx:process, as WASI has no exec; the shell has a timeout builtin), and ln
+# can't work: the VFS refuses links and symlinks.
 # Must match COREUTILS_TOOLS in crates/eryx/src/embedded.rs (a test checks).
 cargo_flags = [
     "--no-default-features",

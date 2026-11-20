@@ -7,8 +7,27 @@ use std::io::Write as _;
 
 use brush_core::commands::{ShellForCommand, SimpleCommand};
 use brush_core::{
-    CommandArg, ExecutionContext, ExecutionResult, ShellExtensions, ShellVariable, builtins, error,
+    CommandArg, ExecutionContext, ExecutionParameters, ExecutionResult, ExecutionSpawnResult,
+    ShellExtensions, ShellVariable, builtins, error,
 };
+
+/// Start `argv` as `env`, `xargs` and `timeout` run their commands: through
+/// the shell's own lookup (builtins, host commands, `sh`/`bash`, scripts),
+/// but, as a real one's would, never as a function.
+pub(crate) async fn start_program<SE: ShellExtensions>(
+    shell: ShellForCommand<'_, SE>,
+    params: ExecutionParameters,
+    argv: &[String],
+) -> Result<ExecutionSpawnResult, brush_core::Error> {
+    let mut cmd = SimpleCommand::new(
+        shell,
+        params,
+        argv[0].clone(),
+        argv.iter().map(|a| CommandArg::from(a.as_str())),
+    );
+    cmd.use_functions = false;
+    cmd.execute().await
+}
 
 const USAGE: &str = "usage: env [-i] [-u NAME]... [NAME=VALUE]... [COMMAND [ARG]...]";
 
@@ -117,7 +136,7 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for EnvCommand {
             var.export();
             shell.env_mut().set_global(name, var)?;
         }
-        let Some(name) = request.command.first().cloned() else {
+        if request.command.is_empty() {
             let mut vars: Vec<String> = shell
                 .env()
                 .iter_exported()
@@ -129,20 +148,16 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for EnvCommand {
                 writeln!(out, "{var}")?;
             }
             return Ok(ExecutionResult::success());
+        }
+        let shell = ShellForCommand::OwnedShell {
+            target: shell,
+            parent: context.shell,
         };
-        let args = request.command.iter().map(|a| CommandArg::from(a.as_str()));
-        let mut cmd = SimpleCommand::new(
-            ShellForCommand::OwnedShell {
-                target: shell,
-                parent: context.shell,
-            },
-            context.params,
-            name,
-            args,
-        );
-        // As a real `env`: it runs programs, not functions.
-        cmd.use_functions = false;
-        Ok(cmd.execute().await?.wait().await?.into())
+        Ok(start_program(shell, context.params, &request.command)
+            .await?
+            .wait()
+            .await?
+            .into())
     }
 }
 

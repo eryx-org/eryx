@@ -977,6 +977,36 @@ async fn python3_streams_through_a_pipeline() {
     );
 }
 
+/// `timeout` stops a CPU-bound guest child: Python spinning never waits,
+/// but the host still polls the shell, whose timer kills it.
+///
+/// 0.3 s keeps it under the host's per-child fuel cap (`CHILD_FUEL` in
+/// src/process.rs): a busy Python loop exhausts it in about 0.8 s and the
+/// child dies of that first (134), so `timeout 1` would never see it run out.
+#[tokio::test]
+async fn timeout_stops_a_busy_python3() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    let start = std::time::Instant::now();
+    let out = sandbox
+        .execute("timeout 0.3 python3 -c 'while True: pass'; echo \"s=$?\"")
+        .await
+        .unwrap();
+    assert_eq!(
+        out.stdout_utf8().unwrap(),
+        "s=124\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn python3_shares_the_shells_files_env_and_cwd() {
     let Some(builder) = python_shell() else {
@@ -1488,6 +1518,56 @@ env -S 'a b'; echo "bad=$?"
         "A=1\n1 3 4\n[] 5\n0\n[]\nx\nA=1\nstatus=9\nmissing=127\nbad=125\n"
     );
     assert!(stderr.contains("env: invalid option"), "{stderr}");
+}
+
+/// `timeout` is a builtin (uutils' needs processes and signals): it runs its
+/// command, found as `env`'s is, and passes its status through; GNU's
+/// statuses for its own failures and a command that can't be found.
+#[tokio::test]
+async fn timeout_runs_commands_and_passes_their_status_through() {
+    let (stdout, stderr) = run_shell(
+        r#"
+type timeout
+timeout 5 echo hi; echo "s=$?"
+timeout 5 sh -c 'exit 3'; echo "s=$?"
+timeout 0 sh -c 'echo none'; echo "s=$?"
+timeout 1m grep -c x /dev/null; echo "s=$?"
+timeout 1 nosuchcmd; echo "missing=$?"
+timeout x echo; echo "bad=$?"
+timeout --help | head -n 1
+"#,
+    )
+    .await;
+    assert_eq!(
+        stdout,
+        "timeout is a shell builtin\nhi\ns=0\ns=3\nnone\ns=0\n0\ns=1\nmissing=127\nbad=125\n\
+         Usage: timeout [OPTION] DURATION COMMAND [ARG]...\n"
+    );
+    assert!(
+        stderr.contains("timeout: invalid time interval 'x'"),
+        "{stderr}"
+    );
+}
+
+/// A command still running when the duration is up is stopped at once:
+/// `timeout` exits 124, or 128 plus the signal under `--preserve-status`.
+#[tokio::test]
+async fn timeout_stops_a_command_that_runs_too_long() {
+    let start = std::time::Instant::now();
+    let (stdout, stderr) = run_shell(
+        r#"
+timeout 0.2 sleep 5; echo "s=$?"
+timeout --preserve-status -s KILL 0.2 sh -c 'sleep 5; echo late'; echo "s=$?"
+"#,
+    )
+    .await;
+    assert_eq!(stdout, "s=124\ns=137\n");
+    assert_eq!(stderr, "");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// A background job made only of builtins (no child processes) runs, and

@@ -2661,6 +2661,37 @@ mod background_jobs {
         assert!(stderr(&out).contains("tc: limit-exceeded"), "{out:?}");
     }
 
+    /// `timeout` stops a pipeline that runs too long with all its children,
+    /// and what they held (here the arguments budget) comes back.
+    #[tokio::test]
+    async fn timeout_kills_a_pipelines_children() {
+        let sandbox = shell()
+            .with_command("tc", test_cmd())
+            .with_resource_limits(ResourceLimits::default().with_max_child_host_bytes(7 << 19))
+            .build()
+            .unwrap();
+        let start = Instant::now();
+        let out = sandbox
+            .execute(&format!(
+                "{BIG}\n\
+                 timeout 2 sh -c 'X=\"$1\" sleep 30 | X=\"$1\" sleep 30 | X=\"$1\" sleep 30' _ \"$BIG\" &\n\
+                 sleep 0.3; X=\"$BIG\" tc argv0 || echo refused\n\
+                 wait $!; echo \"status: $?\"; X=\"$BIG\" tc argv0"
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.stdout_utf8().unwrap(),
+            "refused\nstatus: 124\ntc\n",
+            "{out:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
     /// The script ends with an implicit `wait`: a job still running then
     /// finishes, its output and files are the execution's, and the status is
     /// the script's own.
