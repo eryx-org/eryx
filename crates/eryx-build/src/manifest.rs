@@ -126,14 +126,17 @@ pub enum CBuildSystem {
     Make,
 }
 
-/// Where a CLI's source comes from.
+/// Where a CLI's source comes from: a pinned upstream (`repo` plus `commit`
+/// or `sha256`, fetched into `dir`), or a local `path`.
 #[derive(Debug, Deserialize)]
 pub struct Source {
-    /// Upstream repository URL (for provenance/reproducibility).
+    /// Upstream repository URL (for provenance/reproducibility). Empty for a
+    /// `path` source.
+    #[serde(default)]
     pub repo: String,
     /// Human-readable label for the pinned version (e.g. a tag). The pin
-    /// itself is `commit` or `sha256`.
-    #[serde(rename = "ref")]
+    /// itself is `commit` or `sha256`. Optional for a `path` source.
+    #[serde(rename = "ref", default)]
     pub git_ref: String,
     /// Git sources: the commit `ref` points at. The fetch checks it.
     #[serde(default)]
@@ -142,7 +145,19 @@ pub struct Source {
     #[serde(default)]
     pub sha256: Option<String>,
     /// Local working copy the driver builds from, relative to the repo root.
+    /// For a `path` source, [`Manifest::load`] sets it to the path.
+    #[serde(default)]
     pub dir: PathBuf,
+    /// A local source tree to build in place instead of a pinned upstream,
+    /// for developing a command: relative to the manifest's directory, or
+    /// absolute. It can't be combined with `repo`, `commit`, `sha256` or
+    /// `dir`, nor with patches (`build.vendor_patch`, a dep's
+    /// `config_patch`), which would modify the tree. The build leaves its
+    /// usual outputs (`target/`, `vendor/`, objects) in the tree; the Rust
+    /// lane builds it without `--locked`. Provenance records it as local, and
+    /// `--check` (the publishing gate) refuses it.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 /// How to build the CLI within its source tree.
@@ -284,9 +299,49 @@ impl Manifest {
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading manifest {}", path.display()))?;
-        let manifest: Manifest = toml::from_str(&text)
+        let mut manifest: Manifest = toml::from_str(&text)
             .with_context(|| format!("parsing manifest {}", path.display()))?;
+        let base = path.parent().unwrap_or(std::path::Path::new(""));
+        manifest
+            .resolve_source(base)
+            .with_context(|| format!("in manifest {}", path.display()))?;
         Ok(manifest)
+    }
+
+    /// Check the source's fields. For a `path` source, also point
+    /// `source.dir` and `source.path` at the absolute tree (`path` relative
+    /// to `base`, the manifest's directory).
+    fn resolve_source(&mut self, base: &std::path::Path) -> Result<()> {
+        let Some(rel) = &self.source.path else {
+            anyhow::ensure!(
+                !self.source.dir.as_os_str().is_empty(),
+                "`source.dir` is required (or a local `source.path`)"
+            );
+            return Ok(());
+        };
+        let src = &self.source;
+        anyhow::ensure!(
+            src.repo.is_empty()
+                && src.commit.is_none()
+                && src.sha256.is_none()
+                && src.dir.as_os_str().is_empty(),
+            "a `path` source can't also set `repo`, `commit`, `sha256` or `dir`"
+        );
+        anyhow::ensure!(
+            self.build.vendor_patch.is_none() && self.deps.iter().all(|d| d.config_patch.is_none()),
+            "a `path` source is built in place, so it can't take `vendor_patch` or a dep's \
+             `config_patch` (they'd modify the tree); apply the change to the tree instead"
+        );
+        let abs = std::fs::canonicalize(base.join(rel))
+            .with_context(|| format!("source path {}", base.join(rel).display()))?;
+        anyhow::ensure!(
+            abs.is_dir(),
+            "source path {} is not a directory",
+            abs.display()
+        );
+        self.source.dir.clone_from(&abs);
+        self.source.path = Some(abs);
+        Ok(())
     }
 
     /// The repo files (repo-root-relative) the build applies, compiles or
@@ -561,5 +616,49 @@ mod tests {
         assert_eq!(m.build.package, "./cmd/gh");
         assert!(m.build.sources.is_empty());
         assert!(m.build.cflags.is_empty());
+    }
+
+    /// A `path` source resolves against the manifest's directory and becomes
+    /// the build dir; pins, `dir` and patches alongside it are refused.
+    #[test]
+    fn path_source() {
+        let root = std::env::temp_dir().join(format!("eryx-build-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("clis")).unwrap();
+        std::fs::create_dir_all(root.join("tool")).unwrap();
+        let load = |source: &str, build: &str| {
+            let path = root.join("clis/tool.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "name = \"tool\"\nlicense = \"MIT\"\nlang = \"rust\"\n\
+                     [source]\n{source}\n[build]\nbin = \"tool\"\n{build}\n\
+                     [output]\ndir = \"out\"\n"
+                ),
+            )
+            .unwrap();
+            Manifest::load(&path)
+        };
+
+        let m = load(r#"path = "../tool""#, "").unwrap();
+        let abs = std::fs::canonicalize(root.join("tool")).unwrap();
+        assert_eq!(m.source.path.as_deref(), Some(abs.as_path()));
+        assert_eq!(m.source.dir, abs);
+        assert!(m.source.repo.is_empty());
+
+        let err = |source: &str, build: &str| format!("{:#}", load(source, build).unwrap_err());
+        assert!(err(r#"path = "../missing""#, "").contains("source path"));
+        for extra in [
+            r#"repo = "https://example.com/x.git""#,
+            r#"commit = "0000000000000000000000000000000000000000""#,
+            r#"dir = "scratch/tool""#,
+        ] {
+            assert!(
+                err(&format!("path = \"../tool\"\n{extra}"), "").contains("can't also set"),
+                "{extra}"
+            );
+        }
+        assert!(err(r#"path = "../tool""#, r#"vendor_patch = "p.sh""#).contains("vendor_patch"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

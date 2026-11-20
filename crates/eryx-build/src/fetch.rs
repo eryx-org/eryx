@@ -55,15 +55,18 @@ pub fn pin<'a>(url: &str, commit: Option<&'a str>, sha256: Option<&'a str>) -> R
     }
 }
 
-/// Fetch (or check) the manifest's source and each `[[deps]]` source.
+/// Fetch (or check) the manifest's source and each `[[deps]]` source. A
+/// local `path` source isn't fetched; [`Manifest::load`] checked it exists.
 pub fn sources(manifest: &Manifest) -> Result<()> {
     let repo_root = std::env::current_dir().context("getting current dir")?;
     let src = &manifest.source;
-    fetch(
-        &src.repo,
-        pin(&src.repo, src.commit.as_deref(), src.sha256.as_deref())?,
-        &repo_root.join(&src.dir),
-    )?;
+    if src.path.is_none() {
+        fetch(
+            &src.repo,
+            pin(&src.repo, src.commit.as_deref(), src.sha256.as_deref())?,
+            &repo_root.join(&src.dir),
+        )?;
+    }
     for dep in &manifest.deps {
         fetch(
             &dep.url,

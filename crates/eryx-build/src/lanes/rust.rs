@@ -47,19 +47,23 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     // binary alone without replacing the project's own RUSTFLAGS.
     // `cargo rustc` needs the package, which a workspace root (jaq's) doesn't
     // imply.
-    let package = package_of(&source_dir, bin)?;
+    // Build exactly the pinned lockfile (after any vendor_patch updates it),
+    // except for a local `path` source under development.
+    let locked = manifest.source.path.is_none();
+    let package = package_of(&source_dir, bin, locked)?;
     let mut args: Vec<String> = vec![
         "rustc".into(),
         "--package".into(),
         package,
         "--release".into(),
-        // Build exactly the pinned lockfile (after any vendor_patch updates it).
-        "--locked".into(),
         "--target".into(),
         "wasm32-wasip2".into(),
         "--bin".into(),
         bin.to_string(),
     ];
+    if locked {
+        args.push("--locked".into());
+    }
     args.extend(manifest.build.cargo_flags.iter().cloned());
     args.extend(["--".into(), "-C".into(), format!("link-arg={cwd_obj}")]);
     let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -98,10 +102,12 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// The package in the workspace at `source_dir` that has the binary `bin`.
-fn package_of(source_dir: &std::path::Path, bin: &str) -> Result<String> {
+/// The package in the workspace at `source_dir` that has the binary `bin`,
+/// read with `--locked` when `locked`.
+fn package_of(source_dir: &std::path::Path, bin: &str, locked: bool) -> Result<String> {
     let output = std::process::Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .args(locked.then_some("--locked"))
         .current_dir(source_dir)
         .output()
         .context("running cargo metadata")?;
