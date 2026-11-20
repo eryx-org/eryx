@@ -1841,7 +1841,9 @@ class VfsStorage:
                 plus a charge of the path length (twice for a directory) and 64
                 bytes for each file and directory. Writes that would exceed it fail inside the sandbox with
                 ``OSError``. ``None`` (the default) means 64 MiB. The storage owns
-                this cap, so ``ResourceLimits.max_vfs_bytes`` does not apply.
+                this cap and the default limit of 65,536 files and directories,
+                so ``ResourceLimits.max_vfs_bytes`` and ``max_vfs_entries`` do
+                not apply.
         """
         ...
 

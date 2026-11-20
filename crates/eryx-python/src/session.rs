@@ -169,12 +169,10 @@ impl Session {
             .block_on(async {
                 if needs_vfs {
                     let storage = vfs_storage.unwrap_or_else(|| {
-                        let storage = match limits.max_vfs_bytes {
-                            Some(max_bytes) => {
-                                eryx::vfs::InMemoryStorage::with_max_bytes(max_bytes)
-                            }
-                            None => eryx::vfs::InMemoryStorage::new(),
-                        };
+                        let storage = eryx::vfs::InMemoryStorage::with_max_bytes(
+                            limits.max_vfs_bytes.unwrap_or(eryx::vfs::DEFAULT_MAX_BYTES),
+                        )
+                        .with_max_entries(limits.max_vfs_entries.unwrap_or(eryx::vfs::MAX_ENTRIES));
                         eryx::vfs::ArcStorage::new(Arc::new(eryx::vfs::ScrubbingStorage::new(
                             storage,
                             HashMap::new(),
