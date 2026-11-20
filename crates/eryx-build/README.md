@@ -40,7 +40,9 @@ The C and Rust lanes link a small start-up object, compiled with
 starts, since WASI children don't otherwise start in the shell's directory.
 The C lane also links `src/exit_code.c`, which exits with
 `wasi:cli/exit.exit-with-code`, since wasi-libc reports only success or
-failure (any non-zero status became 1). Rust's std already uses it.
+failure (any non-zero status became 1). Rust's std uses it for
+`std::process::exit`, but a status returned from `main` (an `ExitCode`)
+still reaches the shell as 1.
 
 Upstream sources are pinned by content: a git `commit`, or the `sha256` of an
 archive. A checkout or download that doesn't match fails the build.
