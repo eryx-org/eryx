@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.0...eryx-precompile-v0.16.1) - 2026-11-21
+
+### Fixed
+- *(eryx-precompile)* exit quietly when stdout is a closed pipe ([#1139](https://github.com/eryx-org/eryx/pull/1139))
+
+## `eryx-build` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-build-v0.16.0...eryx-build-v0.16.1) - 2026-11-21
+
+### Added
+- *(eryx-build)* pin the wasip3 Go fork and build it with `toolchain go` ([#1137](https://github.com/eryx-org/eryx/pull/1137))
+- *(eryx-build)* allow a local `path` source for development ([#1138](https://github.com/eryx-org/eryx/pull/1138))
+
+### Fixed
+- *(eryx-build)* keep the ExitCode a Rust main returns ([#1136](https://github.com/eryx-org/eryx/pull/1136))
+
+### Other
+- add a guide to building shell commands ([#1130](https://github.com/eryx-org/eryx/pull/1130))
+
+## `eryx` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-v0.16.0...eryx-v0.16.1) - 2026-11-21
+
+### Added
+- *(server)* add --site-packages for custom Python runtimes
+- *(trace)* report a nested child's parent pid on process_start ([#1163](https://github.com/eryx-org/eryx/pull/1163))
+- *(shell)* add a timeout builtin ([#1153](https://github.com/eryx-org/eryx/pull/1153))
+- opt-in callback namespace (with_callback_namespace) ([#1148](https://github.com/eryx-org/eryx/pull/1148))
+- *(server)* add ExecuteRequest.globals ([#1159](https://github.com/eryx-org/eryx/pull/1159))
+
+### Fixed
+- *(process)* charge a killed child the fuel it burned since its last tick ([#1165](https://github.com/eryx-org/eryx/pull/1165))
+- *(process)* let a child burn all of its parent's fuel ([#1156](https://github.com/eryx-org/eryx/pull/1156))
+- *(eryx)* don't panic warming a runtime that isn't pre-initialized ([#1151](https://github.com/eryx-org/eryx/pull/1151))
+- *(js)* rewrite leading imports after a hashbang or directive prologue ([#1160](https://github.com/eryx-org/eryx/pull/1160))
+
+### Other
+- *(deps)* update wasmtime & wasm-tools to v51 ([#1120](https://github.com/eryx-org/eryx/pull/1120))
+- *(coreutils)* bump uutils to 0.13.0 and drop the patches it fixes ([#1147](https://github.com/eryx-org/eryx/pull/1147))
+
+## `eryx-vfs` - [0.14.3](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.2...eryx-vfs-v0.14.3) - 2026-11-21
+
+### Other
+- *(deps)* update wasmtime & wasm-tools to v51 ([#1120](https://github.com/eryx-org/eryx/pull/1120))
+
+## `eryx-runtime` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.16.0...eryx-runtime-v0.16.1) - 2026-11-21
+
+### Fixed
+- *(runtime)* keep native-extension link error causes
+
 ## `eryx-precompile` - [0.16.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.2...eryx-precompile-v0.16.0) - 2026-11-20
 
 ### Added
