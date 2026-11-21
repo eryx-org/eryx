@@ -41,6 +41,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--metrics-addr` | `ERYX_METRICS_ADDR` | `0.0.0.0:9090` | Address of the Prometheus `/metrics` endpoint. |
 | `--runtime-cwasm` | `ERYX_RUNTIME_CWASM` | *(embedded)* | Path to a [pre-compiled runtime](./precompile.md) (e.g. with numpy/polars baked in). |
 | `--stdlib` | `ERYX_STDLIB` | *(embedded)* | Python stdlib directory; only used with `--runtime-cwasm`. |
+| `--site-packages` | `ERYX_SITE_PACKAGES` | *(none)* | The site-packages directory `--runtime-cwasm` was pre-initialized with (`eryx-precompile compile --preinit --site-packages DIR`), mounted at `/site-packages` for Python and `--shell-python`. Needed for any module a package imports after pre-initialization (e.g. pandas' `describe()` imports `numpy.rec`); only used with `--runtime-cwasm`. |
 | `--environments` | `ERYX_ENVIRONMENTS` | *(none)* | Directory of [environments](#environments), one per subdirectory, that requests mount by name. |
 | `--journal-signing-key` | `ERYX_JOURNAL_SIGNING_KEY` | *(random)* | Hex-encoded 32-byte HMAC key for signing replay journals. Prefer the env var, which keeps the key out of the process list. See [Journal signing](#journal-signing-and-the-trust-boundary). |
 | `--journal-ttl-secs` | `ERYX_JOURNAL_TTL_SECS` | `604800` (7 days) | How long a signed journal can be replayed. |
@@ -91,7 +92,7 @@ containers:
 
 ### Shell requests
 
-A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-embedded-commands` is set, any `--shell-command`s, `python`/`python3` with `--shell-python` (from the server's Python runtime: `--runtime-cwasm` and `--stdlib`, or the embedded one), and `node`/`js` with `--shell-node` (the embedded JavaScript runtime).
+A request with `language = LANGUAGE_SHELL` runs a shell script against the server's commands: the embedded coreutils, unless `--no-shell-embedded-commands` is set, any `--shell-command`s, `python`/`python3` with `--shell-python` (from the server's Python runtime: `--runtime-cwasm`, `--stdlib` and `--site-packages`, or the embedded one), and `node`/`js` with `--shell-node` (the embedded JavaScript runtime).
 - **Which commands:** `allowed_commands` narrows a request to some of them.
 - **Per command:** `commands` narrows what each one gets: a narrower network for its children, or no tunnels or spawning. A server older than this field ignores it, as proto3 does any unknown field, so a client can only count on `no_tunnels`, `no_spawn` or a narrower network being enforced by a server new enough to know `commands`.
 - **Network:** commands only reach it through `network_config.child_network`. There's none without it.
