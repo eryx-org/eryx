@@ -132,6 +132,20 @@ pub mod base_libraries {
 pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, LinkError> {
     use wit_component::Linker;
 
+    // Without dylink.0 wit-component links the module as if it had no
+    // memory/table requirements and fails much later, in validation, with
+    // an unrelated-looking error ("table limits mismatch").
+    for ext in extensions {
+        if !has_dylink_section(&ext.bytes) {
+            return Err(LinkError::Extension(
+                ext.name.clone(),
+                "not a WASI shared library (no dylink.0 section); \
+                 was it stripped with 'wasm-tools strip -a'?"
+                    .into(),
+            ));
+        }
+    }
+
     // Decompress base libraries
     let libc = decompress_zstd(base_libraries::LIBC)?;
     let libcxx = decompress_zstd(base_libraries::LIBCXX)?;
@@ -166,25 +180,38 @@ pub fn link_with_extensions(extensions: &[NativeExtension]) -> Result<Vec<u8>, L
     for (name, bytes) in libs.in_link_order() {
         linker
             .library(name, bytes, false)
-            .map_err(|e| LinkError::Library(name.into(), e.to_string()))?;
+            .map_err(|e| LinkError::Library(name.into(), format!("{e:#}")))?;
     }
 
     // Add user's native extensions (dl_openable = true for dlopen/dlsym)
     for ext in extensions {
         linker
             .library(&ext.name, &ext.bytes, true)
-            .map_err(|e| LinkError::Extension(ext.name.clone(), e.to_string()))?;
+            .map_err(|e| LinkError::Extension(ext.name.clone(), format!("{e:#}")))?;
     }
 
     // Add WASI adapter
     linker
         .encoder()
         .adapter("wasi_snapshot_preview1", &adapter)
-        .map_err(|e| LinkError::Adapter(e.to_string()))?;
+        .map_err(|e| LinkError::Adapter(format!("{e:#}")))?;
 
     linker
         .encode()
-        .map_err(|e| LinkError::Encode(e.to_string()))
+        .map_err(|e| LinkError::Encode(format!("{e:#}")))
+}
+
+/// Whether `bytes` has a `dylink.0` custom section. Unparseable input counts
+/// as having one, so the linker reports the parse error itself.
+fn has_dylink_section(bytes: &[u8]) -> bool {
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        match payload {
+            Ok(wasmparser::Payload::CustomSection(c)) if c.name() == "dylink.0" => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, LinkError> {
@@ -220,3 +247,49 @@ impl std::fmt::Display for LinkError {
 }
 
 impl std::error::Error for LinkError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER: &[u8] = b"\0asm\x01\0\0\0";
+
+    #[test]
+    fn rejects_extension_without_dylink_section() {
+        let Err(err) =
+            link_with_extensions(&[NativeExtension::new("stripped.so", HEADER.to_vec())])
+        else {
+            panic!("linking should fail");
+        };
+        let err = err.to_string();
+        assert!(err.contains("stripped.so"), "{err}");
+        assert!(err.contains("no dylink.0 section"), "{err}");
+    }
+
+    #[test]
+    fn real_shared_libraries_have_a_dylink_section() -> Result<(), LinkError> {
+        assert!(has_dylink_section(&decompress_zstd(
+            base_libraries::LIBPYTHON
+        )?));
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_the_linker_error_chain() {
+        // A dylink.0 section with an unknown subsection (type 99, empty).
+        let mut module = HEADER.to_vec();
+        module.extend([0, 11, 8]);
+        module.extend(b"dylink.0");
+        module.extend([99, 0]);
+        let Err(err) = link_with_extensions(&[NativeExtension::new("bad.so", module)]) else {
+            panic!("linking should fail");
+        };
+        let err = err.to_string();
+        // Outer context and the inner cause, which `to_string()` dropped.
+        assert!(
+            err.contains("failed to extract linking metadata from bad.so"),
+            "{err}"
+        );
+        assert!(err.contains("dylink.0` subsection: 99"), "{err}");
+    }
+}
