@@ -40,9 +40,9 @@ dev = ["pytest", "pytest-asyncio", "pytest-xdist", "mypy", "requests", "httpx", 
 serve = ["mcp>=2,<2.4"]
 # The JavaScript and shell runtimes, which the pyeryx wheel doesn't include.
 # The versions must match pyeryx's exactly (tests/test_languages.py checks).
-javascript = ["pyeryx-runtime-javascript==0.16.0"]
-shell = ["pyeryx-runtime-shell==0.16.0"]
-all = ["pyeryx-runtime-javascript==0.16.0", "pyeryx-runtime-shell==0.16.0"]
+javascript = ["pyeryx-runtime-javascript==0.16.1"]
+shell = ["pyeryx-runtime-shell==0.16.1"]
+all = ["pyeryx-runtime-javascript==0.16.1", "pyeryx-runtime-shell==0.16.1"]
 
 [tool.uv.sources]
 # Developed together in this repo (sdk/python)

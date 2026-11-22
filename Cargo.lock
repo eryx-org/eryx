@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-build"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -1184,14 +1184,14 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-call"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "wit-dylib-ffi",
 ]
 
 [[package]]
 name = "eryx-guest-js"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "eryx-guest-call",
  "httparse",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-python"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "eryx-guest-call",
  "pyo3",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-linker-wasm"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "wasm-bindgen",
  "wit-component",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-macros"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "eryx",
  "proc-macro2",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-server"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "clap",
  "dashmap",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "ambient-authority",
  "anyhow",
@@ -5410,7 +5410,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.16.0"
+version = "0.16.1"
 
 [[package]]
 name = "wit-parser"

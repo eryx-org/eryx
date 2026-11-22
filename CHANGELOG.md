@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.0...eryx-precompile-v0.16.1) - 2026-11-22
+
+### Fixed
+- *(eryx-precompile)* exit quietly when stdout is a closed pipe ([#1139](https://github.com/eryx-org/eryx/pull/1139))
+
+## `eryx-build` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-build-v0.16.0...eryx-build-v0.16.1) - 2026-11-22
+
+### Added
+- *(eryx-build)* pin the wasip3 Go fork and build it with `toolchain go` ([#1137](https://github.com/eryx-org/eryx/pull/1137))
+- *(eryx-build)* allow a local `path` source for development ([#1138](https://github.com/eryx-org/eryx/pull/1138))
+
+### Fixed
+- *(eryx-build)* keep the ExitCode a Rust main returns ([#1136](https://github.com/eryx-org/eryx/pull/1136))
+
+### Other
+- add a guide to building shell commands ([#1130](https://github.com/eryx-org/eryx/pull/1130))
+
+## `eryx` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-v0.16.0...eryx-v0.16.1) - 2026-11-22
+
+eryx-server can mount pre-packed environments per request and inject JSON data as guest globals, callbacks can live under a namespace, the shell gains a `timeout` builtin, and eryx moves to wasmtime 51. Precompiled runtimes from 0.16.0 don't load, and child commands are no longer stopped after about 0.8 s of CPU. Read **Upgrade notes** before upgrading.
+
+### Security
+- **Child commands stay within the execution's fuel** ([#1156](https://github.com/eryx-org/eryx/pull/1156), [#1165](https://github.com/eryx-org/eryx/pull/1165)). In 0.16.0, a guest command (a nested `sh`, or the shell's `python3`) parked in `wait` on its own child didn't pass that child's fuel up to the execution, so several such chains running at once could each use the execution's remaining fuel, up to about N × `max_fuel` in total. The execution timeout still bounded it, so the impact is resource-limit denial of service, not a sandbox escape. A killed or dropped child is now also charged the fuel it used since its last tick. This is hardening, so there is no advisory.
+
+### Highlights
+- **Environments in eryx-server** ([#1150](https://github.com/eryx-org/eryx/pull/1150)): `--environments DIR` (`ERYX_ENVIRONMENTS`) loads every environment packed with `eryx-precompile env pack` under `DIR` at startup, and a request mounts one by name with `ExecuteRequest.environment` (proto field 18). Each environment gets its own sandbox pool, created on its first request. An environment that fails to load, has no name, shares a name, or is for a language the server doesn't serve stops startup.
+- **`ExecuteRequest.globals`** ([#1159](https://github.com/eryx-org/eryx/pull/1159)): a JSON object (proto field 20) whose top-level keys become globals in Python and JavaScript, so clients pass data without generating per-language code. The guest parses the client's JSON itself, so large integers stay exact. Keys must be identifiers and can't be keywords, Python dunders, the guest's own names or a declared callback's name. Shell requests are refused. Globals aren't scrubbed from output: put credentials in `secrets`.
+- **Callback namespace** ([#1148](https://github.com/eryx-org/eryx/pull/1148)), opt-in: `with_callback_namespace("tools")` puts every callback under `tools.` in each guest (`ExecuteRequest.callback_namespace`, proto field 19; `callback_namespace=` in pyeryx). Preambles or stubs written against bare callback names break under a namespace.
+- **`timeout` shell builtin** ([#1153](https://github.com/eryx-org/eryx/pull/1153)), `timeout DURATION CMD` stops the command (its builtins and child commands too) and exits 124, or 128 plus the signal's number with `--preserve-status`. `-k`/`--kill-after` and `--foreground` are accepted and change nothing.
+- **`ppid` on `process_start` trace events** ([#1163](https://github.com/eryx-org/eryx/pull/1163)): the pid of the child that spawned a nested child (`TraceEvent.ppid`, proto field 10), unset for children of the guest itself.
+- **`--site-packages` in eryx-server** for a custom Python runtime pre-initialized with packages, so modules a package imports after pre-initialization (such as `numpy.rec` for pandas' `describe()`) are found.
+- **JavaScript imports after a hashbang or `"use strict"`**: a script starting with `#!` or a directive prologue before its `import`s used to fail with `SyntaxError: Unexpected identifier` ([#1160](https://github.com/eryx-org/eryx/pull/1160)).
+- **pyeryx:** `eryx --language/-l` and `--precompiled/-s` in the CLI ([#1168](https://github.com/eryx-org/eryx/pull/1168), [#1146](https://github.com/eryx-org/eryx/pull/1146)), and `ResourceLimits.max_vfs_entries` is applied ([#1162](https://github.com/eryx-org/eryx/pull/1162)).
+
+### Upgrade notes
+
+**All users**
+- **Precompiled runtimes and saved factories from 0.16.0 don't load**, as after every release. Rebuild them with this release (`eryx-precompile upgrade OLD -o NEW`, `eryx-precompile compile`, or `python -m eryx factory upgrade` / `SandboxFactory.load(..., rebuild_if_incompatible=True)`), and run `eryx-precompile setup` again ([#1120](https://github.com/eryx-org/eryx/pull/1120)).
+- **Child commands can use all of the execution's fuel.** 0.16.0 also capped each child at 1e10 fuel, about 0.8 s of CPU, and reported a child that reached it as spawn-failed. That cap is gone, so long-running children now run until the execution's `max_fuel` or timeout ([#1156](https://github.com/eryx-org/eryx/pull/1156)).
+- **uutils coreutils 0.13.0**: `cp -p` exits 1 on WASI, as GNU's does there, and coreutils' error messages now use GNU's wording. Check scripts that match on them ([#1147](https://github.com/eryx-org/eryx/pull/1147)).
+- **The `timeout` builtin shadows a command registered as `timeout`**, as `env` and `xargs` already do ([#1153](https://github.com/eryx-org/eryx/pull/1153)).
+
+**gRPC server (`sd2k/eryx-server`)**
+- **Callback journals are now also bound to the request's environment (name and content hash), globals and callback namespace.** A journal from a request that sets none of them keeps the signature it had in 0.16.0. One that sets any of them only replays on a server that knows the field, so during a rolling upgrade a replay can fail with `FAILED_PRECONDITION` when an old and a new server disagree. Replays don't cross a change to the environment's contents either.
+
+**Python (`pyeryx`)**
+- **pyeryx requires `eryx-run>=0.4`**, for `ResourceLimits.max_vfs_entries` ([#1162](https://github.com/eryx-org/eryx/pull/1162)).
+- **The CLI's REPL is Python-only**: `eryx -l javascript` or `-l shell` without `-c`, a script or stdin exits 2 and says so, since the REPL splits input by Python's block rules ([#1168](https://github.com/eryx-org/eryx/pull/1168)).
+
+### Added
+- *(server)* add --site-packages for custom Python runtimes
+- *(trace)* report a nested child's parent pid on process_start ([#1163](https://github.com/eryx-org/eryx/pull/1163))
+- *(shell)* add a timeout builtin ([#1153](https://github.com/eryx-org/eryx/pull/1153))
+- opt-in callback namespace (with_callback_namespace) ([#1148](https://github.com/eryx-org/eryx/pull/1148))
+- *(server)* add ExecuteRequest.globals ([#1159](https://github.com/eryx-org/eryx/pull/1159))
+
+### Fixed
+- *(process)* charge a killed child the fuel it burned since its last tick ([#1165](https://github.com/eryx-org/eryx/pull/1165))
+- *(process)* let a child burn all of its parent's fuel ([#1156](https://github.com/eryx-org/eryx/pull/1156))
+- *(eryx)* don't panic warming a runtime that isn't pre-initialized ([#1151](https://github.com/eryx-org/eryx/pull/1151))
+- *(js)* rewrite leading imports after a hashbang or directive prologue ([#1160](https://github.com/eryx-org/eryx/pull/1160))
+
+### Other
+- *(deps)* update wasmtime & wasm-tools to v51 ([#1120](https://github.com/eryx-org/eryx/pull/1120))
+- *(coreutils)* bump uutils to 0.13.0 and drop the patches it fixes ([#1147](https://github.com/eryx-org/eryx/pull/1147))
+
+## `eryx-vfs` - [0.14.3](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.2...eryx-vfs-v0.14.3) - 2026-11-22
+
+### Other
+- *(deps)* update wasmtime & wasm-tools to v51 ([#1120](https://github.com/eryx-org/eryx/pull/1120))
+
+## `eryx-runtime` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.16.0...eryx-runtime-v0.16.1) - 2026-11-22
+
+### Fixed
+- *(runtime)* keep native-extension link error causes
+
 ## `eryx-precompile` - [0.16.0](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.15.2...eryx-precompile-v0.16.0) - 2026-11-20
 
 ### Added
