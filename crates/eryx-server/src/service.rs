@@ -828,7 +828,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     inbound_closed.clone(),
                 )
                 .map(Arc::new)
-                .map_err(|e| Status::internal(format!("failed to set up the mounts: {e}")))
+                .map_err(|e| {
+                    Status::failed_precondition(format!(
+                        "writable mounts don't fit this server's --max-mount-write-bytes: {e}"
+                    ))
+                })
             })
             .transpose()?;
         let volumes = mounts.as_deref().map(crate::mounts::Mounts::volumes);
@@ -1031,9 +1035,13 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 match result_msg {
                     Ok(mut result_msg) => {
                         // The writable mounts' changes, unless the client
-                        // has gone
+                        // has gone, or the run suspended: resuming replays it
+                        // from the start, against the client's files as they
+                        // were
+                        let skipped = [FailureKind::Cancelled, FailureKind::Suspended]
+                            .map(|kind| kind as i32);
                         if let Some(mounts) = &mounts
-                            && result_msg.failure_kind != FailureKind::Cancelled as i32
+                            && !skipped.contains(&result_msg.failure_kind)
                         {
                             send_mount_changes(mounts, &server_tx_result, &mut result_msg).await;
                         }
@@ -1096,9 +1104,13 @@ async fn send_mount_changes(
         Ok(changes) => changes,
         Err(e) => {
             tracing::error!(error = %e, "failed to collect the mounts' changes");
-            result.success = false;
-            result.error = format!("collecting the mounts' changes failed: {e}");
-            result.failure_kind = FailureKind::SandboxError as i32;
+            // A run that failed already keeps its own failure
+            if result.success {
+                result.success = false;
+                result.error = format!("collecting the mounts' changes failed: {e}");
+                result.failure_kind = FailureKind::SandboxError as i32;
+                result.exit_code = None;
+            }
             return;
         }
     };

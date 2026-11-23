@@ -209,21 +209,27 @@ impl Mounts {
             received: AtomicUsize::new(0),
             cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
         });
-        let upper = Arc::new(InMemoryStorage::with_max_bytes(limits.max_write_bytes));
+        // Made only for a request with writable mounts, as it charges their
+        // directories to the limit
+        let upper = defs
+            .iter()
+            .any(|d| d.writable)
+            .then(|| Arc::new(InMemoryStorage::with_max_bytes(limits.max_write_bytes)));
         let mounts = defs
             .iter()
             .map(|def| {
-                let overlay = def
-                    .writable
-                    .then(|| {
+                let overlay = match &upper {
+                    Some(upper) if def.writable => {
                         let lower = Arc::new(RemoteStorage {
                             mount: def.path.clone(),
                             remote: Arc::clone(&remote),
                         });
-                        Overlay::new(&def.path, lower, Arc::clone(&upper), limits.max_write_bytes)
-                    })
-                    .transpose()?
-                    .map(Arc::new);
+                        let upper = Arc::clone(upper);
+                        let overlay = Overlay::new(&def.path, lower, upper, limits.max_write_bytes);
+                        Some(Arc::new(overlay?))
+                    }
+                    _ => None,
+                };
                 Ok((def.path.clone(), overlay))
             })
             .collect::<VfsResult<_>>()?;

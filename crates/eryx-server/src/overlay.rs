@@ -39,6 +39,9 @@ pub struct Overlay {
     /// Most bytes the upper layer may hold, also checked before a copy-up
     max_bytes: u64,
     state: Mutex<State>,
+    /// Held while copying a client file up, so two writers to it can't both
+    /// copy it, the second over the first's write
+    copying: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Overlay {
@@ -103,6 +106,7 @@ impl Overlay {
             upper,
             max_bytes,
             state: Mutex::default(),
+            copying: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -160,6 +164,13 @@ impl Overlay {
 
     /// Have `path` in the upper layer, copying a client file up whole
     async fn copy_up(&self, path: &str) -> VfsResult<()> {
+        if let Found::Upper(m) = self.find(path).await?
+            && !m.is_dir
+        {
+            return Ok(());
+        }
+        // Looked up again under the lock: another writer may have copied it
+        let _copying = self.copying.lock().await;
         match self.find(path).await? {
             Found::Upper(m) | Found::Lower(m) if m.is_dir => {
                 Err(VfsError::NotFile(path.to_string()))
@@ -193,15 +204,14 @@ impl Overlay {
             Some(_) => {}
         }
         let mut entries = std::collections::BTreeMap::new();
-        // A directory only in the upper layer (the run made it, or remade
-        // it) has no client entries left to show
+        // A directory the run made (or remade) has no client entries left to
+        // show; any other is the client's, even with an upper copy holding
+        // the run's files, so its listing must come
+        let made = lock(&self.state).created.contains(path);
         let lower = match self.lower.list(path).await {
             Ok(lower) => lower,
             Err(VfsError::NotFound(_) | VfsError::NotDirectory(_)) => Vec::new(),
-            Err(e) if matches!(found, Found::Upper(_)) => {
-                tracing::debug!(path, error = %e, "listing the client's directory failed");
-                Vec::new()
-            }
+            Err(_) if made => Vec::new(),
             Err(e) => return Err(e),
         };
         {
@@ -422,10 +432,20 @@ impl VfsStorage for Overlay {
         };
         if meta.is_dir {
             // Only a directory wholly the run's moves as one
-            if !lock(&self.state).created.contains(from) || self.lower_has(from).await? {
+            let made = lock(&self.state).created.contains(from);
+            if !made || self.lower_has(from).await? {
                 return Err(VfsError::CrossDevice(format!(
                     "{from}: a directory from the client can't be renamed, only copied"
                 )));
+            }
+            // As rename(2): onto nothing, or onto an empty directory, which
+            // goes
+            match self.find(to).await? {
+                Found::Nowhere => {}
+                Found::Upper(m) | Found::Lower(m) if !m.is_dir => {
+                    return Err(VfsError::NotDirectory(to.to_string()));
+                }
+                _ => self.rmdir(to).await?,
             }
             self.ensure_parent(to).await?;
             self.upper.rename(from, to).await?;
@@ -445,8 +465,9 @@ impl VfsStorage for Overlay {
         if self.is_dir(to).await? {
             return Err(VfsError::NotFile(to.to_string()));
         }
-        self.copy_up(from).await?;
+        // The destination first, so a rename that fails copies nothing up
         self.ensure_parent(to).await?;
+        self.copy_up(from).await?;
         self.upper.rename(from, to).await?;
         if self.lower_has(from).await? {
             lock(&self.state).whiteouts.insert(from.to_string());
@@ -625,6 +646,109 @@ mod tests {
                 ("moved/c.txt".into(), "write", 0, b"c".to_vec()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn directory_renames_respect_the_destination() {
+        let o = overlay().await;
+        o.mkdir("/mnt/m/new").await.unwrap();
+        assert!(matches!(
+            o.rename("/mnt/m/new", "/mnt/m/dir").await,
+            Err(VfsError::DirectoryNotEmpty(_))
+        ));
+        assert!(matches!(
+            o.rename("/mnt/m/new", "/mnt/m/a.txt").await,
+            Err(VfsError::NotDirectory(_))
+        ));
+        // Onto an empty client directory: it goes, and the new one is made
+        o.rename("/mnt/m/new", "/mnt/m/empty").await.unwrap();
+        assert_eq!(names(&o, "/mnt/m").await, ["a.txt", "dir", "empty"]);
+        assert_eq!(
+            changes(&o).await,
+            [
+                ("empty".into(), "remove", 0, vec![]),
+                ("empty".into(), "mkdir", 0, vec![]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_copies_nothing() {
+        let o = overlay().await;
+        assert!(o.rename("/mnt/m/a.txt", "/mnt/m/missing/a").await.is_err());
+        assert!(changes(&o).await.is_empty());
+    }
+
+    /// Two writers to one client file: both writes land
+    #[tokio::test]
+    async fn concurrent_copy_ups_keep_both_writes() {
+        let o = Arc::new(overlay().await);
+        let (a, b) = (Arc::clone(&o), Arc::clone(&o));
+        let (ra, rb) = tokio::join!(
+            async move { a.append("/mnt/m/a.txt", b"1").await },
+            async move { b.append("/mnt/m/a.txt", b"2").await },
+        );
+        ra.unwrap();
+        rb.unwrap();
+        let data = o.read("/mnt/m/a.txt").await.unwrap();
+        assert!(data == b"alpha12" || data == b"alpha21", "{data:?}");
+    }
+
+    /// A client directory's listing error isn't hidden by the run's copy
+    #[tokio::test]
+    async fn client_listing_errors_come_through() {
+        struct Failing;
+        #[async_trait]
+        impl VfsStorage for Failing {
+            async fn read(&self, p: &str) -> VfsResult<Vec<u8>> {
+                Err(VfsError::NotFound(p.into()))
+            }
+            async fn read_at(&self, p: &str, _: u64, _: u64) -> VfsResult<Vec<u8>> {
+                Err(VfsError::NotFound(p.into()))
+            }
+            async fn write(&self, p: &str, _: &[u8]) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn write_at(&self, p: &str, _: u64, _: &[u8]) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn set_size(&self, p: &str, _: u64) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn delete(&self, p: &str) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn exists(&self, _: &str) -> VfsResult<bool> {
+                Ok(true)
+            }
+            async fn list(&self, p: &str) -> VfsResult<Vec<DirEntry>> {
+                Err(VfsError::Io(format!("{p}: the client refused")))
+            }
+            async fn stat(&self, _: &str) -> VfsResult<Metadata> {
+                let now = SystemTime::now();
+                Ok(Metadata {
+                    is_dir: true,
+                    size: 0,
+                    created: now,
+                    modified: now,
+                    accessed: now,
+                })
+            }
+            async fn mkdir(&self, p: &str) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn rmdir(&self, p: &str) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+            async fn rename(&self, p: &str, _: &str) -> VfsResult<()> {
+                Err(VfsError::PermissionDenied(p.into()))
+            }
+        }
+        let upper = Arc::new(InMemoryStorage::new());
+        let o = Overlay::new("/mnt/m", Arc::new(Failing), upper, 1024 * 1024).unwrap();
+        // The mount root is in the upper layer, but is the client's
+        assert!(matches!(o.list("/mnt/m").await, Err(VfsError::Io(_))));
+        assert!(o.rmdir("/mnt/m").await.is_err());
     }
 
     #[tokio::test]

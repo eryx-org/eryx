@@ -227,7 +227,8 @@ With `writable: true`, the code can change a mount, but the client's files are n
 | `mkdir` | Make the directory (parents come first). |
 | `write` | Part of the file's whole new contents: chunks of up to 1 MiB in order, the first at `offset` 0, which creates or truncates the file. An empty file is one empty chunk. |
 
-- Changes come for a failed run too, as far as its code got, so check `ExecuteResult.success` before applying them. None come if the run is cancelled.
+- Changes come for a failed run too, as far as its code got, so check `ExecuteResult.success` before applying them. None come if the run is cancelled or [suspends](#suspension), since a resumed run starts again from the client's files.
+- The changes come from the sandboxed code: treat them as untrusted. Resolve each path inside the mount without following symlinks out of it, and think twice before applying writes to files that run code, such as `.git/hooks`, build scripts or `.env`.
 - Writing part of a file fetches it whole first; replacing it, or truncating it to nothing (`open(path, 'w')`), doesn't. The changes may hold up to `--max-mount-write-bytes`, past which writes fail with `ENOSPC`.
 - Renaming a file works. Renaming a directory the client served fails with `EXDEV`, which `shutil.move` and `mv` handle by copying; one the code made itself renames.
 - Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported.

@@ -189,8 +189,8 @@ message ExecuteRequest {
   // INVALID_ARGUMENT.
   string globals = 20;
 
-  // Read-only directories the client serves to the code, without uploading
-  // them first. As the code uses one, the server sends FsRequests for what's
+  // Directories the client serves to the code, without uploading them
+  // first: read-only unless Mount.writable. As the code uses one, the server sends FsRequests for what's
   // in it, and the client answers each with an FsResponse carrying its
   // op_id. The client decides what each path serves, so don't serve files
   // such as `.env` or `.git/config` unless you mean to. See Mount.
@@ -200,7 +200,9 @@ message ExecuteRequest {
 // A directory the client serves to the code; see ExecuteRequest.mounts.
 //
 // A mount is read-only unless `writable`: writing, creating or deleting
-// files in it fails. A run reads each thing once: a file changed on the client mid-run may be
+// files in it fails.
+//
+// A run reads each thing once: a file changed on the client mid-run may be
 // seen as it was, and reads stop at the size the file had when the code
 // first looked at it. Reads fetch 256 KiB at a time. The server's
 // --max-mount* flags bound each run: by default it keeps up to 16 MiB of
@@ -222,7 +224,13 @@ message Mount {
   // files, and sent as FsChange messages once the code finishes, before the
   // ExecuteResult, for the client to apply (or not: check
   // ExecuteResult.success). They're sent for a failed run too, as far as
-  // its code got, but not when the run is cancelled.
+  // its code got, but not when the run is cancelled or suspends (a resumed
+  // run starts again from the client's files).
+  //
+  // The changes come from the sandboxed code, so treat them as untrusted:
+  // resolve each path inside the mount without following symlinks out of
+  // it, and think twice before applying writes to files that run code
+  // (`.git/hooks`, build scripts, `.env`).
   //
   // Writing part of a file fetches it whole first. The changes may hold up
   // to the server's --max-mount-write-bytes (64 MiB by default), past which
