@@ -819,14 +819,18 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
         // The mounts' requests share the stream with the callbacks', and fail
         // the same way once the client stops sending.
-        let mounts = (!mount_defs.is_empty()).then(|| {
-            Arc::new(crate::mounts::Mounts::new(
-                &mount_defs,
-                self.limits.mounts,
-                server_tx.downgrade(),
-                inbound_closed.clone(),
-            ))
-        });
+        let mounts = (!mount_defs.is_empty())
+            .then(|| {
+                crate::mounts::Mounts::new(
+                    &mount_defs,
+                    self.limits.mounts,
+                    server_tx.downgrade(),
+                    inbound_closed.clone(),
+                )
+                .map(Arc::new)
+                .map_err(|e| Status::internal(format!("failed to set up the mounts: {e}")))
+            })
+            .transpose()?;
         let volumes = mounts.as_deref().map(crate::mounts::Mounts::volumes);
         // The client still sees the declared names: the wrapper strips the
         // namespace before a call reaches it.
@@ -1025,7 +1029,14 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 }
 
                 match result_msg {
-                    Ok(result_msg) => {
+                    Ok(mut result_msg) => {
+                        // The writable mounts' changes, unless the client
+                        // has gone
+                        if let Some(mounts) = &mounts
+                            && result_msg.failure_kind != FailureKind::Cancelled as i32
+                        {
+                            send_mount_changes(mounts, &server_tx_result, &mut result_msg).await;
+                        }
                         let msg = ServerMessage {
                             message: Some(server_message::Message::ExecuteResult(Box::new(
                                 result_msg,
@@ -1070,6 +1081,35 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         );
 
         Ok(Response::new(ReceiverStream::new(resp_rx)))
+    }
+}
+
+/// Send the run's changes to its writable mounts as `FsChange` messages,
+/// counting them in `result`. If they can't be read, none are sent and the
+/// run fails, so a client never applies part of them.
+async fn send_mount_changes(
+    mounts: &crate::mounts::Mounts,
+    server_tx: &mpsc::Sender<ServerMessage>,
+    result: &mut ExecuteResult,
+) {
+    let changes = match mounts.changes().await {
+        Ok(changes) => changes,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to collect the mounts' changes");
+            result.success = false;
+            result.error = format!("collecting the mounts' changes failed: {e}");
+            result.failure_kind = FailureKind::SandboxError as i32;
+            return;
+        }
+    };
+    for change in changes {
+        let msg = ServerMessage {
+            message: Some(server_message::Message::FsChange(change)),
+        };
+        if server_tx.send(msg).await.is_err() {
+            return;
+        }
+        result.fs_changes += 1;
     }
 }
 
@@ -1735,6 +1775,8 @@ async fn execute_with_session(
                 state_skipped_globals,
                 state_was_reset: exec_output.state_was_reset,
                 exit_code: (params.language == eryx::Language::Shell).then_some(0),
+                // Counted as they're sent, after the execution
+                fs_changes: 0,
             }
         }
         Err(e) => {
@@ -1794,6 +1836,7 @@ async fn execute_with_session(
                     ErrorKind::ScriptFailed { exit_code, .. } => *exit_code,
                     _ => None,
                 },
+                fs_changes: 0,
             }
         }
     }

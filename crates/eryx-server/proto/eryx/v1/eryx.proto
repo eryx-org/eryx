@@ -19,7 +19,8 @@ service Eryx {
   //   5. Server sends ExecuteResult as the final message
   //
   // With mounts, the server also sends FsRequest messages as the code uses
-  // them, and the client answers each with an FsResponse.
+  // them, and the client answers each with an FsResponse. With writable
+  // mounts, it sends FsChange messages just before the ExecuteResult.
   rpc Execute(stream ClientMessage) returns (stream ServerMessage);
 }
 
@@ -43,6 +44,9 @@ message ServerMessage {
     // A file operation on one of the request's mounts, for the client to
     // answer with an FsResponse.
     FsRequest fs_request = 5;
+    // A change the run made to a writable mount, for the client to apply.
+    // All of a run's come after its code finishes, before ExecuteResult.
+    FsChange fs_change = 6;
   }
 }
 
@@ -195,8 +199,8 @@ message ExecuteRequest {
 
 // A directory the client serves to the code; see ExecuteRequest.mounts.
 //
-// Mounts are read-only: writing, creating or deleting files in them fails.
-// A run reads each thing once: a file changed on the client mid-run may be
+// A mount is read-only unless `writable`: writing, creating or deleting
+// files in it fails. A run reads each thing once: a file changed on the client mid-run may be
 // seen as it was, and reads stop at the size the file had when the code
 // first looked at it. Reads fetch 256 KiB at a time. The server's
 // --max-mount* flags bound each run: by default it keeps up to 16 MiB of
@@ -212,6 +216,51 @@ message Mount {
   // to the server's --max-mounts (8 by default), none inside another
   // (INVALID_ARGUMENT otherwise).
   string path = 1;
+
+  // Let the code change the mount. The client's files are never written
+  // during the run: the changes are kept on the server, over the client's
+  // files, and sent as FsChange messages once the code finishes, before the
+  // ExecuteResult, for the client to apply (or not: check
+  // ExecuteResult.success). They're sent for a failed run too, as far as
+  // its code got, but not when the run is cancelled.
+  //
+  // Writing part of a file fetches it whole first. The changes may hold up
+  // to the server's --max-mount-write-bytes (64 MiB by default), past which
+  // writes fail with ENOSPC. Renaming a directory the client served is
+  // EXDEV, which code that moves trees (shutil.move, mv) handles by
+  // copying. Changes are against what the run saw: a file the client
+  // changed mid-run isn't noticed. Times aren't reported.
+  bool writable = 2;
+}
+
+// A change a run made to a writable mount. Apply them in the order they
+// come: removals deepest first, then new directories parents first, then
+// files, each in FsWrite chunks.
+message FsChange {
+  // The mount's path, as in ExecuteRequest.mounts.
+  string mount = 1;
+  // Relative to the mount, without `.` or `..` components.
+  string path = 2;
+  oneof change {
+    // Remove the file, or the directory (empty by then).
+    FsRemove remove = 3;
+    // Make the directory.
+    FsMkdir mkdir = 4;
+    // Write part of the file's new contents.
+    FsWrite write = 5;
+  }
+}
+
+message FsRemove {}
+
+message FsMkdir {}
+
+// Part of a file's whole new contents, in order and at most 1 MiB each.
+// The first chunk is at offset 0, and creates or truncates the file; an
+// empty file is one empty chunk.
+message FsWrite {
+  uint64 offset = 1;
+  bytes data = 2;
 }
 
 // A file operation on a mount, for the client to answer; see Mount.
@@ -757,6 +806,9 @@ message ExecuteResult {
   // the sandbox itself failed (a timeout, a resource limit) before the script
   // could exit.
   optional int32 exit_code = 17;
+
+  // How many FsChange messages came before this, for writable mounts.
+  uint32 fs_changes = 18;
 }
 
 // Why an execution failed, when success is false.

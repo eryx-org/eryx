@@ -9,9 +9,9 @@ use std::time::Duration;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::{
-    ClientMessage, ExecuteRequest, ExecuteResult, FileKind, FsEntry, FsError, FsErrorCode,
-    FsListing, FsMetadata, FsResponse, Language, Mount, SupportingFile, client_message, fs_request,
-    fs_response, server_message,
+    ClientMessage, ExecuteRequest, ExecuteResult, FileKind, FsChange, FsEntry, FsError,
+    FsErrorCode, FsListing, FsMetadata, FsResponse, Language, Mount, SupportingFile,
+    client_message, fs_change, fs_request, fs_response, server_message,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -161,6 +161,7 @@ async fn run(channel: Channel, language: Language, code: &str) -> (ExecuteResult
         language: language.into(),
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
+            writable: false,
         }],
         ..Default::default()
     };
@@ -169,6 +170,18 @@ async fn run(channel: Channel, language: Language, code: &str) -> (ExecuteResult
 
 /// Send `request`, answering the server's file operations from `tree`.
 async fn run_request(channel: Channel, request: ExecuteRequest) -> (ExecuteResult, usize) {
+    let (result, ops, changes) = exchange(channel, request).await;
+    assert!(changes.is_empty(), "{changes:?}");
+    (result, ops)
+}
+
+/// Send `request`, answering the server's file operations from `tree`, and
+/// return the result, how many operations it asked for, and the changes it
+/// sent for writable mounts.
+async fn exchange(
+    channel: Channel,
+    request: ExecuteRequest,
+) -> (ExecuteResult, usize, Vec<FsChange>) {
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
     tx.send(ClientMessage {
@@ -182,6 +195,7 @@ async fn run_request(channel: Channel, request: ExecuteRequest) -> (ExecuteResul
         .unwrap()
         .into_inner();
     let mut ops = 0;
+    let mut changes = Vec::new();
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::FsRequest(req)) => {
@@ -197,7 +211,11 @@ async fn run_request(channel: Channel, request: ExecuteRequest) -> (ExecuteResul
                 .await
                 .unwrap();
             }
-            Some(server_message::Message::ExecuteResult(result)) => return (*result, ops),
+            Some(server_message::Message::FsChange(change)) => changes.push(change),
+            Some(server_message::Message::ExecuteResult(result)) => {
+                assert_eq!(result.fs_changes as usize, changes.len());
+                return (*result, ops, changes);
+            }
             _ => {}
         }
     }
@@ -262,6 +280,7 @@ except OSError:
         }],
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
+            writable: false,
         }],
         ..Default::default()
     };
@@ -334,7 +353,10 @@ async fn the_operators_mount_limits_apply() {
 
     let mut client = EryxClient::new(channel.clone());
     let (tx, rx) = mpsc::channel(1);
-    let two = ["/mnt/a", "/mnt/b"].map(|path| Mount { path: path.into() });
+    let two = ["/mnt/a", "/mnt/b"].map(|path| Mount {
+        path: path.into(),
+        writable: false,
+    });
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(
             ExecuteRequest {
@@ -366,6 +388,118 @@ except OSError:
     assert_eq!(ops, 2);
 }
 
+/// A run with `tree` mounted writable at `/mnt/repo`: its result and its
+/// changes, as `(path, change)` with each file's chunks joined
+async fn run_writable(
+    channel: Channel,
+    language: Language,
+    code: &str,
+) -> (ExecuteResult, Vec<(String, String)>) {
+    let request = ExecuteRequest {
+        code: code.to_string(),
+        language: language.into(),
+        mounts: vec![Mount {
+            path: "/mnt/repo".into(),
+            writable: true,
+        }],
+        ..Default::default()
+    };
+    let (result, _, changes) = exchange(channel, request).await;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for change in changes {
+        assert_eq!(change.mount, "/mnt/repo");
+        match change.change.unwrap() {
+            fs_change::Change::Remove(_) => out.push((change.path, "remove".into())),
+            fs_change::Change::Mkdir(_) => out.push((change.path, "mkdir".into())),
+            fs_change::Change::Write(write) => {
+                let data = String::from_utf8_lossy(&write.data).into_owned();
+                match out.last_mut() {
+                    Some((path, text)) if write.offset > 0 && *path == change.path => {
+                        text.push_str(&data);
+                    }
+                    _ => out.push((change.path, format!("write {data}"))),
+                }
+            }
+        }
+    }
+    (result, out)
+}
+
+#[tokio::test]
+async fn python_changes_a_writable_mount() {
+    let channel = start_server().await;
+    let code = r"
+import errno, os, shutil
+with open('/mnt/repo/README.md', 'a') as f:
+    f.write('more\n')
+open('/mnt/repo/src/main.py', 'w').write('print(2)\n')
+os.makedirs('/mnt/repo/out/logs')
+open('/mnt/repo/out/logs/run.txt', 'w').write('ok')
+os.remove('/mnt/repo/big.bin')
+os.rename('/mnt/repo/src/main.py', '/mnt/repo/main.py')
+try:
+    os.rename('/mnt/repo/src', '/mnt/repo/lib')
+except OSError as e:
+    print('exdev', e.errno == errno.EXDEV)
+shutil.move('/mnt/repo/src', '/mnt/repo/lib')
+print(sorted(os.listdir('/mnt/repo')))
+print(open('/mnt/repo/README.md').read(), end='')
+";
+    let (result, changes) = run_writable(channel, Language::Python, code).await;
+    assert_eq!(
+        stdout(&result),
+        "exdev True\n\
+         ['README.md', 'lib', 'main.py', 'out', 'private']\n\
+         hello mounts\nmore\n"
+    );
+    let changes: Vec<(&str, &str)> = changes
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("src/main.py", "remove"),
+            ("big.bin", "remove"),
+            ("src", "remove"),
+            ("lib", "mkdir"),
+            ("out", "mkdir"),
+            ("out/logs", "mkdir"),
+            ("README.md", "write hello mounts\nmore\n"),
+            ("main.py", "write print(2)\n"),
+            ("out/logs/run.txt", "write ok"),
+        ]
+    );
+}
+
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn the_shell_changes_a_writable_mount() {
+    let channel = start_server().await;
+    let code =
+        "echo hi > /mnt/repo/new.txt; rm /mnt/repo/README.md; mkdir /mnt/repo/d; ls /mnt/repo";
+    let (result, changes) = run_writable(channel, Language::Shell, code).await;
+    assert_eq!(stdout(&result), "big.bin\nd\nnew.txt\nprivate\nsrc\n");
+    assert_eq!(
+        changes,
+        [
+            ("README.md".into(), "remove".into()),
+            ("d".into(), "mkdir".into()),
+            ("new.txt".into(), "write hi\n".into()),
+        ]
+    );
+}
+
+/// A failed run's changes still come, as far as it got
+#[tokio::test]
+async fn a_failed_runs_changes_still_come() {
+    let channel = start_server().await;
+    let code = "open('/mnt/repo/partial.txt', 'w').write('half')\nraise SystemExit(1)";
+    let (result, changes) = run_writable(channel, Language::Python, code).await;
+    assert!(!result.success);
+    assert_eq!(changes, [("partial.txt".into(), "write half".into())]);
+}
+
 #[tokio::test]
 async fn bad_mounts_are_refused() {
     let channel = start_server().await;
@@ -377,6 +511,7 @@ async fn bad_mounts_are_refused() {
                 code: "print(1)".into(),
                 mounts: vec![Mount {
                     path: "/etc".into(),
+                    writable: false,
                 }],
                 ..Default::default()
             },

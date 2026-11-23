@@ -220,6 +220,11 @@ struct Args {
     #[arg(long, default_value_t = MountLimits::default().max_dir_entries, env = "ERYX_MAX_MOUNT_DIR_ENTRIES")]
     max_mount_dir_entries: usize,
 
+    /// Most host memory one execution's changes to its writable mounts may
+    /// hold, all of them together; past it, writes fail with ENOSPC.
+    #[arg(long, default_value_t = MountLimits::default().max_write_bytes, env = "ERYX_MAX_MOUNT_WRITE_BYTES")]
+    max_mount_write_bytes: u64,
+
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
     /// requests are rejected and secrets are only substituted over TLS.
@@ -1011,6 +1016,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_cache_bytes: args.max_mount_cache_bytes,
             max_listing_bytes: args.max_mount_listing_bytes,
             max_dir_entries: args.max_mount_dir_entries,
+            max_write_bytes: args.max_mount_write_bytes,
         },
     };
     if let Some(total) = args.max_open_host_files_total {
