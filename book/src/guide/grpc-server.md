@@ -148,13 +148,15 @@ service Eryx {
 }
 ```
 
-It is **bidirectional streaming**. A `ClientMessage` is either an `ExecuteRequest` or a `CallbackResponse`; a `ServerMessage` is a `CallbackRequest`, `OutputEvent`, `TraceEvent`, or `ExecuteResult`. The protocol for one execution is:
+It is **bidirectional streaming**. A `ClientMessage` is an `ExecuteRequest`, a `CallbackResponse` or an `FsResponse`; a `ServerMessage` is a `CallbackRequest`, `OutputEvent`, `TraceEvent`, `FsRequest` or `ExecuteResult`. The protocol for one execution is:
 
 1. The client sends an **`ExecuteRequest`** as the first message. This is the only `ExecuteRequest` on the stream — it configures the entire run.
 2. As the script runs, the server streams **`OutputEvent`** messages (stdout/stderr chunks) and, when `enable_tracing` is set, **`TraceEvent`** messages.
 3. When the Python code `await`s a declared callback, the server sends a **`CallbackRequest`** carrying a unique `request_id`, the callback `name`, and the JSON-encoded `arguments_json`.
 4. The client handles the callback and replies with a **`CallbackResponse`** echoing the same `request_id`. Multiple callbacks can be in flight at once (e.g. from `asyncio.gather`), so responses are matched by `request_id`, not by order.
 5. When execution finishes, the server sends a single **`ExecuteResult`** and closes the stream.
+
+With [mounts](#mounts), the server also sends **`FsRequest`** messages as the code uses them, and the client answers each with an **`FsResponse`** carrying its `op_id`.
 
 If the client disconnects, the server cancels the in-flight execution, including CPU-bound code, and returns the sandbox to the pool promptly instead of waiting for timeouts. A client may instead half-close its side of the stream (e.g. grpc-go's `CloseSend()`) and keep reading: execution then runs to completion, but any callback the script awaits after that fails immediately, since no response can arrive.
 
@@ -171,6 +173,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `secrets` | [Secrets](./secrets.md) injected as environment variables with placeholder values; real values are substituted only in HTTP headers to allowed hosts. The shell exports the placeholders to its commands, and only their `child_network` proxy substitutes the real values; commands the server allows tunnels (`--shell-command-tunnels`) send placeholders as they are. With networking on, a secret that has no `allowed_hosts` of its own and no `network_config.allowed_hosts` to fall back on (e.g. under `allow_all_hosts`) is rejected with `INVALID_ARGUMENT`. |
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |
 | `files` | [Supporting files](./vfs.md) written into the sandbox VFS — `FILE_KIND_MODULE` files go on `sys.path`, `FILE_KIND_DATA` files are readable but not importable. |
+| `mounts` | Read-only directories under `/mnt/` that the client serves as the code uses them. See [Mounts](#mounts). |
 | `persist_state` / `state_snapshot` | [Session state](./sessions.md): when `persist_state` is true the server snapshots state into `ExecuteResult.state_snapshot`; supplying `state_snapshot` restores it before execution. |
 | `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid`, `exit_code`, and `ppid` for a nested child). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
@@ -188,6 +191,24 @@ If the client disconnects, the server cancels the in-flight execution, including
 - It isn't scrubbed: printing a global prints its value. Put credentials in `secrets`, not here.
 - With `persist_state`, globals are saved in the snapshot like any other variable, and the next request's `globals` overwrite those with the same names. In JavaScript that includes a restored `let`; a restored `const` can't be overwritten, so the execution fails with a `TypeError`.
 - It counts towards the server's message size limit like `code`.
+
+### Mounts
+
+`mounts` gives the code directories the client serves, without uploading them first: `mounts: [{path: "/mnt/repo"}]`. As the code uses one, the server sends `FsRequest`s for it, and the client answers each with an `FsResponse` carrying the request's `op_id`. `mount` is the mount's path, and `path` is relative to it (`""` for the mount itself). The client decides what each path serves, so don't serve files such as `.env` or `.git/config` unless you mean to.
+
+| `FsRequest.op` | Answer with |
+|----------------|-------------|
+| `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch). |
+| `list` | `listing`: the directory's entries, each with its metadata. Put a small file's whole contents in its entry's `content`: the server keeps those up to 64 KiB, so reading a tree of small files costs one round trip per directory. |
+| `read` | `data`: up to `len` bytes of the file from `offset`, fewer at its end. |
+
+Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_NOT_A_DIRECTORY`, `_IS_A_DIRECTORY` and `_PERMISSION_DENIED` reach the code as the matching exception (`FileNotFoundError`, ...), anything else as an `OSError` (EIO). A read's error is always EIO, as the file is already open by then: to refuse a file, refuse its `stat`. Once the code has listed a directory, its listing answers stats of its entries, and a name that isn't in it is not found without asking.
+
+- Mounts are read-only: writing, creating or deleting files in them fails.
+- A run reads each thing once: a file changed on the client mid-run may be seen as it was, and reads stop at the size the file had when the code first looked at it. Reads fetch 256 KiB at a time, and up to 16 MiB of file data and 16 MiB of listings are kept per run.
+- A run can have up to 8 mounts, which can't overlap, and makes at most 1000 `FsRequest`s and is sent at most 256 MiB of `FsResponse`s; past either, the code's file operations on its mounts fail. Each `FsResponse` must fit in the server's `--max-message-size`.
+- They work for every language. They aren't saved with `persist_state`, nor recorded in a [callback journal](#callback-replay): a replayed run asks for them again.
+- If the client half-closes or disconnects, file operations waiting for an answer, and any after, fail at once.
 
 ## Reading the result
 

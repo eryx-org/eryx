@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod callbacks;
+pub mod mounts;
 pub mod replay;
 pub mod service;
 pub mod telemetry;
