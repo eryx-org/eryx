@@ -15,13 +15,8 @@ permissions:
 jobs:
   build:
     name: Build
-    # Only the main eryx release gets the runtime assets. Without this the job
-    # ran for all four release-plz releases, rebuilding the runtimes each time
-    # and attaching them to releases that have no use for them. See the note in
-    # python-release.yml for why the eryx-vfs exclusion is needed.
-    if: >-
-      startsWith(github.event.release.tag_name, 'eryx-v') &&
-      !startsWith(github.event.release.tag_name, 'eryx-vfs-v')
+    # Only the eryx release gets the runtime assets, not the SDKs' releases.
+    if: startsWith(github.event.release.tag_name, 'eryx-v')
     uses: ./.github/workflows/runtime-build.yml
 
   upload-runtime:

@@ -47,12 +47,27 @@ jobs:
           toolchain: stable
 
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
         with:
           command: release
           config: release-plz.toml
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # release-plz leaves the release body empty with our single changelog (it
+      # can't find a section whose heading starts with the crate name), so fill
+      # the eryx release with every crate's section for this release.
+      - name: Fill release notes from CHANGELOG.md
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(jq -r '.[] | select(.package_name == "eryx") | .tag' <<<"$RELEASES")
+          [[ -n $tag ]] || exit 0
+          git fetch --tags --quiet
+          gh release edit "$tag" --notes "$(scripts/release-notes.sh "$tag")"
 
   # Create a PR with the new versions and changelog, preparing the next release.
   # The PR runs only the cheap CI jobs until it has the `ready-to-release`
