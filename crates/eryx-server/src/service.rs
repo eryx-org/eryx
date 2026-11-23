@@ -897,7 +897,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     if let Some(client_message::Message::FsResponse(resp)) = msg.message {
                         match &mounts_dispatch {
                             Some(mounts) => mounts.reply(resp),
-                            None => tracing::warn!("fs_response for a request without mounts"),
+                            None => tracing::debug!("fs_response for a request without mounts"),
                         }
                     } else if let Some(client_message::Message::CallbackResponse(resp)) =
                         msg.message

@@ -201,11 +201,14 @@ impl Mounts {
 
     /// Take the client's answer to an operation
     pub fn reply(&self, response: FsResponse) {
-        let received = self
-            .remote
-            .received
-            .fetch_add(response.encoded_len(), Ordering::Relaxed)
-            + response.encoded_len();
+        // An answer to an operation we didn't ask for, or one the run has
+        // given up on, is dropped, and doesn't count towards the transfer
+        let Some(tx) = lock(&self.remote.pending).remove(&response.op_id) else {
+            tracing::debug!(op_id = %response.op_id, "fs_response for no pending operation");
+            return;
+        };
+        let len = response.encoded_len();
+        let received = self.remote.received.fetch_add(len, Ordering::Relaxed) + len;
         let answer = if received > MAX_TRANSFER {
             Err(Failure::Other(format!(
                 "the client sent more than {} MiB",
@@ -216,12 +219,7 @@ impl Mounts {
                 .result
                 .ok_or_else(|| Failure::Other("an empty fs_response".into()))
         };
-        let tx = lock(&self.remote.pending).remove(&response.op_id);
-        // An answer to an operation we didn't ask for, or one the run has
-        // given up on, is dropped
-        if let Some(tx) = tx {
-            let _ = tx.send(answer);
-        }
+        let _ = tx.send(answer);
     }
 
     /// When the run is done (it finished, or the client went), operations
@@ -318,6 +316,20 @@ impl Cache {
 }
 
 impl Remote {
+    /// Why a new operation would fail without asking: the client can't
+    /// answer, or the run has used up its operations. Checked before a new
+    /// entry goes in the cache, so failures past the limit aren't kept, and
+    /// the cache holds at most about [`MAX_OPS`] entries besides blocks.
+    fn refusal(&self) -> Option<Failure> {
+        if self.closed.is_cancelled() {
+            Some(gone())
+        } else if self.ops.load(Ordering::Relaxed) >= MAX_OPS {
+            Some(too_many_ops())
+        } else {
+            None
+        }
+    }
+
     /// Ask the client for `op` on `path` (relative to `mount`) and wait for
     /// its answer
     fn request(
@@ -329,28 +341,28 @@ impl Remote {
         let remote = Arc::clone(self);
         let (mount, path) = (mount.to_string(), path.to_string());
         async move {
-            let gone = || Failure::Other("the client can no longer answer".to_string());
             if remote.closed.is_cancelled() {
                 return Err(gone());
             }
             if remote.ops.fetch_add(1, Ordering::Relaxed) >= MAX_OPS {
-                return Err(Failure::Other(format!(
-                    "a run can make at most {MAX_OPS} file operations on its mounts"
-                )));
+                return Err(too_many_ops());
             }
+            let requests = remote.requests.upgrade().ok_or_else(gone)?;
             let op_id = uuid::Uuid::new_v4().to_string();
             let (tx, rx) = oneshot::channel();
             lock(&remote.pending).insert(op_id.clone(), tx);
             let message = ServerMessage {
                 message: Some(server_message::Message::FsRequest(FsRequest {
-                    op_id,
+                    op_id: op_id.clone(),
                     mount,
                     path,
                     op: Some(op),
                 })),
             };
-            let requests = remote.requests.upgrade().ok_or_else(gone)?;
-            requests.send(message).await.map_err(|_| gone())?;
+            if requests.send(message).await.is_err() {
+                lock(&remote.pending).remove(&op_id);
+                return Err(gone());
+            }
             drop(requests);
             let answer = tokio::select! {
                 answer = rx => answer.map_err(|_| gone())??,
@@ -369,6 +381,16 @@ impl Remote {
         }
         .boxed()
     }
+}
+
+fn gone() -> Failure {
+    Failure::Other("the client can no longer answer".to_string())
+}
+
+fn too_many_ops() -> Failure {
+    Failure::Other(format!(
+        "a run can make at most {MAX_OPS} file operations on its mounts"
+    ))
 }
 
 /// The answer wasn't what the operation asked for
@@ -406,11 +428,20 @@ impl RemoteStorage {
     async fn listing(&self, path: &str) -> VfsResult<Arc<BTreeMap<String, Stat>>> {
         let rel = self.relative(path)?;
         let key = self.key(rel);
-        let fetch = lock(&self.remote.cache)
-            .lists
-            .entry(key.clone())
-            .or_insert_with(|| self.fetch_listing(&key, rel))
-            .clone();
+        let fetch = {
+            let mut cache = lock(&self.remote.cache);
+            match cache.lists.get(&key) {
+                Some(fetch) => fetch.clone(),
+                None => {
+                    if let Some(failure) = self.remote.refusal() {
+                        return Err(failure.into_vfs(path));
+                    }
+                    let fetch = self.fetch_listing(&key, rel);
+                    cache.lists.insert(key, fetch.clone());
+                    fetch
+                }
+            }
+        };
         fetch.await.map_err(|f| f.into_vfs(path))
     }
 
@@ -501,6 +532,11 @@ impl RemoteStorage {
                     .cloned()
                     .ok_or_else(|| VfsError::NotFound(path.to_string()));
             }
+            if !cache.stats.contains_key(&key)
+                && let Some(failure) = self.remote.refusal()
+            {
+                return Err(failure.into_vfs(path));
+            }
             let stat = cache.stats.entry(key).or_insert_with(|| {
                 let request =
                     self.remote
@@ -526,6 +562,9 @@ impl RemoteStorage {
         let mut cache = lock(&self.remote.cache);
         if let Some(fetch) = cache.blocks.get(&key) {
             return Ok(fetch.clone());
+        }
+        if let Some(failure) = self.remote.refusal() {
+            return Err(failure);
         }
         cache.reserve(size)?;
         let op = fs_request::Op::Read(FsRead {
@@ -890,6 +929,34 @@ mod tests {
             storage.stat("/mnt/m/b").await,
             Err(VfsError::Io(_))
         ));
+    }
+
+    /// Past the operation limit, new paths fail without a cache entry, so
+    /// a guest probing paths can't grow the cache without bound
+    #[tokio::test]
+    async fn failures_past_the_limit_arent_cached() {
+        let (storage, _count) = serve(vec![("a.txt", b"abc")]);
+        storage.remote.ops.store(MAX_OPS, Ordering::Relaxed);
+        for i in 0..100 {
+            assert!(matches!(
+                storage.exists(&format!("/mnt/m/{i}")).await,
+                Err(VfsError::Io(_))
+            ));
+            assert!(storage.list(&format!("/mnt/m/d{i}")).await.is_err());
+        }
+        let cache = lock(&storage.remote.cache);
+        assert!(cache.stats.is_empty() && cache.lists.is_empty());
+    }
+
+    /// Stray answers are dropped without counting towards the transfer
+    #[tokio::test]
+    async fn stray_answers_dont_count() {
+        let (_storage, mounts, _rx, _tx, _closed) = mount();
+        mounts.reply(FsResponse {
+            op_id: "nobody".into(),
+            result: Some(fs_response::Result::Data(vec![0; 1000])),
+        });
+        assert_eq!(mounts.remote.received.load(Ordering::Relaxed), 0);
     }
 
     /// The mounts don't keep the response stream open: once the run's own
