@@ -17,6 +17,9 @@ service Eryx {
   //   3. Client responds with CallbackResponse for each CallbackRequest
   //   4. Server streams OutputEvent messages as Python produces output
   //   5. Server sends ExecuteResult as the final message
+  //
+  // With mounts, the server also sends FsRequest messages as the code uses
+  // them, and the client answers each with an FsResponse.
   rpc Execute(stream ClientMessage) returns (stream ServerMessage);
 }
 
@@ -25,6 +28,8 @@ message ClientMessage {
   oneof message {
     ExecuteRequest execute_request = 1;
     CallbackResponse callback_response = 2;
+    // The answer to an FsRequest, for one of the request's mounts.
+    FsResponse fs_response = 3;
   }
 }
 
@@ -35,6 +40,9 @@ message ServerMessage {
     OutputEvent output_event = 2;
     ExecuteResult execute_result = 3;
     TraceEvent trace_event = 4;
+    // A file operation on one of the request's mounts, for the client to
+    // answer with an FsResponse.
+    FsRequest fs_request = 5;
   }
 }
 
@@ -176,6 +184,129 @@ message ExecuteRequest {
   // else that isn't such an object, or setting it for the shell, is
   // INVALID_ARGUMENT.
   string globals = 20;
+
+  // Read-only directories the client serves to the code, without uploading
+  // them first. As the code uses one, the server sends FsRequests for what's
+  // in it, and the client answers each with an FsResponse carrying its
+  // op_id. The client decides what each path serves, so don't serve files
+  // such as `.env` or `.git/config` unless you mean to. See Mount.
+  repeated Mount mounts = 21;
+}
+
+// A directory the client serves to the code; see ExecuteRequest.mounts.
+//
+// Mounts are read-only: writing, creating or deleting files in them fails.
+// A run reads each thing once: a file changed on the client mid-run may be
+// seen as it was, and reads stop at the size the file had when the code
+// first looked at it. Reads fetch 256 KiB at a time. The server's
+// --max-mount* flags bound each run: by default it keeps up to 16 MiB of
+// file data and 16 MiB of listings, makes at most 1000 FsRequests and is
+// sent at most 256 MiB of FsResponses, after which the code's file
+// operations on its mounts fail with an OSError (EIO). Each FsResponse must
+// fit in the server's message size limit. Mounts aren't
+// saved with persist_state, nor recorded in a callback journal: a replay
+// asks for them again.
+message Mount {
+  // Where the code sees it: a path under /mnt/, like /mnt/repo, without
+  // `.`, `..`, empty components or a trailing slash. A request can have up
+  // to the server's --max-mounts (8 by default), none inside another
+  // (INVALID_ARGUMENT otherwise).
+  string path = 1;
+}
+
+// A file operation on a mount, for the client to answer; see Mount.
+message FsRequest {
+  // Unique ID for this operation. The FsResponse must carry it.
+  string op_id = 1;
+  // The mount's path, as in ExecuteRequest.mounts.
+  string mount = 2;
+  // The file or directory, relative to the mount: "" is the mount itself,
+  // and there are no `.` or `..` components.
+  string path = 3;
+  oneof op {
+    // The metadata of `path`: answer with FsResponse.stat.
+    FsStat stat = 4;
+    // The entries of the directory `path`: answer with FsResponse.listing.
+    FsList list = 5;
+    // Bytes of the file `path`: answer with FsResponse.data.
+    FsRead read = 6;
+  }
+}
+
+message FsStat {}
+
+message FsList {}
+
+message FsRead {
+  // Where the bytes start in the file.
+  uint64 offset = 1;
+  // How many to send: at most this many, fewer at the end of the file.
+  uint64 len = 2;
+}
+
+// The client's answer to an FsRequest.
+message FsResponse {
+  // The op_id of the FsRequest this answers. An answer for an operation the
+  // server isn't waiting for is ignored.
+  string op_id = 1;
+  oneof result {
+    // The operation failed.
+    FsError error = 2;
+    // stat's answer.
+    FsMetadata stat = 3;
+    // list's answer.
+    FsListing listing = 4;
+    // read's answer: the bytes from `offset`, at most `len` of them (empty
+    // at or past the end of the file).
+    bytes data = 5;
+  }
+}
+
+message FsError {
+  // What the code sees: NOT_FOUND is FileNotFoundError, NOT_A_DIRECTORY
+  // NotADirectoryError, IS_A_DIRECTORY IsADirectoryError, PERMISSION_DENIED
+  // PermissionError, anything else an OSError (EIO). A read's error reaches
+  // the code as EIO whatever its code, as the file is open by then: to
+  // refuse a file, refuse its stat. Once the code has listed a directory,
+  // the listing answers stats of its entries, and a name it doesn't have is
+  // NOT_FOUND without asking.
+  FsErrorCode code = 1;
+  // Details for the server's log and the code's EIO error.
+  string message = 2;
+}
+
+enum FsErrorCode {
+  FS_ERROR_CODE_OTHER = 0;
+  FS_ERROR_CODE_NOT_FOUND = 1;
+  FS_ERROR_CODE_NOT_A_DIRECTORY = 2;
+  FS_ERROR_CODE_IS_A_DIRECTORY = 3;
+  FS_ERROR_CODE_PERMISSION_DENIED = 4;
+}
+
+// A file's or directory's metadata.
+message FsMetadata {
+  bool is_dir = 1;
+  // The file's size in bytes (ignored for a directory).
+  uint64 size = 2;
+  // Last modified, in seconds since the Unix epoch. Unset: the epoch.
+  optional double modified = 3;
+}
+
+message FsListing {
+  // The directory's entries, at most the server's --max-mount-dir-entries
+  // (10,000 by default). Names are plain: not empty,
+  // `.` or `..`, and without a `/`.
+  repeated FsEntry entries = 1;
+}
+
+message FsEntry {
+  string name = 1;
+  FsMetadata metadata = 2;
+  // A file's whole contents, `size` bytes, so reading it needs no further
+  // FsRequest. Optional: worth sending for small files (the server keeps
+  // those up to 64 KiB), as reading a whole tree of them then costs one
+  // round trip per directory.
+  optional bytes content = 3;
 }
 
 // Per-execution options for one of the server's shell commands; see

@@ -1295,6 +1295,7 @@ dependencies = [
 name = "eryx-server"
 version = "0.16.1"
 dependencies = [
+ "async-trait",
  "clap",
  "dashmap",
  "eryx",

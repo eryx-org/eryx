@@ -111,6 +111,8 @@ pub struct ServerLimits {
     /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
     /// run with the field ignored.
     pub allow_plaintext_secrets: bool,
+    /// Limits on each request's `mounts`.
+    pub mounts: crate::mounts::MountLimits,
 }
 
 impl Default for ServerLimits {
@@ -128,6 +130,7 @@ impl Default for ServerLimits {
             max_child_host_bytes: 64 * 1024 * 1024,
             max_child_memory_bytes: 256 * 1024 * 1024,
             allow_plaintext_secrets: false,
+            mounts: crate::mounts::MountLimits::default(),
         }
     }
 }
@@ -609,6 +612,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let persist_state = execute_req.persist_state;
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
+        let mount_defs = execute_req.mounts;
+        crate::mounts::check(&mount_defs, self.limits.mounts.max_mounts)
+            .map_err(|e| Status::invalid_argument(format!("mounts: {e}")))?;
         let result_variable = execute_req.result_variable;
         let callback_namespace = execute_req.callback_namespace;
         let scrub_result = execute_req.scrub_result;
@@ -811,6 +817,17 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             Arc::clone(&pending),
             inbound_closed.clone(),
         );
+        // The mounts' requests share the stream with the callbacks', and fail
+        // the same way once the client stops sending.
+        let mounts = (!mount_defs.is_empty()).then(|| {
+            Arc::new(crate::mounts::Mounts::new(
+                &mount_defs,
+                self.limits.mounts,
+                server_tx.downgrade(),
+                inbound_closed.clone(),
+            ))
+        });
+        let volumes = mounts.as_deref().map(crate::mounts::Mounts::volumes);
         // The client still sees the declared names: the wrapper strips the
         // namespace before a call reaches it.
         let cbs = if callback_namespace.is_empty() {
@@ -869,6 +886,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         //    routes them to the pending oneshot senders.
         let pending_dispatch = Arc::clone(&pending);
         let cancel_dispatch = cancel.clone();
+        let mounts_dispatch = mounts.clone();
         tokio::spawn(
             async move {
                 let disconnected = loop {
@@ -880,7 +898,14 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         Ok(None) => break false,
                         Err(_) => break true,
                     };
-                    if let Some(client_message::Message::CallbackResponse(resp)) = msg.message {
+                    if let Some(client_message::Message::FsResponse(resp)) = msg.message {
+                        match &mounts_dispatch {
+                            Some(mounts) => mounts.reply(resp),
+                            None => tracing::debug!("fs_response for a request without mounts"),
+                        }
+                    } else if let Some(client_message::Message::CallbackResponse(resp)) =
+                        msg.message
+                    {
                         let request_id = resp.request_id;
                         // A SUSPEND outcome takes precedence over the result oneof:
                         // the reason is carried in the `error` field. This defers
@@ -955,6 +980,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     callback_namespace: &callback_namespace,
                     language,
                     vfs_storage,
+                    volumes: volumes.unwrap_or_default(),
                     state: persist_state.then_some(state_snapshot.as_slice()),
                     enable_tracing,
                     resource_limits,
@@ -993,6 +1019,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     () = resp_tx_final.closed() => Ok(cancelled_result()),
                 };
                 let panicked = result_msg.is_err();
+                // Fail anything still asking the client, and free the cache.
+                if let Some(mounts) = &mounts {
+                    mounts.close();
+                }
 
                 match result_msg {
                     Ok(result_msg) => {
@@ -1198,6 +1228,8 @@ struct SessionParams<'a> {
     language: eryx::Language,
     /// VFS pre-populated with the request's supporting files, if any.
     vfs_storage: Option<ArcStorage>,
+    /// The request's mounts, served by the client.
+    volumes: Vec<eryx::VolumeMount>,
     state: Option<&'a [u8]>,
     enable_tracing: bool,
     resource_limits: ResourceLimits,
@@ -1273,8 +1305,23 @@ async fn execute_with_session(
     };
     let callbacks_arc: Vec<Arc<dyn Callback>> = active_callbacks.values().cloned().collect();
 
-    // Create the session executor, optionally with pre-populated VFS for supporting files.
-    let mut session = match params.vfs_storage.clone() {
+    // Create the session executor, optionally with pre-populated VFS for
+    // supporting files, and the mounts. Mounts without files keep the
+    // default `/data` scratch storage, under the request's VFS limits.
+    let vfs = match params.vfs_storage.clone() {
+        Some(storage) => Some((storage, VfsConfig::new(VFS_MOUNT_PATH))),
+        None if !params.volumes.is_empty() => {
+            let limits = &params.resource_limits;
+            let storage = InMemoryStorage::with_max_bytes(
+                limits.max_vfs_bytes.unwrap_or(eryx::vfs::DEFAULT_MAX_BYTES),
+            )
+            .with_max_entries(limits.max_vfs_entries.unwrap_or(eryx::vfs::MAX_ENTRIES));
+            let storage = ArcStorage::new(Arc::new(storage) as Arc<dyn VfsStorage>);
+            Some((storage, VfsConfig::default()))
+        }
+        None => None,
+    };
+    let mut session = match vfs {
         None => match SessionExecutor::new_with_limits(
             executor,
             &callbacks_arc,
@@ -1297,8 +1344,8 @@ async fn execute_with_session(
                 };
             }
         },
-        Some(vfs_storage) => {
-            let vfs_config = VfsConfig::new(VFS_MOUNT_PATH);
+        Some((vfs_storage, vfs_config)) => {
+            let vfs_config = vfs_config.with_volumes(params.volumes.iter().cloned());
             match SessionExecutor::new_with_vfs_config_and_limits(
                 executor,
                 &callbacks_arc,
