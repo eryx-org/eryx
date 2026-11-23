@@ -7,20 +7,22 @@ changelog_path = "./CHANGELOG.md"
 # Create git tags for releases
 git_tag_enable = true
 
-# Create GitHub releases
-git_release_enable = true
-
-# eryx-precompile ships prebuilt binaries via cargo-dist (.github/workflows/release.yml),
-# which creates AND populates its GitHub release when the tag is pushed. If release-plz
-# also created that release, cargo-dist's `gh release create` would collide and fail.
-# So let release-plz create only the tag (which triggers cargo-dist) — not the release.
-[[package]]
-name = "eryx-precompile"
+# One GitHub release per version, eryx's; the other crates only get tags. The
+# release-plz workflow fills its notes with every crate's CHANGELOG.md section
+# (scripts/release-notes.sh), and the Python/JS/runtime release workflows run
+# off it.
+#
+# eryx-precompile still gets a release of its own, but from cargo-dist
+# (.github/workflows/eryx-precompile-release.yml), which creates it with the
+# binaries when release-plz pushes the eryx-precompile tag.
 git_release_enable = false
 
+[[package]]
+name = "eryx"
+git_release_enable = true
+
 # eryx-build is a build tool for command components (eryx-commands pins a
-# published version); it versions with the workspace and gets no GitHub
-# release of its own.
+# published version); it versions with the workspace.
 #
 # `publish = false` for now: release-plz publishes through crates.io trusted
 # publishing, which only works for a crate that already exists with a
@@ -29,7 +31,6 @@ git_release_enable = false
 # publishes it like the other crates.
 [[package]]
 name = "eryx-build"
-git_release_enable = false
 publish = false
 
 [changelog]
