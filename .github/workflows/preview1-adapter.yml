@@ -5,9 +5,7 @@
 # runs) and push its changes (the adapter, its third_party/manual.toml entry
 # and mise.toml's wasmtime CLI pin) back to the PR branch.
 #
-# - The adapter only exists on multi-guest, and Renovate targets main, so the
-#   mismatch shows up when main is merged in. Once multi-guest is main, change
-#   `branches` to main and this covers Renovate's PRs directly.
+# - Runs on PRs into main, so it covers Renovate's wasmtime bumps directly.
 # - Only for branches in this repository, never a fork's: pull_request (not
 #   pull_request_target) runs the PR's code, and secrets aren't given to fork
 #   PRs anyway.
@@ -21,7 +19,7 @@ name: preview1-adapter
 
 on:
   pull_request:
-    branches: [multi-guest]
+    branches: [main]
     paths:
       - 'Cargo.lock'
 

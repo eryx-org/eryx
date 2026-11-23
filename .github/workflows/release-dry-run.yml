@@ -13,8 +13,10 @@
 # (RUNTIME_SOURCE=default) and checked to serve every language they include.
 #
 # Nothing is pushed, uploaded to a release or published to a registry: every
-# job only has `contents: read`. It runs on pull requests that change a
-# release workflow; run it by hand before a release from a long-lived branch.
+# job only has `contents: read`. It runs on pull requests that change one of
+# the build workflows above or what they build from (not the *-release.yml
+# workflows that call them: the dry run doesn't run those); run it by hand
+# before a release from a long-lived branch.
 
 name: Release Dry Run
 
@@ -27,10 +29,7 @@ on:
       - .github/workflows/release-dry-run.yml
       - .github/workflows/runtime-build.yml
       - .github/workflows/python-build.yml
-      - .github/workflows/python-release.yml
       - .github/workflows/js-build.yml
-      - .github/workflows/js-release.yml
-      - .github/workflows/upload-runtime.yml
       - crates/eryx-server/Dockerfile
       # The wheels' metadata and licence files, and their notices check.
       - crates/eryx-python/pyproject.toml
