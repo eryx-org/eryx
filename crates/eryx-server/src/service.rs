@@ -111,6 +111,8 @@ pub struct ServerLimits {
     /// default: such a request is rejected with `INVALID_ARGUMENT` rather than
     /// run with the field ignored.
     pub allow_plaintext_secrets: bool,
+    /// Limits on each request's `mounts`.
+    pub mounts: crate::mounts::MountLimits,
 }
 
 impl Default for ServerLimits {
@@ -128,6 +130,7 @@ impl Default for ServerLimits {
             max_child_host_bytes: 64 * 1024 * 1024,
             max_child_memory_bytes: 256 * 1024 * 1024,
             allow_plaintext_secrets: false,
+            mounts: crate::mounts::MountLimits::default(),
         }
     }
 }
@@ -610,7 +613,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
         let mount_defs = execute_req.mounts;
-        crate::mounts::check(&mount_defs)
+        crate::mounts::check(&mount_defs, self.limits.mounts.max_mounts)
             .map_err(|e| Status::invalid_argument(format!("mounts: {e}")))?;
         let result_variable = execute_req.result_variable;
         let callback_namespace = execute_req.callback_namespace;
@@ -819,6 +822,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let mounts = (!mount_defs.is_empty()).then(|| {
             Arc::new(crate::mounts::Mounts::new(
                 &mount_defs,
+                self.limits.mounts,
                 server_tx.downgrade(),
                 inbound_closed.clone(),
             ))

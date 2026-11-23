@@ -55,6 +55,12 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution, at most 16 MiB. See [Output cap](#output-cap). |
 | `--max-open-host-files` | `ERYX_MAX_OPEN_HOST_FILES` | `256` | Most host files (stdlib and site-packages) one execution may hold open; opens past it fail with `EDQUOT`. Not settable per request. |
 | `--max-open-host-files-total` | `ERYX_MAX_OPEN_HOST_FILES_TOTAL` | *(half the soft `RLIMIT_NOFILE`, at least 256)* | Most host files all executions in the server may hold open together. |
+| `--max-mounts` | `ERYX_MAX_MOUNTS` | `8` | Most [mounts](#mounts) one request may have. |
+| `--max-mount-ops` | `ERYX_MAX_MOUNT_OPS` | `1000` | Most `FsRequest`s one execution sends its client; past it, the code's file operations on its mounts fail. |
+| `--max-mount-transfer-bytes` | `ERYX_MAX_MOUNT_TRANSFER_BYTES` | `268435456` (256 MiB) | Most bytes of `FsResponse`s a client may send one execution. |
+| `--max-mount-cache-bytes` | `ERYX_MAX_MOUNT_CACHE_BYTES` | `16777216` (16 MiB) | Most host memory one execution's cache of mounted file data may hold, evicted oldest first. |
+| `--max-mount-listing-bytes` | `ERYX_MAX_MOUNT_LISTING_BYTES` | `16777216` (16 MiB) | Most host memory one execution's directory listings may hold, kept for the execution. |
+| `--max-mount-dir-entries` | `ERYX_MAX_MOUNT_DIR_ENTRIES` | `10000` | Most entries one directory's listing may have. |
 | `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
 | `--shell-command` | `ERYX_SHELL_COMMANDS` (`;`-separated) | *(none)* | A shell command, `NAME[,NAME...]=PATH[@sha256:<hex>]`: a `.wasm` or `.cwasm` file, the `.wasm` optionally pinned to its digest. Repeatable; empty entries and an empty variable mean none. See [Commands from a registry](#commands-from-a-registry) and [External Commands](./sandboxes.md#external-commands). |
 | `--shell-command-tunnels` | `ERYX_SHELL_COMMAND_TUNNELS` (`,`-separated) | *(none)* | Let a `--shell-command` name open blind `CONNECT` tunnels through the child proxy (no secret substitution, no HTTP rules). A request can turn it off (`commands`), not on. |
@@ -205,8 +211,8 @@ If the client disconnects, the server cancels the in-flight execution, including
 Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_NOT_A_DIRECTORY`, `_IS_A_DIRECTORY` and `_PERMISSION_DENIED` reach the code as the matching exception (`FileNotFoundError`, ...), anything else as an `OSError` (EIO). A read's error is always EIO, as the file is already open by then: to refuse a file, refuse its `stat`. Once the code has listed a directory, its listing answers stats of its entries, and a name that isn't in it is not found without asking.
 
 - Mounts are read-only: writing, creating or deleting files in them fails.
-- A run reads each thing once: a file changed on the client mid-run may be seen as it was, and reads stop at the size the file had when the code first looked at it. Reads fetch 256 KiB at a time, and up to 16 MiB of file data and 16 MiB of listings are kept per run.
-- A run can have up to 8 mounts, which can't overlap, and makes at most 1000 `FsRequest`s and is sent at most 256 MiB of `FsResponse`s; past either, the code's file operations on its mounts fail. Each `FsResponse` must fit in the server's `--max-message-size`.
+- A run reads each thing once: a file changed on the client mid-run may be seen as it was, and reads stop at the size the file had when the code first looked at it. Reads fetch 256 KiB at a time.
+- Mounts can't overlap, and the [`--max-mount*` flags](#running-the-server) bound each run: how many mounts it may have, how many `FsRequest`s it makes and bytes of `FsResponse`s it's sent (past either, the code's file operations on its mounts fail), and the host memory its file data and listings may hold. Each `FsResponse` must fit in the server's `--max-message-size`.
 - They work for every language. They aren't saved with `persist_state`, nor recorded in a [callback journal](#callback-replay): a replayed run asks for them again.
 - If the client half-closes or disconnects, file operations waiting for an answer, and any after, fail at once.
 

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxBuilder, SandboxPool};
+use eryx_server::mounts::MountLimits;
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::{DEFAULT_JOURNAL_TTL, EryxService, MAX_MESSAGE_SIZE, ServerLimits};
 use eryx_server::telemetry::setup_tracing;
@@ -190,6 +191,34 @@ struct Args {
     /// none. Raising it raises the host memory one execution can use.
     #[arg(long, default_value_t = 256 * 1024 * 1024, env = "ERYX_MAX_CHILD_MEMORY_BYTES")]
     max_child_memory_bytes: u64,
+
+    /// Most mounts (`ExecuteRequest.mounts`) one request may have.
+    #[arg(long, default_value_t = MountLimits::default().max_mounts, env = "ERYX_MAX_MOUNTS")]
+    max_mounts: usize,
+
+    /// Most file operations (`FsRequest`s) one execution may send its
+    /// client for its mounts; past it, the code's file operations on them
+    /// fail.
+    #[arg(long, default_value_t = MountLimits::default().max_ops, env = "ERYX_MAX_MOUNT_OPS")]
+    max_mount_ops: u32,
+
+    /// Most bytes of `FsResponse`s a client may send one execution.
+    #[arg(long, default_value_t = MountLimits::default().max_transfer_bytes, env = "ERYX_MAX_MOUNT_TRANSFER_BYTES")]
+    max_mount_transfer_bytes: usize,
+
+    /// Most host memory one execution's cache of mounted file data may
+    /// hold, evicted oldest first. A read that can't fit fails.
+    #[arg(long, default_value_t = MountLimits::default().max_cache_bytes, env = "ERYX_MAX_MOUNT_CACHE_BYTES")]
+    max_mount_cache_bytes: u64,
+
+    /// Most host memory one execution's directory listings from its mounts
+    /// may hold; they're kept for the execution.
+    #[arg(long, default_value_t = MountLimits::default().max_listing_bytes, env = "ERYX_MAX_MOUNT_LISTING_BYTES")]
+    max_mount_listing_bytes: u64,
+
+    /// Most entries one directory's listing on a mount may have.
+    #[arg(long, default_value_t = MountLimits::default().max_dir_entries, env = "ERYX_MAX_MOUNT_DIR_ENTRIES")]
+    max_mount_dir_entries: usize,
 
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
@@ -975,6 +1004,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_child_host_bytes: args.max_child_host_bytes,
         max_child_memory_bytes: args.max_child_memory_bytes,
         allow_plaintext_secrets: args.allow_plaintext_secrets,
+        mounts: MountLimits {
+            max_mounts: args.max_mounts,
+            max_ops: args.max_mount_ops,
+            max_transfer_bytes: args.max_mount_transfer_bytes,
+            max_cache_bytes: args.max_mount_cache_bytes,
+            max_listing_bytes: args.max_mount_listing_bytes,
+            max_dir_entries: args.max_mount_dir_entries,
+        },
     };
     if let Some(total) = args.max_open_host_files_total {
         eryx::vfs::set_process_max_open_host_files(total);

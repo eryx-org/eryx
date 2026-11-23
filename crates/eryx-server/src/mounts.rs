@@ -36,41 +36,60 @@ use crate::proto::eryx::v1::{
 
 /// Mounts go beneath this
 const MOUNT_ROOT: &str = "/mnt/";
-/// Mounts per run
-pub const MAX_MOUNTS: usize = 8;
 /// What a read that misses the cache fetches, aligned to it
 // ponytail: fixed block size; adaptive readahead and prefetch when sequential
 // reads of big files need fewer round trips
 pub const BLOCK_SIZE: u64 = 256 * 1024;
 /// Files up to this size are kept when they come with their directory's listing
 pub const INLINE_MAX: u64 = 64 * 1024;
-/// Entries in one listing
-pub const MAX_ENTRIES: usize = 10_000;
-/// Round trips to the client per run
-// ponytail: fixed per-run limits, the same as eryx-run's; `--max-*` flags when
-// operators need to tune them
-pub const MAX_OPS: u32 = 1000;
-/// Bytes the client may send a run in `FsResponse`s
-pub const MAX_TRANSFER: usize = 256 * 1024 * 1024;
-/// Host memory a run's cache of file data may hold, evicted oldest first
-pub const CACHE_BYTES: u64 = 16 * 1024 * 1024;
-/// Host memory a run's listings may hold, kept for the run
-pub const LISTING_BYTES: u64 = 16 * 1024 * 1024;
 /// Most a read fetches at once, as the guest reads at most this much a time
 const MAX_READ: u64 = 1024 * 1024;
 /// What a listing's entry counts for in the cache, besides its name
 const ENTRY_BYTES: u64 = 64;
 
-/// Check a request's mounts: at most [`MAX_MOUNTS`], each a plain path under
+/// Per-run limits on a request's mounts, set by the operator (the
+/// `--max-mount*` flags). Not client-controllable: the cache and listings are
+/// host memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountLimits {
+    /// Mounts one request may have.
+    pub max_mounts: usize,
+    /// Round trips to the client (`FsRequest`s) per run.
+    pub max_ops: u32,
+    /// Bytes of `FsResponse`s the client may send a run.
+    pub max_transfer_bytes: usize,
+    /// Host memory a run's cache of file data may hold, evicted oldest first.
+    pub max_cache_bytes: u64,
+    /// Host memory a run's directory listings may hold, kept for the run.
+    pub max_listing_bytes: u64,
+    /// Entries in one directory's listing.
+    pub max_dir_entries: usize,
+}
+
+impl Default for MountLimits {
+    /// eryx-run's limits for its `/v1/stream` mounts.
+    fn default() -> Self {
+        Self {
+            max_mounts: 8,
+            max_ops: 1000,
+            max_transfer_bytes: 256 * 1024 * 1024,
+            max_cache_bytes: 16 * 1024 * 1024,
+            max_listing_bytes: 16 * 1024 * 1024,
+            max_dir_entries: 10_000,
+        }
+    }
+}
+
+/// Check a request's mounts: at most `max_mounts`, each a plain path under
 /// `/mnt/` (no `.`, `..`, empty components or trailing slash), none inside
 /// another.
 ///
 /// # Errors
 ///
 /// What's wrong with them, for the client.
-pub fn check(mounts: &[Mount]) -> Result<(), String> {
-    if mounts.len() > MAX_MOUNTS {
-        return Err(format!("a request can have at most {MAX_MOUNTS} mounts"));
+pub fn check(mounts: &[Mount], max_mounts: usize) -> Result<(), String> {
+    if mounts.len() > max_mounts {
+        return Err(format!("a request can have at most {max_mounts} mounts"));
     }
     for (i, mount) in mounts.iter().enumerate() {
         let path = &mount.path;
@@ -168,16 +187,18 @@ impl Mounts {
     /// response stream open.
     pub fn new(
         defs: &[Mount],
+        limits: MountLimits,
         requests: mpsc::WeakSender<ServerMessage>,
         closed: CancellationToken,
     ) -> Self {
         let remote = Arc::new(Remote {
+            limits,
             requests,
             closed,
             pending: Mutex::default(),
             ops: AtomicU32::new(0),
             received: AtomicUsize::new(0),
-            cache: Mutex::default(),
+            cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
         });
         Self {
             remote,
@@ -209,10 +230,11 @@ impl Mounts {
         };
         let len = response.encoded_len();
         let received = self.remote.received.fetch_add(len, Ordering::Relaxed) + len;
-        let answer = if received > MAX_TRANSFER {
+        let max = self.remote.limits.max_transfer_bytes;
+        let answer = if received > max {
             Err(Failure::Other(format!(
                 "the client sent more than {} MiB",
-                MAX_TRANSFER >> 20
+                max >> 20
             )))
         } else {
             response
@@ -228,7 +250,7 @@ impl Mounts {
     /// `Remote` that holds the cache, which would never be freed.
     pub fn close(&self) {
         lock(&self.remote.pending).clear();
-        *lock(&self.remote.cache) = Cache::default();
+        *lock(&self.remote.cache) = Cache::new(self.remote.limits.max_cache_bytes);
     }
 }
 
@@ -256,6 +278,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// What a run's mounts share: the way to the client, and the cache
 struct Remote {
+    limits: MountLimits,
     requests: mpsc::WeakSender<ServerMessage>,
     closed: CancellationToken,
     pending: Mutex<HashMap<String, oneshot::Sender<Answer>>>,
@@ -267,8 +290,9 @@ struct Remote {
 }
 
 /// What a run has learned from the client, by guest path
-#[derive(Default)]
 struct Cache {
+    /// Most bytes of blocks it may hold
+    max_bytes: u64,
     stats: HashMap<String, Fetch<Stat>>,
     lists: HashMap<String, Fetch<Arc<BTreeMap<String, Stat>>>>,
     blocks: HashMap<(String, u64), Fetch<Bytes>>,
@@ -281,12 +305,24 @@ struct Cache {
 }
 
 impl Cache {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            max_bytes,
+            stats: HashMap::new(),
+            lists: HashMap::new(),
+            blocks: HashMap::new(),
+            order: VecDeque::new(),
+            used: 0,
+            listed: 0,
+        }
+    }
+
     /// Make room for `bytes`, evicting finished blocks oldest first
     fn reserve(&mut self, bytes: u64) -> Result<(), Failure> {
         // Blocks still being fetched go back in the queue: a rerun of their
         // read joins them
         for _ in 0..self.order.len() {
-            if self.used + bytes <= CACHE_BYTES {
+            if self.used + bytes <= self.max_bytes {
                 break;
             }
             let Some((key, size)) = self.order.pop_front() else {
@@ -299,10 +335,10 @@ impl Cache {
                 self.used -= size;
             }
         }
-        if self.used + bytes > CACHE_BYTES {
+        if self.used + bytes > self.max_bytes {
             return Err(Failure::Other(format!(
                 "the mounts' cache of {} MiB is full",
-                CACHE_BYTES >> 20
+                self.max_bytes >> 20
             )));
         }
         self.used += bytes;
@@ -319,12 +355,12 @@ impl Remote {
     /// Why a new operation would fail without asking: the client can't
     /// answer, or the run has used up its operations. Checked before a new
     /// entry goes in the cache, so failures past the limit aren't kept, and
-    /// the cache holds at most about [`MAX_OPS`] entries besides blocks.
+    /// the cache holds at most about `max_ops` entries besides blocks.
     fn refusal(&self) -> Option<Failure> {
         if self.closed.is_cancelled() {
             Some(gone())
-        } else if self.ops.load(Ordering::Relaxed) >= MAX_OPS {
-            Some(too_many_ops())
+        } else if self.ops.load(Ordering::Relaxed) >= self.limits.max_ops {
+            Some(too_many_ops(self.limits.max_ops))
         } else {
             None
         }
@@ -344,8 +380,9 @@ impl Remote {
             if remote.closed.is_cancelled() {
                 return Err(gone());
             }
-            if remote.ops.fetch_add(1, Ordering::Relaxed) >= MAX_OPS {
-                return Err(too_many_ops());
+            let max_ops = remote.limits.max_ops;
+            if remote.ops.fetch_add(1, Ordering::Relaxed) >= max_ops {
+                return Err(too_many_ops(max_ops));
             }
             let requests = remote.requests.upgrade().ok_or_else(gone)?;
             let op_id = uuid::Uuid::new_v4().to_string();
@@ -387,9 +424,9 @@ fn gone() -> Failure {
     Failure::Other("the client can no longer answer".to_string())
 }
 
-fn too_many_ops() -> Failure {
+fn too_many_ops(max: u32) -> Failure {
     Failure::Other(format!(
-        "a run can make at most {MAX_OPS} file operations on its mounts"
+        "a run can make at most {max} file operations on its mounts"
     ))
 }
 
@@ -456,9 +493,11 @@ impl RemoteStorage {
                 return Err(wrong_answer("listing"));
             };
             let entries = listing.entries;
-            if entries.len() > MAX_ENTRIES {
+            let limits = remote.limits;
+            if entries.len() > limits.max_dir_entries {
                 return Err(Failure::Other(format!(
-                    "a directory can have at most {MAX_ENTRIES} entries"
+                    "a directory can have at most {} entries",
+                    limits.max_dir_entries
                 )));
             }
             if let Some(entry) = entries.iter().find(|e| {
@@ -470,10 +509,10 @@ impl RemoteStorage {
             let mut cache = lock(&remote.cache);
             let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
             let bytes = names + ENTRY_BYTES * entries.len() as u64;
-            if cache.listed + bytes > LISTING_BYTES {
+            if cache.listed + bytes > limits.max_listing_bytes {
                 return Err(Failure::Other(format!(
                     "the mounts' listings can hold at most {} MiB",
-                    LISTING_BYTES >> 20
+                    limits.max_listing_bytes >> 20
                 )));
             }
             cache.listed += bytes;
@@ -728,6 +767,7 @@ mod tests {
 
     #[test]
     fn mount_paths_are_plain_and_apart() {
+        let check = |m: &[Mount]| check(m, 8);
         assert!(check(&defs(&["/mnt/repo", "/mnt/data/set"])).is_ok());
         for bad in [
             &["/data/x"][..],
@@ -744,7 +784,7 @@ mod tests {
             assert!(check(&defs(bad)).is_err(), "{bad:?}");
         }
         assert!(check(&defs(&["/mnt/ab", "/mnt/a"])).is_ok());
-        let many: Vec<String> = (0..=MAX_MOUNTS).map(|i| format!("/mnt/{i}")).collect();
+        let many: Vec<String> = (0..=8).map(|i| format!("/mnt/{i}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(check(&defs(&many)).is_err());
     }
@@ -762,6 +802,7 @@ mod tests {
         let closed = CancellationToken::new();
         let mounts = Arc::new(Mounts::new(
             &defs(&["/mnt/m"]),
+            MountLimits::default(),
             tx.downgrade(),
             closed.clone(),
         ));
@@ -936,7 +977,10 @@ mod tests {
     #[tokio::test]
     async fn failures_past_the_limit_arent_cached() {
         let (storage, _count) = serve(vec![("a.txt", b"abc")]);
-        storage.remote.ops.store(MAX_OPS, Ordering::Relaxed);
+        storage
+            .remote
+            .ops
+            .store(MountLimits::default().max_ops, Ordering::Relaxed);
         for i in 0..100 {
             assert!(matches!(
                 storage.exists(&format!("/mnt/m/{i}")).await,
@@ -1025,7 +1069,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_cache_evicts_old_blocks() {
-        let mut cache = Cache::default();
+        const CACHE_BYTES: u64 = 4 * BLOCK_SIZE;
+        let mut cache = Cache::new(CACHE_BYTES);
         let done = |b: &'static [u8]| fetched(Arc::new(b.to_vec()));
         for i in 0..(CACHE_BYTES / BLOCK_SIZE) {
             cache.reserve(BLOCK_SIZE).unwrap();

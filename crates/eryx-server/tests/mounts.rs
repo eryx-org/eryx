@@ -103,12 +103,16 @@ fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
 }
 
 async fn start_server() -> Channel {
+    start_server_with(eryx_server::service::ServerLimits::default()).await
+}
+
+async fn start_server_with(limits: eryx_server::service::ServerLimits) -> Channel {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let pool = SandboxPool::new(Sandbox::embedded(), PoolConfig::default().with_max_size(2))
         .await
         .unwrap();
-    let service = EryxService::new(Arc::new(pool));
+    let service = EryxService::new(Arc::new(pool)).with_limits(limits);
     #[cfg(feature = "shell")]
     let service = {
         let create: eryx_server::service::PoolFactory = Arc::new(|| {
@@ -312,6 +316,54 @@ async fn javascript_reads_a_mount() {
         stdout(&result),
         "README.md,big.bin,private,src\nprint('hi')\n300000\nread-only\n"
     );
+}
+
+/// The operator's limits apply: more mounts than `max_mounts` are refused,
+/// and file operations past `max_ops` fail
+#[tokio::test]
+async fn the_operators_mount_limits_apply() {
+    let limits = eryx_server::service::ServerLimits {
+        mounts: eryx_server::mounts::MountLimits {
+            max_mounts: 1,
+            max_ops: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let channel = start_server_with(limits).await;
+
+    let mut client = EryxClient::new(channel.clone());
+    let (tx, rx) = mpsc::channel(1);
+    let two = ["/mnt/a", "/mnt/b"].map(|path| Mount { path: path.into() });
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print(1)".into(),
+                mounts: two.to_vec(),
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("at most 1"), "{status:?}");
+
+    // Reading the tree needs more than two operations: the ones past the
+    // limit fail without asking the client
+    let code = r"
+import os
+try:
+    for root, _, files in os.walk('/mnt/repo'):
+        for name in files:
+            open(os.path.join(root, name), 'rb').read()
+except OSError:
+    print('limited')
+";
+    let (result, ops) = run(channel, Language::Python, code).await;
+    assert_eq!(stdout(&result), "limited\n");
+    assert_eq!(ops, 2);
 }
 
 #[tokio::test]
