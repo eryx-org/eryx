@@ -23,6 +23,7 @@ _LOCAL_ONLY = {
     "network": "use network_policies= (set up at https://app.eryx.run)",
     "mcp": "use connections= (set up at https://app.eryx.run)",
     "secrets": "add secrets to a network policy",
+    "env": "environment variables aren't supported on eryx.run yet",
     "scrub_stdout": "secrets are scrubbed by their network policy",
     "scrub_stderr": "secrets are scrubbed by their network policy",
     "scrub_result": "secrets are scrubbed by their network policy",

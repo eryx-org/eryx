@@ -160,6 +160,8 @@ pub struct Sandbox {
     net_config: Option<NetConfig>,
     /// Secrets configuration (name -> SecretConfig).
     secrets: HashMap<String, crate::secrets::SecretConfig>,
+    /// Environment variables from [`SandboxBuilder::with_env`].
+    env: std::collections::BTreeMap<String, String>,
     /// Stdout scrubbing policy.
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
@@ -899,8 +901,12 @@ impl Sandbox {
             .check_secret_hosts(&secrets)
             .map_err(ErrorKind::Initialization)?;
         crate::secrets::check_placeholders(&secrets).map_err(ErrorKind::Initialization)?;
-        self.preamble =
-            language_preamble(self.executor.language(), &secrets, &self.library_preamble)?;
+        self.preamble = language_preamble(
+            self.executor.language(),
+            &secrets,
+            &self.env,
+            &self.library_preamble,
+        )?;
         self.net_config = Some(config);
         self.secrets = secrets;
         Ok(())
@@ -1042,6 +1048,7 @@ impl Clone for Sandbox {
             resource_limits: self.resource_limits.clone(),
             net_config: self.net_config.clone(),
             secrets: self.secrets.clone(),
+            env: self.env.clone(),
             scrub_stdout: self.scrub_stdout.clone(),
             scrub_stderr: self.scrub_stderr.clone(),
             scrub_result: self.scrub_result,
@@ -1056,31 +1063,91 @@ impl Clone for Sandbox {
 }
 
 unstable_pub! {
-/// The code the guest runs before each execution: `full_preamble` for
-/// Python, [`crate::secrets::javascript_preamble`] for JavaScript, and for the
-/// shell an `export` of each secret's placeholder, which its child commands
-/// inherit (the child proxy substitutes them). Library preambles are Python.
+/// The code the guest runs before each execution, setting each secret's
+/// placeholder and each of `env`'s variables: `full_preamble` for Python,
+/// `process.env` (as [`crate::secrets::javascript_preamble`] does) for
+/// JavaScript, and for the shell an `export` of each, which its child
+/// commands inherit (the child proxy substitutes the placeholders). Library
+/// preambles are Python.
 ///
 /// # Errors
 ///
-/// A library preamble for another language, or a secret name the shell can't
-/// export.
+/// A library preamble for another language, a secret name the shell can't
+/// export, or an `env` [`check_env`] refuses.
 #[doc(hidden)]
 fn language_preamble(
     language: Language,
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    env: &std::collections::BTreeMap<String, String>,
     library_preamble: &str,
 ) -> Result<String, Error> {
     let unsupported = |message: String| Err(ErrorKind::Initialization(message).into());
+    check_env(env, secrets)?;
+    // No name is both a secret and in `env`, as `check_env` made sure.
+    let mut vars: std::collections::BTreeMap<&str, &str> = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    vars.extend(
+        secrets
+            .iter()
+            .map(|(name, secret)| (name.as_str(), secret.placeholder())),
+    );
     match language {
-        Language::Python => Ok(full_preamble(secrets, library_preamble)),
+        Language::Python => Ok(full_preamble(&vars, library_preamble)),
         _ if !library_preamble.is_empty() => unsupported(format!(
             "library preambles are only supported for Python, not {language}"
         )),
-        Language::JavaScript => Ok(crate::secrets::javascript_preamble(secrets)),
-        Language::Shell => shell_preamble(secrets),
+        Language::JavaScript => Ok(crate::secrets::process_env_preamble(&vars)),
+        Language::Shell => shell_preamble(secrets, &vars),
     }
 }
+}
+
+/// Check the environment variables given with secrets `secrets`: each name
+/// matches `[A-Za-z_][A-Za-z0-9_]*`, so every guest can set it (the shell
+/// can't export other names), and isn't one the sandbox sets itself, which
+/// the guest relies on, or a secret's, whose placeholder it would replace;
+/// and no value has a NUL byte, which no guest's environment can hold.
+/// The same names are refused for every language, so a request's
+/// environment means the same whichever runs it.
+fn check_env(
+    env: &std::collections::BTreeMap<String, String>,
+    secrets: &HashMap<String, crate::secrets::SecretConfig>,
+) -> Result<(), Error> {
+    let invalid = |message: String| Err(ErrorKind::Initialization(message).into());
+    for (name, value) in env {
+        if !is_identifier(name) {
+            return invalid(format!(
+                "invalid environment variable name {name:?}: must match [A-Za-z_][A-Za-z0-9_]*"
+            ));
+        }
+        if crate::wasm::SHELL_ENV.iter().any(|(set, _)| set == name) {
+            return invalid(format!(
+                "environment variable {name} is set by the sandbox itself, so it can't be given"
+            ));
+        }
+        if secrets.contains_key(name) {
+            return invalid(format!(
+                "environment variable {name} collides with the secret {name}; \
+                 give one of them another name"
+            ));
+        }
+        if value.contains('\0') {
+            return invalid(format!(
+                "the value of environment variable {name} contains a NUL byte"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_identifier(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The code that makes each top-level key of `globals`, a JSON object, a
@@ -1122,12 +1189,7 @@ pub fn globals_preamble<'a>(
         .map(|name| crate::reserved::installed_as(language, name))
         .collect();
     for name in object.keys() {
-        let identifier = name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !identifier {
+        if !is_identifier(name) {
             return invalid(format!(
                 "invalid global name {name:?}: must match [A-Za-z_][A-Za-z0-9_]*"
             ));
@@ -1239,54 +1301,44 @@ const PYTHON_KEYWORDS: &[&str] = &[
     "with", "yield",
 ];
 
-/// `export NAME='placeholder'` for each secret, in name order, with any `'`
-/// in the placeholder escaped. A name that isn't a shell variable name is
-/// refused.
+/// `export NAME='value'` for each of `vars` (the secrets' placeholders and
+/// the environment variables), in name order, with any `'` in the value
+/// escaped: inside single quotes nothing else is special, newlines included.
+/// A secret name that isn't a shell variable name is refused.
 fn shell_preamble(
     secrets: &HashMap<String, crate::secrets::SecretConfig>,
+    vars: &std::collections::BTreeMap<&str, &str>,
 ) -> Result<String, Error> {
-    let mut names: Vec<&String> = secrets.keys().collect();
-    names.sort();
+    if let Some(name) = secrets.keys().find(|name| !is_identifier(name)) {
+        return Err(ErrorKind::Initialization(format!(
+            "secret {name:?} can't be exported to the shell: not a shell variable name"
+        ))
+        .into());
+    }
     let mut preamble = String::new();
-    for name in names {
-        let valid = name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !valid {
-            return Err(ErrorKind::Initialization(format!(
-                "secret {name:?} can't be exported to the shell: not a shell variable name"
-            ))
-            .into());
-        }
-        let placeholder = secrets[name].placeholder().replace('\'', "'\\''");
-        preamble.push_str(&format!("export {name}='{placeholder}'\n"));
+    for (name, value) in vars {
+        let value = value.replace('\'', "'\\''");
+        preamble.push_str(&format!("export {name}='{value}'\n"));
     }
     Ok(preamble)
 }
 
-/// The preamble setting each secret's placeholder in `os.environ`, followed
-/// by `library_preamble`.
+/// The preamble setting each of `vars` (the secrets' placeholders and the
+/// environment variables) in `os.environ`, followed by `library_preamble`.
 ///
 /// The preinitialized runtime snapshots `os.environ`, so WASI env vars set per
 /// execution would not show up. JSON string literals are valid Python string
 /// literals, unlike Rust's `{:?}` escapes (`\u{1b}`).
-fn full_preamble(
-    secrets: &HashMap<String, crate::secrets::SecretConfig>,
-    library_preamble: &str,
-) -> String {
-    let mut names: Vec<&String> = secrets.keys().collect();
-    names.sort();
+fn full_preamble(vars: &std::collections::BTreeMap<&str, &str>, library_preamble: &str) -> String {
     let mut preamble = String::new();
-    if !names.is_empty() {
+    if !vars.is_empty() {
         preamble.push_str("import os\n");
     }
-    for name in names {
+    for (name, value) in vars {
         preamble.push_str(&format!(
             "os.environ[{}] = {}\n",
             python_str_literal(name),
-            python_str_literal(secrets[name].placeholder())
+            python_str_literal(value)
         ));
     }
     preamble.push_str(library_preamble);
@@ -2021,6 +2073,8 @@ pub struct SandboxBuilder<Lang: GuestLanguage = Python, Runtime = state::Needs> 
     net_config: Option<crate::net::NetConfig>,
     /// Secrets configuration (name -> SecretConfig).
     secrets: HashMap<String, crate::secrets::SecretConfig>,
+    /// Environment variables from [`SandboxBuilder::with_env`].
+    env: std::collections::BTreeMap<String, String>,
     /// Stdout scrubbing policy.
     scrub_stdout: crate::secrets::OutputScrubPolicy,
     /// Stderr scrubbing policy.
@@ -2110,6 +2164,7 @@ impl SandboxBuilder<Python, state::Needs> {
             packages: Vec::new(),
             net_config: None,
             secrets: HashMap::new(),
+            env: std::collections::BTreeMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_result: false,
@@ -2155,6 +2210,7 @@ impl SandboxBuilder<Python, state::Needs> {
             packages: Vec::new(),
             net_config: None,
             secrets: HashMap::new(),
+            env: std::collections::BTreeMap::new(),
             scrub_stdout: crate::secrets::OutputScrubPolicy::default(),
             scrub_stderr: crate::secrets::OutputScrubPolicy::default(),
             scrub_result: false,
@@ -2200,6 +2256,7 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
             packages: self.packages,
             net_config: self.net_config,
             secrets: self.secrets,
+            env: self.env,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
             scrub_result: self.scrub_result,
@@ -3202,6 +3259,24 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
         self
     }
 
+    /// Set the environment variable `name` to `value` for every execution:
+    /// in `os.environ` (Python), `process.env` (JavaScript), or exported in
+    /// the shell, so its commands inherit it. For ordinary configuration,
+    /// such as `GIT_AUTHOR_NAME`: the value isn't a secret, so it isn't
+    /// scrubbed from output and the code can print it. Put secrets in
+    /// [`with_secret`](Self::with_secret). Setting a name again replaces its
+    /// value.
+    ///
+    /// [`build`](Self::build) fails if `name` doesn't match
+    /// `[A-Za-z_][A-Za-z0-9_]*`, is one the sandbox sets itself (`HOME`,
+    /// `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`) or a
+    /// secret's, or if `value` contains a NUL byte.
+    #[must_use]
+    pub fn with_env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(name.into(), value.into());
+        self
+    }
+
     /// Control stdout scrubbing (default: All when secrets configured).
     ///
     /// Accepts `bool` (for convenience) or `OutputScrubPolicy` (for future extensibility).
@@ -3470,7 +3545,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
                 .collect::<Result<_, Error>>()?;
         }
         self.check_language()?;
-        let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.preamble)?;
+        let preamble = language_preamble(L::LANGUAGE, &self.secrets, &self.env, &self.preamble)?;
         crate::secrets::check_placeholders(&self.secrets).map_err(ErrorKind::Initialization)?;
         if let Some(net) = &self.net_config {
             net.validate().map_err(ErrorKind::Initialization)?;
@@ -3660,6 +3735,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
             resource_limits: built.resource_limits.clone(),
             net_config: built.net_config.clone(),
             secrets: built.secrets.clone(),
+            env: self.env,
             scrub_stdout: self.scrub_stdout,
             scrub_stderr: self.scrub_stderr,
             scrub_result: self.scrub_result,
@@ -5043,14 +5119,15 @@ mod tests {
 
     #[test]
     fn shell_preamble_exports_placeholders() {
+        let no_env = std::collections::BTreeMap::new();
         let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
         let placeholder = secret.placeholder().to_string();
         let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
-        let preamble = language_preamble(Language::Shell, &secrets, "").unwrap();
+        let preamble = language_preamble(Language::Shell, &secrets, &no_env, "").unwrap();
         assert_eq!(preamble, format!("export TOKEN='{placeholder}'\n"));
         assert!(!preamble.contains("real-value"));
         assert_eq!(
-            language_preamble(Language::Shell, &HashMap::new(), "").unwrap(),
+            language_preamble(Language::Shell, &HashMap::new(), &no_env, "").unwrap(),
             ""
         );
 
@@ -5062,23 +5139,25 @@ mod tests {
         let preamble = language_preamble(
             Language::Shell,
             &HashMap::from([("Q".to_string(), quoted)]),
+            &no_env,
             "",
         )
         .unwrap();
         assert_eq!(preamble, "export Q='it'\\''s'\n");
 
         let bad = HashMap::from([("NOT-A-NAME".to_string(), secret)]);
-        assert!(language_preamble(Language::Shell, &bad, "").is_err());
-        assert!(language_preamble(Language::Shell, &HashMap::new(), "import os").is_err());
+        assert!(language_preamble(Language::Shell, &bad, &no_env, "").is_err());
+        assert!(language_preamble(Language::Shell, &HashMap::new(), &no_env, "import os").is_err());
     }
 
     #[test]
     fn javascript_preamble_sets_process_env_placeholders() {
+        let no_env = std::collections::BTreeMap::new();
         let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
         let placeholder = secret.placeholder().to_string();
         let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
 
-        let preamble = language_preamble(Language::JavaScript, &secrets, "").unwrap();
+        let preamble = language_preamble(Language::JavaScript, &secrets, &no_env, "").unwrap();
         assert_eq!(
             preamble,
             format!(
@@ -5089,11 +5168,112 @@ mod tests {
         );
         assert!(!preamble.contains("real-value"));
         assert_eq!(
-            language_preamble(Language::JavaScript, &HashMap::new(), "").unwrap(),
+            language_preamble(Language::JavaScript, &HashMap::new(), &no_env, "").unwrap(),
             ""
         );
-        let err = language_preamble(Language::JavaScript, &secrets, "import os").unwrap_err();
+        let err =
+            language_preamble(Language::JavaScript, &secrets, &no_env, "import os").unwrap_err();
         assert!(err.to_string().contains("library preambles"), "{err}");
+    }
+
+    /// A value that would end each language's quoting and run code if it
+    /// weren't escaped.
+    const HOSTILE: &str = "a'b\"c\\d\n$(touch /tmp/x)`id`\u{2028}'); import os #";
+
+    fn env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn env_preamble_sets_variables_with_secrets() {
+        let secret = crate::secrets::SecretConfig::new("real-value", vec!["a.test".to_string()]);
+        let placeholder = secret.placeholder().to_string();
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+        let vars = env(&[("GIT_AUTHOR_NAME", "Eryx"), ("A", "1")]);
+
+        assert_eq!(
+            language_preamble(Language::Shell, &secrets, &vars, "").unwrap(),
+            format!("export A='1'\nexport GIT_AUTHOR_NAME='Eryx'\nexport TOKEN='{placeholder}'\n")
+        );
+        assert_eq!(
+            language_preamble(Language::Python, &secrets, &vars, "x = 1\n").unwrap(),
+            format!(
+                "import os\nos.environ[\"A\"] = \"1\"\n\
+                 os.environ[\"GIT_AUTHOR_NAME\"] = \"Eryx\"\n\
+                 os.environ[\"TOKEN\"] = \"{placeholder}\"\nx = 1\n"
+            )
+        );
+        let js = language_preamble(Language::JavaScript, &secrets, &vars, "").unwrap();
+        assert!(
+            js.contains(&format!(
+                r#"JSON.parse("{{\"A\":\"1\",\"GIT_AUTHOR_NAME\":\"Eryx\",\"TOKEN\":\"{placeholder}\"}}")"#
+            )),
+            "{js}"
+        );
+        // Without secrets, the variables alone.
+        assert_eq!(
+            language_preamble(Language::Shell, &HashMap::new(), &vars, "").unwrap(),
+            "export A='1'\nexport GIT_AUTHOR_NAME='Eryx'\n"
+        );
+    }
+
+    #[test]
+    fn env_preamble_escapes_values() {
+        let vars = env(&[("V", HOSTILE)]);
+        let none = HashMap::new();
+
+        // Shell: one single-quoted word, `'` closed, escaped and reopened.
+        let shell = language_preamble(Language::Shell, &none, &vars, "").unwrap();
+        let quoted = HOSTILE.replace('\'', "'\\''");
+        assert_eq!(shell, format!("export V='{quoted}'\n"));
+
+        // Python: the value is a JSON string literal, which Python reads as
+        // the same string.
+        let python = language_preamble(Language::Python, &none, &vars, "").unwrap();
+        let literal = serde_json::to_string(HOSTILE).unwrap();
+        assert_eq!(
+            python,
+            format!("import os\nos.environ[\"V\"] = {literal}\n")
+        );
+
+        // JavaScript: the JSON object is itself one JSON string literal,
+        // parsed back to the same value.
+        let js = language_preamble(Language::JavaScript, &none, &vars, "").unwrap();
+        let start = js.find("JSON.parse(").unwrap() + "JSON.parse(".len();
+        let end = js.rfind(")) }").unwrap();
+        let object: String = serde_json::from_str(&js[start..end]).unwrap();
+        let parsed: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&object).unwrap();
+        assert_eq!(parsed, vars);
+    }
+
+    #[test]
+    fn env_preamble_refuses_bad_names_and_values() {
+        let secret = crate::secrets::SecretConfig::new("v", vec!["a.test".to_string()]);
+        let secrets = HashMap::from([("TOKEN".to_string(), secret)]);
+        for language in [Language::Python, Language::JavaScript, Language::Shell] {
+            let refused = |vars: &[(&str, &str)], expected: &str| {
+                let err = language_preamble(language, &secrets, &env(vars), "").unwrap_err();
+                assert!(
+                    err.to_string().contains(expected),
+                    "{language} {vars:?}: {err}"
+                );
+            };
+            refused(&[("NOT-A-NAME", "x")], "invalid environment variable name");
+            refused(&[("1X", "x")], "invalid environment variable name");
+            refused(&[("", "x")], "invalid environment variable name");
+            refused(&[("A B", "x")], "invalid environment variable name");
+            refused(&[("X=Y", "x")], "invalid environment variable name");
+            for (name, _) in crate::wasm::SHELL_ENV {
+                refused(&[(name, "x")], "set by the sandbox itself");
+            }
+            refused(&[("TOKEN", "x")], "collides with the secret TOKEN");
+            refused(&[("NUL", "a\0b")], "NUL byte");
+            assert!(language_preamble(language, &secrets, &env(&[("_ok1", "")]), "").is_ok());
+        }
     }
 
     #[test]

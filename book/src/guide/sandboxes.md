@@ -228,7 +228,8 @@ A shell sandbox starts with what CLI tools expect of a Unix system:
   most 1 MiB, however much was asked for. A mount at `/dev` replaces them.
 - **Environment:** `HOME=/tmp`, `PATH=/eryx/bin` (where the shell lists its
   commands), `TERM=dumb`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `USER=eryx`,
-  `PWD=/` and `TMPDIR=/tmp`.
+  `PWD=/` and `TMPDIR=/tmp`, plus any [environment
+  variables](#environment-variables) you give it.
 - **Permissions:** WASI has no file modes, owners or exec bit, so what tools
   report is made up by their libc. uutils `ls -l` shows every directory as
   `dr-xr-xr-x` and every file (devices included) as `-r-xr-xr-x`, owned by
@@ -546,6 +547,44 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 
 The gRPC server serves every language it has a pool for (`--languages`), and
 each request picks one with `ExecuteRequest.language`.
+
+## Environment Variables
+
+`with_env` (`env=` in Python, `ExecuteRequest.env` on the [gRPC
+server](./grpc-server.md)) gives every execution ordinary configuration, such
+as `GIT_AUTHOR_NAME` or a tool's config path, without writing it into the
+code. Python reads it from `os.environ` and JavaScript from `process.env`; the
+shell exports it, so its commands inherit it.
+
+<!-- langtabs-start -->
+```rust,ignore
+let sandbox = Sandbox::embedded()
+    .shell()
+    .with_env("GIT_AUTHOR_NAME", "Eryx Bot")
+    .with_env("GIT_AUTHOR_EMAIL", "bot@example.com")
+    .build()?;
+let result = sandbox.execute("printenv GIT_AUTHOR_NAME").await?;
+```
+
+```python
+import eryx
+
+sandbox = eryx.Sandbox(env={"GIT_AUTHOR_NAME": "Eryx Bot"})
+result = sandbox.execute("import os; print(os.environ['GIT_AUTHOR_NAME'])")
+```
+<!-- langtabs-end -->
+
+- Names must match `[A-Za-z_][A-Za-z0-9_]*`, and can't be one the sandbox
+  sets itself (`HOME`, `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`,
+  `LC_ALL`) or a [secret](./secrets.md)'s name. A value can hold anything
+  but a NUL byte: quotes and newlines arrive as they were given, never as
+  code. The same names are refused in every language, and building the
+  sandbox fails otherwise (`ErrorKind::Initialization`; `InitializationError`
+  in Python).
+- Values aren't secrets: they aren't scrubbed, so printing one prints it.
+  Put credentials in [secrets](./secrets.md).
+- They're set before each execution. Python and shell code can change them;
+  JavaScript's `process.env` is frozen, as it is with only secrets.
 
 ## Sandbox Isolation
 
