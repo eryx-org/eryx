@@ -1103,6 +1103,25 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         }
     }
 
+    /// Remove whatever is mounted at `guest_path` (a directory, or a
+    /// single-file volume's file), so a mount added there next replaces it
+    /// instead of sitting beside it, which would leave the guest choosing
+    /// between them. Mounts above or below `guest_path` stay, as does the
+    /// root.
+    pub fn unmount(&mut self, guest_path: &str) {
+        let path = normalize_guest_path(guest_path);
+        let gone: Vec<usize> = self
+            .mount_points()
+            .filter(|point| point.path == path)
+            .map(|point| point.index)
+            .collect();
+        let mut index = 0;
+        self.preopens.retain(|_| {
+            index += 1;
+            !gone.contains(&(index - 1))
+        });
+    }
+
     /// Add a real filesystem preopen directory.
     ///
     /// Paths under `guest_path` will be passed through to the real filesystem.
@@ -1253,6 +1272,21 @@ mod tests {
         // Same storage: the child's writes are the parent's files.
         child.storages[0].write("/data/f", b"x").await.unwrap();
         assert_eq!(parent.storages[0].read("/data/f").await.unwrap(), b"x");
+    }
+
+    #[test]
+    fn unmount_removes_only_the_mount_at_the_path() {
+        let storage = crate::ArcStorage::new(std::sync::Arc::new(crate::InMemoryStorage::new()));
+        let mut ctx = HybridVfsCtx::new(storage);
+        ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
+        ctx.add_vfs_preopen("/data/go/", DirPerms::all(), FilePerms::all());
+        ctx.add_vfs_preopen("/data/go/sub", DirPerms::all(), FilePerms::all());
+        ctx.add_root();
+
+        ctx.unmount("/data/./go");
+        let paths: Vec<String> = ctx.mount_points().map(|point| point.path).collect();
+        assert_eq!(paths, ["/data", "/data/go/sub"]);
+        assert_eq!(ctx.preopens.len(), 3, "the root stays");
     }
 
     #[test]
