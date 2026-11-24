@@ -1520,11 +1520,21 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
 /// A shell whose `git` (ERYX_TEST_GIT_WASM: git with HTTPS) may spawn its
 /// helpers, with the secret TOKEN for `host` and a child network allowing
 /// `network`'s hosts.
-fn git_shell(network: NetConfig, host: &str, scrub_files: bool) -> Sandbox {
+/// git from ERYX_TEST_GIT_WASM, with a sandbox's defaults: no system config,
+/// and no prompting for credentials.
+fn git_cmd() -> Command {
     let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
+    Command::from_file(git)
+        .unwrap()
+        .allow_spawn()
+        .with_env("GIT_CONFIG_NOSYSTEM", "1")
+        .with_env("GIT_TERMINAL_PROMPT", "0")
+}
+
+fn git_shell(network: NetConfig, host: &str, scrub_files: bool) -> Sandbox {
     Sandbox::embedded()
         .shell()
-        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .with_command("git", git_cmd())
         .with_network(network)
         .with_secret("TOKEN", REAL, vec![host.to_string()])
         .scrub_files(scrub_files)
@@ -1552,7 +1562,7 @@ async fn git_clones_fetches_and_pushes_over_http_with_a_secret() {
     let sandbox = git_shell(git_test_network(), "git.test", false);
     let url = format!("http://git.test:{port}/repo.git");
     let script = format!(
-        r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+        r#"export HOME=/tmp
 cd /tmp
 git config --global http.extraHeader "Authorization: Bearer $TOKEN"
 git clone -q {url} c && git -C c log --format=%s
@@ -1608,7 +1618,7 @@ async fn git_authenticates_without_writing_the_secret_to_a_file() {
     let out = run(
         &sandbox,
         &format!(
-            r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+            r#"export HOME=/tmp
 cd /tmp
 git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone -q {url} c && git -C c log -1 --format=%s
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Bearer $TOKEN" git -C c fetch -q origin feature && echo env-fetch
@@ -1631,10 +1641,9 @@ async fn git_authenticates_with_a_credential_the_sandbox_never_sees() {
     let dir = tempfile::tempdir().unwrap();
     let repos = git_repos(dir.path());
     let port = git_server(repos.clone()).await;
-    let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
     let sandbox = Sandbox::embedded()
         .shell()
-        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .with_command("git", git_cmd())
         .with_command("tc", test_cmd())
         .with_network(git_test_network())
         .with_child_network(ChildNetwork::Inherit)
@@ -1649,7 +1658,7 @@ async fn git_authenticates_with_a_credential_the_sandbox_never_sees() {
         .unwrap();
     let url = format!("http://git.test:{port}/repo.git");
     let script = format!(
-        r#"export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+        r#"export HOME=/tmp
 cd /tmp
 git clone -q {url} c && git -C c log --format=%s
 git -C c fetch -q origin feature && git -C c log -1 --format=%s FETCH_HEAD
@@ -1712,7 +1721,7 @@ async fn git_clones_from_github_over_https() {
     );
     let out = run(
         &sandbox,
-        "export HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0; cd /tmp; \
+        "export HOME=/tmp; cd /tmp; \
          git clone -q https://github.com/octocat/Hello-World.git hw && git -C hw log -1 --format=%s",
     )
     .await;
