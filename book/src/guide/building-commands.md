@@ -278,6 +278,15 @@ eryx's `gh` is built this way. Commands built with that branch start in
 the shell's directory and keep their `os.Exit` status; earlier builds of the
 fork report any non-zero status as 1.
 
+A Go command that runs commands through `eryx:process` (see
+[Commands that run commands](#commands-that-run-commands)) also sets
+`[build] wit`, and its component's world then includes that world too. The
+lane generates no Go bindings for it; the command declares its own
+`//go:wasmimport` functions. Go's own commands (`go`, `compile`, `asm`,
+`link`) build from a checkout of the fork with `[build] std_tool`. The
+[eryx-build README](https://github.com/eryx-org/eryx/tree/main/crates/eryx-build)
+covers both.
+
 ## When a command won't load
 
 `Command::from_file` (and pyeryx's `Command.from_file`, eryx-server's
