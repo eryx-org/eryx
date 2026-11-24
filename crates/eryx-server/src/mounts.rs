@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use eryx::vfs::{DirEntry, Metadata, VfsError, VfsResult, VfsStorage};
+use eryx::vfs::{DirEntry, InMemoryStorage, Metadata, VfsError, VfsResult, VfsStorage};
 use eryx::{CancellationToken, VolumeMount};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -29,9 +29,10 @@ use tokio::sync::{mpsc, oneshot};
 /// A block of a file's data, shared by the reads that need it
 type Bytes = Arc<Vec<u8>>;
 
+use crate::overlay::Overlay;
 use crate::proto::eryx::v1::{
-    FsErrorCode, FsList, FsMetadata, FsRead, FsRequest, FsResponse, FsStat, Mount, ServerMessage,
-    fs_request, fs_response, server_message,
+    FsChange, FsErrorCode, FsList, FsMetadata, FsRead, FsRequest, FsResponse, FsStat, Mount,
+    ServerMessage, fs_request, fs_response, server_message,
 };
 
 /// Mounts go beneath this
@@ -64,6 +65,8 @@ pub struct MountLimits {
     pub max_listing_bytes: u64,
     /// Entries in one directory's listing.
     pub max_dir_entries: usize,
+    /// Host memory a run's changes to its writable mounts may hold.
+    pub max_write_bytes: u64,
 }
 
 impl Default for MountLimits {
@@ -76,6 +79,7 @@ impl Default for MountLimits {
             max_cache_bytes: 16 * 1024 * 1024,
             max_listing_bytes: 16 * 1024 * 1024,
             max_dir_entries: 10_000,
+            max_write_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -177,7 +181,8 @@ fn fetched<T: Clone + Send + Sync + 'static>(value: T) -> Fetch<T> {
 /// the client's answers to
 pub struct Mounts {
     remote: Arc<Remote>,
-    paths: Vec<String>,
+    /// Each mount's path, and its overlay if it's writable
+    mounts: Vec<(String, Option<Arc<Overlay>>)>,
 }
 
 impl Mounts {
@@ -185,12 +190,16 @@ impl Mounts {
     /// `requests`, and fail at once after `closed`, when the client can no
     /// longer answer. The sender is weak, so the mounts never keep the
     /// response stream open.
+    ///
+    /// # Errors
+    ///
+    /// If a writable mount's overlay can't be made.
     pub fn new(
         defs: &[Mount],
         limits: MountLimits,
         requests: mpsc::WeakSender<ServerMessage>,
         closed: CancellationToken,
-    ) -> Self {
+    ) -> VfsResult<Self> {
         let remote = Arc::new(Remote {
             limits,
             requests,
@@ -200,24 +209,64 @@ impl Mounts {
             received: AtomicUsize::new(0),
             cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
         });
-        Self {
-            remote,
-            paths: defs.iter().map(|m| m.path.clone()).collect(),
-        }
+        // Made only for a request with writable mounts, as it charges their
+        // directories to the limit
+        let upper = defs
+            .iter()
+            .any(|d| d.writable)
+            .then(|| Arc::new(InMemoryStorage::with_max_bytes(limits.max_write_bytes)));
+        let mounts = defs
+            .iter()
+            .map(|def| {
+                let overlay = match &upper {
+                    Some(upper) if def.writable => {
+                        let lower = Arc::new(RemoteStorage {
+                            mount: def.path.clone(),
+                            remote: Arc::clone(&remote),
+                        });
+                        let upper = Arc::clone(upper);
+                        let overlay = Overlay::new(&def.path, lower, upper, limits.max_write_bytes);
+                        Some(Arc::new(overlay?))
+                    }
+                    _ => None,
+                };
+                Ok((def.path.clone(), overlay))
+            })
+            .collect::<VfsResult<_>>()?;
+        Ok(Self { remote, mounts })
     }
 
-    /// One read-only volume per mount
+    /// One volume per mount: read-only, or its overlay if it's writable
     pub fn volumes(&self) -> Vec<VolumeMount> {
-        self.paths
+        self.mounts
             .iter()
-            .map(|path| {
-                let storage = RemoteStorage {
-                    mount: path.clone(),
-                    remote: Arc::clone(&self.remote),
-                };
-                VolumeMount::read_only_storage(path.clone(), Arc::new(storage))
+            .map(|(path, overlay)| match overlay {
+                Some(overlay) => {
+                    VolumeMount::storage(path.clone(), Arc::clone(overlay) as Arc<dyn VfsStorage>)
+                }
+                None => {
+                    let storage = RemoteStorage {
+                        mount: path.clone(),
+                        remote: Arc::clone(&self.remote),
+                    };
+                    VolumeMount::read_only_storage(path.clone(), Arc::new(storage))
+                }
             })
             .collect()
+    }
+
+    /// What the run changed in its writable mounts, in the order to apply
+    /// them (see [`Overlay::changes`])
+    ///
+    /// # Errors
+    ///
+    /// If an overlay's changes can't be read.
+    pub async fn changes(&self) -> VfsResult<Vec<FsChange>> {
+        let mut changes = Vec::new();
+        for overlay in self.mounts.iter().filter_map(|(_, o)| o.as_ref()) {
+            changes.extend(overlay.changes().await?);
+        }
+        Ok(changes)
     }
 
     /// Take the client's answer to an operation
@@ -256,9 +305,8 @@ impl Mounts {
 
 impl std::fmt::Debug for Mounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Mounts")
-            .field("paths", &self.paths)
-            .finish()
+        let paths: Vec<_> = self.mounts.iter().map(|(p, o)| (p, o.is_some())).collect();
+        f.debug_struct("Mounts").field("mounts", &paths).finish()
     }
 }
 
@@ -761,6 +809,7 @@ mod tests {
             .iter()
             .map(|p| Mount {
                 path: (*p).to_string(),
+                ..Mount::default()
             })
             .collect()
     }
@@ -800,12 +849,15 @@ mod tests {
     ) {
         let (tx, rx) = mpsc::channel(16);
         let closed = CancellationToken::new();
-        let mounts = Arc::new(Mounts::new(
-            &defs(&["/mnt/m"]),
-            MountLimits::default(),
-            tx.downgrade(),
-            closed.clone(),
-        ));
+        let mounts = Arc::new(
+            Mounts::new(
+                &defs(&["/mnt/m"]),
+                MountLimits::default(),
+                tx.downgrade(),
+                closed.clone(),
+            )
+            .unwrap(),
+        );
         let storage = RemoteStorage {
             mount: "/mnt/m".into(),
             remote: Arc::clone(&mounts.remote),

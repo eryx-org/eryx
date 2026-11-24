@@ -61,6 +61,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-mount-cache-bytes` | `ERYX_MAX_MOUNT_CACHE_BYTES` | `16777216` (16 MiB) | Most host memory one execution's cache of mounted file data may hold, evicted oldest first. |
 | `--max-mount-listing-bytes` | `ERYX_MAX_MOUNT_LISTING_BYTES` | `16777216` (16 MiB) | Most host memory one execution's directory listings may hold, kept for the execution. |
 | `--max-mount-dir-entries` | `ERYX_MAX_MOUNT_DIR_ENTRIES` | `10000` | Most entries one directory's listing may have. |
+| `--max-mount-write-bytes` | `ERYX_MAX_MOUNT_WRITE_BYTES` | `67108864` (64 MiB) | Most host memory one execution's changes to its [writable mounts](#writable-mounts) may hold, all together; past it, writes fail with `ENOSPC`. |
 | `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
 | `--shell-command` | `ERYX_SHELL_COMMANDS` (`;`-separated) | *(none)* | A shell command, `NAME[,NAME...]=PATH[@sha256:<hex>]`: a `.wasm` or `.cwasm` file, the `.wasm` optionally pinned to its digest. Repeatable; empty entries and an empty variable mean none. See [Commands from a registry](#commands-from-a-registry) and [External Commands](./sandboxes.md#external-commands). |
 | `--shell-command-tunnels` | `ERYX_SHELL_COMMAND_TUNNELS` (`,`-separated) | *(none)* | Let a `--shell-command` name open blind `CONNECT` tunnels through the child proxy (no secret substitution, no HTTP rules). A request can turn it off (`commands`), not on. |
@@ -179,7 +180,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `secrets` | [Secrets](./secrets.md) injected as environment variables with placeholder values; real values are substituted only in HTTP headers to allowed hosts. The shell exports the placeholders to its commands, and only their `child_network` proxy substitutes the real values; commands the server allows tunnels (`--shell-command-tunnels`) send placeholders as they are. With networking on, a secret that has no `allowed_hosts` of its own and no `network_config.allowed_hosts` to fall back on (e.g. under `allow_all_hosts`) is rejected with `INVALID_ARGUMENT`. |
 | `disable_stdout_scrub` / `disable_stderr_scrub` | Turn off placeholder scrubbing on stdout/stderr (scrubbing is **on** by default when secrets are present). |
 | `files` | [Supporting files](./vfs.md) written into the sandbox VFS — `FILE_KIND_MODULE` files go on `sys.path`, `FILE_KIND_DATA` files are readable but not importable. |
-| `mounts` | Read-only directories under `/mnt/` that the client serves as the code uses them. See [Mounts](#mounts). |
+| `mounts` | Directories under `/mnt/` that the client serves as the code uses them, read-only unless `writable`. See [Mounts](#mounts). |
 | `persist_state` / `state_snapshot` | [Session state](./sessions.md): when `persist_state` is true the server snapshots state into `ExecuteResult.state_snapshot`; supplying `state_snapshot` restores it before execution. |
 | `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid`, `exit_code`, and `ppid` for a nested child). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
@@ -210,11 +211,27 @@ If the client disconnects, the server cancels the in-flight execution, including
 
 Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_NOT_A_DIRECTORY`, `_IS_A_DIRECTORY` and `_PERMISSION_DENIED` reach the code as the matching exception (`FileNotFoundError`, ...), anything else as an `OSError` (EIO). A read's error is always EIO, as the file is already open by then: to refuse a file, refuse its `stat`. Once the code has listed a directory, its listing answers stats of its entries, and a name that isn't in it is not found without asking.
 
-- Mounts are read-only: writing, creating or deleting files in them fails.
+- Mounts are read-only unless `writable` (see below): writing, creating or deleting files in them fails.
 - A run reads each thing once: a file changed on the client mid-run may be seen as it was, and reads stop at the size the file had when the code first looked at it. Reads fetch 256 KiB at a time.
 - Mounts can't overlap, and the [`--max-mount*` flags](#running-the-server) bound each run: how many mounts it may have, how many `FsRequest`s it makes and bytes of `FsResponse`s it's sent (past either, the code's file operations on its mounts fail), and the host memory its file data and listings may hold. Each `FsResponse` must fit in the server's `--max-message-size`.
 - They work for every language. They aren't saved with `persist_state`, nor recorded in a [callback journal](#callback-replay): a replayed run asks for them again.
 - If the client half-closes or disconnects, file operations waiting for an answer, and any after, fail at once.
+
+### Writable mounts
+
+With `writable: true`, the code can change a mount, but the client's files are never written during the run. The server keeps the changes, over the client's files, and once the code finishes it sends them as `FsChange` messages, just before the `ExecuteResult`, whose `fs_changes` counts them. Apply them in the order they come:
+
+| `FsChange.change` | Meaning |
+|-------------------|---------|
+| `remove` | Remove the file, or the directory (empty by then: removals come deepest first). |
+| `mkdir` | Make the directory (parents come first). |
+| `write` | Part of the file's whole new contents: chunks of up to 1 MiB in order, the first at `offset` 0, which creates or truncates the file. An empty file is one empty chunk. |
+
+- Changes come for a failed run too, as far as its code got, so check `ExecuteResult.success` before applying them. None come if the run is cancelled or [suspends](#suspension), since a resumed run starts again from the client's files.
+- The changes come from the sandboxed code: treat them as untrusted. Resolve each path inside the mount without following symlinks out of it, and think twice before applying writes to files that run code, such as `.git/hooks`, build scripts or `.env`.
+- Writing part of a file fetches it whole first; replacing it, or truncating it to nothing (`open(path, 'w')`), doesn't. The changes may hold up to `--max-mount-write-bytes`, past which writes fail with `ENOSPC`.
+- Renaming a file works. Renaming a directory the client served fails with `EXDEV`, which `shutil.move` and `mv` handle by copying; one the code made itself renames.
+- Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported.
 
 ## Reading the result
 
