@@ -213,10 +213,11 @@ pub struct Build {
     /// `cflags` and linked into it: WASI glue the project lacks.
     #[serde(default)]
     pub shims: Vec<PathBuf>,
-    /// C lane: a WIT world to generate C bindings for with `wit-bindgen c`,
-    /// compiled and linked into the build so its sources can call the
-    /// world's imports. Generated into `<output>/wit`, so `cflags` can
-    /// `-I` it.
+    /// A WIT world whose imports the command calls. C lane: generates
+    /// `wit-bindgen c` bindings for it, compiled and linked into the build,
+    /// into `<output>/wit`, so `cflags` can `-I` it. Go lane: the component
+    /// world becomes `[component] world` plus this one (the Go code carries
+    /// its own `//go:wasmimport` bindings, e.g. from a `vendor_patch`).
     #[serde(default)]
     pub wit: Option<WitBindings>,
     /// Go lane: `go build -ldflags` value. `{ref}` is replaced with the
@@ -230,6 +231,13 @@ pub struct Build {
     /// builds it).
     #[serde(default)]
     pub go_toolchain: GoToolchain,
+    /// Go lane: build one of Go's own commands (`package` is a `cmd/…`
+    /// package, such as `cmd/go` or `cmd/compile`) with the source tree as
+    /// its GOROOT. The source must be the fork at `go_toolchain`'s commit.
+    /// The lane runs `vendor_patch` on that tree instead of vendoring, and
+    /// builds it with the toolchain's native tools.
+    #[serde(default)]
+    pub std_tool: bool,
     /// Rust lane: cargo binary to build (`cargo build --bin <bin>`); the wasm
     /// artifact is `<bin>.wasm`. Required for the Rust lane.
     #[serde(default)]
@@ -337,8 +345,34 @@ impl Manifest {
         let base = path.parent().unwrap_or(std::path::Path::new(""));
         manifest
             .resolve_source(base)
+            .and_then(|()| manifest.check_std_tool())
             .with_context(|| format!("in manifest {}", path.display()))?;
         Ok(manifest)
+    }
+
+    /// A `std_tool` build is the Go fork itself, at the toolchain's commit,
+    /// building a `cmd/…` package.
+    fn check_std_tool(&self) -> Result<()> {
+        if !self.build.std_tool {
+            return Ok(());
+        }
+        anyhow::ensure!(self.lang == Lang::Go, "`std_tool` is for the Go lane");
+        anyhow::ensure!(
+            self.source.path.is_none(),
+            "a `std_tool` source must be the pinned Go fork, not a local `path`"
+        );
+        let fork = &self.build.go_toolchain;
+        anyhow::ensure!(
+            self.source.commit.as_deref() == Some(fork.commit.as_str()),
+            "a `std_tool` source must be the Go fork at `build.go_toolchain`'s commit ({})",
+            fork.commit
+        );
+        anyhow::ensure!(
+            self.build.package.starts_with("cmd/"),
+            "a `std_tool` package is one of Go's commands (`cmd/go`, `cmd/compile`, ...), not {:?}",
+            self.build.package
+        );
+        Ok(())
     }
 
     /// Check the source's fields. For a `path` source, also point
@@ -687,6 +721,54 @@ mod tests {
             "0123456789012345678901234567890123456789"
         );
         assert!(manifest(r#"commit = "0123456789012345678901234567890123456789""#).is_err());
+    }
+
+    /// A `std_tool` manifest builds a `cmd/` package from the Go fork at the
+    /// toolchain's commit; anything else is refused when it's loaded.
+    #[test]
+    fn std_tool() {
+        let root = std::env::temp_dir().join(format!("eryx-build-std-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fork = GoToolchain::default();
+        let load = |lang: &str, commit: &str, package: &str| {
+            let path = root.join("go.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "name = \"go\"\nlicense = \"BSD-3-Clause\"\nlang = \"{lang}\"\n\
+                     [source]\nrepo = \"{}\"\nref = \"{}\"\ncommit = \"{commit}\"\n\
+                     dir = \"scratch/go-src\"\n\
+                     [build]\npackage = \"{package}\"\nstd_tool = true\n\
+                     [output]\ndir = \"out\"\n",
+                    fork.repo, fork.git_ref
+                ),
+            )
+            .unwrap();
+            Manifest::load(&path).map_err(|e| format!("{e:#}"))
+        };
+
+        let m = load("go", &fork.commit, "cmd/go").unwrap();
+        assert!(m.build.std_tool);
+        assert!(m.build.wit.is_none());
+
+        let other = "0123456789012345678901234567890123456789";
+        assert!(
+            load("go", other, "cmd/go")
+                .unwrap_err()
+                .contains("go_toolchain`'s commit")
+        );
+        assert!(
+            load("go", &fork.commit, "./cmd/gh")
+                .unwrap_err()
+                .contains("Go's commands")
+        );
+        assert!(
+            load("rust", &fork.commit, "cmd/go")
+                .unwrap_err()
+                .contains("Go lane")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A `path` source resolves against the manifest's directory and becomes

@@ -74,6 +74,50 @@ commit = "<40 hex digits>"
 
 and `eryx-build toolchain go <manifest>` builds that commit.
 
+### Go's own commands
+
+`go`, `compile`, `asm` and `link` only build from their GOROOT, so a
+manifest for one of them sets `std_tool`:
+
+```toml
+[source]
+repo = "https://github.com/sd2k/go.git"
+ref = "wasip3-0.3.0-go1.27.4-exit-code"
+commit = "<the toolchain's commit>"
+dir = "scratch/go-src"
+
+[build]
+package = "cmd/go"
+std_tool = true
+vendor_patch = "clis/patches/patch-go.sh"
+```
+
+The source is a second checkout of the fork, at the same commit as the
+toolchain (`[build.go_toolchain]`, or the default pin), and loading the
+manifest fails otherwise. The lane skips `go mod vendor`. Instead it resets
+the checkout (`git checkout -- .` and `git clean -fd`, which keeps ignored
+files), so each build patches a clean tree, and runs `vendor_patch` on it. It links the toolchain's native
+`pkg/tool` into the checkout and copies its `go.env` (with `GOWASM`), then
+builds `package` with the checkout as `GOROOT`. Since both commits match,
+those are the tools the checkout's own `make.bash` would build, so it never
+runs. Linking needs a Unix host.
+
+### WIT imports beyond WASI
+
+A Go command that calls eryx's host interfaces, such as `go` running its
+tools through `eryx:process/run`, sets `[build] wit` as the C lane does:
+
+```toml
+wit = { path = "wit/process.wit", world = "eryx:process/child@0.1.0" }
+```
+
+Name the world with its package's version: it's included from the fork's
+WIT package, where an unversioned name doesn't resolve. The lane copies the fork's WIT into `<output>/wit`, adds that file (or
+directory) to its `deps/`, and componentizes with a world that includes
+both `[component] world` and `wit.world`. Unlike the C lane, it generates
+no bindings: the Go code declares its own `//go:wasmimport` functions,
+typically added by its `vendor_patch`.
+
 The C and Rust lanes link a small start-up object, compiled with
 `rustc --target wasm32-wasip2`, that moves the command into `$PWD` when it
 starts, since WASI children don't otherwise start in the shell's directory.
@@ -144,7 +188,7 @@ again at `r.1`.
 ## Building outside the eryx repository
 
 Manifests name files relative to the directory eryx-build runs in. A command
-that talks to eryx's host interfaces through `[build] wit` (git's
+that talks to eryx's host interfaces through `[build] wit` (git's or go's
 `eryx:process/run` bindings, for example) needs its own copy of that WIT,
 such as eryx's `crates/eryx-runtime/wit/deps/process.wit`, at the version of
 the eryx release it targets.
