@@ -19,8 +19,9 @@
 //! What a child can reach:
 //! - **Files:** with `unstable-vfs` or `shell`, a
 //!   [fork](eryx_vfs::HybridVfsCtx::fork) of the parent's hybrid VFS, so the
-//!   same mounts and permissions and nothing else. Without either, no
-//!   filesystem.
+//!   same mounts and permissions, plus its command's own mounts
+//!   (`Command::with_mount`, with `unstable-vfs`), and nothing else.
+//!   Without either, no filesystem.
 //! - **Network:** through the child proxy only, when the sandbox has one
 //!   (#812); otherwise none.
 //! - **Commands:** a child whose command was registered with
@@ -672,6 +673,12 @@ pub struct Command {
     /// The credentials its requests get in this execution (see
     /// [`Credential`](crate::net::Credential)).
     credentials: Vec<Arc<crate::net::Credential>>,
+    /// Its default environment (see [`Command::with_env`]).
+    env: Vec<(String, String)>,
+    /// What it and its children see mounted on top of their parent's
+    /// filesystem (see [`Command::with_mount`]).
+    #[cfg(feature = "unstable-vfs")]
+    mounts: Vec<crate::session::VolumeMount>,
 }
 
 /// Per-execution options for one registered command, which can only take
@@ -977,6 +984,9 @@ impl Command {
             .unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
+            env: Vec::new(),
+            #[cfg(feature = "unstable-vfs")]
+            mounts: Vec::new(),
         })
     }
 
@@ -1033,6 +1043,23 @@ impl Command {
         false
     }
 
+    /// `vfs` (its parent's, forked) with this command's mounts on top.
+    #[cfg(feature = "unstable-vfs")]
+    fn mount(
+        &self,
+        vfs: Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>,
+    ) -> Result<Option<eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>>, Error> {
+        if self.mounts.is_empty() {
+            return Ok(vfs);
+        }
+        let mut vfs = vfs.unwrap_or_else(crate::wasm::empty_vfs);
+        for volume in &self.mounts {
+            vfs.unmount(&volume.guest_path);
+            crate::session::executor::mount_volume(&mut vfs, volume)?;
+        }
+        Ok(Some(vfs))
+    }
+
     fn from_component(engine: &Engine, component: &Component, vmctx: u64) -> Result<Self, Error> {
         #[cfg(test)]
         tests::COMPILED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1044,6 +1071,9 @@ impl Command {
             vmctx: usize::try_from(vmctx).unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
+            env: Vec::new(),
+            #[cfg(feature = "unstable-vfs")]
+            mounts: Vec::new(),
         })
     }
 
@@ -1112,6 +1142,47 @@ impl Command {
     #[must_use]
     pub fn allow_spawn(mut self) -> Self {
         self.spawns = true;
+        self
+    }
+
+    /// Start the command with `key` set to `value` unless whoever runs it
+    /// (the shell, or a command that [spawns](Self::allow_spawn) it) sets
+    /// `key` itself: a default, such as git's `GIT_CONFIG_NOSYSTEM=1` or
+    /// go's `GOROOT`, that a script can still override. Setting `key` again
+    /// replaces its value. Its children get it only if the command passes it
+    /// on, as it does the rest of its environment. The child proxy's
+    /// variables (see
+    /// [`SandboxBuilder::with_child_network`](crate::SandboxBuilder::with_child_network))
+    /// replace a default of the same name.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = key.into();
+        self.env.retain(|(k, _)| *k != key);
+        self.env.push((key, value.into()));
+        self
+    }
+
+    /// Mount `volume` in this command's filesystem: on top of the files it
+    /// sees anyway (its parent's, which start as the sandbox's), for it and
+    /// the commands it [spawns](Self::allow_spawn), not for the shell or other
+    /// commands. Read-only unless `volume` is writable, and a storage volume
+    /// (an overlay, say) works as it does for a sandbox. Register the same
+    /// mount on each command of a group that needs it (go's `go`,
+    /// `go-compile`, `go-asm` and `go-link` all need `GOROOT`): each command
+    /// sees it, run by the shell or by another of them.
+    ///
+    /// A mount replaces whatever its parent has at the same path: the
+    /// sandbox's volume, or the same mount from a command that spawned it.
+    /// One below another mount (`/data/go` under `/data`) shows through
+    /// it. The child proxy's CA certificate (see
+    /// [`SandboxBuilder::with_child_network`](crate::SandboxBuilder::with_child_network))
+    /// replaces a mount at its directory. A host directory is opened each
+    /// time the command runs; if that fails, the command fails to start,
+    /// with the reason on stderr.
+    #[cfg(feature = "unstable-vfs")]
+    #[must_use]
+    pub fn with_mount(mut self, volume: crate::session::VolumeMount) -> Self {
+        self.mounts.push(volume);
         self
     }
 }
@@ -1489,6 +1560,20 @@ impl Spawner {
             .get(&cmd)
             .ok_or(ProcessError::CommandNotFound)?
             .clone();
+        // The caller's values win over the command's defaults.
+        for (key, value) in &command.env {
+            if !env.iter().any(|(k, _)| k == key) {
+                env.push((key.clone(), value.clone()));
+            }
+        }
+        #[cfg(feature = "unstable-vfs")]
+        let vfs = match command.mount(vfs) {
+            Ok(vfs) => vfs,
+            Err(e) => {
+                self.notices.write(&format!("eryx: {cmd}: {e}\n"));
+                return Err(ProcessError::SpawnFailed);
+            }
+        };
         // WASI 0.2 has no working directory; tell the child where it is.
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
@@ -1684,6 +1769,9 @@ impl Command {
             vmctx: usize::try_from(precompiled_vmctx(precompiled)).unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
+            env: Vec::new(),
+            #[cfg(feature = "unstable-vfs")]
+            mounts: Vec::new(),
         })
     }
 
@@ -2560,12 +2648,15 @@ impl ChildRun {
             // The CA certificate only, read-only, at CA_DIR.
             #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
             let mounted = match vfs.as_mut() {
-                Some(vfs) => vfs.add_real_preopen_path(
-                    CA_DIR,
-                    &link.ca_dir,
-                    eryx_vfs::DirPerms::READ,
-                    eryx_vfs::FilePerms::READ,
-                ),
+                Some(vfs) => {
+                    vfs.unmount(CA_DIR);
+                    vfs.add_real_preopen_path(
+                        CA_DIR,
+                        &link.ca_dir,
+                        eryx_vfs::DirPerms::READ,
+                        eryx_vfs::FilePerms::READ,
+                    )
+                }
                 None => wasi
                     .preopened_dir(&link.ca_dir, CA_DIR, wasmtime_wasi::FsPerms::ReadOnly)
                     .map(|_| ())

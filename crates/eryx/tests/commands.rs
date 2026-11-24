@@ -2613,7 +2613,13 @@ async fn git_stash_runs_git_itself() {
 
     let git = std::env::var_os("ERYX_TEST_GIT_WASM").expect("ERYX_TEST_GIT_WASM");
     let executor = shell()
-        .with_command("git", Command::from_file(git).unwrap().allow_spawn())
+        .with_command(
+            "git",
+            Command::from_file(git)
+                .unwrap()
+                .allow_spawn()
+                .with_env("GIT_CONFIG_NOSYSTEM", "1"),
+        )
         .build()
         .unwrap()
         .executor();
@@ -2624,7 +2630,7 @@ async fn git_stash_runs_git_itself() {
     let out = session
         .execute(
             r#"
-export HOME=/data GIT_CONFIG_NOSYSTEM=1
+export HOME=/data
 export GIT_AUTHOR_NAME=eryx GIT_AUTHOR_EMAIL=eryx@example.com
 export GIT_COMMITTER_NAME=eryx GIT_COMMITTER_EMAIL=eryx@example.com
 mkdir -p /data/repo && cd /data/repo
@@ -3049,4 +3055,128 @@ mod background_jobs {
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
     }
+}
+
+/// A command's defaults for its environment (`Command::with_env`): it
+/// starts with them, a value its caller sets wins, and the shell and other
+/// commands don't see them.
+#[tokio::test]
+async fn a_commands_env_defaults_lose_to_its_callers() {
+    let sandbox = shell()
+        .with_command(
+            "tc",
+            spawning_cmd()
+                .with_env("GOROOT", "/usr/local/go")
+                .with_env("GIT_TERMINAL_PROMPT", "1")
+                .with_env("GIT_TERMINAL_PROMPT", "0"),
+        )
+        .with_command("other", test_cmd())
+        .build()
+        .unwrap();
+    let out = run_script(
+        &sandbox,
+        "tc env GOROOT; tc env GIT_TERMINAL_PROMPT; GOROOT=/mine tc env GOROOT; \
+         echo \"shell=${GOROOT-unset}\"; other env GOROOT; FOO=bar tc spawn tc env GOROOT",
+    )
+    .await;
+    assert_eq!(
+        out,
+        "/usr/local/go\n0\n/mine\nshell=unset\n\n/usr/local/go\n"
+    );
+}
+
+/// A command's mount (`Command::with_mount`) is in its filesystem and its
+/// children's, read-only unless writable, and nobody else's: not the
+/// shell's, nor another command's run by the shell.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn a_commands_mount_is_seen_by_it_and_its_children_only() {
+    use eryx::session::VolumeMount;
+    use eryx::vfs::{ArcStorage, InMemoryStorage, VfsStorage};
+    use std::sync::Arc;
+
+    let goroot = tempfile::tempdir().unwrap();
+    std::fs::write(goroot.path().join("VERSION"), "go1.26").unwrap();
+    let cache = ArcStorage::new(Arc::new(InMemoryStorage::new()));
+    let go = |cmd: Command| {
+        cmd.with_mount(VolumeMount::read_only(goroot.path(), "/goroot"))
+            .with_mount(VolumeMount::storage("/gocache", Arc::new(cache.clone())))
+    };
+    let sandbox = shell()
+        // `go` and `go-compile` share the mounts, as a group of commands
+        // that run each other would.
+        .with_command("go", go(spawning_cmd()))
+        .with_command("go-compile", go(test_cmd()))
+        .with_command("other", test_cmd())
+        .build()
+        .unwrap();
+    let out = run_script(
+        &sandbox,
+        "go cat /goroot/VERSION; echo; go write /goroot/x y; \
+         go write /gocache/a built; go-compile cat /gocache/a; echo; \
+         go spawn go-compile cat /goroot/VERSION; echo; go spawn other cat /goroot/VERSION; echo; \
+         other cat /goroot/VERSION; test -e /goroot/VERSION || echo 'shell: no goroot'",
+    )
+    .await;
+    assert_eq!(
+        out,
+        "go1.26\nerror: PermissionDenied\nbuilt\ngo1.26\ngo1.26\nerror: NotFound\nshell: no goroot\n"
+    );
+    assert_eq!(cache.read("/gocache/a").await.unwrap(), b"built");
+    assert!(!goroot.path().join("x").exists());
+}
+
+/// A command's mount replaces the sandbox's volume at the same path, for
+/// that command only; one below a volume shows through it.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn a_commands_mount_replaces_the_sandboxs_at_its_path() {
+    use eryx::session::VolumeMount;
+
+    let volume = tempfile::tempdir().unwrap();
+    std::fs::write(volume.path().join("sandbox"), "sandbox's").unwrap();
+    let mine = tempfile::tempdir().unwrap();
+    std::fs::write(mine.path().join("mine"), "mine").unwrap();
+    let sandbox = shell()
+        .with_volume(VolumeMount::read_only(volume.path(), "/vol"))
+        .with_command(
+            "tc",
+            test_cmd()
+                .with_mount(VolumeMount::read_only(mine.path(), "/vol"))
+                .with_mount(VolumeMount::read_only(mine.path(), "/vol/sub")),
+        )
+        .with_command("other", test_cmd())
+        .build()
+        .unwrap();
+    let out = run_script(
+        &sandbox,
+        "tc cat /vol/mine; echo; tc cat /vol/sub/mine; echo; tc cat /vol/sandbox; \
+         other cat /vol/sandbox; echo",
+    )
+    .await;
+    assert_eq!(out, "mine\nmine\nerror: NotFound\nsandbox's\n");
+}
+
+/// A mount whose host directory is gone fails the command, saying why.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn a_commands_missing_mount_fails_it() {
+    use eryx::session::VolumeMount;
+
+    let gone = tempfile::tempdir().unwrap();
+    let path = gone.path().to_owned();
+    drop(gone);
+    let sandbox = shell()
+        .with_command(
+            "tc",
+            test_cmd().with_mount(VolumeMount::read_only(&path, "/gone")),
+        )
+        .build()
+        .unwrap();
+    let out = run_script(&sandbox, "tc argv0; echo \"status=$?\"").await;
+    assert!(out.starts_with("status=126\neryx: tc: "), "{out}");
+    assert!(
+        out.contains(&format!("{} -> /gone", path.display())),
+        "{out}"
+    );
 }

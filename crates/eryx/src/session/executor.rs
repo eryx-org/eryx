@@ -979,42 +979,7 @@ pub(crate) fn build_hybrid_vfs_context(
 
     // Add user-specified volume mounts
     for volume in &vfs_config.volumes {
-        let (dir_perms, file_perms) = if volume.read_only {
-            (DirPerms::READ, FilePerms::READ)
-        } else {
-            (DirPerms::all(), FilePerms::all())
-        };
-        let host_path = match &volume.source {
-            VolumeSource::Host(path) => path,
-            VolumeSource::Storage(storage) => {
-                ctx.add_storage_preopen(&volume.guest_path, storage.clone(), dir_perms, file_perms);
-                continue;
-            }
-        };
-        let result = if host_path.is_file() {
-            ctx.add_real_file_preopen_path(
-                &volume.guest_path,
-                host_path,
-                dir_perms,
-                file_perms,
-                volume.max_file_size,
-            )
-        } else {
-            eryx_vfs::RealDir::open_ambient(host_path, dir_perms, file_perms).map(|dir| {
-                let dir = match volume.max_file_size {
-                    Some(bytes) => dir.with_max_file_size(bytes),
-                    None => dir,
-                };
-                ctx.add_real_preopen(&volume.guest_path, dir);
-            })
-        };
-        result.map_err(|e| {
-            ErrorKind::WasmEngine(format!(
-                "Failed to mount volume {} -> {}: {e}",
-                host_path.display(),
-                volume.guest_path,
-            ))
-        })?;
+        mount_volume(&mut ctx, volume)?;
     }
 
     if executor.language() == Language::Shell {
@@ -1022,6 +987,52 @@ pub(crate) fn build_hybrid_vfs_context(
     }
 
     Ok(ctx)
+}
+
+/// Mount `volume` in `ctx`: a host directory or file, or a storage, read-only
+/// if it says so.
+#[cfg(feature = "unstable-vfs")]
+pub(crate) fn mount_volume(
+    ctx: &mut eryx_vfs::HybridVfsCtx<eryx_vfs::ArcStorage>,
+    volume: &VolumeMount,
+) -> std::result::Result<(), Error> {
+    let (dir_perms, file_perms) = if volume.read_only {
+        (DirPerms::READ, FilePerms::READ)
+    } else {
+        (DirPerms::all(), FilePerms::all())
+    };
+    let host_path = match &volume.source {
+        VolumeSource::Host(path) => path,
+        VolumeSource::Storage(storage) => {
+            ctx.add_storage_preopen(&volume.guest_path, storage.clone(), dir_perms, file_perms);
+            return Ok(());
+        }
+    };
+    let result = if host_path.is_file() {
+        ctx.add_real_file_preopen_path(
+            &volume.guest_path,
+            host_path,
+            dir_perms,
+            file_perms,
+            volume.max_file_size,
+        )
+    } else {
+        eryx_vfs::RealDir::open_ambient(host_path, dir_perms, file_perms).map(|dir| {
+            let dir = match volume.max_file_size {
+                Some(bytes) => dir.with_max_file_size(bytes),
+                None => dir,
+            };
+            ctx.add_real_preopen(&volume.guest_path, dir);
+        })
+    };
+    result.map_err(|e| {
+        ErrorKind::WasmEngine(format!(
+            "Failed to mount volume {} -> {}: {e}",
+            host_path.display(),
+            volume.guest_path,
+        ))
+        .into()
+    })
 }
 
 /// The filesystem of `executor`'s guest run as a command: `base` (its

@@ -407,6 +407,41 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   also its WASI initial working directory. Children built with `eryx-build`
   start in that directory; other wasi-libc programs start in `/`, because
   wasi-libc ignores both (WebAssembly/wasi-libc#915).
+- **A command's own environment and files:** in Rust,
+  `Command::with_env(key, value)` gives a command a default for one
+  variable, which a value its caller sets (`GIT_PAGER=less git log`, or an
+  `export`) replaces. `Command::with_mount(volume)` (with `unstable-vfs`)
+  mounts a `VolumeMount` in that command's filesystem and its children's,
+  not the shell's or other commands': read-only unless the volume is
+  writable, and a storage volume works as for a sandbox. A mount replaces
+  what its parent has at the same path (a sandbox volume, or the same
+  mount from the command that ran it); one beneath another mount shows
+  through it. Commands that run each other and need the same files each
+  get the mount:
+
+  ```rust,ignore
+  let goroot = VolumeMount::read_only("/opt/go", "/usr/local/go");
+  let go = |cmd: Command| {
+      cmd.with_mount(goroot.clone())
+          .with_env("GOROOT", "/usr/local/go")
+          .with_env("GOCACHE", "/tmp/go-cache")
+  };
+  let sandbox = Sandbox::embedded()
+      .shell()
+      .with_command("go", go(Command::from_file("go.wasm")?.allow_spawn()))
+      .with_command("go-compile", go(Command::from_file("compile.wasm")?))
+      .with_command(
+          "git",
+          Command::from_file("git.wasm")?
+              .allow_spawn()
+              .with_env("GIT_CONFIG_NOSYSTEM", "1")
+              .with_env("GIT_TERMINAL_PROMPT", "0"),
+      )
+      .build()?;
+  ```
+
+  A host directory is opened each time the command runs; if that fails,
+  the command fails to start, with the reason on its stderr.
 - **What children get:** WASI 0.2.x and 0.3.x `wasi:cli`, `wasi:clocks`,
   `wasi:filesystem`, `wasi:random` and `wasi:sockets` (and 0.2's `wasi:io`),
   plus `eryx:process/run@0.1` and `eryx:process/pipe@0.1` for commands
@@ -425,8 +460,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   imports and whether children get each, and exits 1 if eryx can't run it
   (2 if it can't read the file as a command at all).
 - **Files:** a child sees the shell's filesystem (above): the read-only root,
-  `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts, and
-  nothing else of the host. Files a child writes are the shell's, and last as
+  `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts (plus
+  its command's own mounts, above), and nothing else of the host. Files a child writes are the shell's, and last as
   long as the shell's own.
 - **Network:** none by default. A child without network that tries to
   resolve a name or open a socket gets `eryx: networking not enabled for
