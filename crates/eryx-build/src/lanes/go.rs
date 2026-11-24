@@ -154,7 +154,8 @@ pub fn build(manifest: &Manifest) -> Result<()> {
     let std_tool = manifest.build.std_tool;
     // A Go command builds from its GOROOT: the source tree, for std_tool.
     let build_root = if std_tool {
-        std::fs::canonicalize(&source_dir)?
+        std::fs::canonicalize(&source_dir)
+            .with_context(|| format!("the Go fork's checkout {}", source_dir.display()))?
     } else {
         goroot.clone()
     };
@@ -169,6 +170,11 @@ pub fn build(manifest: &Manifest) -> Result<()> {
             "=== [{}] Step 1: use the Go fork's tree as GOROOT ===",
             manifest.name
         );
+        // The checkout is patched in place, unlike a vendor tree, which `go
+        // mod vendor` rewrites: undo the last build's patch first, keeping
+        // ignored files (what prepare_std_tree adds).
+        run("git", &["checkout", "-q", "--", "."], &build_root, &[])?;
+        run("git", &["clean", "-q", "-fd"], &build_root, &[])?;
         prepare_std_tree(&goroot, &build_root)?;
     } else {
         eprintln!("=== [{}] Step 1: vendor dependencies ===", manifest.name);

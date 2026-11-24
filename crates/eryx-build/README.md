@@ -94,8 +94,9 @@ vendor_patch = "clis/patches/patch-go.sh"
 
 The source is a second checkout of the fork, at the same commit as the
 toolchain (`[build.go_toolchain]`, or the default pin), and loading the
-manifest fails otherwise. The lane skips `go mod vendor` and runs
-`vendor_patch` on that checkout. It links the toolchain's native
+manifest fails otherwise. The lane skips `go mod vendor`. Instead it resets
+the checkout (`git checkout -- .` and `git clean -fd`, which keeps ignored
+files), so each build patches a clean tree, and runs `vendor_patch` on it. It links the toolchain's native
 `pkg/tool` into the checkout and copies its `go.env` (with `GOWASM`), then
 builds `package` with the checkout as `GOROOT`. Since both commits match,
 those are the tools the checkout's own `make.bash` would build, so it never
