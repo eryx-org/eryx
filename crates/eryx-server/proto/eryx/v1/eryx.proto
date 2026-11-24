@@ -588,7 +588,9 @@ message HttpRule {
 // when making requests to allowed_hosts.
 message SecretConfig {
   // Secret name: the key of its placeholder in `os.environ` (Python) or
-  // `process.env` (JavaScript). Not supported for the shell.
+  // `process.env` (JavaScript), or the environment variable the shell exports
+  // it as for its commands. Must match `[A-Za-z_][A-Za-z0-9_]*`, a valid shell
+  // variable name; any other name is INVALID_ARGUMENT.
   string name = 1;
   // The real secret value. Transmitted in plaintext over the gRPC connection —
   // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).
