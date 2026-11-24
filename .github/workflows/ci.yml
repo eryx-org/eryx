@@ -115,6 +115,9 @@ jobs:
               - 'crates/eryx-runtime/**'
               - 'crates/wit-dylib-ffi/**'
               - 'crates/eryx-precompile/**'
+              # Lint, Test and the Windows/macOS checks cover eryx-build's
+              # lanes and their unit tests too.
+              - 'crates/eryx-build/**'
               # A unit test in crates/eryx keeps the JS SDK's copy of the
               # reserved callback names current (#962).
               - 'js/eryx/shims/reserved-names.js'
