@@ -12,6 +12,11 @@
 //! storage operation once, drops it and runs it again later (see
 //! `VfsStorage`), so every request is a shared future kept in the cache, and
 //! the rerun joins it instead of asking again.
+//!
+//! A writable mount (`Mount.writable`) is an [`OverlayStorage`] over its
+//! `RemoteStorage`: the client's files stay as they are, the run's writes stay
+//! on the server, and when the run ends [`Mounts::changes`] lists them for the
+//! client to apply.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -19,7 +24,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use eryx::vfs::{DirEntry, InMemoryStorage, Metadata, VfsError, VfsResult, VfsStorage};
+use eryx::vfs::{
+    DirEntry, InMemoryStorage, Metadata, OverlayChange, OverlayStorage, VfsError, VfsResult,
+    VfsStorage,
+};
 use eryx::{CancellationToken, VolumeMount};
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -29,11 +37,13 @@ use tokio::sync::{mpsc, oneshot};
 /// A block of a file's data, shared by the reads that need it
 type Bytes = Arc<Vec<u8>>;
 
-use crate::overlay::Overlay;
 use crate::proto::eryx::v1::{
-    FsChange, FsErrorCode, FsList, FsMetadata, FsRead, FsRequest, FsResponse, FsStat, Mount,
-    ServerMessage, fs_request, fs_response, server_message,
+    FsChange, FsErrorCode, FsList, FsMetadata, FsMkdir, FsRead, FsRemove, FsRequest, FsResponse,
+    FsStat, FsWrite, Mount, ServerMessage, fs_change, fs_request, fs_response, server_message,
 };
+
+/// The largest `FsWrite` chunk of a changed file
+pub const CHUNK: usize = 1024 * 1024;
 
 /// Mounts go beneath this
 const MOUNT_ROOT: &str = "/mnt/";
@@ -182,7 +192,7 @@ fn fetched<T: Clone + Send + Sync + 'static>(value: T) -> Fetch<T> {
 pub struct Mounts {
     remote: Arc<Remote>,
     /// Each mount's path, and its overlay if it's writable
-    mounts: Vec<(String, Option<Arc<Overlay>>)>,
+    mounts: Vec<(String, Option<Arc<OverlayStorage>>)>,
 }
 
 impl Mounts {
@@ -225,7 +235,7 @@ impl Mounts {
                             remote: Arc::clone(&remote),
                         });
                         let upper = Arc::clone(upper);
-                        let overlay = Overlay::new(&def.path, lower, upper, limits.max_write_bytes);
+                        let overlay = OverlayStorage::new(&def.path, lower, upper);
                         Some(Arc::new(overlay?))
                     }
                     _ => None,
@@ -256,15 +266,54 @@ impl Mounts {
     }
 
     /// What the run changed in its writable mounts, in the order to apply
-    /// them (see [`Overlay::changes`])
+    /// them (see [`OverlayStorage::changes`]), each file's whole contents in
+    /// [`CHUNK`]s (the first at offset 0, which creates or truncates it)
     ///
     /// # Errors
     ///
     /// If an overlay's changes can't be read.
     pub async fn changes(&self) -> VfsResult<Vec<FsChange>> {
         let mut changes = Vec::new();
-        for overlay in self.mounts.iter().filter_map(|(_, o)| o.as_ref()) {
-            changes.extend(overlay.changes().await?);
+        for (mount, overlay) in &self.mounts {
+            let Some(overlay) = overlay else { continue };
+            let change = |path: &str, change| FsChange {
+                mount: mount.clone(),
+                path: path
+                    .strip_prefix(mount.as_str())
+                    .unwrap_or(path)
+                    .trim_start_matches('/')
+                    .to_string(),
+                change: Some(change),
+            };
+            for c in overlay.changes().await? {
+                match c {
+                    OverlayChange::Remove(p) => {
+                        changes.push(change(&p, fs_change::Change::Remove(FsRemove {})));
+                    }
+                    OverlayChange::Mkdir(p) => {
+                        changes.push(change(&p, fs_change::Change::Mkdir(FsMkdir {})));
+                    }
+                    OverlayChange::Write(p) => {
+                        let data = overlay.read(&p).await?;
+                        if data.is_empty() {
+                            let write = FsWrite::default();
+                            changes.push(change(&p, fs_change::Change::Write(write)));
+                        }
+                        for (i, chunk) in data.chunks(CHUNK).enumerate() {
+                            let write = FsWrite {
+                                offset: (i * CHUNK) as u64,
+                                data: chunk.to_vec(),
+                            };
+                            changes.push(change(&p, fs_change::Change::Write(write)));
+                        }
+                    }
+                    // OverlayChange is non_exhaustive; a new kind needs a
+                    // proto message before it can be sent
+                    other => {
+                        return Err(VfsError::Io(format!("an unsupported change: {other:?}")));
+                    }
+                }
+            }
         }
         Ok(changes)
     }
@@ -1135,5 +1184,57 @@ mod tests {
         assert!(cache.blocks.contains_key(&("/f".into(), 0)));
         assert!(!cache.blocks.contains_key(&("/f".into(), 1)));
         assert!(cache.reserve(CACHE_BYTES + 1).is_err());
+    }
+
+    /// A writable mount's changes are relative to it, and a big file comes
+    /// in chunks
+    #[tokio::test]
+    async fn changes_are_relative_and_chunked() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let def = Mount {
+            path: "/mnt/m".into(),
+            writable: true,
+        };
+        let mounts = Arc::new(
+            Mounts::new(
+                &[def],
+                MountLimits::default(),
+                tx.downgrade(),
+                CancellationToken::new(),
+            )
+            .unwrap(),
+        );
+        // A client with nothing in it
+        let answers = Arc::clone(&mounts);
+        tokio::spawn(async move {
+            let _tx = tx;
+            while let Some(msg) = rx.recv().await {
+                answers.reply(FsResponse {
+                    op_id: fs_request(msg).op_id,
+                    result: Some(fs_response::Result::Error(FsError {
+                        code: FsErrorCode::NotFound.into(),
+                        message: String::new(),
+                    })),
+                });
+            }
+        });
+        let overlay = mounts.mounts[0].1.as_ref().unwrap();
+        let data: Vec<u8> = (0..CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
+        overlay.write("/mnt/m/f", &data).await.unwrap();
+        overlay.write("/mnt/m/empty", b"").await.unwrap();
+        let mut offsets = Vec::new();
+        let mut joined = Vec::new();
+        for c in mounts.changes().await.unwrap() {
+            assert_eq!(c.mount, "/mnt/m");
+            let Some(fs_change::Change::Write(w)) = c.change else {
+                panic!("not a write: {c:?}");
+            };
+            offsets.push((c.path, w.offset));
+            joined.extend(w.data);
+        }
+        let chunk = CHUNK as u64;
+        let f = |offset| ("f".to_string(), offset);
+        assert_eq!(offsets, [("empty".into(), 0), f(0), f(chunk), f(2 * chunk)]);
+        assert_eq!(joined, data);
     }
 }

@@ -627,6 +627,10 @@ pub enum VolumeSource {
     /// or one of your own. Files are at their full guest paths in it: the
     /// mount's directory is `guest_path` and a file in it is
     /// `{guest_path}/name`, as in the sandbox's own storage.
+    ///
+    /// An [`OverlayStorage`](eryx_vfs::OverlayStorage) gives each sandbox
+    /// its own writes over files they share: one lower storage for them all,
+    /// and a fresh upper layer per run.
     Storage(eryx_vfs::ArcStorage),
 }
 

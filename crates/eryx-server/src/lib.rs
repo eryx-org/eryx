@@ -8,7 +8,6 @@
 
 pub mod callbacks;
 pub mod mounts;
-pub mod overlay;
 pub mod replay;
 pub mod service;
 pub mod telemetry;

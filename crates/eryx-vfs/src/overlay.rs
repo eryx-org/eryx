@@ -1,19 +1,19 @@
-//! Copy-on-write layer for a writable mount (`Mount.writable`).
+//! A copy-on-write overlay of a read-only storage.
 //!
-//! The client's files stay as they are: the run's writes go to an in-memory
-//! upper layer on the server, and deletions are recorded as whiteouts over
-//! the lower layer (the client's [`RemoteStorage`](crate::mounts)). Reads see
-//! the upper layer first, then the lower one minus whiteouts. When the run
-//! ends, [`Overlay::changes`] lists what it did, for the client to apply.
+//! [`OverlayStorage`] serves a directory of a lower storage, which it never
+//! writes to, with the writes going to an [`InMemoryStorage`] upper layer and
+//! deletions recorded as whiteouts over the lower one. Reads see the upper
+//! layer first, then the lower one minus whiteouts. [`OverlayStorage::changes`]
+//! lists what was done, for a caller that wants to apply it elsewhere.
 //!
 //! The rules, overlayfs-like but simpler:
-//! - Writing part of a client file first copies it up whole; replacing it,
-//!   or truncating it to nothing, doesn't.
-//! - A deleted client file or directory becomes a whiteout. `rmdir` needs the
-//!   merged directory to be empty, so a removed directory's client entries
+//! - Writing part of a lower file first copies it up whole; replacing it,
+//!   or truncating it to nothing, doesn't. So does setting its times.
+//! - A deleted lower file or directory becomes a whiteout. `rmdir` needs the
+//!   merged directory to be empty, so a removed directory's lower entries
 //!   are all whited out already, and recreating it doesn't bring them back.
 //! - Renaming a file copies it up and whites out the old name. Renaming a
-//!   directory the run created itself is a plain rename; renaming a client
+//!   directory made in the overlay is a plain rename; renaming a lower
 //!   directory is `EXDEV` (code that moves trees copies instead).
 
 use std::collections::BTreeSet;
@@ -21,44 +21,89 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use eryx::vfs::{DirEntry, InMemoryStorage, Metadata, VfsError, VfsResult, VfsStorage};
 
-use crate::proto::eryx::v1::{FsChange, FsMkdir, FsRemove, FsWrite, fs_change};
+use crate::error::{VfsError, VfsResult};
+use crate::storage::{DirEntry, InMemoryStorage, Metadata, VfsStorage};
 
-/// The largest `FsWrite` chunk of a changed file
-pub const CHUNK: usize = 1024 * 1024;
-
-/// One writable mount: the client's files under the run's changes
-pub struct Overlay {
-    /// The mount's guest path
-    mount: String,
+/// A copy-on-write overlay: a read-only lower storage under an in-memory
+/// upper layer that takes the writes.
+///
+/// The overlay serves `root` and what's beneath it, at the same paths as in
+/// the lower storage. The lower storage is only read, so one can sit under
+/// many overlays at once.
+///
+/// # As a sandbox volume
+///
+/// With the `eryx` crate, mount one as a storage volume
+/// (`VolumeMount::storage`). To give many sandboxes the same starting files
+/// but each its own writes, share one lower storage and make a fresh upper
+/// layer for each run:
+///
+/// ```rust
+/// # async fn example() -> eryx_vfs::VfsResult<()> {
+/// use std::sync::Arc;
+/// use eryx_vfs::{InMemoryStorage, OverlayStorage, VfsStorage};
+///
+/// // Made once, shared by every run
+/// let cache = InMemoryStorage::new();
+/// cache.mkdir_sync("/cache")?;
+/// cache.write("/cache/prebuilt", b"...").await?;
+/// let cache: Arc<dyn VfsStorage> = Arc::new(cache);
+///
+/// // Per run: its writes, at most 64 MiB of them, go to its own upper layer
+/// let upper = Arc::new(InMemoryStorage::with_max_bytes(64 << 20));
+/// let overlay = OverlayStorage::new("/cache", Arc::clone(&cache), upper)?;
+/// overlay.write("/cache/new", b"entry").await?;
+/// assert!(!cache.exists("/cache/new").await?);
+/// // eryx::VolumeMount::storage("/cache", Arc::new(overlay))
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Copy-ups are whole files, held in memory. Setting a lower file's times
+/// copies it up too, so code that touches every file it reads copies them
+/// all.
+pub struct OverlayStorage {
+    /// The directory the overlay serves
+    root: String,
     lower: Arc<dyn VfsStorage>,
-    /// The run's changes, shared by its writable mounts (paths are guest
-    /// paths), so its limit is for the run
+    /// The writes; may be shared by several overlays (with different roots),
+    /// whose limit is then for them all
     upper: Arc<InMemoryStorage>,
-    /// Most bytes the upper layer may hold, also checked before a copy-up
-    max_bytes: u64,
     state: Mutex<State>,
-    /// Held while copying a client file up, so two writers to it can't both
+    /// Held while copying a lower file up, so two writers to it can't both
     /// copy it, the second over the first's write
     copying: tokio::sync::Mutex<()>,
 }
 
-impl std::fmt::Debug for Overlay {
+impl std::fmt::Debug for OverlayStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Overlay")
-            .field("mount", &self.mount)
-            .finish()
+        f.debug_struct("OverlayStorage")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
     }
 }
 
-/// What the run did besides writing files, by guest path
+/// One thing an [`OverlayStorage`] changed, by its path in the storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OverlayChange {
+    /// The lower file or directory there was deleted.
+    Remove(String),
+    /// A directory was made there.
+    Mkdir(String),
+    /// The file there was written; its contents are the overlay's (read
+    /// them with [`VfsStorage::read`]).
+    Write(String),
+}
+
+/// What was done besides writing files, by path
 #[derive(Default)]
 struct State {
-    /// Client entries the run deleted
+    /// Lower entries deleted
     whiteouts: BTreeSet<String>,
-    /// Directories the run made (the upper layer also has its parents, to
-    /// hold its files, which aren't changes)
+    /// Directories made (the upper layer also has its parents, to hold its
+    /// files, which aren't changes)
     created: BTreeSet<String>,
 }
 
@@ -86,35 +131,34 @@ impl Found {
     }
 }
 
-impl Overlay {
-    /// An overlay over `lower`, mounted at `mount`, keeping its changes in
-    /// `upper`, which holds at most `max_bytes`.
+impl OverlayStorage {
+    /// An overlay of `lower`'s directory `root`, keeping its changes in
+    /// `upper`. A copy-up bigger than `upper`'s
+    /// [`max_bytes`](InMemoryStorage::max_bytes) fails before reading the
+    /// file.
     ///
     /// # Errors
     ///
-    /// If the upper layer can't hold the mount's directory.
+    /// If the upper layer can't hold `root`.
     pub fn new(
-        mount: &str,
+        root: &str,
         lower: Arc<dyn VfsStorage>,
         upper: Arc<InMemoryStorage>,
-        max_bytes: u64,
     ) -> VfsResult<Self> {
-        upper.mkdir_sync(mount)?;
+        upper.mkdir_sync(root)?;
         Ok(Self {
-            mount: mount.to_string(),
+            root: root.to_string(),
             lower,
             upper,
-            max_bytes,
             state: Mutex::default(),
             copying: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// `path` relative to the mount
-    fn relative<'a>(&self, path: &'a str) -> &'a str {
-        path.strip_prefix(self.mount.as_str())
-            .unwrap_or(path)
-            .trim_start_matches('/')
+    /// The directory the overlay serves.
+    #[must_use]
+    pub fn root(&self) -> &str {
+        &self.root
     }
 
     async fn find(&self, path: &str) -> VfsResult<Found> {
@@ -139,11 +183,11 @@ impl Overlay {
         let Some((parent, _)) = path.rsplit_once('/') else {
             return Err(VfsError::InvalidPath(path.to_string()));
         };
-        if parent.len() <= self.mount.len() {
+        if parent.len() <= self.root.len() {
             return Ok(());
         }
-        let mut dir = self.mount.clone();
-        for component in parent[self.mount.len()..]
+        let mut dir = self.root.clone();
+        for component in parent[self.root.len()..]
             .split('/')
             .filter(|c| !c.is_empty())
         {
@@ -162,7 +206,7 @@ impl Overlay {
         Ok(())
     }
 
-    /// Have `path` in the upper layer, copying a client file up whole
+    /// Have `path` in the upper layer, copying a lower file up whole
     async fn copy_up(&self, path: &str) -> VfsResult<()> {
         if let Found::Upper(m) = self.find(path).await?
             && !m.is_dir
@@ -177,7 +221,7 @@ impl Overlay {
             }
             Found::Upper(_) => Ok(()),
             Found::Lower(m) => {
-                if m.size > self.max_bytes {
+                if m.size > self.upper.max_bytes() {
                     return Err(VfsError::QuotaExceeded(format!(
                         "{path}: copying it to write it needs {} bytes",
                         m.size
@@ -195,6 +239,15 @@ impl Overlay {
         Ok(self.find(path).await?.metadata().is_some_and(|m| m.is_dir))
     }
 
+    /// Whether the lower storage has something at `path` (deleted or not)
+    async fn lower_has(&self, path: &str) -> VfsResult<bool> {
+        match self.lower.stat(path).await {
+            Ok(_) => Ok(true),
+            Err(VfsError::NotFound(_) | VfsError::NotDirectory(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// The merged listing of the directory `path`
     async fn merged(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
         let found = self.find(path).await?;
@@ -204,9 +257,9 @@ impl Overlay {
             Some(_) => {}
         }
         let mut entries = std::collections::BTreeMap::new();
-        // A directory the run made (or remade) has no client entries left to
-        // show; any other is the client's, even with an upper copy holding
-        // the run's files, so its listing must come
+        // A directory made (or remade) in the overlay has no lower entries
+        // left to show; any other is the lower one's, even with an upper
+        // copy holding new files, so its listing must come
         let made = lock(&self.state).created.contains(path);
         let lower = match self.lower.list(path).await {
             Ok(lower) => lower,
@@ -231,37 +284,29 @@ impl Overlay {
         Ok(entries.into_values().collect())
     }
 
-    /// What the run changed, in an order the client can apply as it goes:
-    /// removals deepest first, then new directories parents first, then
-    /// each file's whole contents in [`CHUNK`]s (the first at offset 0,
-    /// which creates or truncates it).
+    /// What the overlay changed, in an order that can be applied as it
+    /// goes: removals deepest first, then new directories parents first,
+    /// then the written files, by path.
     ///
     /// # Errors
     ///
-    /// If the upper layer can't be read.
-    pub async fn changes(&self) -> VfsResult<Vec<FsChange>> {
+    /// If the upper layer can't be listed.
+    pub async fn changes(&self) -> VfsResult<Vec<OverlayChange>> {
         let (whiteouts, created) = {
             let state = lock(&self.state);
             (state.whiteouts.clone(), state.created.clone())
         };
-        let change = |path: &str, change| FsChange {
-            mount: self.mount.clone(),
-            path: self.relative(path).to_string(),
-            change: Some(change),
-        };
-        let mut removed: Vec<&String> = whiteouts.iter().collect();
+        let mut removed: Vec<String> = whiteouts.into_iter().collect();
         removed.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
-        let mut changes: Vec<FsChange> = removed
-            .into_iter()
-            .map(|p| change(p, fs_change::Change::Remove(FsRemove {})))
-            .collect();
-        for dir in &created {
-            if matches!(self.upper.stat(dir).await, Ok(m) if m.is_dir) {
-                changes.push(change(dir, fs_change::Change::Mkdir(FsMkdir {})));
+        let mut changes: Vec<OverlayChange> =
+            removed.into_iter().map(OverlayChange::Remove).collect();
+        for dir in created {
+            if matches!(self.upper.stat(&dir).await, Ok(m) if m.is_dir) {
+                changes.push(OverlayChange::Mkdir(dir));
             }
         }
         // Every file in the upper layer was written (or copied up to be)
-        let mut dirs = vec![self.mount.clone()];
+        let mut dirs = vec![self.root.clone()];
         let mut files = Vec::new();
         while let Some(dir) = dirs.pop() {
             for entry in self.upper.list(&dir).await? {
@@ -274,28 +319,13 @@ impl Overlay {
             }
         }
         files.sort();
-        for path in files {
-            let data = self.upper.read(&path).await?;
-            let mut offset = 0;
-            for chunk in data.chunks(CHUNK) {
-                let write = FsWrite {
-                    offset: offset as u64,
-                    data: chunk.to_vec(),
-                };
-                changes.push(change(&path, fs_change::Change::Write(write)));
-                offset += chunk.len();
-            }
-            if data.is_empty() {
-                let write = FsWrite::default();
-                changes.push(change(&path, fs_change::Change::Write(write)));
-            }
-        }
+        changes.extend(files.into_iter().map(OverlayChange::Write));
         Ok(changes)
     }
 }
 
 #[async_trait]
-impl VfsStorage for Overlay {
+impl VfsStorage for OverlayStorage {
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
         match self.find(path).await? {
             Found::Upper(_) => self.upper.read(path).await,
@@ -352,8 +382,8 @@ impl VfsStorage for Overlay {
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
-        // Truncating a client file to nothing (`open(..., 'w')`) needn't
-        // fetch it first
+        // Truncating a lower file to nothing (`open(..., 'w')`) needn't
+        // read it first
         if size == 0
             && let Found::Lower(m) = self.find(path).await?
             && !m.is_dir
@@ -376,7 +406,7 @@ impl VfsStorage for Overlay {
         if let Found::Nowhere = found {
             return Err(VfsError::NotFound(path.to_string()));
         }
-        // Whatever the client has there goes too
+        // Whatever the lower storage has there goes too
         if self.lower_has(path).await? {
             lock(&self.state).whiteouts.insert(path.to_string());
         }
@@ -431,11 +461,11 @@ impl VfsStorage for Overlay {
             return Err(VfsError::NotFound(from.to_string()));
         };
         if meta.is_dir {
-            // Only a directory wholly the run's moves as one
+            // Only a directory wholly the overlay's moves as one
             let made = lock(&self.state).created.contains(from);
             if !made || self.lower_has(from).await? {
                 return Err(VfsError::CrossDevice(format!(
-                    "{from}: a directory from the client can't be renamed, only copied"
+                    "{from}: a lower directory can't be renamed, only copied"
                 )));
             }
             // As rename(2): onto nothing, or onto an empty directory, which
@@ -481,8 +511,8 @@ impl VfsStorage for Overlay {
         accessed: Option<SystemTime>,
         modified: Option<SystemTime>,
     ) -> VfsResult<()> {
-        // A client directory's times aren't the run's to change, and aren't
-        // reported, so they're left alone
+        // A lower directory's times are left alone: they aren't a change
+        // `changes` could report
         if self.is_dir(path).await? {
             return match self.upper.set_times(path, accessed, modified).await {
                 Ok(()) | Err(VfsError::NotFound(_)) => Ok(()),
@@ -494,30 +524,19 @@ impl VfsStorage for Overlay {
     }
 }
 
-impl Overlay {
-    /// Whether the client has something at `path` (deleted or not)
-    async fn lower_has(&self, path: &str) -> VfsResult<bool> {
-        match self.lower.stat(path).await {
-            Ok(_) => Ok(true),
-            Err(VfsError::NotFound(_) | VfsError::NotDirectory(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    fn new(lower: InMemoryStorage, max_bytes: u64) -> Overlay {
+    fn new(lower: InMemoryStorage, max_bytes: u64) -> OverlayStorage {
         let upper = Arc::new(InMemoryStorage::with_max_bytes(max_bytes));
-        Overlay::new("/mnt/m", Arc::new(lower), upper, max_bytes).unwrap()
+        OverlayStorage::new("/mnt/m", Arc::new(lower), upper).unwrap()
     }
 
-    /// An overlay at `/mnt/m` over a client tree with `a.txt`, `dir/b.txt`
+    /// An overlay at `/mnt/m` over a lower tree with `a.txt`, `dir/b.txt`
     /// and the empty `empty/`
-    async fn overlay() -> Overlay {
+    async fn overlay() -> OverlayStorage {
         let lower = InMemoryStorage::new();
         lower.mkdir_sync("/mnt/m/dir").unwrap();
         lower.mkdir_sync("/mnt/m/empty").unwrap();
@@ -526,7 +545,7 @@ mod tests {
         new(lower, 1024 * 1024)
     }
 
-    async fn names(o: &Overlay, path: &str) -> Vec<String> {
+    async fn names(o: &OverlayStorage, path: &str) -> Vec<String> {
         o.list(path)
             .await
             .unwrap()
@@ -535,21 +554,24 @@ mod tests {
             .collect()
     }
 
-    /// The changes as `(path, kind, offset, data)`
-    async fn changes(o: &Overlay) -> Vec<(String, &'static str, u64, Vec<u8>)> {
-        o.changes()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| {
-                assert_eq!(c.mount, "/mnt/m");
-                match c.change.unwrap() {
-                    fs_change::Change::Remove(_) => (c.path, "remove", 0, vec![]),
-                    fs_change::Change::Mkdir(_) => (c.path, "mkdir", 0, vec![]),
-                    fs_change::Change::Write(w) => (c.path, "write", w.offset, w.data),
-                }
-            })
-            .collect()
+    /// The changes as `(path relative to the root, kind, contents)`
+    async fn changes(o: &OverlayStorage) -> Vec<(String, &'static str, Vec<u8>)> {
+        let mut out = Vec::new();
+        for c in o.changes().await.unwrap() {
+            let (path, kind) = match c {
+                OverlayChange::Remove(p) => (p, "remove"),
+                OverlayChange::Mkdir(p) => (p, "mkdir"),
+                OverlayChange::Write(p) => (p, "write"),
+            };
+            let data = if kind == "write" {
+                o.read(&path).await.unwrap()
+            } else {
+                vec![]
+            };
+            let rel = path.strip_prefix("/mnt/m/").unwrap().to_string();
+            out.push((rel, kind, data));
+        }
+        out
     }
 
     #[tokio::test]
@@ -566,7 +588,7 @@ mod tests {
         // A partial write copies the file up first
         o.write_at("/mnt/m/a.txt", 0, b"A").await.unwrap();
         assert_eq!(o.read("/mnt/m/a.txt").await.unwrap(), b"Alpha");
-        // Appending to a client file in a client directory
+        // Appending to a lower file in a lower directory
         o.append("/mnt/m/dir/b.txt", b"!").await.unwrap();
         // A new file in a new directory
         o.mkdir("/mnt/m/new").await.unwrap();
@@ -577,10 +599,10 @@ mod tests {
         assert_eq!(
             changes(&o).await,
             [
-                ("new".into(), "mkdir", 0, vec![]),
-                ("a.txt".into(), "write", 0, b"Alpha".to_vec()),
-                ("dir/b.txt".into(), "write", 0, vec![]),
-                ("new/c.txt".into(), "write", 0, b"gamma".to_vec()),
+                ("new".into(), "mkdir", vec![]),
+                ("a.txt".into(), "write", b"Alpha".to_vec()),
+                ("dir/b.txt".into(), "write", vec![]),
+                ("new/c.txt".into(), "write", b"gamma".to_vec()),
             ]
         );
     }
@@ -596,15 +618,15 @@ mod tests {
             o.rmdir("/mnt/m/nope").await,
             Err(VfsError::NotFound(_))
         ));
-        // Remade, it's empty: the client's entries stay deleted
+        // Remade, it's empty: the lower entries stay deleted
         o.mkdir("/mnt/m/dir").await.unwrap();
         assert!(names(&o, "/mnt/m/dir").await.is_empty());
         assert_eq!(
             changes(&o).await,
             [
-                ("dir/b.txt".into(), "remove", 0, vec![]),
-                ("dir".into(), "remove", 0, vec![]),
-                ("dir".into(), "mkdir", 0, vec![]),
+                ("dir/b.txt".into(), "remove", vec![]),
+                ("dir".into(), "remove", vec![]),
+                ("dir".into(), "mkdir", vec![]),
             ]
         );
     }
@@ -623,16 +645,16 @@ mod tests {
     #[tokio::test]
     async fn renames() {
         let o = overlay().await;
-        // A client file moves: copied up, old name whited out
+        // A lower file moves: copied up, old name whited out
         o.rename("/mnt/m/a.txt", "/mnt/m/dir/a2.txt").await.unwrap();
         assert!(!o.exists("/mnt/m/a.txt").await.unwrap());
         assert_eq!(o.read("/mnt/m/dir/a2.txt").await.unwrap(), b"alpha");
-        // A client directory can't
+        // A lower directory can't
         assert!(matches!(
             o.rename("/mnt/m/dir", "/mnt/m/dir2").await,
             Err(VfsError::CrossDevice(_))
         ));
-        // One the run made can
+        // One made in the overlay can
         o.mkdir("/mnt/m/new").await.unwrap();
         o.write("/mnt/m/new/c.txt", b"c").await.unwrap();
         o.rename("/mnt/m/new", "/mnt/m/moved").await.unwrap();
@@ -640,10 +662,10 @@ mod tests {
         assert_eq!(
             changes(&o).await,
             [
-                ("a.txt".into(), "remove", 0, vec![]),
-                ("moved".into(), "mkdir", 0, vec![]),
-                ("dir/a2.txt".into(), "write", 0, b"alpha".to_vec()),
-                ("moved/c.txt".into(), "write", 0, b"c".to_vec()),
+                ("a.txt".into(), "remove", vec![]),
+                ("moved".into(), "mkdir", vec![]),
+                ("dir/a2.txt".into(), "write", b"alpha".to_vec()),
+                ("moved/c.txt".into(), "write", b"c".to_vec()),
             ]
         );
     }
@@ -660,14 +682,14 @@ mod tests {
             o.rename("/mnt/m/new", "/mnt/m/a.txt").await,
             Err(VfsError::NotDirectory(_))
         ));
-        // Onto an empty client directory: it goes, and the new one is made
+        // Onto an empty lower directory: it goes, and the new one is made
         o.rename("/mnt/m/new", "/mnt/m/empty").await.unwrap();
         assert_eq!(names(&o, "/mnt/m").await, ["a.txt", "dir", "empty"]);
         assert_eq!(
             changes(&o).await,
             [
-                ("empty".into(), "remove", 0, vec![]),
-                ("empty".into(), "mkdir", 0, vec![]),
+                ("empty".into(), "remove", vec![]),
+                ("empty".into(), "mkdir", vec![]),
             ]
         );
     }
@@ -679,7 +701,7 @@ mod tests {
         assert!(changes(&o).await.is_empty());
     }
 
-    /// Two writers to one client file: both writes land
+    /// Two writers to one lower file: both writes land
     #[tokio::test]
     async fn concurrent_copy_ups_keep_both_writes() {
         let o = Arc::new(overlay().await);
@@ -694,9 +716,9 @@ mod tests {
         assert!(data == b"alpha12" || data == b"alpha21", "{data:?}");
     }
 
-    /// A client directory's listing error isn't hidden by the run's copy
+    /// A lower directory's listing error isn't hidden by its upper copy
     #[tokio::test]
-    async fn client_listing_errors_come_through() {
+    async fn lower_listing_errors_come_through() {
         struct Failing;
         #[async_trait]
         impl VfsStorage for Failing {
@@ -722,16 +744,12 @@ mod tests {
                 Ok(true)
             }
             async fn list(&self, p: &str) -> VfsResult<Vec<DirEntry>> {
-                Err(VfsError::Io(format!("{p}: the client refused")))
+                Err(VfsError::Io(format!("{p}: the lower storage refused")))
             }
             async fn stat(&self, _: &str) -> VfsResult<Metadata> {
-                let now = SystemTime::now();
                 Ok(Metadata {
                     is_dir: true,
-                    size: 0,
-                    created: now,
-                    modified: now,
-                    accessed: now,
+                    ..Metadata::default()
                 })
             }
             async fn mkdir(&self, p: &str) -> VfsResult<()> {
@@ -745,14 +763,14 @@ mod tests {
             }
         }
         let upper = Arc::new(InMemoryStorage::new());
-        let o = Overlay::new("/mnt/m", Arc::new(Failing), upper, 1024 * 1024).unwrap();
-        // The mount root is in the upper layer, but is the client's
+        let o = OverlayStorage::new("/mnt/m", Arc::new(Failing), upper).unwrap();
+        // The root is in the upper layer, but is the lower one's
         assert!(matches!(o.list("/mnt/m").await, Err(VfsError::Io(_))));
         assert!(o.rmdir("/mnt/m").await.is_err());
     }
 
     #[tokio::test]
-    async fn create_file_sees_client_files() {
+    async fn create_file_sees_lower_files() {
         let o = overlay().await;
         assert!(matches!(
             o.create_file("/mnt/m/a.txt", true).await,
@@ -782,15 +800,27 @@ mod tests {
         ));
     }
 
+    /// One lower storage under two overlays: each sees only its own writes,
+    /// and the lower one none
     #[tokio::test]
-    async fn big_files_come_in_chunks() {
-        let o = new(InMemoryStorage::new(), 8 * 1024 * 1024);
-        let data: Vec<u8> = (0..CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
-        o.write("/mnt/m/f", &data).await.unwrap();
-        let changes = changes(&o).await;
-        let offsets: Vec<u64> = changes.iter().map(|c| c.2).collect();
-        assert_eq!(offsets, [0, CHUNK as u64, 2 * CHUNK as u64]);
-        let joined: Vec<u8> = changes.into_iter().flat_map(|c| c.3).collect();
-        assert_eq!(joined, data);
+    async fn a_shared_lower_layer_keeps_overlays_apart() {
+        let lower = InMemoryStorage::new();
+        lower.mkdir_sync("/mnt/m").unwrap();
+        lower.write("/mnt/m/a.txt", b"alpha").await.unwrap();
+        let lower: Arc<dyn VfsStorage> = Arc::new(lower);
+        let fresh = || {
+            let upper = Arc::new(InMemoryStorage::new());
+            OverlayStorage::new("/mnt/m", Arc::clone(&lower), upper).unwrap()
+        };
+        let (one, two) = (fresh(), fresh());
+        one.write("/mnt/m/a.txt", b"one").await.unwrap();
+        two.delete("/mnt/m/a.txt").await.unwrap();
+        assert_eq!(one.read("/mnt/m/a.txt").await.unwrap(), b"one");
+        assert!(!two.exists("/mnt/m/a.txt").await.unwrap());
+        assert_eq!(lower.read("/mnt/m/a.txt").await.unwrap(), b"alpha");
+        assert_eq!(
+            fresh().read("/mnt/m/a.txt").await.unwrap(),
+            b"alpha".to_vec()
+        );
     }
 }

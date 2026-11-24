@@ -12,6 +12,7 @@ The VFS consists of several key components:
 - **`InMemoryStorage`** - An in-memory implementation for testing and ephemeral use
 - **`HybridVfsCtx`** - Combines real filesystem access with virtual storage
 - **`ScrubbingStorage`** - A wrapper that scrubs secret placeholders from writes
+- **`OverlayStorage`** - A copy-on-write overlay of a read-only storage
 
 ## Usage
 
@@ -94,6 +95,29 @@ Patterns match the normalized path: `*` matches within one path segment, `**`
 across segments (`/cache/**` is everything under `/cache`), and `?` one
 character. Under the path-based policies, renaming a file from an unscrubbed
 path to a scrubbed one scrubs it again, and renaming directories is refused.
+
+## Copy-on-Write Overlay
+
+`OverlayStorage` serves a directory of a read-only lower storage, with writes
+going to an `InMemoryStorage` upper layer (copying a lower file up whole when
+it's partly written) and deletions recorded as whiteouts. The lower storage is
+never written, so many overlays can share one: mount a fresh overlay per run
+as an `eryx` storage volume (`VolumeMount::storage`) to give every sandbox the
+same starting files and its own writes.
+
+```rust
+use eryx_vfs::{InMemoryStorage, OverlayStorage, VfsStorage};
+use std::sync::Arc;
+
+// Once, shared by every run
+let lower: Arc<dyn VfsStorage> = Arc::new(prebuilt_cache());
+// Per run, at most 64 MiB of writes
+let upper = Arc::new(InMemoryStorage::with_max_bytes(64 << 20));
+let overlay = OverlayStorage::new("/cache", Arc::clone(&lower), upper)?;
+```
+
+`OverlayStorage::changes` lists what the overlay did (removals, new
+directories, written files), in an order that can be applied elsewhere.
 
 ## Testing
 
