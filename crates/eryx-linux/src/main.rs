@@ -15,6 +15,8 @@ use wasmtime::error::Context;
 use wasmtime::*;
 
 mod net;
+mod snapshot;
+mod vsock;
 
 const ERRNO_SUCCESS: i32 = 0;
 const ERRNO_AGAIN: i32 = 6;
@@ -28,6 +30,7 @@ const ENODEV: i64 = -19;
 const IRQ_CONSOLE: u32 = 2;
 const IRQ_NET: u32 = 4;
 const IRQ_BLOCK: u32 = 8;
+const IRQ_VSOCK: u32 = 1 << 6;
 
 /// Something the host side produced for the guest, delivered on the store's thread.
 pub enum Event {
@@ -50,6 +53,13 @@ struct Host {
     input: VecDeque<u8>,
     net_rx: VecDeque<Vec<u8>>,
     net: Option<net::Net>,
+    vsock: vsock::Vsock,
+    /// `--exec` was given: power off once every command has run.
+    exec_mode: bool,
+    snapshot_out: Option<String>,
+    snapshot_requested: bool,
+    /// Monotonic time the guest had already seen (from a snapshot).
+    mono_base: u64,
     events: Receiver<Event>,
     disks: Vec<Disk>,
     slots: HashMap<i64, i32>,
@@ -83,7 +93,7 @@ struct Stats {
 
 impl Host {
     fn mono_ns(&self) -> u64 {
-        self.start.elapsed().as_nanos() as u64
+        self.mono_base + self.start.elapsed().as_nanos() as u64
     }
     fn deliver(&mut self, ev: Event, mem: &mut [u8]) {
         match ev {
@@ -134,6 +144,12 @@ struct Opts {
     net: bool,
     jit: bool,
     append: String,
+    exec: Vec<String>,
+    snapshot_out: Option<String>,
+    snapshot_in: Option<String>,
+    repeat: u32,
+    cow: bool,
+    keep: bool,
 }
 
 fn parse_args() -> Result<Opts> {
@@ -147,6 +163,12 @@ fn parse_args() -> Result<Opts> {
         net: true,
         jit: true,
         append: String::new(),
+        exec: Vec::new(),
+        snapshot_out: None,
+        snapshot_in: None,
+        repeat: 1,
+        cow: false,
+        keep: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -160,6 +182,12 @@ fn parse_args() -> Result<Opts> {
             "--timeout" => o.timeout = Some(Duration::from_secs_f64(val()?.parse()?)),
             "--no-net" => o.net = false,
             "--no-jit" => o.jit = false,
+            "--exec" => o.exec.push(val()?),
+            "--snapshot-out" => o.snapshot_out = Some(val()?),
+            "--snapshot-in" => o.snapshot_in = Some(val()?),
+            "--repeat" => o.repeat = val()?.parse()?,
+            "--cow" => o.cow = true,
+            "--keep" => o.keep = true,
             "--append" => o.append = val()?,
             _ => bail!("unknown argument {a}"),
         }
@@ -237,7 +265,9 @@ fn main() -> Result<()> {
         .wasm_exceptions(true)
         .wasm_stack_switching(true)
         .max_wasm_stack(1 << 20)
-        .async_stack_size(2 << 20);
+        .async_stack_size(2 << 20)
+        // let the snapshot image be one dense CoW mapping (default 16 MiB)
+        .memory_guaranteed_dense_image_size(4 << 30);
     let engine = Engine::new(&cfg)?;
     // eryx-style AOT: compile once, then load the native code
     let cwasm = format!("{}.cwasm", o.kernel);
@@ -253,9 +283,114 @@ fn main() -> Result<()> {
     };
     let switcher = Module::new(&engine, include_str!("switcher.wat"))?;
     eprintln!("[spike] compiled in {:?}", t0.elapsed());
+    let snap = o.snapshot_in.as_deref().map(snapshot::load).transpose()?;
+    // --cow: the snapshot as a precompiled memory image, mapped copy-on-write
+    let image = match (&snap, &o.snapshot_in) {
+        (Some(s), Some(path)) if o.cow => {
+            let cw = format!("{path}.cwasm");
+            if std::fs::metadata(&cw).is_err() {
+                let t = Instant::now();
+                let m = Module::new(&engine, snapshot::image_module(s))?;
+                snapshot::write_sparse(&cw, &m.serialize()?)?;
+                eprintln!("[spike] built the memory image {cw} in {:?}", t.elapsed());
+            }
+            Some(unsafe { Module::deserialize_file(&engine, &cw) }?)
+        }
+        _ => None,
+    };
+    // with an image, the kernel must leave memory alone when instantiated
+    let resume_kernel = match image {
+        Some(_) => {
+            let cw = format!("{}.resume.cwasm", o.kernel);
+            if std::fs::metadata(&cw).is_err() {
+                let m = Module::new(&engine, snapshot::resume_variant(&bytes)?)?;
+                std::fs::write(&cw, m.serialize()?)?;
+            }
+            Some(unsafe { Module::deserialize_file(&engine, &cw) }?)
+        }
+        None => None,
+    };
 
+    let mut code = 0;
+    let mut kept = Vec::new();
+    let rss = || {
+        let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        st.lines()
+            .find_map(|l| {
+                l.strip_prefix("VmRSS:")
+                    .map(|v| v.trim().trim_end_matches(" kB").parse::<u64>().unwrap_or(0))
+            })
+            .unwrap_or(0)
+    };
+    let rss0 = rss();
+    for i in 0..o.repeat {
+        let t = Instant::now();
+        let shared = Loaded {
+            engine: &engine,
+            kernel: resume_kernel.as_ref().unwrap_or(&kernel),
+            switcher: &switcher,
+            initrd: &initrd,
+            cmdline: &cmdline,
+            snap: snap.as_ref(),
+            image: image.as_ref(),
+        };
+        let (c, store) = boot(&o, &shared, t)?;
+        code = c;
+        if o.keep {
+            kept.push(store);
+        }
+        if o.repeat > 1 {
+            eprintln!(
+                "[repeat] sandbox {i}: {:.1} ms, exit {code}",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
+    }
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    for l in status
+        .lines()
+        .filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS"))
+    {
+        eprintln!("[spike] {l}");
+    }
+    if o.keep && !kept.is_empty() {
+        eprintln!(
+            "[keep] {} sandboxes alive: RSS {} MiB, {:.1} MiB per sandbox over the {} MiB before the first",
+            kept.len(),
+            rss() >> 10,
+            (rss() - rss0) as f64 / 1024.0 / kept.len() as f64,
+            rss0 >> 10
+        );
+    }
+    std::process::exit(code);
+}
+
+/// What every sandbox in the process shares, loaded once.
+struct Loaded<'a> {
+    engine: &'a Engine,
+    kernel: &'a Module,
+    switcher: &'a Module,
+    initrd: &'a [u8],
+    cmdline: &'a str,
+    snap: Option<&'a snapshot::Snapshot>,
+    image: Option<&'a Module>,
+}
+
+/// One sandbox: a store, a booted (or resumed) kernel, run until it stops.
+fn boot(o: &Opts, l: &Loaded<'_>, t0: Instant) -> Result<(i32, Store<Host>)> {
+    let Loaded {
+        engine,
+        kernel,
+        switcher,
+        initrd,
+        cmdline,
+        snap,
+        image,
+    } = *l;
     let (tx, rx) = mpsc::channel();
-    spawn_input(o.input.clone(), tx.clone());
+    if o.input.is_some() || o.exec.is_empty() {
+        spawn_input(o.input.clone(), tx.clone());
+    }
 
     let mut disks = Vec::new();
     for (path, ro) in [(&o.distro, true), (&o.data, false)] {
@@ -282,11 +417,16 @@ fn main() -> Result<()> {
         memory: None,
         irq_addr: None,
         args,
-        initrd,
+        initrd: initrd.to_vec(),
         files: HashMap::new(),
         input: VecDeque::new(),
         net_rx: VecDeque::new(),
         net: o.net.then(|| net::Net::new(tx.clone())),
+        vsock: vsock::Vsock::new(o.exec.clone()),
+        exec_mode: !o.exec.is_empty(),
+        snapshot_out: o.snapshot_out.clone(),
+        snapshot_requested: false,
+        mono_base: 0,
         events: rx,
         disks,
         slots: HashMap::new(),
@@ -305,12 +445,19 @@ fn main() -> Result<()> {
         line: Vec::new(),
         marks: HashMap::new(),
     };
-    let mut store = Store::new(&engine, host);
+    let mut tm = vec![("setup", t0.elapsed())];
+    let mut store = Store::new(engine, host);
     let pages = (o.mem_mib * 1024 * 1024 / 65536) as u32;
-    let memory = Memory::new(&mut store, MemoryType::new(pages, Some(pages))?)?;
+    tm.push(("store", t0.elapsed()));
+    let memory = match image {
+        Some(img) => Instance::new(&mut store, img, &[])?
+            .get_memory(&mut store, "memory")
+            .context("the image exports no memory")?,
+        None => Memory::new(&mut store, MemoryType::new(pages, Some(pages))?)?,
+    };
     store.data_mut().memory = Some(memory);
 
-    let mut linker = Linker::new(&engine);
+    let mut linker = Linker::new(engine);
     linker.func_wrap(
         "host",
         "slot",
@@ -341,15 +488,18 @@ fn main() -> Result<()> {
     linker.func_wrap("host", "unknown_task", |task: i64| {
         eprintln!("[spike] fatal: switch to unknown task {task:#x}");
     })?;
-    let sw = linker.instantiate(&mut store, &switcher)?;
+    tm.push(("memory+linker", t0.elapsed()));
+    let sw = linker.instantiate(&mut store, switcher)?;
+    tm.push(("switcher", t0.elapsed()));
     linker.instance(&mut store, "switcher", sw)?;
     linker.alias("switcher", "wasm_switch_to", "unkernel", "wasm_switch_to")?;
     linker.define(&mut store, "env", "memory", memory)?;
     define_wasi(&mut linker)?;
     define_devices(&mut linker)?;
 
+    tm.push(("host funcs", t0.elapsed()));
     let inst = linker
-        .instantiate(&mut store, &kernel)
+        .instantiate(&mut store, kernel)
         .context("instantiating the kernel")?;
     let irq = match inst
         .get_global(&mut store, "wasm_host_irqs")
@@ -363,13 +513,46 @@ fn main() -> Result<()> {
     store.data_mut().irq_addr = Some(irq);
     store.data_mut().table = inst.get_table(&mut store, "__indirect_function_table");
     let entries = sw.get_table(&mut store, "entries").unwrap();
-    for (i, name) in ["_start", "ret_from_fork"].iter().enumerate() {
+    let entry = if let (Some(snap), Some(path)) = (snap, &o.snapshot_in) {
+        let t = Instant::now();
+        let end = match inst
+            .get_global(&mut store, "_end")
+            .context("no _end")?
+            .get(&mut store)
+        {
+            Val::I64(v) => v as usize,
+            Val::I32(v) => v as u32 as usize,
+            v => bail!("_end is {v:?}"),
+        };
+        let (mem, h) = memory.data_and_store_mut(&mut store);
+        if image.is_none() {
+            snapshot::restore(snap, mem, end)?;
+        }
+        // the guest's clock carries on from the snapshot; no IRQs pending
+        h.mono_base = snap.mono_ns;
+        h.vsock.guest_cid = snap.guest_cid;
+        mem[irq..irq + 4].fill(0);
+        eprintln!(
+            "[spike] restored {} MiB of {} MiB from {path} in {:?}",
+            (snap.chunks.len() * snapshot::CHUNK) >> 20,
+            mem.len() >> 20,
+            t.elapsed()
+        );
+        "kw_resume"
+    } else {
+        "_start"
+    };
+    for (i, name) in [entry, "ret_from_fork"].iter().enumerate() {
         let f = inst
             .get_func(&mut store, name)
             .with_context(|| format!("no export {name}"))?;
         entries.set(&mut store, i as u64, Ref::Func(Some(f)))?;
     }
-    eprintln!("[spike] instantiated in {:?}, booting", t0.elapsed());
+    tm.push(("kernel+restore", t0.elapsed()));
+    eprintln!(
+        "[spike] instantiated in {:?}, booting ({tm:?})",
+        t0.elapsed()
+    );
 
     if let Some(t) = o.timeout {
         std::thread::spawn(move || {
@@ -382,12 +565,26 @@ fn main() -> Result<()> {
     let r = run.call(&mut store, ());
     let h = store.data();
     eprintln!("[spike] ran for {:?}, {:?}", t0.elapsed(), h.stats);
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    for l in status
-        .lines()
-        .filter(|l| l.starts_with("VmHWM") || l.starts_with("VmRSS"))
-    {
-        eprintln!("[spike] {l}");
+    for r in &h.vsock.results {
+        eprintln!(
+            "[exec] {:?}: status {:?}, done {:.1} ms after process start, opened in {:.1} ms, done in {:.1} ms{}",
+            r.cmd,
+            r.status,
+            r.finished.map_or(0.0, |f| (f - t0).as_secs_f64() * 1e3),
+            r.open_time.as_secs_f64() * 1e3,
+            r.total_time.as_secs_f64() * 1e3,
+            r.error
+                .as_ref()
+                .map_or(String::new(), |e| format!(", error: {e}")),
+        );
+        eprintln!("[exec]   stdout: {:?}", String::from_utf8_lossy(&r.stdout));
+        eprintln!("[exec]   stderr: {:?}", String::from_utf8_lossy(&r.stderr));
+    }
+    if h.vsock.refused > 0 {
+        eprintln!(
+            "[exec] the tty server refused {} connects before it was up",
+            h.vsock.refused
+        );
     }
     match (h.exit, r) {
         (Some(253), _) => {
@@ -395,15 +592,15 @@ fn main() -> Result<()> {
                 "[spike] kernel panic: {}",
                 String::from_utf8_lossy(&h.stderr)
             );
-            std::process::exit(253);
+            Ok((253, store))
         }
         (Some(code), _) => {
             eprintln!("[spike] kernel exited with {code}");
-            std::process::exit(code);
+            Ok((code, store))
         }
         (None, Err(e)) => {
             eprintln!("[spike] trap: {e:?}");
-            std::process::exit(254);
+            Ok((254, store))
         }
         (None, Ok(())) => bail!("run returned"),
     }
@@ -646,6 +843,22 @@ fn define_wasi(l: &mut Linker<Host>) -> Result<()> {
             if h.exit.is_some() {
                 bail!("exited");
             }
+            if h.exec_mode && h.vsock.idle() {
+                if h.snapshot_out.is_none() {
+                    h.exit = Some(0);
+                    bail!("every --exec command has run");
+                }
+                if !h.snapshot_requested {
+                    // ask the kernel for a consistent point (and to drop its caches)
+                    h.snapshot_requested = true;
+                    h.set_irq(m, 256 | 2048);
+                    return Ok(ERRNO_SUCCESS);
+                }
+            }
+            if h.vsock.tick(Instant::now()) {
+                h.set_irq(m, IRQ_VSOCK);
+                return Ok(ERRNO_SUCCESS);
+            }
             let mut wrote = poll_ready(
                 m,
                 h,
@@ -661,7 +874,10 @@ fn define_wasi(l: &mut Linker<Host>) -> Result<()> {
                     .filter_map(|i| sub_deadline(m, h, inp as usize + 48 * i))
                     .min()
                     .unwrap_or(now + 60_000_000_000);
-                let wait = Duration::from_nanos(deadline.saturating_sub(now));
+                let mut wait = Duration::from_nanos(deadline.saturating_sub(now));
+                if let Some(t) = h.vsock.deadline() {
+                    wait = wait.min(t.saturating_duration_since(Instant::now()));
+                }
                 match h.events.recv_timeout(wait) {
                     Ok(ev) => {
                         h.deliver(ev, m);
@@ -760,7 +976,37 @@ fn define_devices(l: &mut Linker<Host>) -> Result<()> {
     l.func_wrap(
         U,
         "wasm_snapshot_point",
-        |_: i32, _: i64, _: i64, _: i64| -16i32,
+        |mut c: Caller<'_, Host>,
+         result: i32,
+         _blocker: i64,
+         free_map: i64,
+         free_bits: i64|
+         -> Result<i32> {
+            let (m, h) = parts(&mut c);
+            let Some(path) = h.snapshot_out.clone().filter(|_| h.snapshot_requested) else {
+                return Ok(-16);
+            };
+            if result != 0 {
+                bail!("snapshot: the kernel could not park (errno {})", -result);
+            }
+            if !h.net_rx.is_empty() || !h.vsock.rx.is_empty() {
+                bail!("snapshot: device packets in flight");
+            }
+            let t = Instant::now();
+            let fm = free_map as usize;
+            let free = &m[fm..fm + (free_bits as usize).div_ceil(8)].to_vec();
+            let snap =
+                snapshot::capture(m, free, free_bits as usize, h.mono_ns(), h.vsock.guest_cid);
+            snapshot::save(&snap, &path)?;
+            eprintln!(
+                "[spike] snapshot: {} MiB used of {} MiB, written to {path} in {:?}",
+                (snap.chunks.len() * snapshot::CHUNK) >> 20,
+                m.len() >> 20,
+                t.elapsed()
+            );
+            h.exit = Some(0);
+            bail!("stopped after a snapshot")
+        },
     )?;
     l.func_wrap(
         U,
@@ -938,10 +1184,46 @@ fn define_devices(l: &mut Linker<Host>) -> Result<()> {
         |_: i32, _: i32, _: i32, _: i32| {},
     )?;
     l.func_wrap(U, "wasm_driver_sound_write", |_: i64, _: i64| 0i64)?;
-    l.func_wrap(U, "wasm_driver_vsock_init", |_: i32, _: i32| -19i32)?;
-    l.func_wrap(U, "wasm_driver_vsock_send", |_: i64, _: i64, _: i32| -19i32)?;
-    l.func_wrap(U, "wasm_driver_vsock_rx_len", || 0i32)?;
-    l.func_wrap(U, "wasm_driver_vsock_recv", |_: i64, _: i32| 0i32)?;
+    l.func_wrap(
+        U,
+        "wasm_driver_vsock_init",
+        |mut c: Caller<'_, Host>, cid: i32, _rx_max: i32| {
+            c.data_mut().vsock.guest_cid = Some(cid as u32 as u64);
+            0i32
+        },
+    )?;
+    l.func_wrap(
+        U,
+        "wasm_driver_vsock_send",
+        |mut c: Caller<'_, Host>, hdr: i64, data: i64, len: i32| {
+            let (m, h) = parts(&mut c);
+            let (hdr, data, len) = (hdr as usize, data as usize, len as u32 as usize);
+            let mut pkt = m[hdr..hdr + 44].to_vec();
+            pkt.extend_from_slice(&m[data..data + len]);
+            if h.vsock.on_packet(&pkt) {
+                h.set_irq(m, IRQ_VSOCK);
+            }
+            0i32
+        },
+    )?;
+    l.func_wrap(U, "wasm_driver_vsock_rx_len", |c: Caller<'_, Host>| {
+        c.data().vsock.rx.front().map_or(0, |p| p.len() as i32)
+    })?;
+    l.func_wrap(
+        U,
+        "wasm_driver_vsock_recv",
+        |mut c: Caller<'_, Host>, buf: i64, max: i32| {
+            let (m, h) = parts(&mut c);
+            let Some(p) = h.vsock.rx.pop_front() else {
+                return 0;
+            };
+            if buf != 0 {
+                let k = p.len().min(max as u32 as usize);
+                m[buf as usize..buf as usize + k].copy_from_slice(&p[..k]);
+            }
+            p.len() as i32
+        },
+    )?;
     l.func_wrap(U, "wasm_driver_vsock_keep", |_: i32, _: i32| 0i32)?;
     // kwemu's JIT hands us a wasm module per hot block; it shares the
     // kernel's memory and function table, and replaces table[slot].

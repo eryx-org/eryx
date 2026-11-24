@@ -2409,6 +2409,7 @@ version = "0.0.0"
 dependencies = [
  "eryx",
  "tokio",
+ "wasm-encoder",
  "wasmparser",
  "wasmtime",
 ]
