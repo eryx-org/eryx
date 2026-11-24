@@ -1,0 +1,9 @@
+# Allowlist: ignore everything, then unignore project files.
+*
+!.gitignore
+!Cargo.toml
+!Cargo.lock
+!README.md
+!*.sh
+!src/
+!src/**

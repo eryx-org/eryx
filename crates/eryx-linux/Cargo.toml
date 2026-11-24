@@ -1,0 +1,14 @@
+[package]
+name = "unkernel-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+wasmtime = { version = "51.0.0", features = ["stack-switching"] }
+wasmparser = "0.263"
+eryx = { path = "../eryx/crates/eryx", default-features = false, features = ["embedded", "shell"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+debug = 1
