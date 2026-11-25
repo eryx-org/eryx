@@ -3009,6 +3009,21 @@ impl<R> SandboxBuilder<Shell, R> {
         self
     }
 
+    /// Let the shell run wasm files from the sandbox's filesystem as
+    /// commands, as `./a.out` runs a binary built in the sandbox, within
+    /// `files`' limits (default off). Commands that spawn run files only if
+    /// registered with [`Command::allow_file_commands`](crate::Command::allow_file_commands)
+    /// too. A file runs with no network, credentials or tunnels and runs no
+    /// commands itself, and an execution with an allow-list
+    /// ([`ExecuteOptions::with_allowed_commands`]) runs none. See
+    /// [`FileCommands`](crate::FileCommands) for what runs and how
+    /// compiling is bounded.
+    #[must_use]
+    pub fn with_file_commands(mut self, files: crate::FileCommands) -> Self {
+        self.commands.run_files(files);
+        self
+    }
+
     /// Leave out the embedded shell's default commands (uutils coreutils,
     /// with the `coreutils` feature, and `sh`/`bash` for the commands that
     /// spawn them, see [`Command::guest`](crate::Command::guest)), so only

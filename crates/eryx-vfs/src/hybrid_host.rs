@@ -540,6 +540,76 @@ fn synthetic_hash(path: &str) -> types::MetadataHashValue {
     }
 }
 
+impl<S: VfsStorage + Clone + 'static> HybridVfsCtx<S> {
+    /// Up to `limit` bytes of the file at the absolute guest path `path`,
+    /// read as a guest with this context would: opened for reading under
+    /// the mount the path is in, with that mount's permissions. A caller
+    /// that wants to refuse larger files asks for one byte more than it
+    /// accepts.
+    ///
+    /// # Errors
+    ///
+    /// As the guest's `open-at` and `read` fail: the path isn't there, isn't
+    /// a file, or isn't readable.
+    pub async fn read_file(&mut self, path: &str, limit: u64) -> crate::VfsResult<Vec<u8>> {
+        let path = crate::hybrid::normalize_guest_path(path);
+        let (index, rest) = match self.resolve_from_root(&path) {
+            RootEntry::Mount { index, rest } => (index, rest),
+            RootEntry::NotFound => return Err(crate::VfsError::NotFound(path)),
+            _ => return Err(crate::VfsError::NotFile(path)),
+        };
+        let mut table = wasmtime::component::ResourceTable::new();
+        let mut state = HybridVfsState {
+            ctx: self,
+            table: &mut table,
+        };
+        let (mount, _) = Self::preopen_descriptor(&state.ctx.preopens[index]);
+        let mount = state
+            .table
+            .push(mount)
+            .map_err(|e| crate::VfsError::Io(e.to_string()))?;
+        let read = async {
+            let opened = state
+                .open_at_op(
+                    &mount,
+                    types::PathFlags::SYMLINK_FOLLOW,
+                    rest,
+                    types::OpenFlags::empty(),
+                    types::DescriptorFlags::READ,
+                )?
+                .await?;
+            let fd = state.push_opened(opened)?;
+            let mut data = Vec::new();
+            let outcome = loop {
+                let left = limit.saturating_sub(data.len() as u64);
+                if left == 0 {
+                    break Ok(());
+                }
+                match state.read_op(&fd, left, data.len() as u64) {
+                    Ok(op) => match op.await {
+                        Ok((chunk, eof)) => {
+                            data.extend_from_slice(&chunk);
+                            if eof || chunk.is_empty() {
+                                break Ok(());
+                            }
+                        }
+                        Err(e) => break Err(e),
+                    },
+                    Err(e) => break Err(e),
+                }
+            };
+            if let Some(delete) = state
+                .close_op(fd)
+                .map_err(|e| crate::VfsError::Io(e.to_string()))?
+            {
+                let _ = delete.await;
+            }
+            outcome.map(|()| data)
+        };
+        read.await.map_err(|e| e.0)
+    }
+}
+
 impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
     /// Run `f` on a descriptor for the mount at `index`, held in the table
     /// only for the call: the root hands paths under a mount to it.

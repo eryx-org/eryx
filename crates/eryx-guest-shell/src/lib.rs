@@ -524,14 +524,27 @@ impl EryxLauncher {
         }))
     }
 
-    /// Run the file `request.program` as a script. WASI has no exec bit, so
-    /// any regular file is runnable, as brush already treats it: a `#!`
-    /// line names its interpreter, and without one it's an `sh` script, as
-    /// bash runs a file `execve` refuses.
+    /// Run the file `request.program`: a wasm binary as a host command by
+    /// its path, which the host runs if the sandbox lets it, and anything
+    /// else as a script. WASI has no exec bit, so any regular file is
+    /// runnable, as brush already treats it: a `#!` line names its
+    /// interpreter, and without one it's an `sh` script, as bash runs a
+    /// file `execve` refuses.
     fn run_script(&self, request: LaunchRequest) -> std::io::Result<ChildProcess> {
         let path = request.working_dir.join(&request.program);
         if std::fs::metadata(&path)?.is_dir() {
             return Err(std::io::ErrorKind::IsADirectory.into());
+        }
+        if is_wasm(&path)? {
+            // As typed, as bash's argv[0] is: the host resolves a relative
+            // path against the working directory too.
+            let name = if request.program.components().count() > 1 {
+                request.program.to_string_lossy().into_owned()
+            } else {
+                path.to_string_lossy().into_owned()
+            };
+            let args = request.args.clone();
+            return spawn_child(&name, &args, request);
         }
         let script = request.program.to_string_lossy().into_owned();
         let (name, mut args) = match shebang(&path)? {
@@ -559,6 +572,14 @@ impl EryxLauncher {
             other => other,
         }
     }
+}
+
+/// Whether the file at `path` is a wasm binary: it starts with `\0asm`.
+fn is_wasm(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::Read as _;
+    let mut magic = Vec::with_capacity(4);
+    std::fs::File::open(path)?.take(4).read_to_end(&mut magic)?;
+    Ok(magic == b"\0asm")
 }
 
 /// The interpreter a script's `#!` line names, by its file name, and the
