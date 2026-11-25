@@ -10,6 +10,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `message`, so e.g. `ClientMessage.message.execute_request`.
         .boxed(".eryx.v1.ClientMessage.message.execute_request")
         .boxed(".eryx.v1.ServerMessage.message.execute_result")
+        // Sorted, so the preamble and the journal binding don't depend on
+        // the order a map's entries came in.
+        .btree_map(".eryx.v1.ExecuteRequest.env")
         .build_server(true)
         .build_client(true) // For integration tests
         // Box the large `ExecuteRequest` oneof variant so the generated

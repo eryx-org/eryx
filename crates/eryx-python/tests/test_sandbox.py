@@ -1140,3 +1140,48 @@ class TestResultCapture:
         assert "ERYX_SECRET_PLACEHOLDER_" in result.result_json
         assert "[REDACTED]" not in result.result_json
         assert "ghp-real-token" not in result.result_json
+
+
+class TestEnv:
+    """``env=`` sets environment variables, which aren't secrets."""
+
+    HOSTILE = "it's \"quoted\"\n'); import os; os._exit(3) #"
+
+    def test_env_is_in_os_environ(self):
+        sandbox = eryx.Sandbox(
+            env={"GIT_AUTHOR_NAME": "Eryx", "HOSTILE": self.HOSTILE},
+            secrets={"TOKEN": {"value": "ghp-real-token"}},
+        )
+        result = sandbox.execute(
+            "import os\n"
+            "print(os.environ['GIT_AUTHOR_NAME'])\n"
+            f"print(os.environ['HOSTILE'] == {self.HOSTILE!r})\n"
+            "print(os.environ['TOKEN'])\n"
+        )
+        # The variable's value is printed as is; the secret is scrubbed.
+        assert result.stdout == b"Eryx\nTrue\n[REDACTED]\n"
+
+    def test_factory_sandbox_and_pool_get_env(self):
+        factory = eryx.SandboxFactory()
+        sandbox = factory.create_sandbox(env={"A": "1"})
+        assert sandbox.execute("import os; print(os.environ['A'])").stdout == b"1\n"
+        pool = factory.create_pool(max_size=1, min_idle=0, env={"A": "2"})
+        try:
+            with pool.acquire() as leased:
+                result = leased.execute("import os; print(os.environ['A'])")
+                assert result.stdout == b"2\n"
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize(
+        ("env", "message"),
+        [
+            ({"NOT-A-NAME": "x"}, "invalid environment variable name"),
+            ({"PATH": "/bin"}, "set by the sandbox itself"),
+            ({"TOKEN": "x"}, "collides with the secret TOKEN"),
+            ({"A": "a\0b"}, "NUL byte"),
+        ],
+    )
+    def test_bad_env_is_refused(self, env, message):
+        with pytest.raises(eryx.InitializationError, match=message):
+            eryx.Sandbox(env=env, secrets={"TOKEN": {"value": "v"}})

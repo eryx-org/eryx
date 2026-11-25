@@ -186,6 +186,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `enable_tracing` | Stream `TraceEvent` messages for line/call/return/exception/callback events, and for the shell's child processes (`process_start`/`process_end`, with `pid`, `exit_code`, and `ppid` for a nested child). `context_json` carries a `callback_start`'s arguments and a `process_start`'s `{"args": [...]}`, with secret placeholders replaced by `[REDACTED]`; context counts against the execution's trace budget. |
 | `result_variable` / `scrub_result` | Capture a [result variable](./callbacks.md) (default `result`) into `ExecuteResult.result` as JSON. `scrub_result` opts the result into placeholder scrubbing (off by default — the result is a programmatic side channel). |
 | `globals` | Data for the script: a JSON object, as a string, whose top-level keys become globals before the code runs (Python and JavaScript; the shell rejects it). See [Globals](#globals). |
+| `env` | [Environment variables](./sandboxes.md#environment-variables) for the code, by name: in `os.environ`, `process.env`, or exported in the shell for its commands. See [Environment variables](#environment-variables). |
 | `callback_journal` | Opt into [callback replay](#callback-replay). See below. |
 | `language` / `allowed_commands` | The guest language (unset is Python). For the shell, `allowed_commands` narrows this request to some of the server's commands: unset allows all, set with no names allows none, and other commands exit 127. The shell's `grep` builtin and its nested `sh`/`bash` count as commands; other builtins and callbacks aren't restricted. Setting it for another language is `INVALID_ARGUMENT`. |
 | `environment` | The name of one of the server's `--environments` to mount (empty: none). It must be for the request's `language`. |
@@ -198,6 +199,16 @@ If the client disconnects, the server cancels the in-flight execution, including
 - Each key must match `[A-Za-z_][A-Za-z0-9_]*`, must not be a keyword of the language, and must not be a name the guest already has (a Python builtin or any `__dunder__`, a JavaScript global such as `fetch` or `process`) or the name a callback is installed under. Those, a value that isn't a JSON object, or `globals` on a shell request are `INVALID_ARGUMENT`. Empty means no globals.
 - It isn't scrubbed: printing a global prints its value. Put credentials in `secrets`, not here.
 - With `persist_state`, globals are saved in the snapshot like any other variable, and the next request's `globals` overwrite those with the same names. In JavaScript that includes a restored `let`; a restored `const` can't be overwritten, so the execution fails with a `TypeError`.
+- It counts towards the server's message size limit like `code`.
+
+### Environment variables
+
+`env` gives the code ordinary configuration, such as `{"GIT_AUTHOR_NAME": "Eryx"}`, in every language: Python's `os.environ`, JavaScript's `process.env`, and exported in the shell, so its commands inherit it.
+
+- Each name must match `[A-Za-z_][A-Za-z0-9_]*` and must not be one the sandbox sets itself (`HOME`, `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`), one the shell manages (any `BASH*`, `UID`, `RANDOM`, `SHELLOPTS` and the others listed under [Environment variables](./sandboxes.md#environment-variables)) or a secret's name, and a value must not contain a NUL byte; otherwise the request is `INVALID_ARGUMENT`. Quotes and newlines in a value arrive as sent, never as code.
+- It isn't scrubbed: printing a variable prints its value. Put credentials in `secrets`, not here.
+- With `persist_state`, a request's variables replace restored values of the same names. The shell's snapshot keeps what an earlier request exported, its `env` included, like any other shell variable; Python and JavaScript start each request with only that request's variables.
+- A [callback journal](#callback-replay) is bound to the variables it was recorded with.
 - It counts towards the server's message size limit like `code`.
 
 ### Mounts
@@ -317,13 +328,13 @@ When a callback suspends, the server **halts the guest immediately** (no further
 
 Replayed journal entries are returned to Python **verbatim** — the server does not re-execute the callback to validate them. A journal is therefore a **trusted input**: a crafted journal could inject arbitrary values into a script. Because the server hands a recorded journal back to the client (who echoes it on the next run), it must defend against tampering when that journal round-trips through storage or an intermediary.
 
-The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, the `environment`'s name and content hash (when one is set), the request's `globals`, and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state, callback set, environment and globals that produced it. On an incoming replay request the server:
+The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers the journal entries, the script `code`, the `state_snapshot` the run started from (when `persist_state` is set), the declared callback names, the `environment`'s name and content hash (when one is set), the request's `globals` and `env`, and an expiry time (`CallbackJournal.expires_at_unix_secs`, `--journal-ttl-secs` after signing). A signature therefore binds a journal to the exact script, starting state, callback set, environment, globals and environment variables that produced it. On an incoming replay request the server:
 
-- **Verifies** the signature against the request's `code`, `state_snapshot`, callback names, `environment` and `globals` before matching, and checks the journal has not expired.
+- **Verifies** the signature against the request's `code`, `state_snapshot`, callback names, `environment`, `globals` and `env` before matching, and checks the journal has not expired.
 - **Rejects** an unsigned non-empty, mis-signed, expired, or mismatched journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.
 - Accepts an empty, unsigned journal to start a new journaling session. An empty journal that carries a signature must still pass verification.
 
-To run an edited script, explicitly start a new execution without the old journal. To resume a suspended run, send the same `code`, callbacks, `environment`, `globals` and `state_snapshot` as the run that suspended, and echo the journal back unchanged (including `expires_at_unix_secs`). Journals signed by servers before this binding was added fail verification and must be discarded.
+To run an edited script, explicitly start a new execution without the old journal. To resume a suspended run, send the same `code`, callbacks, `environment`, `globals`, `env` and `state_snapshot` as the run that suspended, and echo the journal back unchanged (including `expires_at_unix_secs`). Journals signed by servers before this binding was added fail verification and must be discarded.
 
 Configure the signing key explicitly so journals are portable:
 

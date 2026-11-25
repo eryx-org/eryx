@@ -114,6 +114,15 @@ impl Sandbox {
     ///     network: Optional network configuration. If provided, enables networking.
     ///     callbacks: Optional callbacks that sandboxed code can invoke.
     ///         Can be a CallbackRegistry or a list of callback dicts.
+    ///     env: Optional environment variables, by name: in `os.environ`
+    ///         (Python), `process.env` (JavaScript), or exported in the
+    ///         shell, so its commands inherit them. For configuration, not
+    ///         secrets: values aren't scrubbed from output. A name must match
+    ///         `[A-Za-z_][A-Za-z0-9_]*` and not be one the sandbox sets
+    ///         (HOME, PATH, PWD, USER, TMPDIR, TERM, LANG, LC_ALL), one the
+    ///         shell manages (UID, RANDOM, SHELLOPTS, any BASH*, ...) or a
+    ///         secret's, and a value must not contain a NUL byte; otherwise
+    ///         InitializationError.
     ///     callback_namespace: Install the callbacks (and MCP tools) under
     ///         this name rather than as top-level names: with "tools", a
     ///         callback `get_time` is `await tools.get_time()` (the command
@@ -173,7 +182,7 @@ impl Sandbox {
     ///     )
     ///     sandbox = factory.create_sandbox()
     #[new]
-    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None, callback_namespace=None))]
+    #[pyo3(signature = (*, language=None, runtime_path=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, env=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, commands=None, child_network=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -184,6 +193,7 @@ impl Sandbox {
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         secrets: Option<Bound<'_, PyDict>>,
+        env: Option<std::collections::BTreeMap<String, String>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_result: Option<bool>,
@@ -245,6 +255,9 @@ impl Sandbox {
         let has_secrets = secrets.as_ref().is_some_and(|s| !s.is_empty());
         if let Some(ref secrets_dict) = secrets {
             builder = apply_secrets(builder, secrets_dict)?;
+        }
+        for (name, value) in env.into_iter().flatten() {
+            builder = builder.with_env(name, value);
         }
 
         // Apply scrub policies (default to true when secrets are present)

@@ -20,9 +20,10 @@
 //! covers the journal entries (via deterministic protobuf encoding), its expiry
 //! time, and the [`JournalBinding`]: the script code, the state snapshot the run
 //! started from, the declared callback names, the environment, the
-//! request's globals and its callback namespace. A journal therefore only
-//! replays into the same script, starting state, callback set, environment,
-//! globals and callback namespace that produced it, and
+//! request's globals, its callback namespace and its environment variables.
+//! A journal therefore only replays into the same script, starting state,
+//! callback set, environment, globals, callback namespace and environment
+//! variables that produced it, and
 //! only until it expires. This is correct for the primary replay use case
 //! (re-running the same script); for edit-and-retry, the signature won't
 //! verify and the server rejects the replay before executing the script.
@@ -52,7 +53,9 @@ const MAC_DOMAIN: &[u8] = b"eryx-journal-v2";
 
 /// The MAC domain names the optional inputs fed right after it, in this
 /// order: `-environment` (its name and content hash), `-globals` (the
-/// request's globals) and `-callback-namespace`. A run with none feeds
+/// request's globals), `-callback-namespace` and `-env` (the request's
+/// environment variables: their count, then each name and value in name
+/// order). A run with none feeds
 /// [`MAC_DOMAIN`] alone, so journals recorded without them keep the
 /// signatures they had before.
 const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"-environment";
@@ -60,6 +63,8 @@ const MAC_DOMAIN_ENVIRONMENT: &[u8] = b"-environment";
 const MAC_DOMAIN_GLOBALS: &[u8] = b"-globals";
 /// See [`MAC_DOMAIN_ENVIRONMENT`].
 const MAC_DOMAIN_CALLBACK_NAMESPACE: &[u8] = b"-callback-namespace";
+/// See [`MAC_DOMAIN_ENVIRONMENT`].
+const MAC_DOMAIN_ENV: &[u8] = b"-env";
 
 /// The request context a journal is bound to, besides its entries.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +84,9 @@ pub struct JournalBinding<'a> {
     /// The request's callback namespace, which the journal's callback names
     /// carry; empty for none.
     pub callback_namespace: &'a str,
+    /// The request's environment variables, which the script reads like its
+    /// globals; empty for none.
+    pub env: &'a std::collections::BTreeMap<String, String>,
 }
 
 /// An environment a journal is bound to: its name and its content hash, so a
@@ -189,6 +197,9 @@ impl JournalSigner {
         if !binding.callback_namespace.is_empty() {
             domain.extend_from_slice(MAC_DOMAIN_CALLBACK_NAMESPACE);
         }
+        if !binding.env.is_empty() {
+            domain.extend_from_slice(MAC_DOMAIN_ENV);
+        }
         feed(&domain);
         if let Some(environment) = binding.environment {
             feed(environment.name.as_bytes());
@@ -199,6 +210,13 @@ impl JournalSigner {
         }
         if !binding.callback_namespace.is_empty() {
             feed(binding.callback_namespace.as_bytes());
+        }
+        if !binding.env.is_empty() {
+            feed(&(binding.env.len() as u64).to_le_bytes());
+            for (name, value) in binding.env {
+                feed(name.as_bytes());
+                feed(value.as_bytes());
+            }
         }
         feed(&journal.expires_at_unix_secs.to_le_bytes());
         feed(binding.code.as_bytes());
@@ -356,8 +374,11 @@ mod tests {
             environment: None,
             globals: "",
             callback_namespace: "",
+            env: &NO_ENV,
         }
     }
+
+    static NO_ENV: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
 
     fn signed(signer: &JournalSigner, binding: JournalBinding<'_>) -> pb::CallbackJournal {
         let mut journal = pb::CallbackJournal {
@@ -554,6 +575,31 @@ mod tests {
         assert!(!signer.verify(&journal, with("")));
         let journal = signed(&signer, with(""));
         assert!(!signer.verify(&journal, with("tools")));
+    }
+
+    /// A journal is bound to its environment variables, which the script
+    /// reads like its globals, and a run without any keeps the MAC it had
+    /// before they were bound.
+    #[test]
+    fn journal_is_bound_to_env() {
+        let a1 = std::collections::BTreeMap::from([("A".to_string(), "1".to_string())]);
+        let a2 = std::collections::BTreeMap::from([("A".to_string(), "2".to_string())]);
+        let b1 = std::collections::BTreeMap::from([("B".to_string(), "1".to_string())]);
+        // Names and values are length-prefixed, so moving bytes between
+        // them changes the MAC.
+        let split = std::collections::BTreeMap::from([("A1".to_string(), String::new())]);
+        let with = |env| JournalBinding {
+            env,
+            ..binding("code")
+        };
+        let signer = JournalSigner::random();
+        let journal = signed(&signer, with(&a1));
+        assert!(signer.verify(&journal, with(&a1)));
+        for other in [&a2, &b1, &split, &NO_ENV] {
+            assert!(!signer.verify(&journal, with(other)), "{other:?}");
+        }
+        let journal = signed(&signer, with(&NO_ENV));
+        assert!(!signer.verify(&journal, with(&a1)));
     }
 
     /// With both an environment and globals, the journal is bound to each.
