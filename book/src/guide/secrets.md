@@ -109,7 +109,8 @@ endpoints, in `Authorization`. Two settings narrow it:
   matches, by host, method, path and query, matched exactly as the network's
   [method, path and query rules](./networking.md#method-path-and-query-rules)
   match. They apply on top of `allowed_hosts`: a request has to be to an
-  allowed host *and* match a rule. No rules means any request to an allowed
+  allowed host *and* match a rule, so a rule for a host outside
+  `allowed_hosts` never matches. No rules means any request to an allowed
   host.
 
 A request with the placeholder in a header or request outside them is refused,

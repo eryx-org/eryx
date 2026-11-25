@@ -73,8 +73,9 @@ impl SecretConfig {
     /// Only substitute the real value in requests matching one of `rules`:
     /// the request's host, method, path and query are matched as
     /// [`NetConfig`](crate::NetConfig)'s HTTP rules match them, on top of
-    /// the secret's allowed hosts. A request with the placeholder that no
-    /// rule matches is refused, as for a host the secret isn't allowed for.
+    /// the secret's allowed hosts, so a rule for a host outside them never
+    /// matches. A request with the placeholder that no rule matches is
+    /// refused, as for a host the secret isn't allowed for.
     /// No rules means any request to an allowed host.
     ///
     /// A rule that can't match (see [`HttpRule`](crate::HttpRule)) fails

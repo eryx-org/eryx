@@ -627,7 +627,8 @@ message SecretConfig {
   string header = 4;
   // The only requests the real value may be sent in: a request must match
   // one of these rules (host, methods, paths and queries, matched as
-  // NetworkConfig.http_rules are) as well as allowed_hosts. Empty = any
+  // NetworkConfig.http_rules are) as well as allowed_hosts, so a rule for
+  // a host outside allowed_hosts never matches. Empty = any
   // request to an allowed host. A request with the placeholder that no rule
   // matches is refused.
   repeated HttpRule http_rules = 5;
