@@ -35,8 +35,13 @@ use crate::proto::eryx::v1::{
     ServerMessage, fs_request, fs_response, server_message,
 };
 
-/// Mounts go beneath this
-const MOUNT_ROOT: &str = "/mnt/";
+/// What the guest needs, so no mount root may be at, inside or around one:
+/// the server's files and environments (`/eryx`), the scratch storage a
+/// request with mounts but no `files` gets (`/data`), the stdlib, `/tmp`
+/// (also `HOME`) and the CA certificates. Site-packages directories are checked
+/// apart, as there's one per `--site-packages` (`/site-packages`,
+/// `/site-packages-1`, ...).
+const RESERVED: &[&str] = &["/eryx", "/data", "/python-stdlib", "/tmp", "/etc/ssl/certs"];
 /// What a read that misses the cache fetches, aligned to it
 // ponytail: fixed block size; adaptive readahead and prefetch when sequential
 // reads of big files need fewer round trips
@@ -84,28 +89,122 @@ impl Default for MountLimits {
     }
 }
 
-/// Check a request's mounts: at most `max_mounts`, each a plain path under
-/// `/mnt/` (no `.`, `..`, empty components or trailing slash), none inside
-/// another.
+/// `a` is `b` or inside it
+fn inside(a: &str, b: &str) -> bool {
+    a == b || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// `rest` is one or more names, without `.`, `..` or empty components
+fn plain(rest: &str) -> bool {
+    rest.split('/').all(|c| !matches!(c, "" | "." | ".."))
+}
+
+/// Where a request's mounts may go, set by the operator (the `--mount-root`
+/// flags). A root with a trailing slash, like the default `/mnt/`, takes
+/// mounts below it (`/mnt/repo`, not `/mnt`); one without, like
+/// `/workspace`, takes a mount at it too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountRoots(Vec<String>);
+
+impl Default for MountRoots {
+    fn default() -> Self {
+        Self(vec!["/mnt/".to_string()])
+    }
+}
+
+impl MountRoots {
+    /// Check the operator's roots: at least one, each a plain absolute path
+    /// (no `.`, `..` or empty components) that isn't `/` and doesn't shadow
+    /// anything the guest needs.
+    ///
+    /// # Errors
+    ///
+    /// What's wrong with them, for the operator.
+    pub fn new(roots: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        // Empty entries, as from an empty ERYX_MOUNT_ROOTS, are skipped
+        let roots: Vec<String> = roots.into_iter().filter(|r| !r.is_empty()).collect();
+        if roots.is_empty() {
+            return Err("at least one mount root is needed, like /mnt/".to_string());
+        }
+        for root in &roots {
+            let base = root.strip_suffix('/').unwrap_or(root);
+            if base.is_empty() {
+                return Err(format!(
+                    "mount root {root:?} would shadow the whole filesystem"
+                ));
+            }
+            if !base.strip_prefix('/').is_some_and(plain) {
+                return Err(format!(
+                    "mount root {root:?} must be an absolute path without `.`, `..` or empty \
+                     components, like /mnt/ or /workspace"
+                ));
+            }
+            let site_packages = base.split('/').nth(1).is_some_and(|c| {
+                c.strip_prefix("site-packages").is_some_and(|n| {
+                    n.is_empty()
+                        || n.strip_prefix('-')
+                            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                })
+            });
+            let shadowed = RESERVED
+                .iter()
+                .copied()
+                .find(|r| inside(base, r) || inside(r, base))
+                .or(site_packages.then_some("/site-packages"));
+            if let Some(reserved) = shadowed {
+                return Err(format!(
+                    "mount root {root:?} would shadow {reserved}, which the sandbox needs"
+                ));
+            }
+        }
+        Ok(Self(roots))
+    }
+
+    /// `path` is a plain path a mount may have under one of the roots
+    fn allow(&self, path: &str) -> bool {
+        self.0.iter().any(|root| {
+            let (base, at_root) = match root.strip_suffix('/') {
+                Some(base) => (base, false),
+                None => (root.as_str(), true),
+            };
+            path.strip_prefix(base).is_some_and(|rest| {
+                (at_root && rest.is_empty()) || rest.strip_prefix('/').is_some_and(plain)
+            })
+        })
+    }
+}
+
+impl std::fmt::Display for MountRoots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, root) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" or ")?;
+            }
+            match root.strip_suffix('/') {
+                Some(_) => write!(f, "a path under {root}")?,
+                None => write!(f, "{root} or a path under it")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Check a request's mounts: at most `max_mounts`, each a plain path (no
+/// `.`, `..`, empty components or trailing slash) the `roots` allow, none
+/// inside another.
 ///
 /// # Errors
 ///
 /// What's wrong with them, for the client.
-pub fn check(mounts: &[Mount], max_mounts: usize) -> Result<(), String> {
+pub fn check(mounts: &[Mount], max_mounts: usize, roots: &MountRoots) -> Result<(), String> {
     if mounts.len() > max_mounts {
         return Err(format!("a request can have at most {max_mounts} mounts"));
     }
     for (i, mount) in mounts.iter().enumerate() {
         let path = &mount.path;
-        let plain = path
-            .strip_prefix(MOUNT_ROOT)
-            .is_some_and(|rest| rest.split('/').all(|c| !matches!(c, "" | "." | "..")));
-        if !plain {
-            return Err(format!(
-                "mount path {path:?} must be a path under /mnt/, like /mnt/repo"
-            ));
+        if !roots.allow(path) {
+            return Err(format!("mount path {path:?} must be {roots}"));
         }
-        let inside = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
         if let Some(other) = mounts[..i]
             .iter()
             .find(|m| inside(path, &m.path) || inside(&m.path, path))
@@ -816,7 +915,7 @@ mod tests {
 
     #[test]
     fn mount_paths_are_plain_and_apart() {
-        let check = |m: &[Mount]| check(m, 8);
+        let check = |m: &[Mount]| check(m, 8, &MountRoots::default());
         assert!(check(&defs(&["/mnt/repo", "/mnt/data/set"])).is_ok());
         for bad in [
             &["/data/x"][..],
@@ -836,6 +935,70 @@ mod tests {
         let many: Vec<String> = (0..=8).map(|i| format!("/mnt/{i}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(check(&defs(&many)).is_err());
+    }
+
+    #[test]
+    fn mount_roots_take_mounts_below_or_at_them() {
+        let roots = MountRoots::new(["/mnt/".to_string(), "/workspace".to_string()]).unwrap();
+        let check = |m: &[Mount]| check(m, 8, &roots);
+        for good in ["/mnt/repo", "/workspace", "/workspace/a/b"] {
+            assert!(check(&defs(&[good])).is_ok(), "{good}");
+        }
+        for bad in [
+            "/mnt",
+            "/workspace/",
+            "/workspaces",
+            "/workspace/../etc",
+            "/workspace//a",
+            "/data",
+        ] {
+            let err = check(&defs(&[bad])).unwrap_err();
+            assert!(err.contains("/mnt/ or /workspace"), "{bad}: {err}");
+        }
+        assert!(check(&defs(&["/workspace", "/workspace/a"])).is_err());
+    }
+
+    #[test]
+    fn mount_roots_cant_shadow_the_guest() {
+        for bad in [
+            "/",
+            "//",
+            "mnt",
+            "/mnt//",
+            "/a/../b",
+            "/eryx",
+            "/eryx/environment/x",
+            "/etc",
+            "/etc/ssl/certs/extra",
+            "/python-stdlib",
+            "/site-packages",
+            "/site-packages-2/",
+            "/site-packages/x",
+            "/data",
+            "/data/repos/",
+            "/tmp/",
+            "/tmp/work",
+        ] {
+            assert!(MountRoots::new([bad.to_string()]).is_err(), "{bad:?}");
+        }
+        assert!(MountRoots::new(Vec::new()).is_err());
+        assert!(MountRoots::new([String::new()]).is_err());
+        let skipped = MountRoots::new(["".to_string(), "/workspace".to_string()]).unwrap();
+        assert_eq!(
+            skipped,
+            MountRoots::new(["/workspace".to_string()]).unwrap()
+        );
+        for good in [
+            "/mnt/",
+            "/workspace",
+            "/srv/repos/",
+            "/tmpfiles",
+            "/etc/app",
+            "/site-packages-extra",
+            "/site-packagesx",
+        ] {
+            assert!(MountRoots::new([good.to_string()]).is_ok(), "{good}");
+        }
     }
 
     /// One mount at `/mnt/m` with its stream: the storage, its run's mounts

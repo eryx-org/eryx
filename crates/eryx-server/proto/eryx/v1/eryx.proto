@@ -231,10 +231,12 @@ message ExecuteRequest {
 // saved with persist_state, nor recorded in a callback journal: a replay
 // asks for them again.
 message Mount {
-  // Where the code sees it: a path under /mnt/, like /mnt/repo, without
-  // `.`, `..`, empty components or a trailing slash. A request can have up
-  // to the server's --max-mounts (8 by default), none inside another
-  // (INVALID_ARGUMENT otherwise).
+  // Where the code sees it: a path under one of the server's --mount-root
+  // directories, by default /mnt/ (so /mnt/repo, not /mnt), without `.`,
+  // `..`, empty components or a trailing slash. A root the operator gives
+  // without a trailing slash, like /workspace, takes a mount at it too. A
+  // request can have up to the server's --max-mounts (8 by default), none
+  // inside another (INVALID_ARGUMENT otherwise).
   string path = 1;
 
   // Let the code change the mount. The client's files are never written
