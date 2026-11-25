@@ -1984,7 +1984,7 @@ mod tests {
         }
 
         // A file under a mount is reached through the root too.
-        state.ctx.storages[0].write("/tmp/f", b"hi").await.unwrap();
+        state.ctx.storages[&0].write("/tmp/f", b"hi").await.unwrap();
         let f = open(
             &mut state,
             &root,
@@ -2066,7 +2066,7 @@ mod tests {
             .create_directory_at(borrow(&root), "tmp/sub".into())
             .await
             .unwrap();
-        assert!(state.ctx.storages[0].exists("/tmp/sub").await.unwrap());
+        assert!(state.ctx.storages[&0].exists("/tmp/sub").await.unwrap());
     }
 
     #[tokio::test]
@@ -2258,7 +2258,7 @@ mod tests {
     async fn read_only_file_perms_refuse_write_opens() {
         let mut ctx = HybridVfsCtx::new(storage());
         ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::READ);
-        ctx.storages[0].write("/data/f", b"x").await.unwrap();
+        ctx.storages[&0].write("/data/f", b"x").await.unwrap();
         let mut table = ResourceTable::new();
         let mut state = HybridVfsState::new(&mut ctx, &mut table);
         let data = preopen(&mut state, 0);
@@ -2288,10 +2288,10 @@ mod tests {
             err.map(drop).map_err(vfs_err),
             Err(crate::VfsError::AccessDenied(_))
         ));
-        assert_eq!(state.ctx.storages[0].read("/data/f").await.unwrap(), b"x");
+        assert_eq!(state.ctx.storages[&0].read("/data/f").await.unwrap(), b"x");
 
         // File permissions don't apply to opening subdirectories.
-        state.ctx.storages[0].mkdir("/data/sub").await.unwrap();
+        state.ctx.storages[&0].mkdir("/data/sub").await.unwrap();
         open(
             &mut state,
             &data,
@@ -2317,8 +2317,8 @@ mod tests {
     async fn vfs_paths_stay_inside_their_preopen() {
         let mut ctx = HybridVfsCtx::new(storage());
         ctx.add_vfs_preopen("/data", DirPerms::all(), FilePerms::all());
-        ctx.storages[0].write("/outside", b"secret").await.unwrap();
-        ctx.storages[0].mkdir("/data/sub").await.unwrap();
+        ctx.storages[&0].write("/outside", b"secret").await.unwrap();
+        ctx.storages[&0].mkdir("/data/sub").await.unwrap();
         let mut table = ResourceTable::new();
         let mut state = HybridVfsState::new(&mut ctx, &mut table);
         let data = preopen(&mut state, 0);
@@ -2383,7 +2383,7 @@ mod tests {
             .unwrap();
         assert!(mounted.exists("/mnt/repo/src/b.py").await.unwrap());
         assert!(
-            !state.ctx.storages[0]
+            !state.ctx.storages[&0]
                 .exists("/mnt/repo/src/b.py")
                 .await
                 .unwrap()
@@ -2391,7 +2391,7 @@ mod tests {
         open(&mut state, &data, "c", types::OpenFlags::CREATE, write)
             .await
             .unwrap();
-        assert!(state.ctx.storages[0].exists("/data/c").await.unwrap());
+        assert!(state.ctx.storages[&0].exists("/data/c").await.unwrap());
         assert!(!mounted.exists("/data/c").await.unwrap());
 
         // Renames stay within a storage.

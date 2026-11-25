@@ -2899,8 +2899,9 @@ impl<R> SandboxBuilder<Shell, R> {
     ///
     /// The shell finds it after its functions, builtins and callbacks, and
     /// runs it as a child process with `argv[0]` set to `name`. The child
-    /// sees the sandbox's VFS mounts (with `unstable-vfs`) and nothing else
-    /// of the host, and has no network unless
+    /// sees the sandbox's VFS mounts (with `unstable-vfs`, plus its own from
+    /// `Command::with_mount`) and nothing else of the host, and has no
+    /// network unless
     /// [`with_child_network`](Self::with_child_network) gives it some.
     /// Registering a name again replaces it.
     ///
