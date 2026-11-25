@@ -891,6 +891,7 @@ class Sandbox:
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
@@ -928,6 +929,17 @@ class Sandbox:
                 (optional, defaults to []).
                 Python code sees a placeholder instead of the real value.
                 The real secret is only substituted when writing to an allowed host.
+            env: Optional environment variables, by name: in ``os.environ``
+                (Python), ``process.env`` (JavaScript), or exported in the
+                shell, so its commands inherit them. For configuration such
+                as ``GIT_AUTHOR_NAME``, not secrets: values aren't scrubbed
+                from output. Names and values must be strings (TypeError
+                otherwise). A name must match ``[A-Za-z_][A-Za-z0-9_]*`` and
+                must not be one the sandbox sets itself (HOME, PATH, PWD,
+                USER, TMPDIR, TERM, LANG, LC_ALL), one the shell manages
+                (UID, RANDOM, SHELLOPTS, any BASH*, ...) or a secret's, and a
+                value must not contain a NUL byte; otherwise
+                InitializationError.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1378,6 +1390,7 @@ class SandboxFactory:
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
@@ -1406,6 +1419,7 @@ class SandboxFactory:
             secrets: Optional dict of secret names to secret configurations.
                 Each value is a dict with "value" (required) and "allowed_hosts"
                 (optional, defaults to []).
+            env: Optional environment variables, as for ``Sandbox(env=...)``.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1445,6 +1459,7 @@ class SandboxFactory:
         idle_timeout_ms: int = 300000,
         network: Optional[NetConfig] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
@@ -1465,6 +1480,8 @@ class SandboxFactory:
             network: Optional network configuration for every pooled sandbox.
             secrets: Optional secrets for every pooled sandbox, in the same
                 format as ``Sandbox(secrets=...)``.
+            env: Optional environment variables for every pooled sandbox, as
+                for ``Sandbox(env=...)``.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1474,7 +1491,7 @@ class SandboxFactory:
             callback_namespace: Install each lease's callbacks under this name,
                 as for ``Sandbox``.
 
-        Network and secrets are fixed for the pool's lifetime, unlike the
+        Network, secrets and env are fixed for the pool's lifetime, unlike the
         per-request settings passed to ``acquire()``.
 
         Returns:

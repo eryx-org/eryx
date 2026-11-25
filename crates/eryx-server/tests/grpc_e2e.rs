@@ -5,6 +5,7 @@
 //! → output streaming → trace events → final result.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -499,6 +500,225 @@ async fn javascript_globals_are_injected() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("boom 2"), "{stderr}");
     assert!(stderr.contains(":3:"), "{stderr}");
+}
+
+fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect()
+}
+
+/// `ExecuteRequest.env` sets `os.environ`, a value with quotes and newlines
+/// arriving as it was sent; names the sandbox sets, a secret's name and bad
+/// names are refused. With persisted state, Python starts each request
+/// from only that request's variables.
+#[tokio::test]
+async fn python_env_is_set() {
+    use eryx_server::proto::eryx::v1::SecretConfig;
+
+    let channel = start_server().await;
+    let hostile = "it's \"quoted\"\n'); import os; os._exit(3) #";
+    let request =
+        |code: &str, env: BTreeMap<String, String>, state_snapshot: Vec<u8>| ExecuteRequest {
+            code: code.to_string(),
+            env,
+            persist_state: true,
+            state_snapshot,
+            ..Default::default()
+        };
+
+    let first = execute_request(
+        channel.clone(),
+        request(
+            &format!(
+                "import os\nprint(os.environ['GIT_AUTHOR_NAME'])\n\
+                 print(os.environ['HOSTILE'] == {})\nkept = 1",
+                serde_json::to_string(hostile).unwrap()
+            ),
+            env(&[("GIT_AUTHOR_NAME", "Eryx"), ("HOSTILE", hostile)]),
+            vec![],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "execution failed: {}", first.error);
+    assert_eq!(first.stdout.to_lossy(), "Eryx\nTrue\n");
+
+    let code = "import os\nprint(kept, os.environ.get('GIT_AUTHOR_NAME'))";
+    let second = execute_request(
+        channel.clone(),
+        request(code, BTreeMap::new(), first.state_snapshot.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(second.success, "execution failed: {}", second.error);
+    assert_eq!(second.stdout.to_lossy(), "1 None\n");
+    let third = execute_request(
+        channel.clone(),
+        request(
+            code,
+            env(&[("GIT_AUTHOR_NAME", "Other")]),
+            first.state_snapshot,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(third.stdout.to_lossy(), "1 Other\n");
+
+    for (vars, expected) in [
+        (
+            env(&[("NOT-A-NAME", "x")]),
+            "invalid environment variable name",
+        ),
+        (env(&[("HOME", "/root")]), "set by the sandbox itself"),
+        (env(&[("TOKEN", "x")]), "collides with the secret TOKEN"),
+        (env(&[("A", "a\0b")]), "NUL byte"),
+    ] {
+        let status = execute_request(
+            channel.clone(),
+            ExecuteRequest {
+                code: "print(1)".to_string(),
+                env: vars,
+                secrets: vec![SecretConfig {
+                    name: "TOKEN".to_string(),
+                    value: "v".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status:?}");
+        assert!(status.message().contains(expected), "{status:?}");
+    }
+}
+
+/// `ExecuteRequest.env` sets JavaScript's `process.env`, alongside the
+/// secrets' placeholders.
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn javascript_env_is_set() {
+    use eryx_server::proto::eryx::v1::{Language, SecretConfig};
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().javascript(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::JavaScript, create)
+    })
+    .await;
+    let hostile = "it's \"quoted\"\n`${process.exit(3)}`')); process.exit(3); //";
+    let result = execute_request(
+        channel.clone(),
+        ExecuteRequest {
+            code: format!(
+                "console.log(process.env.GIT_AUTHOR_NAME, process.env.HOSTILE === {}, \
+                 process.env.TOKEN.startsWith('ERYX_SECRET_PLACEHOLDER_'))",
+                serde_json::to_string(hostile).unwrap()
+            ),
+            language: Language::Javascript as i32,
+            env: env(&[("GIT_AUTHOR_NAME", "Eryx"), ("HOSTILE", hostile)]),
+            secrets: vec![SecretConfig {
+                name: "TOKEN".to_string(),
+                value: "v".to_string(),
+                ..Default::default()
+            }],
+            persist_state: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "execution failed: {}", result.error);
+    assert_eq!(result.stdout.to_lossy(), "Eryx true true\n");
+
+    // Restored state doesn't bring them back: `process` is the host's.
+    let restored = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "console.log(typeof process)".to_string(),
+            language: Language::Javascript as i32,
+            persist_state: true,
+            state_snapshot: result.state_snapshot,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(restored.success, "execution failed: {}", restored.error);
+    assert_eq!(restored.stdout.to_lossy(), "undefined\n");
+}
+
+/// `ExecuteRequest.env` is exported in the shell, so its commands see it.
+/// With persisted state, the shell keeps what an earlier request exported,
+/// and a later request's variables replace it.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_env_is_exported() {
+    use eryx_server::proto::eryx::v1::Language;
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+    let hostile = "it's \"quoted\"\n$(exit 3)`exit 3`'; exit 3; '";
+    let request =
+        |code: &str, env: BTreeMap<String, String>, state_snapshot: Vec<u8>| ExecuteRequest {
+            code: code.to_string(),
+            language: Language::Shell as i32,
+            env,
+            persist_state: true,
+            state_snapshot,
+            ..Default::default()
+        };
+
+    let first = execute_request(
+        channel.clone(),
+        request(
+            "printenv GIT_AUTHOR_NAME; printf '%s' \"$HOSTILE\"",
+            env(&[("GIT_AUTHOR_NAME", "Eryx"), ("HOSTILE", hostile)]),
+            vec![],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(first.success, "execution failed: {}", first.error);
+    assert_eq!(first.stdout.to_lossy(), format!("Eryx\n{hostile}"));
+
+    let code = "printenv GIT_AUTHOR_NAME";
+    let second = execute_request(
+        channel.clone(),
+        request(code, BTreeMap::new(), first.state_snapshot.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.stdout.to_lossy(), "Eryx\n", "{}", second.error);
+    let third = execute_request(
+        channel,
+        request(
+            code,
+            env(&[("GIT_AUTHOR_NAME", "Other")]),
+            first.state_snapshot,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(third.stdout.to_lossy(), "Other\n", "{}", third.error);
 }
 
 /// With persisted JavaScript state, a request's globals replace a restored
@@ -2679,6 +2899,8 @@ async fn rejects_invalid_replay_before_execution() {
         ..Default::default()
     };
     let ttl = Duration::from_secs(60);
+    let no_env = BTreeMap::new();
+    let env = BTreeMap::from([("A".to_string(), "1".to_string())]);
     let bound = |code| JournalBinding {
         code,
         state: None,
@@ -2686,6 +2908,7 @@ async fn rejects_invalid_replay_before_execution() {
         environment: None,
         globals: "",
         callback_namespace: "",
+        env: &no_env,
     };
     let echo = [echo_declaration()];
     for scenario in [
@@ -2697,6 +2920,7 @@ async fn rejects_invalid_replay_before_execution() {
         "changed state",
         "changed callbacks",
         "changed globals",
+        "changed env",
         "expired",
         "extended expiry",
     ] {
@@ -2733,6 +2957,14 @@ async fn rejects_invalid_replay_before_execution() {
                 &mut journal,
                 JournalBinding {
                     globals: r#"{"a": 1}"#,
+                    ..bound(code)
+                },
+                ttl,
+            ),
+            "changed env" => signer.sign(
+                &mut journal,
+                JournalBinding {
+                    env: &env,
                     ..bound(code)
                 },
                 ttl,

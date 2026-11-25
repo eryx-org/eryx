@@ -357,16 +357,24 @@ pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) 
 pub fn javascript_preamble<S: std::hash::BuildHasher>(
     secrets: &std::collections::HashMap<String, SecretConfig, S>,
 ) -> String {
-    if secrets.is_empty() {
-        return String::new();
-    }
     let env: std::collections::BTreeMap<&str, &str> = secrets
         .iter()
         .map(|(name, secret)| (name.as_str(), secret.placeholder()))
         .collect();
-    // Parsed rather than written as an object literal, where a secret named
-    // `__proto__` would set the prototype instead of a property.
-    let env = serde_json::to_string(&env).unwrap_or_else(|_| "{}".to_string());
+    process_env_preamble(&env)
+}
+
+/// The JavaScript preamble making `env` the frozen `process.env`; empty
+/// when `env` is.
+pub(crate) fn process_env_preamble(env: &std::collections::BTreeMap<&str, &str>) -> String {
+    if env.is_empty() {
+        return String::new();
+    }
+    // Parsed rather than written as an object literal, where a name like
+    // `__proto__` would set the prototype instead of a property. The JSON
+    // is itself quoted as a JSON string, which is a valid JavaScript string
+    // literal, so no value can end it.
+    let env = serde_json::to_string(env).unwrap_or_else(|_| "{}".to_string());
     let env = serde_json::to_string(&env).unwrap_or_else(|_| "\"{}\"".to_string());
     format!(
         "Object.defineProperty(globalThis, 'process', \

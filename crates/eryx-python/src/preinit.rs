@@ -675,6 +675,7 @@ impl SandboxFactory {
     ///         Can be a CallbackRegistry or a list of callback dicts.
     ///     mcp: Optional MCPManager whose tools are exposed as callbacks.
     ///     secrets: Optional secrets, as for `Sandbox`.
+    ///     env: Optional environment variables, as for `Sandbox`.
     ///     scrub_stdout, scrub_stderr, scrub_files: Scrub secret placeholders
     ///         from that output. Default to True when secrets are provided.
     ///     scrub_result: Scrub secret placeholders from the structured result.
@@ -712,7 +713,7 @@ impl SandboxFactory {
     ///         secrets={"API_KEY": {"value": "sk-xxx", "allowed_hosts": ["api.example.com"]}},
     ///         network=NetConfig(allowed_hosts=["api.example.com"]),
     ///     )
-    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, callback_namespace=None))]
+    #[pyo3(signature = (*, site_packages=None, resource_limits=None, network=None, callbacks=None, mcp=None, secrets=None, env=None, scrub_stdout=None, scrub_stderr=None, scrub_result=None, scrub_files=None, volumes=None, on_stdout=None, on_stderr=None, result_variable=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_sandbox(
         &self,
@@ -723,6 +724,7 @@ impl SandboxFactory {
         callbacks: Option<Bound<'_, PyAny>>,
         mcp: Option<PyRef<'_, crate::mcp::MCPManager>>,
         secrets: Option<Bound<'_, PyDict>>,
+        env: Option<std::collections::BTreeMap<String, String>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_result: Option<bool>,
@@ -786,6 +788,9 @@ impl SandboxFactory {
         let has_secrets = secrets.as_ref().is_some_and(|s| !s.is_empty());
         if let Some(ref secrets_dict) = secrets {
             builder = apply_secrets(builder, secrets_dict)?;
+        }
+        for (name, value) in env.into_iter().flatten() {
+            builder = builder.with_env(name, value);
         }
 
         // Apply scrub policies (default to true when secrets are present)
@@ -857,12 +862,14 @@ impl SandboxFactory {
     ///     idle_timeout_ms: Idle sandbox eviction threshold in ms. Default: 300000.
     ///     network: Optional network configuration for every pooled sandbox.
     ///     secrets: Optional secrets for every pooled sandbox, as for `Sandbox`.
+    ///     env: Optional environment variables for every pooled sandbox, as
+    ///         for `Sandbox`.
     ///     scrub_stdout, scrub_stderr, scrub_files: Scrub secret placeholders
     ///         from that output. Default to True when secrets are provided.
     ///     callback_namespace: Install each lease's callbacks under this
     ///         name, as for `Sandbox`.
     ///
-    /// Network and secrets are fixed for the pool's lifetime, unlike the
+    /// Network, secrets and env are fixed for the pool's lifetime, unlike the
     /// per-request settings passed to ``acquire()``.
     ///
     /// Returns:
@@ -877,7 +884,7 @@ impl SandboxFactory {
     ///     with pool.acquire() as sandbox:
     ///         result = sandbox.execute('import json; print(json.dumps([1]))')
     ///     pool.close()
-    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000, network=None, secrets=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, callback_namespace=None))]
+    #[pyo3(signature = (*, max_size=10, min_idle=1, acquire_timeout_ms=30_000, idle_timeout_ms=300_000, network=None, secrets=None, env=None, scrub_stdout=None, scrub_stderr=None, scrub_files=None, callback_namespace=None))]
     #[allow(clippy::too_many_arguments)]
     fn create_pool(
         &self,
@@ -888,6 +895,7 @@ impl SandboxFactory {
         idle_timeout_ms: u64,
         network: Option<NetConfig>,
         secrets: Option<Bound<'_, PyDict>>,
+        env: Option<std::collections::BTreeMap<String, String>>,
         scrub_stdout: Option<bool>,
         scrub_stderr: Option<bool>,
         scrub_files: Option<bool>,
@@ -936,6 +944,9 @@ impl SandboxFactory {
             }
             for (name, secret) in secrets.iter().flatten() {
                 builder = builder.with_secret_config(name, secret.config());
+            }
+            for (name, value) in env.iter().flatten() {
+                builder = builder.with_env(name, value);
             }
             if let Some(ref namespace) = callback_namespace {
                 builder = builder.with_callback_namespace(namespace);
