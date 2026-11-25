@@ -449,9 +449,13 @@ class HttpRule:
     Methods are compared ignoring case. Paths match whole segments:
     ``/repos/org/repo`` matches it and anything under ``/repos/org/repo/``,
     but not ``/repos/org/repo-evil``; a path ending in ``/`` matches anything
-    under it. The request's query is ignored and percent-escapes decoded
-    first; a path with ``.``/``..`` or empty segments, or an escaped ``/`` or
-    backslash, never matches.
+    under it. Paths are matched without the query and with percent-escapes
+    decoded; a path with ``.``/``..`` or empty segments, or an escaped ``/``
+    or backslash, never matches. Queries are regular expressions (Rust
+    ``regex`` syntax), each matched against the whole raw query string: the
+    text after ``?`` as sent, not decoded, and empty when there's none.
+    ``service=git-upload-pack`` matches only that query, and
+    ``(service=git-upload-pack)?`` also no query.
 
     Example:
         net = NetConfig(
@@ -477,12 +481,18 @@ class HttpRule:
         """The allowed path prefixes; empty allows any."""
         ...
 
+    @property
+    def queries(self) -> list[str]:
+        """The allowed query patterns; empty allows any."""
+        ...
+
     def __new__(
         cls,
         host: str,
         *,
         methods: Optional[Sequence[str]] = None,
         paths: Optional[Sequence[str]] = None,
+        queries: Optional[Sequence[str]] = None,
     ) -> HttpRule:
         """Create a rule for hosts matching ``host`` (same patterns as allowed_hosts).
 
@@ -492,9 +502,12 @@ class HttpRule:
             paths: Allowed path prefixes; None or empty allows any. Must be
                 normalized absolute paths (no ``.``/``..`` or empty segments,
                 query or escapes).
+            queries: Allowed queries, as regular expressions matched against
+                the whole raw query; None or empty allows any.
 
         Raises:
-            ValueError: If a path can't match any request.
+            ValueError: If a path can't match any request, or a query
+                pattern isn't a valid regular expression.
         """
         ...
 
@@ -867,6 +880,7 @@ class Sandbox:
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
@@ -904,6 +918,17 @@ class Sandbox:
                 (optional, defaults to []).
                 Python code sees a placeholder instead of the real value.
                 The real secret is only substituted when writing to an allowed host.
+            env: Optional environment variables, by name: in ``os.environ``
+                (Python), ``process.env`` (JavaScript), or exported in the
+                shell, so its commands inherit them. For configuration such
+                as ``GIT_AUTHOR_NAME``, not secrets: values aren't scrubbed
+                from output. Names and values must be strings (TypeError
+                otherwise). A name must match ``[A-Za-z_][A-Za-z0-9_]*`` and
+                must not be one the sandbox sets itself (HOME, PATH, PWD,
+                USER, TMPDIR, TERM, LANG, LC_ALL), one the shell manages
+                (UID, RANDOM, SHELLOPTS, any BASH*, ...) or a secret's, and a
+                value must not contain a NUL byte; otherwise
+                InitializationError.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1354,6 +1379,7 @@ class SandboxFactory:
         callbacks: Optional[Union[CallbackRegistry, Sequence[CallbackDict]]] = None,
         mcp: Optional[MCPManager] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_result: Optional[bool] = None,
@@ -1382,6 +1408,7 @@ class SandboxFactory:
             secrets: Optional dict of secret names to secret configurations.
                 Each value is a dict with "value" (required) and "allowed_hosts"
                 (optional, defaults to []).
+            env: Optional environment variables, as for ``Sandbox(env=...)``.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1421,6 +1448,7 @@ class SandboxFactory:
         idle_timeout_ms: int = 300000,
         network: Optional[NetConfig] = None,
         secrets: Optional[dict[str, SecretDict]] = None,
+        env: Optional[dict[str, str]] = None,
         scrub_stdout: Optional[bool] = None,
         scrub_stderr: Optional[bool] = None,
         scrub_files: Optional[bool] = None,
@@ -1441,6 +1469,8 @@ class SandboxFactory:
             network: Optional network configuration for every pooled sandbox.
             secrets: Optional secrets for every pooled sandbox, in the same
                 format as ``Sandbox(secrets=...)``.
+            env: Optional environment variables for every pooled sandbox, as
+                for ``Sandbox(env=...)``.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
@@ -1450,7 +1480,7 @@ class SandboxFactory:
             callback_namespace: Install each lease's callbacks under this name,
                 as for ``Sandbox``.
 
-        Network and secrets are fixed for the pool's lifetime, unlike the
+        Network, secrets and env are fixed for the pool's lifetime, unlike the
         per-request settings passed to ``acquire()``.
 
         Returns:

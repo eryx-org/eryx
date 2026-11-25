@@ -113,6 +113,8 @@ pub struct ServerLimits {
     pub allow_plaintext_secrets: bool,
     /// Limits on each request's `mounts`.
     pub mounts: crate::mounts::MountLimits,
+    /// Where each request's `mounts` may go.
+    pub mount_roots: crate::mounts::MountRoots,
 }
 
 impl Default for ServerLimits {
@@ -131,6 +133,7 @@ impl Default for ServerLimits {
             max_child_memory_bytes: 256 * 1024 * 1024,
             allow_plaintext_secrets: false,
             mounts: crate::mounts::MountLimits::default(),
+            mount_roots: crate::mounts::MountRoots::default(),
         }
     }
 }
@@ -248,6 +251,7 @@ impl ServerLimits {
                 HttpRule::new(r.host)
                     .with_methods(r.methods)
                     .with_paths(r.paths)
+                    .with_queries(r.queries)
             }))
             .allow_plaintext_secrets(nc.allow_plaintext_secrets);
         if !nc.blocked_hosts.is_empty() {
@@ -613,12 +617,17 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let state_snapshot = execute_req.state_snapshot;
         let files = execute_req.files;
         let mount_defs = execute_req.mounts;
-        crate::mounts::check(&mount_defs, self.limits.mounts.max_mounts)
-            .map_err(|e| Status::invalid_argument(format!("mounts: {e}")))?;
+        crate::mounts::check(
+            &mount_defs,
+            self.limits.mounts.max_mounts,
+            &self.limits.mount_roots,
+        )
+        .map_err(|e| Status::invalid_argument(format!("mounts: {e}")))?;
         let result_variable = execute_req.result_variable;
         let callback_namespace = execute_req.callback_namespace;
         let scrub_result = execute_req.scrub_result;
         let globals = execute_req.globals;
+        let env = execute_req.env;
 
         let binding = crate::replay::JournalBinding {
             code: &code,
@@ -626,6 +635,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             callbacks: &declarations,
             environment: bound_environment(&environment, &environment_hash),
             globals: &globals,
+            env: &env,
             callback_namespace: &callback_namespace,
         };
         // A rejected replay must not become a fresh run: completed callbacks
@@ -743,10 +753,10 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             Some(create_vfs_with_files(&files, VFS_MOUNT_PATH).await?)
         };
 
-        // The secrets' placeholders (`os.environ`, `process.env`, or exported
-        // to the shell's children), then the Python builtins injection, so
-        // callbacks are reachable from imported modules, and the sys.path
-        // setup for supporting files. As a preamble, it doesn't shift the
+        // The secrets' placeholders and the request's env (`os.environ`,
+        // `process.env`, or exported to the shell's children), then the
+        // Python builtins injection, so callbacks are reachable from imported
+        // modules, and the sys.path setup for supporting files. As a preamble, it doesn't shift the
         // user code's line numbers.
         let library_preamble = match language {
             eryx::Language::Python if vfs_storage.is_some() => {
@@ -755,7 +765,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             eryx::Language::Python => BUILTINS_INJECT.to_owned(),
             _ => String::new(),
         };
-        let mut preamble = eryx::language_preamble(language, &secrets, &library_preamble)
+        let mut preamble = eryx::language_preamble(language, &secrets, &env, &library_preamble)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         // The client's data as globals, after eryx's own preamble.
         preamble.push_str(&globals_preamble);
@@ -773,6 +783,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             supporting_files = files.len(),
             networking = net_config.is_some(),
             secrets = secrets.len(),
+            env = env.len(),
         );
         if let Err(e) = span.set_parent(parent_cx) {
             tracing::debug!("failed to set parent trace context: {e}");
@@ -985,6 +996,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 let params = SessionParams {
                     code: &code,
                     globals: &globals,
+                    env: &env,
                     callback_namespace: &callback_namespace,
                     language,
                     vfs_storage,
@@ -1274,6 +1286,9 @@ struct SessionParams<'a> {
     code: &'a str,
     /// The request's globals, which the replay journal is bound to.
     globals: &'a str,
+    /// The request's environment variables, which the replay journal is
+    /// bound to.
+    env: &'a std::collections::BTreeMap<String, String>,
     /// The request's callback namespace, which the replay journal is bound to.
     callback_namespace: &'a str,
     /// The guest language: only Python gets the (Python) preamble.
@@ -1669,6 +1684,7 @@ async fn execute_with_session(
                 callbacks: params.declarations,
                 environment: params.environment,
                 globals: params.globals,
+                env: params.env,
                 callback_namespace: params.callback_namespace,
             };
             params

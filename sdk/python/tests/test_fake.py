@@ -129,6 +129,8 @@ def test_local_only_arguments_say_what_to_use() -> None:
         sandbox(network=object())
     with pytest.raises(ValueError, match="result"):
         sandbox(result_variable="out")
+    with pytest.raises(ValueError, match="environment variables"):
+        sandbox(env={"A": "1"})
     with pytest.raises(TypeError, match="nonsense"):
         sandbox(nonsense=1)
     limits = eryx.ResourceLimits(max_memory_bytes=1 << 20)

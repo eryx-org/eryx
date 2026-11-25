@@ -487,9 +487,8 @@ impl NetConfig {
         if rules.peek().is_none() {
             return Ok(());
         }
-        let path = request_path(target);
-        if let Some(path) = &path
-            && rules.any(|r| r.allows(method, path))
+        if let Some(target) = request_target(target)
+            && rules.any(|r| r.allows(method, &target))
         {
             return Ok(());
         }
@@ -542,8 +541,8 @@ impl NetConfig {
     }
 
     /// Fail if a setting can't work: a zero connect or I/O timeout would
-    /// make every connection time out immediately, and an HTTP rule's path
-    /// must be one a request can match.
+    /// make every connection time out immediately, an HTTP rule's path
+    /// must be one a request can match, and its query patterns must compile.
     ///
     /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
     /// check when networking is enabled, and every network policy (e.g.
@@ -747,10 +746,16 @@ impl NetConfig {
 /// - Paths match whole segments: `/repos/org/repo` matches it and anything
 ///   under `/repos/org/repo/`, but not `/repos/org/repo-evil`. A path ending
 ///   in `/` matches anything under it. No paths means any path.
-/// - A request's query string is ignored and its percent-escapes decoded
-///   before matching. A path with a `.` or `..` segment (escaped or not, or
-///   with `;` parameters), an empty segment (`//`), an escaped `/` or `\`, or
-///   a malformed escape never matches, nor does a target that isn't a path or
+/// - Queries are anchored regular expressions ([`regex`] syntax) matched
+///   against the whole raw query string: the text after `?`, as sent, not
+///   decoded, and empty when there's none. `service=git-upload-pack` matches
+///   exactly that query, `(service=git-upload-pack)?` also no query, and
+///   neither `service=git-upload-pack&service=git-receive-pack` nor
+///   `service=git%2Dupload-pack`. No queries means any query.
+/// - Paths are matched without the query, with percent-escapes decoded. A
+///   path with a `.` or `..` segment (escaped or not, or with `;`
+///   parameters), an empty segment (`//`), an escaped `/` or `\`, or a
+///   malformed escape never matches, nor does a target that isn't a path or
 ///   an absolute URL (`CONNECT`, `OPTIONS *`).
 ///
 /// ```
@@ -766,12 +771,24 @@ impl NetConfig {
 /// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo/issues?page=2").is_ok());
 /// assert!(config.check_http_request("api.github.com", "DELETE", "/repos/org/repo").is_err());
 /// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo-evil").is_err());
+///
+/// // Git fetches, but not pushes.
+/// let git = NetConfig::default().allow_host("git.example.com").allow_http(
+///     HttpRule::new("git.example.com")
+///         .with_methods(["GET"])
+///         .with_paths(["/org/repo.git/info/refs"])
+///         .with_queries(["service=git-upload-pack"]),
+/// );
+/// let check = |target| git.check_http_request("git.example.com", "GET", target);
+/// assert!(check("/org/repo.git/info/refs?service=git-upload-pack").is_ok());
+/// assert!(check("/org/repo.git/info/refs?service=git-receive-pack").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRule {
     host: String,
     methods: Vec<String>,
     paths: Vec<String>,
+    queries: QueryPatterns,
 }
 
 impl HttpRule {
@@ -784,6 +801,7 @@ impl HttpRule {
             host: host.into(),
             methods: vec![],
             paths: vec![],
+            queries: QueryPatterns::default(),
         }
     }
 
@@ -798,6 +816,15 @@ impl HttpRule {
     #[must_use]
     pub fn with_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Only allow requests whose raw query matches one of these anchored
+    /// regular expressions; see [`HttpRule`]. A pattern that doesn't compile
+    /// fails [`NetConfig::validate`], and the rule matches nothing.
+    #[must_use]
+    pub fn with_queries(mut self, queries: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.queries = QueryPatterns::new(queries.into_iter().map(Into::into).collect());
         self
     }
 
@@ -819,6 +846,12 @@ impl HttpRule {
         &self.paths
     }
 
+    /// The allowed query patterns; empty allows any query.
+    #[must_use]
+    pub fn queries(&self) -> &[String] {
+        self.queries.patterns()
+    }
+
     fn validate(&self) -> Result<(), String> {
         for path in &self.paths {
             if !is_normalized_path(path) {
@@ -828,17 +861,91 @@ impl HttpRule {
                 ));
             }
         }
-        Ok(())
+        self.queries
+            .validate()
+            .map_err(|e| format!("HTTP rule for {}: {e}", self.host))
     }
 
-    /// Whether this rule allows `method` on the decoded `path`.
-    fn allows(&self, method: &str, path: &str) -> bool {
+    /// Whether this rule allows `method` on `target`.
+    fn allows(&self, method: &str, target: &RequestTarget) -> bool {
         let method_ok =
             self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
-        let path_ok = self.paths.is_empty() || self.paths.iter().any(|p| path_is_under(path, p));
-        method_ok && path_ok
+        let path_ok =
+            self.paths.is_empty() || self.paths.iter().any(|p| path_is_under(&target.path, p));
+        method_ok && path_ok && self.queries.matches(&target.query)
     }
 }
+
+/// Regular expressions each matched against a whole raw query string; see
+/// [`HttpRule::with_queries`]. No patterns matches any query.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryPatterns {
+    patterns: Vec<String>,
+    /// The patterns anchored and compiled, or why one didn't compile.
+    compiled: Result<Vec<regex::Regex>, String>,
+}
+
+impl QueryPatterns {
+    pub(crate) fn new(patterns: Vec<String>) -> Self {
+        // Query patterns are short; the default 10 MiB would let one
+        // pattern (`\pL{50}{50}`) cost a server real time and memory.
+        let compile = |p: &str| regex::RegexBuilder::new(p).size_limit(1 << 20).build();
+        let compiled = patterns
+            .iter()
+            .map(|p| {
+                // Compiled alone first: wrapping a pattern like `a)|(b`
+                // would compile, unanchored.
+                compile(p).map_err(|e| {
+                    format!("query pattern {p:?} is not a valid regular expression: {e}")
+                })?;
+                // Only a trailing `#` comment in verbose mode (`(?x)`)
+                // compiles alone but not anchored: it comments out the
+                // closing anchor.
+                compile(&format!(r"\A(?:{p})\z")).map_err(|e| {
+                    format!(
+                        "query pattern {p:?} can't be anchored (end a trailing `#` comment \
+                         with a newline): {e}"
+                    )
+                })
+            })
+            .collect();
+        Self { patterns, compiled }
+    }
+
+    pub(crate) fn patterns(&self) -> &[String] {
+        &self.patterns
+    }
+
+    /// Fail if a pattern doesn't compile.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.compiled.as_ref().map(|_| ()).map_err(Clone::clone)
+    }
+
+    /// Whether the raw `query` (empty if there's none) matches. Never, if a
+    /// pattern doesn't compile.
+    pub(crate) fn matches(&self, query: &str) -> bool {
+        self.patterns.is_empty()
+            || self
+                .compiled
+                .as_ref()
+                .is_ok_and(|regexes| regexes.iter().any(|re| re.is_match(query)))
+    }
+}
+
+impl Default for QueryPatterns {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+/// Equal when the patterns are: the compiled form follows from them.
+impl PartialEq for QueryPatterns {
+    fn eq(&self, other: &Self) -> bool {
+        self.patterns == other.patterns
+    }
+}
+
+impl Eq for QueryPatterns {}
 
 /// Whether the decoded `path` is `prefix` or under it: `/a` covers `/a` and
 /// `/a/b` but not `/ab`; `/a/` covers everything below `/a/`.
@@ -853,19 +960,35 @@ fn is_normalized_path(path: &str) -> bool {
     request_path(path).as_deref() == Some(path) && !path.contains(['?', '#'])
 }
 
-/// The decoded path of request target `target` (origin-form, a path, or
-/// absolute-form, an absolute URL's path), without its query; `None` if it
-/// has none or is ambiguous: see [`HttpRule`]. Any other target (`*`, an
-/// authority, or something a server might resolve as a relative path, like
-/// `../x?u=http://host/`) has none.
+/// The decoded path of request target `target`; see [`request_target`].
 fn request_path(target: &str) -> Option<String> {
+    request_target(target).map(|t| t.path)
+}
+
+/// What [`HttpRule`]s match in a request target.
+#[derive(Debug, PartialEq, Eq)]
+struct RequestTarget {
+    /// The percent-decoded path, without the query.
+    path: String,
+    /// The raw query, as sent: the text after `?`, or empty without one.
+    query: String,
+}
+
+/// The path and query of request target `target` (origin-form, a path, or
+/// absolute-form, an absolute URL); `None` if it has no path or its path is
+/// ambiguous: see [`HttpRule`]. Any other target (`*`, an authority, or
+/// something a server might resolve as a relative path, like
+/// `../x?u=http://host/`) has none.
+fn request_target(target: &str) -> Option<RequestTarget> {
     let uri = if target.starts_with('/') {
         parse_target(target)?
     } else {
         absolute_form(target)?
     };
-    // The raw path: parse_target checked the parsed target is the text.
+    // The raw path and query: parse_target checked the parsed target is
+    // the text.
     let path = uri.path();
+    let query = uri.query().unwrap_or_default().to_owned();
 
     let mut decoded = Vec::with_capacity(path.len());
     let mut bytes = path.bytes();
@@ -895,7 +1018,10 @@ fn request_path(target: &str) -> Option<String> {
             return None;
         }
     }
-    Some(decoded)
+    Some(RequestTarget {
+        path: decoded,
+        query,
+    })
 }
 
 /// `host` lowercased, without a trailing dot or IPv6 brackets, and an IP
@@ -4470,6 +4596,106 @@ mod tests {
             m.process_write_data(1, b"MKCOL /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n")
                 .is_err()
         );
+    }
+
+    /// Query patterns match the whole raw query: Git's smart HTTP fetch
+    /// starts with the same request as a push but for its query.
+    #[test]
+    fn http_rules_match_queries() {
+        let config = NetConfig::permissive().allow_http(
+            HttpRule::new("git.example.com")
+                .with_methods(["GET"])
+                .with_paths(["/org/repo.git/info/refs"])
+                .with_queries(["service=git-upload-pack"]),
+        );
+        let check = |target| {
+            config
+                .check_http_request("git.example.com", "GET", target)
+                .is_ok()
+        };
+        assert!(check("/org/repo.git/info/refs?service=git-upload-pack"));
+        assert!(check(
+            "https://git.example.com/org/repo.git/info/refs?service=git-upload-pack"
+        ));
+        // Through a connection: a refused push never reaches the server.
+        let mut m = ConnectionManager::new(config.clone(), HashMap::new()).unwrap();
+        m.connection_hosts.insert(1, "git.example.com".into());
+        let fetch = b"GET /org/repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: git.example.com\r\n\r\n";
+        assert_eq!(frame(&mut m, &[fetch]), String::from_utf8_lossy(fetch));
+        m.http_states.clear();
+        let push = b"GET /org/repo.git/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: git.example.com\r\n\r\n";
+        assert!(m.process_write_data(1, push).is_err());
+
+        for target in [
+            "/org/repo.git/info/refs?service=git-receive-pack",
+            "/org/repo.git/info/refs",
+            "/org/repo.git/info/refs?",
+            // Anchored at both ends.
+            "/org/repo.git/info/refs?service=git-upload-pack&x",
+            "/org/repo.git/info/refs?x&service=git-upload-pack",
+            // Repeated parameters and `;` separators, which servers read
+            // differently, and escapes are just text that doesn't match.
+            "/org/repo.git/info/refs?service=git-upload-pack&service=git-receive-pack",
+            "/org/repo.git/info/refs?service=git-receive-pack;service=git-upload-pack",
+            "/org/repo.git/info/refs?service=git%2Dupload-pack",
+            "/org/repo.git/info/refs?service=git-upload-pack#x",
+            // The path still has to match.
+            "/org/repo.git/info/refs/../x?service=git-upload-pack",
+        ] {
+            assert!(!check(target), "{target}");
+        }
+
+        let check = |queries: &[&str], target| {
+            NetConfig::permissive()
+                .allow_http(HttpRule::new("h").with_queries(queries.iter().copied()))
+                .check_http_request("h", "GET", target)
+                .is_ok()
+        };
+        // No queries means any query, as before queries could be set.
+        assert!(check(&[], "/x?anything=at&all"));
+        assert!(check(&[], "/x"));
+        // An optional group allows no query too; `?` alone is an empty query.
+        let optional = ["(service=git-upload-pack)?"];
+        assert!(check(&optional, "/x"));
+        assert!(check(&optional, "/x?"));
+        assert!(check(&optional, "/x?service=git-upload-pack"));
+        assert!(!check(&optional, "/x?service=git-receive-pack"));
+        // Any pattern may match; an alternation stays inside the anchors.
+        assert!(check(&["a=1", "b=2"], "/x?b=2"));
+        assert!(check(&["a=1|b=2"], "/x?a=1"));
+        assert!(!check(&["a=1|b=2"], "/x?a=1&c"));
+        assert!(!check(&["a=1|b=2"], "/x?c&b=2"));
+    }
+
+    /// A query pattern that doesn't compile is refused, including one that
+    /// would escape its anchors once wrapped.
+    #[test]
+    fn http_rule_queries_are_validated() {
+        let config = |q| NetConfig::default().allow_http(HttpRule::new("h").with_queries([q]));
+        assert!(config("a=[0-9]+").validate().is_ok());
+        for q in ["(", "a)|(b", "a)(?:", "\\"] {
+            let err = config(q).validate().unwrap_err();
+            assert!(err.contains("query pattern"), "{q}: {err}");
+            // Nor does it match anything if checked anyway.
+            assert!(
+                config(q).check_http_request("h", "GET", "/?a").is_err(),
+                "{q}"
+            );
+        }
+        // A verbose-mode comment would swallow the closing anchor; ended
+        // with a newline, it's fine.
+        let err = config("(?x) a # fetch").validate().unwrap_err();
+        assert!(err.contains("can't be anchored"), "{err}");
+        let commented = config("(?x) a = 1 # fetch\n");
+        assert!(commented.validate().is_ok());
+        assert!(commented.check_http_request("h", "GET", "/?a=1").is_ok());
+        assert!(commented.check_http_request("h", "GET", "/?a=1&b").is_err());
+        // Patterns that would compile to something huge are refused.
+        assert!(config(r"\pL{50}{50}").validate().is_err());
+        let rule = HttpRule::new("h").with_queries(["a"]);
+        assert_eq!(rule.queries(), ["a"]);
+        assert_eq!(rule, HttpRule::new("h").with_queries(["a"]));
+        assert_ne!(rule, HttpRule::new("h"));
     }
 
     /// A rule's paths must be ones a request can match.

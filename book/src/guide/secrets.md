@@ -53,7 +53,8 @@ const res = await fetch("https://api.github.com/user", {
 console.log(process.env.TOKEN); // Prints: [REDACTED]
 ```
 
-`process` only exists when the sandbox has secrets, and only has `env`. The
+`process` only exists when the sandbox has secrets or [environment
+variables](./sandboxes.md#environment-variables), and only has `env`. The
 shell exports each placeholder as a variable, for its commands; with
 [child network](./sandboxes.md#external-commands), their proxy substitutes the real values.
 
@@ -185,7 +186,7 @@ so an allowed host that echoes request headers returns the base64 of the real
 value, which isn't masked.
 
 To also limit which endpoints a secret can reach on its host, add
-[method and path rules](./networking.md#method-and-path-rules) for that host.
+[method, path and query rules](./networking.md#method-path-and-query-rules) for that host.
 Like secret substitution, they only apply to requests the host can parse: TLS
 done by the sandboxed code itself isn't checked.
 

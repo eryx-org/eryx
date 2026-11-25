@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use eryx::{PoolConfig, Sandbox, SandboxBuilder, SandboxPool};
-use eryx_server::mounts::MountLimits;
+use eryx_server::mounts::{MountLimits, MountRoots};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::{DEFAULT_JOURNAL_TTL, EryxService, MAX_MESSAGE_SIZE, ServerLimits};
 use eryx_server::telemetry::setup_tracing;
@@ -191,6 +191,22 @@ struct Args {
     /// none. Raising it raises the host memory one execution can use.
     #[arg(long, default_value_t = 256 * 1024 * 1024, env = "ERYX_MAX_CHILD_MEMORY_BYTES")]
     max_child_memory_bytes: u64,
+
+    /// Where a request's mounts (`ExecuteRequest.mounts`) may go. A root
+    /// with a trailing slash, like the default /mnt/, takes mounts below it;
+    /// one without, like /workspace, takes a mount at it too. Repeat for more
+    /// roots, or separate them with `,`, in the flag and the environment
+    /// alike (empty entries are skipped). Startup fails for `/` and for roots
+    /// that would shadow what the sandbox needs (/eryx, /data, the stdlib,
+    /// site-packages, /tmp, /etc/ssl/certs).
+    #[arg(
+        long = "mount-root",
+        env = "ERYX_MOUNT_ROOTS",
+        value_name = "PATH",
+        value_delimiter = ',',
+        default_value = "/mnt/"
+    )]
+    mount_roots: Vec<String>,
 
     /// Most mounts (`ExecuteRequest.mounts`) one request may have.
     #[arg(long, default_value_t = MountLimits::default().max_mounts, env = "ERYX_MAX_MOUNTS")]
@@ -1018,6 +1034,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_dir_entries: args.max_mount_dir_entries,
             max_write_bytes: args.max_mount_write_bytes,
         },
+        mount_roots: MountRoots::new(args.mount_roots.clone())?,
     };
     if let Some(total) = args.max_open_host_files_total {
         eryx::vfs::set_process_max_open_host_files(total);

@@ -195,6 +195,24 @@ message ExecuteRequest {
   // op_id. The client decides what each path serves, so don't serve files
   // such as `.env` or `.git/config` unless you mean to. See Mount.
   repeated Mount mounts = 21;
+
+  // Environment variables for the code, by name, e.g. {"GIT_AUTHOR_NAME":
+  // "Eryx"}: in Python's os.environ, JavaScript's process.env, and exported
+  // in the shell, so its commands inherit them. For ordinary configuration:
+  // values aren't secrets and aren't scrubbed from output, so put secrets in
+  // `secrets`, not here. Each name must match [A-Za-z_][A-Za-z0-9_]* and
+  // must not be one the sandbox sets itself (HOME, PATH, PWD, USER, TMPDIR,
+  // TERM, LANG, LC_ALL), one the shell manages (any BASH*, UID, EUID, PPID,
+  // RANDOM, SRANDOM, SECONDS, LINENO, SHELLOPTS, ...), whichever the
+  // language, or a secret's name; a value must not contain a NUL byte;
+  // INVALID_ARGUMENT otherwise. They're set before the code runs;
+  // JavaScript's process.env is frozen. With persist_state, the request's
+  // variables replace restored values of the same names; the shell's
+  // snapshot also keeps the variables an earlier request exported, while
+  // Python and JavaScript start each request from only this request's. A
+  // callback journal is bound to the variables it was recorded with. Counts
+  // towards the server's message size limit like `code`.
+  map<string, string> env = 22;
 }
 
 // A directory the client serves to the code; see ExecuteRequest.mounts.
@@ -213,10 +231,12 @@ message ExecuteRequest {
 // saved with persist_state, nor recorded in a callback journal: a replay
 // asks for them again.
 message Mount {
-  // Where the code sees it: a path under /mnt/, like /mnt/repo, without
-  // `.`, `..`, empty components or a trailing slash. A request can have up
-  // to the server's --max-mounts (8 by default), none inside another
-  // (INVALID_ARGUMENT otherwise).
+  // Where the code sees it: a path under one of the server's --mount-root
+  // directories, by default /mnt/ (so /mnt/repo, not /mnt), without `.`,
+  // `..`, empty components or a trailing slash. A root the operator gives
+  // without a trailing slash, like /workspace, takes a mount at it too. A
+  // request can have up to the server's --max-mounts (8 by default), none
+  // inside another (INVALID_ARGUMENT otherwise).
   string path = 1;
 
   // Let the code change the mount. The client's files are never written
@@ -580,6 +600,12 @@ message HttpRule {
   // percent-decoded path without its query. Empty = any path. Paths must be
   // normalized: no "." or ".." segments, "//", query or escapes.
   repeated string paths = 3;
+  // Allowed queries: regular expressions (Rust regex syntax), each matched
+  // against the whole raw query string, the text after "?" as sent (not
+  // decoded; empty when there's none). "service=git-upload-pack" matches
+  // only that query; "(service=git-upload-pack)?" also matches none.
+  // Empty = any query.
+  repeated string queries = 4;
 }
 
 // A secret to inject into the sandbox environment.
@@ -588,7 +614,9 @@ message HttpRule {
 // when making requests to allowed_hosts.
 message SecretConfig {
   // Secret name: the key of its placeholder in `os.environ` (Python) or
-  // `process.env` (JavaScript). Not supported for the shell.
+  // `process.env` (JavaScript), or the environment variable the shell exports
+  // it as for its commands. Must match `[A-Za-z_][A-Za-z0-9_]*`, a valid shell
+  // variable name; any other name is INVALID_ARGUMENT.
   string name = 1;
   // The real secret value. Transmitted in plaintext over the gRPC connection —
   // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).

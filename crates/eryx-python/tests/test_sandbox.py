@@ -241,13 +241,20 @@ except OSError as e:
             config.allowed_networks = ["not-a-cidr"]
 
     def test_http_rules(self):
-        """Test HttpRule fields round-trip and invalid paths are rejected."""
-        rule = eryx.HttpRule("api.github.com", methods=["GET"], paths=["/repos/org/repo"])
-        assert (rule.host, rule.methods, rule.paths) == (
+        """Test HttpRule fields round-trip and invalid paths and queries are rejected."""
+        rule = eryx.HttpRule(
+            "api.github.com",
+            methods=["GET"],
+            paths=["/repos/org/repo"],
+            queries=["page=[0-9]+"],
+        )
+        assert (rule.host, rule.methods, rule.paths, rule.queries) == (
             "api.github.com",
             ["GET"],
             ["/repos/org/repo"],
+            ["page=[0-9]+"],
         )
+        assert eryx.HttpRule("h").queries == []
         assert eryx.NetConfig().http_rules == []
         config = eryx.NetConfig(http_rules=[rule]).allow_http(eryx.HttpRule("example.com"))
         assert [r.host for r in config.http_rules] == ["api.github.com", "example.com"]
@@ -257,6 +264,9 @@ except OSError as e:
         for path in ["repos", "/a/../b", "/a//b", "/a?x"]:
             with pytest.raises(ValueError, match="HTTP rule path"):
                 eryx.HttpRule("h", paths=[path])
+        for query in ["(", "a)|(b"]:
+            with pytest.raises(ValueError, match="query pattern"):
+                eryx.HttpRule("h", queries=[query])
 
     def test_with_root_cert(self):
         """Test with_root_cert method."""
@@ -1006,6 +1016,28 @@ for method, path in [("GET", "/allowed/x"), ("GET", "/other"), ("POST", "/allowe
         assert b"GET /other refused" in result.stdout, result.stdout
         assert b"POST /allowed refused" in result.stdout, result.stdout
 
+    def test_http_rules_match_queries(self, http_server):
+        """A query the HTTP rules don't allow is refused: fetch, but not push."""
+        host, port = http_server
+        config = eryx.NetConfig.permissive().allow_http(
+            eryx.HttpRule(host, methods=["GET"], queries=["service=git-upload-pack"])
+        )
+        sandbox = eryx.Sandbox(network=config)
+        result = sandbox.execute(f"""
+import socket
+
+for service in ["git-upload-pack", "git-receive-pack"]:
+    sock = socket.create_connection(("{host}", {port}))
+    try:
+        sock.sendall(f"GET /info/refs?service={{service}} HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n".encode())
+        print(service, "sent", sock.recv(12))
+    except OSError as e:
+        print(service, "refused")
+    sock.close()
+""")
+        assert b"git-upload-pack sent b'HTTP/1." in result.stdout, result.stdout
+        assert b"git-receive-pack refused" in result.stdout, result.stdout
+
     def test_network_blocked_host(self):
         """Test that blocked hosts are rejected."""
         # Default config blocks localhost
@@ -1140,3 +1172,48 @@ class TestResultCapture:
         assert "ERYX_SECRET_PLACEHOLDER_" in result.result_json
         assert "[REDACTED]" not in result.result_json
         assert "ghp-real-token" not in result.result_json
+
+
+class TestEnv:
+    """``env=`` sets environment variables, which aren't secrets."""
+
+    HOSTILE = "it's \"quoted\"\n'); import os; os._exit(3) #"
+
+    def test_env_is_in_os_environ(self):
+        sandbox = eryx.Sandbox(
+            env={"GIT_AUTHOR_NAME": "Eryx", "HOSTILE": self.HOSTILE},
+            secrets={"TOKEN": {"value": "ghp-real-token"}},
+        )
+        result = sandbox.execute(
+            "import os\n"
+            "print(os.environ['GIT_AUTHOR_NAME'])\n"
+            f"print(os.environ['HOSTILE'] == {self.HOSTILE!r})\n"
+            "print(os.environ['TOKEN'])\n"
+        )
+        # The variable's value is printed as is; the secret is scrubbed.
+        assert result.stdout == b"Eryx\nTrue\n[REDACTED]\n"
+
+    def test_factory_sandbox_and_pool_get_env(self):
+        factory = eryx.SandboxFactory()
+        sandbox = factory.create_sandbox(env={"A": "1"})
+        assert sandbox.execute("import os; print(os.environ['A'])").stdout == b"1\n"
+        pool = factory.create_pool(max_size=1, min_idle=0, env={"A": "2"})
+        try:
+            with pool.acquire() as leased:
+                result = leased.execute("import os; print(os.environ['A'])")
+                assert result.stdout == b"2\n"
+        finally:
+            pool.close()
+
+    @pytest.mark.parametrize(
+        ("env", "message"),
+        [
+            ({"NOT-A-NAME": "x"}, "invalid environment variable name"),
+            ({"PATH": "/bin"}, "set by the sandbox itself"),
+            ({"TOKEN": "x"}, "collides with the secret TOKEN"),
+            ({"A": "a\0b"}, "NUL byte"),
+        ],
+    )
+    def test_bad_env_is_refused(self, env, message):
+        with pytest.raises(eryx.InitializationError, match=message):
+            eryx.Sandbox(env=env, secrets={"TOKEN": {"value": "v"}})
