@@ -1517,9 +1517,6 @@ async fn serve_git(mut stream: tokio::net::TcpStream, root: PathBuf) {
     }
 }
 
-/// A shell whose `git` (ERYX_TEST_GIT_WASM: git with HTTPS) may spawn its
-/// helpers, with the secret TOKEN for `host` and a child network allowing
-/// `network`'s hosts.
 /// git from ERYX_TEST_GIT_WASM, with a sandbox's defaults: no system config,
 /// and no prompting for credentials.
 fn git_cmd() -> Command {
@@ -1531,6 +1528,9 @@ fn git_cmd() -> Command {
         .with_env("GIT_TERMINAL_PROMPT", "0")
 }
 
+/// A shell whose `git` (ERYX_TEST_GIT_WASM: git with HTTPS) may spawn its
+/// helpers, with the secret TOKEN for `host` and a child network allowing
+/// `network`'s hosts.
 fn git_shell(network: NetConfig, host: &str, scrub_files: bool) -> Sandbox {
     Sandbox::embedded()
         .shell()

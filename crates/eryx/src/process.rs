@@ -1148,7 +1148,8 @@ impl Command {
     /// Start the command with `key` set to `value` unless whoever runs it
     /// (the shell, or a command that [spawns](Self::allow_spawn) it) sets
     /// `key` itself: a default, such as git's `GIT_CONFIG_NOSYSTEM=1` or
-    /// go's `GOROOT`, that a script can still override. Setting `key` again
+    /// go's `GOROOT`, that a script can still override (but not unset: a
+    /// caller without `key` gets the default). Setting `key` again
     /// replaces its value. Its children get it only if the command passes it
     /// on, as it does the rest of its environment. The child proxy's
     /// variables (see

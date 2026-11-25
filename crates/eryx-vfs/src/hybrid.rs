@@ -623,9 +623,15 @@ impl std::fmt::Debug for HybridPreopen {
 /// is either VFS-backed or a real directory, and every descriptor opened
 /// beneath it stays on the same side.
 pub struct HybridVfsCtx<S: VfsStorage + Clone> {
-    /// The VFS storage backends for virtual paths: the default one first,
-    /// then one per [`add_storage_preopen`](Self::add_storage_preopen).
-    pub(crate) storages: Vec<S>,
+    /// The VFS storage backends for virtual paths, by id: the default one
+    /// (0), then one per [`add_storage_preopen`](Self::add_storage_preopen).
+    /// Ids are unique among a context and its [`fork`](Self::fork)s (see
+    /// `next_storage`), since `open_files`, which they share, is keyed by
+    /// them: sibling children mounting different storages at one path must
+    /// not share each other's open-file marks.
+    pub(crate) storages: HashMap<usize, S>,
+    /// The next storage id, shared with forks.
+    next_storage: Arc<AtomicUsize>,
     /// Preopened directories (both VFS and real).
     pub(crate) preopens: Vec<HybridPreopen>,
     /// Host files and directories the guest has opened. A handle stays open
@@ -769,7 +775,8 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     /// `add_real_preopen` to configure paths.
     pub fn new(storage: S) -> Self {
         Self {
-            storages: vec![storage],
+            storages: HashMap::from([(0, storage)]),
+            next_storage: Arc::new(AtomicUsize::new(1)),
             preopens: Vec::new(),
             open_host_files: Vec::new(),
             max_open_host_files: DEFAULT_MAX_OPEN_HOST_FILES,
@@ -786,6 +793,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
     pub fn fork(&self) -> Self {
         Self {
             storages: self.storages.clone(),
+            next_storage: Arc::clone(&self.next_storage),
             preopens: self.preopens.clone(),
             open_host_files: Vec::new(),
             max_open_host_files: self.max_open_host_files,
@@ -864,7 +872,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
 
     /// The storage backing a VFS descriptor.
     pub(crate) fn storage_for(&self, desc: &crate::wasi_impl::VfsDescriptor) -> &S {
-        &self.storages[desc.storage]
+        &self.storages[&desc.storage]
     }
 
     /// Add a VFS-managed preopen directory, backed by the context's storage.
@@ -898,9 +906,9 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         dir_perms: DirPerms,
         file_perms: FilePerms,
     ) {
-        self.storages.push(storage);
-        let index = self.storages.len() - 1;
-        self.add_preopen_on(index, guest_path.into(), dir_perms, file_perms);
+        let id = self.next_storage.fetch_add(1, Ordering::Relaxed);
+        self.storages.insert(id, storage);
+        self.add_preopen_on(id, guest_path.into(), dir_perms, file_perms);
     }
 
     fn add_preopen_on(
@@ -915,7 +923,7 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         // We use the sync method since this is called during setup before
         // the async runtime might be fully available.
         if dir_perms.contains(DirPerms::MUTATE)
-            && let Err(e) = self.storages[storage].mkdir_sync(&guest_path)
+            && let Err(e) = self.storages[&storage].mkdir_sync(&guest_path)
         {
             tracing::warn!(
                 "Failed to create VFS preopen directory {}: {}",
@@ -1103,18 +1111,29 @@ impl<S: VfsStorage + Clone> HybridVfsCtx<S> {
         }
     }
 
-    /// Remove whatever is mounted at `guest_path` (a directory, or a
-    /// single-file volume's file), so a mount added there next replaces it
+    /// Remove whatever is mounted at `guest_path` (a directory, a
+    /// single-file volume's file, or single-file volumes in it), so a mount added there next replaces it
     /// instead of sitting beside it, which would leave the guest choosing
     /// between them. Mounts above or below `guest_path` stay, as does the
     /// root.
     pub fn unmount(&mut self, guest_path: &str) {
         let path = normalize_guest_path(guest_path);
-        let gone: Vec<usize> = self
+        // A single-file volume's preopen is its directory, so one in
+        // `guest_path` goes too: two preopens there would collide.
+        let mut gone: Vec<usize> = self
             .mount_points()
             .filter(|point| point.path == path)
             .map(|point| point.index)
             .collect();
+        gone.extend(self.preopens.iter().enumerate().filter_map(|(i, p)| {
+            let at = match p {
+                HybridPreopen::Vfs { guest_path, .. } | HybridPreopen::Real { guest_path, .. } => {
+                    guest_path
+                }
+                HybridPreopen::Root => return None,
+            };
+            (normalize_guest_path(at) == path).then_some(i)
+        }));
         let mut index = 0;
         self.preopens.retain(|_| {
             index += 1;
@@ -1270,8 +1289,8 @@ mod tests {
         assert_eq!(child.max_open_host_files, 3);
         assert!(child.open_host_files.is_empty());
         // Same storage: the child's writes are the parent's files.
-        child.storages[0].write("/data/f", b"x").await.unwrap();
-        assert_eq!(parent.storages[0].read("/data/f").await.unwrap(), b"x");
+        child.storages[&0].write("/data/f", b"x").await.unwrap();
+        assert_eq!(parent.storages[&0].read("/data/f").await.unwrap(), b"x");
     }
 
     #[test]
@@ -1287,6 +1306,37 @@ mod tests {
         let paths: Vec<String> = ctx.mount_points().map(|point| point.path).collect();
         assert_eq!(paths, ["/data", "/data/go/sub"]);
         assert_eq!(ctx.preopens.len(), 3, "the root stays");
+
+        // A single-file volume in the directory goes with it.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("f"), b"f").unwrap();
+        ctx.add_real_file_preopen_path(
+            "/data/go/f",
+            temp.path().join("f"),
+            DirPerms::READ,
+            FilePerms::READ,
+            None,
+        )
+        .unwrap();
+        ctx.unmount("/data/go");
+        assert_eq!(ctx.preopens.len(), 3);
+    }
+
+    /// Forks adding storages give them different ids, since they share the
+    /// open-file marks keyed by them.
+    #[test]
+    fn sibling_forks_storages_get_their_own_ids() {
+        let storage = || crate::ArcStorage::new(std::sync::Arc::new(crate::InMemoryStorage::new()));
+        let parent = HybridVfsCtx::new(storage());
+        let (mut a, mut b) = (parent.fork(), parent.fork());
+        a.add_storage_preopen("/cache", storage(), DirPerms::all(), FilePerms::all());
+        b.add_storage_preopen("/cache", storage(), DirPerms::all(), FilePerms::all());
+        let id = |ctx: &HybridVfsCtx<_>| match ctx.preopens.last() {
+            Some(HybridPreopen::Vfs { storage, .. }) => *storage,
+            _ => unreachable!(),
+        };
+        assert_ne!(id(&a), id(&b));
+        assert_ne!(id(&a), 0);
     }
 
     #[test]

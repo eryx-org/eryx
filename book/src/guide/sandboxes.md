@@ -410,7 +410,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
 - **A command's own environment and files:** in Rust,
   `Command::with_env(key, value)` gives a command a default for one
   variable, which a value its caller sets (`GIT_PAGER=less git log`, or an
-  `export`) replaces. `Command::with_mount(volume)` (with `unstable-vfs`)
+  `export`) replaces; a caller can't unset a default, only set it (to an
+  empty value, say). `Command::with_mount(volume)` (with `unstable-vfs`)
   mounts a `VolumeMount` in that command's filesystem and its children's,
   not the shell's or other commands': read-only unless the volume is
   writable, and a storage volume works as for a sandbox. A mount replaces
@@ -461,8 +462,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   (2 if it can't read the file as a command at all).
 - **Files:** a child sees the shell's filesystem (above): the read-only root,
   `/tmp`, `/dev` and, with `unstable-vfs`, the session's VFS mounts (plus
-  its command's own mounts, above), and nothing else of the host. Files a child writes are the shell's, and last as
-  long as the shell's own.
+  its command's own mounts, above), and nothing else of the host. Files a
+  child writes are the shell's, and last as long as the shell's own.
 - **Network:** none by default. A child without network that tries to
   resolve a name or open a socket gets `eryx: networking not enabled for
   commands in this sandbox (curl has no network)` on its stderr (`for this
