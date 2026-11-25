@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,6 +16,7 @@ use wasmtime::*;
 
 mod net;
 mod snapshot;
+mod term;
 mod vsock;
 
 const ERRNO_SUCCESS: i32 = 0;
@@ -69,6 +70,8 @@ struct Host {
     stderr: Vec<u8>,
     exit: Option<i32>,
     stats: Stats,
+    /// rows << 16 | cols of the host terminal, 0 when there is none
+    console_size: u32,
     jit: bool,
     table: Option<Table>,
     jit_saved: HashMap<i32, Option<Func>>,
@@ -192,9 +195,24 @@ fn parse_args() -> Result<Opts> {
             _ => bail!("unknown argument {a}"),
         }
     }
+    // what ./fetch-unkernel.sh downloads, from here or from the crate
+    let vendor = |f: &str| {
+        [".".to_owned(), env!("CARGO_MANIFEST_DIR").to_owned()]
+            .into_iter()
+            .map(|d| format!("{d}/vendor/{f}"))
+            .find(|p| std::path::Path::new(p).exists())
+    };
+    if o.kernel.is_empty() {
+        o.kernel = vendor("unkernel.wasm").unwrap_or_default();
+    }
+    if o.distro.is_none() {
+        o.distro = vendor("alpine.erofs");
+    }
     if o.kernel.is_empty() {
         bail!(
-            "usage: unkernel-spike --kernel unkernel.wasm [--distro alpine.erofs] [--data data.img] [--mem MiB] [--input SCRIPT] [--timeout S] [--no-net]"
+            "no kernel: run ./fetch-unkernel.sh, or pass --kernel unkernel.wasm\n\
+             usage: eryx-linux [--kernel unkernel.wasm] [--distro alpine.erofs] [--exec CMD]... \
+             [--mem MiB] [--no-net] [--no-jit] [--snapshot-out F | --snapshot-in F [--cow]] [--timeout S]"
         );
     }
     Ok(o)
@@ -240,6 +258,12 @@ fn spawn_input(script: Option<String>, tx: Sender<Event>) {
             let mut buf = [0u8; 4096];
             let mut stdin = std::io::stdin();
             while let Ok(n) = stdin.read(&mut buf) {
+                // Ctrl-] quits, as in unkernel's CLI (Ctrl-C belongs to the guest)
+                if term::is_raw() && buf[..n].contains(&0x1d) {
+                    term::restore();
+                    eprintln!("[eryx-linux] quit");
+                    std::process::exit(0);
+                }
                 if n == 0 || tx.send(Event::Input(buf[..n].to_vec())).is_err() {
                     return;
                 }
@@ -258,6 +282,10 @@ fn main() -> Result<()> {
         .unwrap_or_default();
     if !o.append.is_empty() {
         cmdline = format!("{cmdline} {}", o.append);
+    }
+    let interactive = o.exec.is_empty() && o.input.is_none() && std::io::stdin().is_terminal();
+    if interactive {
+        cmdline = format!("{cmdline} quiet"); // no boot log on the console
     }
 
     let mut cfg = Config::new();
@@ -436,6 +464,7 @@ fn boot(o: &Opts, l: &Loaded<'_>, t0: Instant) -> Result<(i32, Store<Host>)> {
         stderr: Vec::new(),
         exit: None,
         stats: Stats::default(),
+        console_size: 0,
         jit: o.jit,
         table: None,
         jit_saved: HashMap::new(),
@@ -557,12 +586,21 @@ fn boot(o: &Opts, l: &Loaded<'_>, t0: Instant) -> Result<(i32, Store<Host>)> {
     if let Some(t) = o.timeout {
         std::thread::spawn(move || {
             std::thread::sleep(t);
+            term::restore();
             eprintln!("\n[spike] timeout");
             std::process::exit(124);
         });
     }
     let run = sw.get_typed_func::<(), ()>(&mut store, "run")?;
+    let interactive = o.exec.is_empty() && o.input.is_none() && std::io::stdin().is_terminal();
+    if interactive {
+        eprintln!("[eryx-linux] Ctrl-] quits");
+        if let Some((rows, cols)) = term::raw() {
+            store.data_mut().console_size = (rows as u32) << 16 | cols as u32;
+        }
+    }
     let r = run.call(&mut store, ());
+    term::restore();
     let h = store.data();
     eprintln!("[spike] ran for {:?}, {:?}", t0.elapsed(), h.stats);
     for r in &h.vsock.results {
@@ -1017,7 +1055,9 @@ fn define_devices(l: &mut Linker<Host>) -> Result<()> {
             }
         },
     )?;
-    l.func_wrap(U, "wasm_driver_console_size", || 0i32)?;
+    l.func_wrap(U, "wasm_driver_console_size", |c: Caller<'_, Host>| {
+        c.data().console_size as i32
+    })?;
 
     // block
     l.func_wrap(

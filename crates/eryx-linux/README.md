@@ -37,9 +37,22 @@ changes daily) and wasmtime's experimental stack switching.
 
 ## Running it
 
+To play with it, fetch the kernel and run it. You get an Alpine shell with
+the network on, so `apk add` works:
+
 ```sh
 ./fetch-unkernel.sh
-cargo build --release --bin eryx-linux
+cargo run --release --bin eryx-linux     # Ctrl-] quits; Ctrl-C goes to the guest
+```
+
+The terminal is in raw mode while the guest owns it: arrows, tab
+completion, Ctrl-C and editors all work, and the guest console takes your
+terminal's size. With `vendor/` present, `--kernel` and `--distro` default
+to the fetched files.
+
+Scripted use:
+
+```sh
 K=vendor/unkernel.wasm D=vendor/alpine.erofs
 ./target/release/eryx-linux --kernel $K --distro $D --exec 'uname -a'
 ./target/release/eryx-linux --kernel $K --distro $D --exec true --snapshot-out alpine.snap
