@@ -633,6 +633,12 @@ sock.close()
         assert self._send(port, {}, "/anything?x", "X-Token") == "sent"
         assert received[0]["headers"]["X-Token"] == self.REAL
 
+    def test_none_means_unset(self, exfil_server):
+        _, port, received = exfil_server
+        unset = {"header": None, "http_rules": None}
+        assert self._send(port, unset, "/anything", "X-Token") == "sent"
+        assert received[0]["headers"]["X-Token"] == self.REAL
+
     def test_types_are_checked(self):
         with pytest.raises(TypeError, match="http_rules"):
             eryx.Sandbox(secrets={"KEY": {"value": "v", "http_rules": ["/x"]}})

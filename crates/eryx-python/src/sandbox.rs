@@ -721,18 +721,21 @@ pub(crate) fn extract_secrets(secrets_dict: &Bound<'_, PyDict>) -> PyResult<Vec<
         };
         let allowed_hosts: Vec<String> = value_dict
             .get_item("allowed_hosts")?
+            .filter(|v| !v.is_none())
             .map(|v| v.extract())
             .transpose()
             .map_err(|_| type_error("allowed_hosts", "a list of strings"))?
             .unwrap_or_default();
         let header: Option<String> = value_dict
             .get_item("header")?
+            .filter(|v| !v.is_none())
             .map(|v| v.extract())
             .transpose()
             .map_err(|_| type_error("header", "a string"))?
             .filter(|h: &String| !h.is_empty());
         let http_rules: Vec<HttpRule> = value_dict
             .get_item("http_rules")?
+            .filter(|v| !v.is_none())
             .map(|v| v.extract())
             .transpose()
             .map_err(|_| type_error("http_rules", "a list of HttpRule"))?

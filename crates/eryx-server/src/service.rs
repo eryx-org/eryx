@@ -1157,7 +1157,6 @@ const SYS_PATH_INJECT: &str = concat!(
     "del _sys, _il\n",
 );
 
-/// Parse a `NetworkConfig` CIDR list, naming the field in the error.
 /// The [`HttpRule`] a request's `HttpRule` message describes.
 fn http_rule(r: crate::proto::eryx::v1::HttpRule) -> HttpRule {
     HttpRule::new(r.host)
@@ -1166,6 +1165,7 @@ fn http_rule(r: crate::proto::eryx::v1::HttpRule) -> HttpRule {
         .with_queries(r.queries)
 }
 
+/// Parse a `NetworkConfig` CIDR list, naming the field in the error.
 fn parse_networks(field: &str, cidrs: &[String]) -> Result<Vec<eryx::IpNet>, Status> {
     cidrs
         .iter()

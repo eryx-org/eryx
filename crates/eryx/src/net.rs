@@ -537,6 +537,13 @@ impl NetConfig {
                 ));
             }
             for rule in &secret.http_rules {
+                if rule.host != "*" && !is_host_pattern(&normalize_host(&rule.host)) {
+                    return Err(format!(
+                        "secret '{name}': HTTP rule host {:?} names no host once its trailing \
+                         dot is ignored",
+                        rule.host
+                    ));
+                }
                 rule.validate()
                     .map_err(|e| format!("secret '{name}': {e}"))?;
             }
@@ -2941,6 +2948,8 @@ mod tests {
         for rule in [
             HttpRule::new("h").with_paths(["/a/../b"]),
             HttpRule::new("h").with_queries(["("]),
+            HttpRule::new(""),
+            HttpRule::new("."),
         ] {
             let err = config.check_secret_hosts(&secrets(rule)).unwrap_err();
             assert!(err.contains("secret 'TOKEN'"), "{err}");
