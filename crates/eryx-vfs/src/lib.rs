@@ -9,6 +9,7 @@
 //! The VFS consists of:
 //! - [`VfsStorage`] - A trait for pluggable storage backends
 //! - [`InMemoryStorage`] - An in-memory implementation for testing
+//! - [`OverlayStorage`] - A copy-on-write overlay of a read-only storage
 //! - WASI host implementations that bridge storage to the component model
 //!
 //! ## Usage
@@ -40,6 +41,7 @@ mod hybrid_bindings;
 mod hybrid_host;
 mod hybrid_p3;
 mod linker;
+mod overlay;
 mod perms;
 pub mod scrubbing;
 mod storage;
@@ -55,6 +57,7 @@ pub use linker::{
     HybridVfsView, VfsView, add_hybrid_vfs_to_linker, add_hybrid_vfs_to_linker_p3,
     add_vfs_to_linker,
 };
+pub use overlay::{OverlayChange, OverlayStorage};
 pub use scrubbing::{
     FileScrubPolicy as VfsFileScrubPolicy, ScrubbingStorage, SecretConfig as VfsSecretConfig,
 };

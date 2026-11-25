@@ -1,4 +1,4 @@
-//! End-to-end checks of host volume mounts as sandboxed Python sees them.
+//! End-to-end checks of volume mounts as sandboxed Python sees them.
 #![cfg(all(feature = "embedded", feature = "unstable-vfs"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -261,4 +261,33 @@ for p in [ROOT + '/d', ROOT + '/d/f']:
         let stdout = run_with_volume(volume, &format!("ROOT = '/mnt/ro'\n{code}")).await;
         assert_eq!(stdout, expected);
     }
+}
+
+/// An overlay as a storage volume: the sandbox reads the shared lower layer
+/// and writes to its own upper one, leaving the lower one as it was.
+#[tokio::test]
+async fn an_overlay_volume_keeps_writes_out_of_its_lower_layer() {
+    use eryx::vfs::{OverlayStorage, VfsStorage};
+
+    let lower = Arc::new(InMemoryStorage::new());
+    lower.mkdir_sync("/mnt/cache").unwrap();
+    lower.write("/mnt/cache/a", b"prebuilt").await.unwrap();
+    let lower: Arc<dyn VfsStorage> = lower;
+
+    let code = r"
+import os
+print(open('/mnt/cache/a').read())
+open('/mnt/cache/a', 'a').write('+run')
+open('/mnt/cache/new', 'w').write('entry')
+print(sorted(os.listdir('/mnt/cache')), open('/mnt/cache/a').read())
+";
+    // Each run gets a fresh upper layer over the same lower one
+    for _ in 0..2 {
+        let upper = Arc::new(InMemoryStorage::new());
+        let overlay = OverlayStorage::new("/mnt/cache", Arc::clone(&lower), upper).unwrap();
+        let stdout = run_with_volume(VolumeMount::storage("/mnt/cache", Arc::new(overlay)), code);
+        assert_eq!(stdout.await, "prebuilt\n['a', 'new'] prebuilt+run\n");
+    }
+    assert_eq!(lower.read("/mnt/cache/a").await.unwrap(), b"prebuilt");
+    assert!(!lower.exists("/mnt/cache/new").await.unwrap());
 }
