@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/eryx-org/eryx/compare/eryx-run-python-v0.4.0...eryx-run-python-v0.5.0) (2026-11-25)
+
+
+### Features
+
+* **server:** pass environment variables to executions ([#1203](https://github.com/eryx-org/eryx/issues/1203)) ([5fadaa4](https://github.com/eryx-org/eryx/commit/5fadaa495594ec84630ce3a783b1930e33831e0e))
+
 ## [0.4.0](https://github.com/eryx-org/eryx/compare/eryx-run-python-v0.3.0...eryx-run-python-v0.4.0) (2026-11-20)
 
 
