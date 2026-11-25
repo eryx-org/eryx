@@ -109,8 +109,10 @@ same starting files and its own writes.
 use eryx_vfs::{InMemoryStorage, OverlayStorage, VfsStorage};
 use std::sync::Arc;
 
-// Once, shared by every run
-let lower: Arc<dyn VfsStorage> = Arc::new(prebuilt_cache());
+// Once, shared by every run: the prebuilt files under /cache
+let cache = InMemoryStorage::new();
+cache.mkdir_sync("/cache")?;
+let lower: Arc<dyn VfsStorage> = Arc::new(cache);
 // Per run, at most 64 MiB of writes
 let upper = Arc::new(InMemoryStorage::with_max_bytes(64 << 20));
 let overlay = OverlayStorage::new("/cache", Arc::clone(&lower), upper)?;

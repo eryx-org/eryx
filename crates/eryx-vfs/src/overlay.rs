@@ -132,10 +132,15 @@ impl Found {
 }
 
 impl OverlayStorage {
-    /// An overlay of `lower`'s directory `root`, keeping its changes in
-    /// `upper`. A copy-up bigger than `upper`'s
-    /// [`max_bytes`](InMemoryStorage::max_bytes) fails before reading the
-    /// file.
+    /// An overlay of `lower`'s directory `root` (an absolute path without
+    /// a trailing `/`), keeping its changes in `upper`. A copy-up bigger
+    /// than `upper`'s [`max_bytes`](InMemoryStorage::max_bytes) fails
+    /// before reading the file. Writes outside `root` fail with
+    /// [`VfsError::InvalidPath`].
+    ///
+    /// Overlays sharing an `upper` must have roots apart, neither inside
+    /// the other: each reports everything in the upper layer under its
+    /// root as its own.
     ///
     /// # Errors
     ///
@@ -180,17 +185,16 @@ impl OverlayStorage {
     /// Make `path`'s parent directories in the upper layer, each of which
     /// must already be a directory in the merged view
     async fn ensure_parent(&self, path: &str) -> VfsResult<()> {
-        let Some((parent, _)) = path.rsplit_once('/') else {
+        let under_root = path
+            .strip_prefix(self.root.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        let Some((parent, _)) = path.rsplit_once('/').filter(|_| under_root) else {
             return Err(VfsError::InvalidPath(path.to_string()));
         };
-        if parent.len() <= self.root.len() {
-            return Ok(());
-        }
+        // `path` starts with the root, so this is a char boundary
+        let below = parent.get(self.root.len()..).unwrap_or_default();
         let mut dir = self.root.clone();
-        for component in parent[self.root.len()..]
-            .split('/')
-            .filter(|c| !c.is_empty())
-        {
+        for component in below.split('/').filter(|c| !c.is_empty()) {
             dir.push('/');
             dir.push_str(component);
             match self.find(&dir).await? {
@@ -286,7 +290,8 @@ impl OverlayStorage {
 
     /// What the overlay changed, in an order that can be applied as it
     /// goes: removals deepest first, then new directories parents first,
-    /// then the written files, by path.
+    /// then the written files, by path. Call it once writes have stopped:
+    /// a write's contents are read afterwards, from the overlay.
     ///
     /// # Errors
     ///
@@ -798,6 +803,18 @@ mod tests {
             o.write("/mnt/m/new", &[0; 4096]).await,
             Err(VfsError::QuotaExceeded(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn writes_outside_the_root_are_refused() {
+        let o = overlay().await;
+        for path in ["/mnt/m2/x/f", "/mnt/other", "/mnt/mé/x/f"] {
+            assert!(
+                matches!(o.write(path, b"x").await, Err(VfsError::InvalidPath(_))),
+                "{path}"
+            );
+        }
+        assert!(changes(&o).await.is_empty());
     }
 
     /// One lower storage under two overlays: each sees only its own writes,
