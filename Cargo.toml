@@ -3,8 +3,9 @@ resolver = "2"
 members = ["crates/*"]
 # The shell guest (wasm32-wasip3, plus a wasm32-wasip2 build for js/eryx) and
 # the bundler (wasm32-wasip2) build only for wasm and pin their dependencies
-# (brush, rolldown) with their own locks.
-exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler"]
+# (brush, rolldown) with their own locks. The eryx-linux spike is standalone
+# so wasmtime's experimental stack-switching feature stays out of eryx builds.
+exclude = ["crates/eryx-guest-shell", "crates/eryx-bundler", "crates/eryx-linux"]
 
 # Dev tools (install via cargo or mise):
 # - cargo-nextest: Fast test runner (`cargo nextest run`)

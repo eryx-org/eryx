@@ -4,6 +4,7 @@
 !Cargo.toml
 !Cargo.lock
 !README.md
+!LICENSE-unkernel-MIT
 !*.sh
 !src/
 !src/**

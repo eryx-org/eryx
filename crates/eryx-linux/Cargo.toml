@@ -1,14 +1,23 @@
 [package]
-name = "unkernel-spike"
+name = "eryx-linux"
 version = "0.0.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Spike: a real Linux guest for eryx, booting unkernel (Linux compiled to wasm) under wasmtime"
 publish = false
+
+# A standalone workspace, like eryx-guest-shell's: it needs wasmtime's
+# experimental stack-switching feature, which must not reach eryx's own
+# builds through feature unification, and `cargo clippy --workspace` should
+# never build it.
+[workspace]
 
 [dependencies]
 wasmtime = { version = "51.0.0", features = ["stack-switching"] }
 wasmparser = "0.263"
 wasm-encoder = "0.263"
-eryx = { path = "../eryx/crates/eryx", default-features = false, features = ["embedded", "shell"] }
+# only src/bin/eryx_shell.rs, the comparison benchmark
+eryx = { path = "../eryx", default-features = false, features = ["embedded", "shell"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [profile.release]

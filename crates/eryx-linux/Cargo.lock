@@ -778,6 +778,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eryx-linux"
+version = "0.0.0"
+dependencies = [
+ "eryx",
+ "tokio",
+ "wasm-encoder",
+ "wasmparser",
+ "wasmtime",
+]
+
+[[package]]
 name = "eryx-vfs"
 version = "0.14.3"
 dependencies = [
@@ -2402,17 +2413,6 @@ name = "unicode-width"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
-
-[[package]]
-name = "unkernel-spike"
-version = "0.0.0"
-dependencies = [
- "eryx",
- "tokio",
- "wasm-encoder",
- "wasmparser",
- "wasmtime",
-]
 
 [[package]]
 name = "untrusted"
