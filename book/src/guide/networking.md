@@ -71,7 +71,7 @@ The default `NetConfig` has sensible security defaults:
 | `allowed_networks` | `[]` | CIDRs exempt from `blocked_networks` |
 | `internal_hosts` | `[]` | Host patterns allowed to resolve into `blocked_networks` |
 | `allow_plaintext_secrets` | `false` | Also substitute [secrets](./secrets.md#plain-http) over plain TCP (sends them unencrypted) |
-| `http_rules` | `[]` | [Method and path rules](#method-and-path-rules) for HTTP requests |
+| `http_rules` | `[]` | [Method, path and query rules](#method-path-and-query-rules) for HTTP requests |
 
 A bare `NetConfig()` allows no hosts: list them in `allowed_hosts`, or pass
 `allow_all_hosts=True` to allow any host that isn't blocked.
@@ -217,7 +217,7 @@ In JavaScript, the same options are `blockedNetworks`, `allowedNetworks` and
 `internalHosts`. They're enforced in Node.js only: browsers don't expose the
 address a request connects to.
 
-## Method and Path Rules
+## Method, Path and Query Rules
 
 Allowing a host allows every endpoint on it. To narrow that, add HTTP rules:
 a host that any rule matches only accepts requests matching one of its rules.
@@ -234,8 +234,25 @@ config = eryx.NetConfig(
 )
 ```
 
-From Rust, use `NetConfig::allow_http(HttpRule::new(host).with_methods(..).with_paths(..))`;
+From Rust, use `NetConfig::allow_http(HttpRule::new(host).with_methods(..).with_paths(..).with_queries(..))`;
 over gRPC, `NetworkConfig.http_rules`.
+
+Some endpoints differ only by query. Git's smart HTTP starts a fetch with
+`GET /info/refs?service=git-upload-pack` and a push with
+`?service=git-receive-pack`, so allowing fetches but not pushes needs a query
+rule:
+
+```python
+eryx.HttpRule(
+    "git.example.com",
+    methods=["GET"],
+    paths=["/org/repo.git/info/refs"],
+    queries=["service=git-upload-pack"],
+)
+```
+
+(The fetch itself then `POST`s to `/org/repo.git/git-upload-pack`, which a
+second rule allows.)
 
 How requests match:
 
@@ -243,7 +260,20 @@ How requests match:
 - **Paths** match whole segments: `/repos/org/repo` matches it and anything
   under `/repos/org/repo/`, but not `/repos/org/repo-evil`. A path ending in
   `/` matches anything under it. No paths means any path.
-- The query string is ignored, and percent-escapes are decoded before matching
+- **Queries** are regular expressions, in the Rust
+  [`regex`](https://docs.rs/regex/latest/regex/#syntax) syntax, each matched
+  against the *whole* raw query string: the text after `?` exactly as sent,
+  not decoded, and empty when there's none (`/x` and `/x?` both have an empty
+  query). `service=git-upload-pack` matches that query and nothing else;
+  `(service=git-upload-pack)?` also matches no query; `page=[0-9]+` matches
+  `page=2` but not `page=2&per_page=100`. No queries means any query.
+- A query a server could read differently from the pattern just doesn't match:
+  a repeated parameter (`service=git-upload-pack&service=git-receive-pack`),
+  a `;` separator or an escape (`service=git%2Dupload-pack`) is more text for
+  an anchored pattern, not a second reading of it. Keep that so by matching
+  parameter values with a class such as `[a-z-]+` rather than `.*`, which
+  matches `&`, `;` and `%` too.
+- Paths are matched without the query, and percent-escapes are decoded first
   (`/repos/org/%72epo` is `/repos/org/repo`).
 - A path a server could resolve somewhere else never matches: one with a `.`
   or `..` segment (escaped as `%2e` or not, or with `;` parameters, as in
@@ -251,8 +281,8 @@ How requests match:
   escape. So does a target that isn't a path or an absolute URL (`CONNECT`,
   `OPTIONS *`).
 - A rule's own paths must be normalized absolute paths: no such segments,
-  query or escapes. A rule that breaks this is rejected when the sandbox is
-  built.
+  query or escapes, and its queries must be valid regular expressions. A rule
+  that breaks this is rejected when the sandbox is built.
 
 A refused request is never sent: the write fails in the sandbox (an `OSError`
 in Python) and the connection's request can't continue.

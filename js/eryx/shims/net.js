@@ -118,7 +118,7 @@ function checkTimeout(name, value) {
  *
  * Throws a TypeError if a network is not a valid CIDR, maxConnections is
  * not a non-negative integer, a timeout is not greater than zero, or
- * httpRules (the Rust crate's method and path rules) are given.
+ * httpRules (the Rust crate's method, path and query rules) are given.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
  * @returns {Policy | null}
