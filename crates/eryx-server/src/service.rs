@@ -244,12 +244,7 @@ impl ServerLimits {
             .with_io_timeout(io_timeout.min(self.max_io_timeout))
             .with_allowed_networks(parse_networks("allowed_networks", &nc.allowed_networks)?)
             .with_internal_hosts(nc.internal_hosts)
-            .with_http_rules(nc.http_rules.into_iter().map(|r| {
-                HttpRule::new(r.host)
-                    .with_methods(r.methods)
-                    .with_paths(r.paths)
-                    .with_queries(r.queries)
-            }))
+            .with_http_rules(nc.http_rules.into_iter().map(http_rule))
             .allow_plaintext_secrets(nc.allow_plaintext_secrets);
         if !nc.blocked_hosts.is_empty() {
             config = config.with_blocked_hosts(nc.blocked_hosts);
@@ -696,7 +691,11 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                         s.name
                     )));
                 }
-                let secret = SecretConfig::new(s.value.clone(), s.allowed_hosts.clone());
+                let mut secret = SecretConfig::new(s.value.clone(), s.allowed_hosts.clone())
+                    .with_http_rules(s.http_rules.iter().cloned().map(http_rule));
+                if !s.header.is_empty() {
+                    secret = secret.only_in_header(s.header.clone());
+                }
                 map.insert(s.name.clone(), secret);
             }
             map
@@ -1159,6 +1158,14 @@ const SYS_PATH_INJECT: &str = concat!(
 );
 
 /// Parse a `NetworkConfig` CIDR list, naming the field in the error.
+/// The [`HttpRule`] a request's `HttpRule` message describes.
+fn http_rule(r: crate::proto::eryx::v1::HttpRule) -> HttpRule {
+    HttpRule::new(r.host)
+        .with_methods(r.methods)
+        .with_paths(r.paths)
+        .with_queries(r.queries)
+}
+
 fn parse_networks(field: &str, cidrs: &[String]) -> Result<Vec<eryx::IpNet>, Status> {
     cidrs
         .iter()

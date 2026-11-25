@@ -571,3 +571,70 @@ sock.close()
         net = eryx.NetConfig(allow_plaintext_secrets=True)
         assert net.allow_plaintext_secrets is True
         assert "allow_plaintext_secrets=true" in repr(net)
+
+
+class TestSecretScope:
+    """A secret's header and http_rules limit where it's substituted."""
+
+    REAL = "sk-scoped-real-888"
+
+    def _send(self, port, secret, target, header="Authorization"):
+        net = eryx.NetConfig.permissive()
+        net.allow_plaintext_secrets = True
+        sandbox = eryx.Sandbox(
+            secrets={"KEY": {"value": self.REAL, "allowed_hosts": ["127.0.0.1"], **secret}},
+            network=net,
+        )
+        result = sandbox.execute(f"""
+import os, socket
+sock = socket.create_connection(("127.0.0.1", {port}))
+try:
+    sock.sendall(f"GET {target} HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n{header}: {{os.environ['KEY']}}\\r\\n\\r\\n".encode())
+    sock.recv(4096)
+    print("sent")
+except OSError:
+    print("refused")
+sock.close()
+""")
+        return result.stdout.decode().strip()
+
+    GIT = {
+        "header": "authorization",
+        "http_rules": [
+            eryx.HttpRule(
+                "127.0.0.1",
+                methods=["GET"],
+                paths=["/repo.git/info/refs"],
+                queries=["service=git-upload-pack"],
+            )
+        ],
+    }
+
+    def test_in_scope_is_substituted(self, exfil_server):
+        _, port, received = exfil_server
+        assert self._send(port, self.GIT, "/repo.git/info/refs?service=git-upload-pack") == "sent"
+        assert received[0]["headers"]["Authorization"] == self.REAL
+
+    @pytest.mark.parametrize(
+        ("target", "header"),
+        [
+            ("/repo.git/info/refs?service=git-receive-pack", "Authorization"),
+            ("/other.git/info/refs?service=git-upload-pack", "Authorization"),
+            ("/repo.git/info/refs?service=git-upload-pack", "X-Token"),
+        ],
+    )
+    def test_out_of_scope_is_refused(self, exfil_server, target, header):
+        _, port, received = exfil_server
+        assert self._send(port, self.GIT, target, header) == "refused"
+        assert not received
+
+    def test_no_scope_is_any_request(self, exfil_server):
+        _, port, received = exfil_server
+        assert self._send(port, {}, "/anything?x", "X-Token") == "sent"
+        assert received[0]["headers"]["X-Token"] == self.REAL
+
+    def test_types_are_checked(self):
+        with pytest.raises(TypeError, match="http_rules"):
+            eryx.Sandbox(secrets={"KEY": {"value": "v", "http_rules": ["/x"]}})
+        with pytest.raises(TypeError, match="header"):
+            eryx.Sandbox(secrets={"KEY": {"value": "v", "header": 1}})

@@ -601,6 +601,16 @@ message SecretConfig {
   string value = 2;
   // Hosts where this secret may be sent. Empty = falls back to NetworkConfig.allowed_hosts.
   repeated string allowed_hosts = 3;
+  // The only HTTP header the real value may be sent in, compared ignoring
+  // case. Empty = any header. A request with the placeholder in another
+  // header is refused.
+  string header = 4;
+  // The only requests the real value may be sent in: a request must match
+  // one of these rules (host, methods, paths and queries, matched as
+  // NetworkConfig.http_rules are) as well as allowed_hosts. Empty = any
+  // request to an allowed host. A request with the placeholder that no rule
+  // matches is refused.
+  repeated HttpRule http_rules = 5;
 }
 
 // Server requests the client to execute a callback.

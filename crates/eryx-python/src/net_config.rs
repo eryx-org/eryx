@@ -109,7 +109,7 @@ pub struct NetConfig {
 ///     )
 #[pyclass(module = "eryx", frozen, from_py_object)]
 #[derive(Debug, Clone)]
-pub struct HttpRule(eryx::HttpRule);
+pub struct HttpRule(pub(crate) eryx::HttpRule);
 
 #[pymethods]
 impl HttpRule {

@@ -94,6 +94,17 @@ class SecretDict(TypedDict, total=False):
     allowed_hosts: list[str]
     """Optional list of hosts allowed to receive this secret. Defaults to []."""
 
+    header: str
+    """Optional name of the only HTTP header the secret is substituted in,
+    compared ignoring case. Defaults to any header."""
+
+    http_rules: list[HttpRule]
+    """Optional rules limiting which requests the secret is substituted in:
+    a request must match one (host, methods, paths and queries, as for
+    NetConfig.http_rules) as well as allowed_hosts. Defaults to [], any
+    request to an allowed host. A placeholder in a header or request outside
+    them is refused, as for a host the secret isn't allowed for."""
+
 
 class CallbackDict(TypedDict, total=False):
     """Dictionary format for defining callbacks."""

@@ -39,7 +39,7 @@ print(f"Key is: {key}")  # Prints: Key is: [REDACTED]
 """)
 ```
 
-Each secret dict requires a `"value"` key and accepts an optional `"allowed_hosts"` list (defaults to `[]`).
+Each secret dict requires a `"value"` key and accepts an optional `"allowed_hosts"` list (defaults to `[]`), and the optional `"header"` and `"http_rules"` described in [Limiting where a secret is sent](#limiting-where-a-secret-is-sent).
 
 ## JavaScript
 
@@ -95,6 +95,64 @@ let sandbox = Sandbox::embedded()
 
 The header name is compared ignoring case. A request with the placeholder in
 any other header is refused, as for a host the secret isn't allowed for.
+
+## Limiting where a secret is sent
+
+A secret's real value goes in any header of any request to its allowed hosts.
+Many credentials need less: a Git host password only has to reach the fetch
+endpoints, in `Authorization`. Two settings narrow it:
+
+- **A header:** substitute only in that header, compared ignoring case. No
+  header means any header.
+- **HTTP rules:** substitute only in a request one of the secret's rules
+  matches, by host, method, path and query, matched exactly as the network's
+  [method, path and query rules](./networking.md#method-path-and-query-rules)
+  match. They apply on top of `allowed_hosts`: a request has to be to an
+  allowed host *and* match a rule. No rules means any request to an allowed
+  host.
+
+A request with the placeholder in a header or request outside them is refused,
+not sent, as for a host the secret isn't allowed for: the write fails in the
+sandbox (an `OSError` in Python). A secret with neither behaves as before.
+
+```python
+import eryx
+
+git_fetch = [
+    eryx.HttpRule(
+        "git.example.com",
+        methods=["GET"],
+        paths=["/org/repo.git/info/refs"],
+        queries=["service=git-upload-pack"],
+    ),
+    eryx.HttpRule("git.example.com", methods=["POST"], paths=["/org/repo.git/git-upload-pack"]),
+]
+sandbox = eryx.Sandbox(
+    secrets={
+        "GIT_PASSWORD": {
+            "value": "hunter2",
+            "allowed_hosts": ["git.example.com"],
+            "header": "Authorization",
+            "http_rules": git_fetch,
+        },
+    },
+    network=eryx.NetConfig(allowed_hosts=["git.example.com"]),
+)
+```
+
+git sends the password in `Authorization: Basic` credentials, which are
+substituted as described above. A push (`service=git-receive-pack`, or
+`POST .../git-receive-pack`) carrying the placeholder is refused, while the
+network rules still decide whether a request without it may go out.
+
+From Rust, use `SecretConfig::with_http_rules` and `only_in_header`; over
+gRPC, `SecretConfig.header` and `SecretConfig.http_rules`. A rule that can't
+match a request (a path with `..`, a query pattern that doesn't compile) fails
+when the sandbox is built, or the gRPC request with `INVALID_ARGUMENT`.
+
+A secret's rules only decide where its value is substituted. To refuse other
+requests to the host altogether, whether or not they carry a placeholder, use
+the network's HTTP rules.
 
 A placeholder can also be the username or password of `Authorization: Basic`
 credentials (as git and `requests`' `auth=(user, password)` send them): the
@@ -184,10 +242,11 @@ sent base64-wrapped as `Basic` credentials (e.g. `Basic b64("x:PLACEHOLDER")`),
 so an allowed host that echoes request headers returns the base64 of the real
 value, which isn't masked.
 
-To also limit which endpoints a secret can reach on its host, add
-[method, path and query rules](./networking.md#method-path-and-query-rules) for that host.
-Like secret substitution, they only apply to requests the host can parse: TLS
-done by the sandboxed code itself isn't checked.
+To also limit which endpoints a secret can reach on its host, give it
+[HTTP rules](#limiting-where-a-secret-is-sent), or add
+[method, path and query rules](./networking.md#method-path-and-query-rules)
+for that host. Like secret substitution, they only apply to requests the host
+can parse: TLS done by the sandboxed code itself isn't checked.
 
 ## Plain HTTP
 
@@ -295,10 +354,11 @@ rules and limits worth knowing:
 ## Best Practices
 
 1. **Always specify `allowed_hosts`** — Without explicit hosts, the secret falls back to the network config's allowed hosts, which could be broader than intended.
-2. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
-3. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
-4. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
-5. **For child processes, prefer credentials** — a shell's commands (git, gh, curl) can authenticate with a [credential](./sandboxes.md#external-commands) the child proxy adds itself, so the sandbox never holds even the placeholder.
+2. **Scope secrets to the requests that need them** — give a secret a `header` and `http_rules` when it only has to reach some endpoints, so a host that echoes requests elsewhere never sees it.
+3. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
+4. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
+5. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
+6. **For child processes, prefer credentials** — a shell's commands (git, gh, curl) can authenticate with a [credential](./sandboxes.md#external-commands) the child proxy adds itself, so the sandbox never holds even the placeholder.
 
 ## Security Model
 

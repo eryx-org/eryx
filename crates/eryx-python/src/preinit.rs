@@ -934,8 +934,8 @@ impl SandboxFactory {
             if let Some(ref net) = network {
                 builder = builder.with_network(net.clone());
             }
-            for (name, value, allowed_hosts) in secrets.iter().flatten() {
-                builder = builder.with_secret(name, value, allowed_hosts.clone());
+            for (name, secret) in secrets.iter().flatten() {
+                builder = builder.with_secret_config(name, secret.config());
             }
             if let Some(ref namespace) = callback_namespace {
                 builder = builder.with_callback_namespace(namespace);

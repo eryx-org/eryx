@@ -287,6 +287,9 @@ How requests match:
 A refused request is never sent: the write fails in the sandbox (an `OSError`
 in Python) and the connection's request can't continue.
 
+A [secret](./secrets.md#limiting-where-a-secret-is-sent) can take the same
+rules to limit which requests its real value is substituted in.
+
 Once any rule is set, every connection's HTTP/1.1 requests are parsed and
 checked against both the connected host and every host the request names (its
 `Host` header and an absolute-form target), so another allowed host on the

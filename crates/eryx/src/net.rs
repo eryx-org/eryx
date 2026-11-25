@@ -512,8 +512,10 @@ impl NetConfig {
         }
     }
 
-    /// Fail if a secret has no host it could be sent to; see
-    /// [`NetConfig::secret_hosts`].
+    /// Fail if a secret has no host it could be sent to (see
+    /// [`NetConfig::secret_hosts`]), or one of its
+    /// [HTTP rules](crate::SecretConfig::with_http_rules) can't match a
+    /// request.
     ///
     /// [`SandboxBuilder::build`](crate::SandboxBuilder::build) runs this
     /// check when networking is enabled.
@@ -525,19 +527,21 @@ impl NetConfig {
         &self,
         secrets: &HashMap<String, crate::secrets::SecretConfig>,
     ) -> Result<(), String> {
-        let mut names: Vec<&String> = secrets
-            .iter()
-            .filter(|(_, s)| self.secret_hosts(s).is_empty())
-            .map(|(name, _)| name)
-            .collect();
-        names.sort();
-        match names.first() {
-            Some(name) => Err(format!(
-                "secret '{name}' has no allowed hosts: give it allowed_hosts, or list the hosts \
-                 in NetConfig.allowed_hosts with allow_all_hosts off"
-            )),
-            None => Ok(()),
+        let mut secrets: Vec<_> = secrets.iter().collect();
+        secrets.sort_by_key(|(name, _)| *name);
+        for (name, secret) in secrets {
+            if self.secret_hosts(secret).is_empty() {
+                return Err(format!(
+                    "secret '{name}' has no allowed hosts: give it allowed_hosts, or list the \
+                     hosts in NetConfig.allowed_hosts with allow_all_hosts off"
+                ));
+            }
+            for rule in &secret.http_rules {
+                rule.validate()
+                    .map_err(|e| format!("secret '{name}': {e}"))?;
+            }
         }
+        Ok(())
     }
 
     /// Fail if a setting can't work: a zero connect or I/O timeout would
@@ -936,6 +940,26 @@ impl PartialEq for QueryPatterns {
 }
 
 impl Eq for QueryPatterns {}
+
+/// Whether a request to `host` matches one of `rules`, host included: the
+/// requests a secret's [HTTP rules](crate::SecretConfig::with_http_rules)
+/// allow it in. No rules matches any request.
+pub(crate) fn request_matches_rules(
+    rules: &[HttpRule],
+    host: &str,
+    method: &str,
+    target: &str,
+) -> bool {
+    if rules.is_empty() {
+        return true;
+    }
+    let host = normalize_host(host);
+    request_target(target).is_some_and(|target| {
+        rules.iter().any(|r| {
+            host_matches_pattern(&host, &normalize_host(&r.host)) && r.allows(method, &target)
+        })
+    })
+}
 
 /// Whether the decoded `path` is `prefix` or under it: `/a` covers `/a` and
 /// `/a/b` but not `/ab`; `/a/` covers everything below `/a/`.
@@ -2466,6 +2490,10 @@ mod tests {
     use super::response::{CARRY_GRACE, RequestKind};
     use super::*;
 
+    /// The request line [`NetPolicy::substitute_secrets_in_text`] is given
+    /// where it doesn't matter: a secret without HTTP rules ignores it.
+    const ANY_REQUEST: (&str, &str) = ("GET", "/");
+
     #[test]
     fn test_effective_timeout_uses_default_when_guest_zero() {
         // A guest timeout of 0 means "no preference" - fall back to the host default.
@@ -2734,6 +2762,7 @@ mod tests {
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -2744,6 +2773,7 @@ mod tests {
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "api.example.com",
+            ANY_REQUEST,
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer real-secret-value");
@@ -2753,6 +2783,7 @@ mod tests {
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "evil.com",
+            ANY_REQUEST,
         );
         assert!(result.is_err());
     }
@@ -2775,16 +2806,145 @@ mod tests {
         assert_eq!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_HEADER", "x-api-key", "api.example.com")
+                .substitute_secrets_in_text(
+                    "PH_HEADER",
+                    "x-api-key",
+                    "api.example.com",
+                    ANY_REQUEST
+                )
                 .unwrap(),
             "real-secret-value"
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("Bearer PH_HEADER", "Authorization", "api.example.com")
+                .substitute_secrets_in_text(
+                    "Bearer PH_HEADER",
+                    "Authorization",
+                    "api.example.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
+    }
+
+    /// A secret with HTTP rules is only substituted in requests one of them
+    /// matches, by host, method, path and query; a request with it anywhere
+    /// else is refused. Git's smart HTTP fetch is the motivating case: the
+    /// password reaches the two fetch endpoints, in `Authorization`, and
+    /// nothing else on the host.
+    #[test]
+    fn secret_scoped_by_http_rules() {
+        let git = |rules: Vec<HttpRule>| {
+            crate::secrets::SecretConfig {
+                placeholder: "PH".to_string(),
+                ..crate::secrets::SecretConfig::new(
+                    "real",
+                    vec!["git.example.com".into(), "other.example.com".into()],
+                )
+            }
+            .only_in_header("Authorization")
+            .with_http_rules(rules)
+        };
+        let fetch_rules = vec![
+            HttpRule::new("git.example.com")
+                .with_methods(["GET"])
+                .with_paths(["/org/repo.git/info/refs"])
+                .with_queries(["service=git-upload-pack"]),
+            HttpRule::new("git.example.com")
+                .with_methods(["POST"])
+                .with_paths(["/org/repo.git/git-upload-pack"]),
+        ];
+        // Each request on a new connection: a refused one ends its own.
+        let send = |secret: &crate::secrets::SecretConfig, host: &str, request: &str| {
+            let mut m = ConnectionManager::new(
+                NetConfig::permissive().allow_plaintext_secrets(true),
+                HashMap::from([("TOKEN".into(), secret.clone())]),
+            )
+            .unwrap();
+            m.connection_hosts.insert(1, host.into());
+            m.process_write_data(1, request.as_bytes())
+                .map(|out| String::from_utf8(out).unwrap())
+        };
+        let request = |line: &str, header: &str| {
+            format!("{line} HTTP/1.1\r\nHost: git.example.com\r\n{header}\r\n\r\n")
+        };
+        let basic = |creds: &str| format!("Authorization: Basic {}", BASE64_STANDARD.encode(creds));
+
+        let secret = git(fetch_rules.clone());
+        for line in [
+            "GET /org/repo.git/info/refs?service=git-upload-pack",
+            "POST /org/repo.git/git-upload-pack",
+            "GET https://git.example.com/org/repo.git/info/refs?service=git-upload-pack",
+        ] {
+            let out = send(&secret, "git.example.com", &request(line, &basic("git:PH"))).unwrap();
+            assert!(out.contains(&basic("git:real")), "{line}: {out}");
+        }
+        for line in [
+            // A push.
+            "GET /org/repo.git/info/refs?service=git-receive-pack",
+            "POST /org/repo.git/git-receive-pack",
+            // Another method, path or query on the same host.
+            "POST /org/repo.git/info/refs?service=git-upload-pack",
+            "GET /org/repo.git/info/refs",
+            "GET /org/other.git/info/refs?service=git-upload-pack",
+            "GET /org/repo.git/info/refs/../../other.git/info/refs?service=git-upload-pack",
+            "GET /org/repo.git/info/refs?service=git-upload-pack&service=git-receive-pack",
+        ] {
+            let err = send(&secret, "git.example.com", &request(line, &basic("git:PH")));
+            assert!(err.is_err(), "{line}: {err:?}");
+        }
+        // The header limit still applies to a request in scope.
+        let line = "POST /org/repo.git/git-upload-pack";
+        assert!(send(&secret, "git.example.com", &request(line, "X-Token: PH")).is_err());
+        // The rules' host has to match too: the secret is allowed on
+        // other.example.com, but no rule covers it.
+        assert!(
+            send(
+                &secret,
+                "other.example.com",
+                &request(line, &basic("git:PH")).replace("git.example.com", "other.example.com")
+            )
+            .is_err()
+        );
+        // A request without the placeholder is untouched by the rules.
+        let line = "GET /anything";
+        assert!(send(&secret, "git.example.com", &request(line, "X-Other: 1")).is_ok());
+
+        // No rules: any request to an allowed host, as before rules existed.
+        let unscoped = git(vec![]);
+        let line = "DELETE /org/repo.git/anything?x";
+        let out = send(
+            &unscoped,
+            "git.example.com",
+            &request(line, "Authorization: Bearer PH"),
+        )
+        .unwrap();
+        assert!(out.contains("Authorization: Bearer real"), "{out}");
+    }
+
+    /// A secret's HTTP rules are validated with the hosts it can reach.
+    #[test]
+    fn secret_http_rules_are_validated() {
+        let secrets = |rule: HttpRule| {
+            HashMap::from([(
+                "TOKEN".to_string(),
+                crate::secrets::SecretConfig::new("real", vec!["h".into()]).with_http_rules([rule]),
+            )])
+        };
+        let config = NetConfig::default();
+        assert!(
+            config
+                .check_secret_hosts(&secrets(HttpRule::new("h").with_paths(["/a"])))
+                .is_ok()
+        );
+        for rule in [
+            HttpRule::new("h").with_paths(["/a/../b"]),
+            HttpRule::new("h").with_queries(["("]),
+        ] {
+            let err = config.check_secret_hosts(&secrets(rule)).unwrap_err();
+            assert!(err.contains("secret 'TOKEN'"), "{err}");
+        }
     }
 
     /// Placeholders inside base64 `Basic` credentials are substituted and
@@ -2796,13 +2956,23 @@ mod tests {
 
         assert_eq!(
             m.policy
-                .substitute_secrets_in_text(&basic("git:PH"), "authorization", "api.example.com")
+                .substitute_secrets_in_text(
+                    &basic("git:PH"),
+                    "authorization",
+                    "api.example.com",
+                    ANY_REQUEST
+                )
                 .unwrap(),
             basic("git:real")
         );
         assert!(
             m.policy
-                .substitute_secrets_in_text(&basic("git:PH"), "Authorization", "evil.com")
+                .substitute_secrets_in_text(
+                    &basic("git:PH"),
+                    "Authorization",
+                    "evil.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         // Other headers and schemes aren't decoded.
@@ -2812,7 +2982,8 @@ mod tests {
                 .substitute_secrets_in_text(
                     &format!("Basic {encoded}"),
                     "X-Auth",
-                    "api.example.com"
+                    "api.example.com",
+                    ANY_REQUEST
                 )
                 .unwrap(),
             format!("Basic {encoded}")
@@ -2820,7 +2991,12 @@ mod tests {
         // Credentials without a placeholder are passed through as written.
         assert_eq!(
             m.policy
-                .substitute_secrets_in_text("basic Z2l0OnB3", "Authorization", "api.example.com")
+                .substitute_secrets_in_text(
+                    "basic Z2l0OnB3",
+                    "Authorization",
+                    "api.example.com",
+                    ANY_REQUEST
+                )
                 .unwrap(),
             "basic Z2l0OnB3"
         );
@@ -2842,7 +3018,12 @@ mod tests {
             .header = Some("X-Api-Key".into());
         assert!(
             m.policy
-                .substitute_secrets_in_text(&basic("git:PH"), "Authorization", "api.example.com")
+                .substitute_secrets_in_text(
+                    &basic("git:PH"),
+                    "Authorization",
+                    "api.example.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
     }
@@ -2859,6 +3040,7 @@ mod tests {
                     placeholder: "PLACEHOLDER_XYZ".to_string(),
                     allowed_hosts: hosts,
                     header: None,
+                    http_rules: Vec::new(),
                 },
             )])
         };
@@ -2872,7 +3054,8 @@ mod tests {
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
-                    "any-host.com"
+                    "any-host.com",
+                    ANY_REQUEST
                 )
                 .is_err()
         );
@@ -2898,7 +3081,8 @@ mod tests {
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
-                    "api.example.com"
+                    "api.example.com",
+                    ANY_REQUEST
                 )
                 .unwrap(),
             "Bearer real-secret-value"
@@ -2909,7 +3093,8 @@ mod tests {
                 .substitute_secrets_in_text(
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
-                    "other.example.com"
+                    "other.example.com",
+                    ANY_REQUEST
                 )
                 .is_err()
         );
@@ -2931,6 +3116,7 @@ mod tests {
                 placeholder: "PH_AUTH".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -2940,25 +3126,25 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com", ANY_REQUEST)
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1", ANY_REQUEST)
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost", ANY_REQUEST)
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "")
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "", ANY_REQUEST)
                 .is_err()
         );
     }
@@ -2975,6 +3161,7 @@ mod tests {
                 placeholder: "PH_OPENAI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
         secrets.insert(
@@ -2984,6 +3171,7 @@ mod tests {
                 placeholder: "PH_GITHUB".to_string(),
                 allowed_hosts: vec!["api.github.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -2993,28 +3181,48 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.openai.com")
+                .substitute_secrets_in_text(
+                    "PH_OPENAI",
+                    "Authorization",
+                    "api.openai.com",
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
         // OpenAI key for GitHub host: REJECTED
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_OPENAI", "Authorization", "api.github.com")
+                .substitute_secrets_in_text(
+                    "PH_OPENAI",
+                    "Authorization",
+                    "api.github.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         // GitHub key for GitHub host: OK
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.github.com")
+                .substitute_secrets_in_text(
+                    "PH_GITHUB",
+                    "Authorization",
+                    "api.github.com",
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
         // GitHub key for OpenAI host: REJECTED
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GITHUB", "Authorization", "api.openai.com")
+                .substitute_secrets_in_text(
+                    "PH_GITHUB",
+                    "Authorization",
+                    "api.openai.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
     }
@@ -3031,6 +3239,7 @@ mod tests {
                 placeholder: "PH_GLOB".to_string(),
                 allowed_hosts: vec!["*.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3039,20 +3248,25 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GLOB", "Authorization", "api.openai.com")
+                .substitute_secrets_in_text(
+                    "PH_GLOB",
+                    "Authorization",
+                    "api.openai.com",
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
         // Bare domain doesn't match *.openai.com
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com", ANY_REQUEST)
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com")
+                .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com", ANY_REQUEST)
                 .is_err()
         );
     }
@@ -3069,6 +3283,7 @@ mod tests {
                 placeholder: "PH_DECEPTIVE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3081,26 +3296,42 @@ mod tests {
                 .substitute_secrets_in_text(
                     "PH_DECEPTIVE",
                     "Authorization",
-                    "api.openai.com.evil.com"
+                    "api.openai.com.evil.com",
+                    ANY_REQUEST
                 )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "api-openai.com")
+                .substitute_secrets_in_text(
+                    "PH_DECEPTIVE",
+                    "Authorization",
+                    "api-openai.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "evil-api.openai.com")
+                .substitute_secrets_in_text(
+                    "PH_DECEPTIVE",
+                    "Authorization",
+                    "evil-api.openai.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_DECEPTIVE", "Authorization", "xapi.openai.com")
+                .substitute_secrets_in_text(
+                    "PH_DECEPTIVE",
+                    "Authorization",
+                    "xapi.openai.com",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
     }
@@ -3117,6 +3348,7 @@ mod tests {
                 placeholder: "PH_IP".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3126,13 +3358,13 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192", ANY_REQUEST)
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4")
+                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4", ANY_REQUEST)
                 .is_err()
         );
     }
@@ -3149,6 +3381,7 @@ mod tests {
                 placeholder: "PH_CASE".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3158,13 +3391,23 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_CASE", "Authorization", "API.OPENAI.COM")
+                .substitute_secrets_in_text(
+                    "PH_CASE",
+                    "Authorization",
+                    "API.OPENAI.COM",
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_CASE", "Authorization", "Api.OpenAI.Com")
+                .substitute_secrets_in_text(
+                    "PH_CASE",
+                    "Authorization",
+                    "Api.OpenAI.Com",
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
     }
@@ -3181,6 +3424,7 @@ mod tests {
                 placeholder: "PH_NOOP".to_string(),
                 allowed_hosts: vec!["restricted.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3191,6 +3435,7 @@ mod tests {
             "Bearer some-other-token",
             "Authorization",
             "evil.com",
+            ANY_REQUEST,
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Bearer some-other-token");
@@ -3243,6 +3488,7 @@ mod tests {
                 placeholder: "PLACEHOLDER_LARGE".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3309,6 +3555,7 @@ mod tests {
                 placeholder: "PLACEHOLDER_SNI".to_string(),
                 allowed_hosts: vec!["api.openai.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3353,6 +3600,7 @@ mod tests {
                 placeholder: "PLACEHOLDER_BLOCKED".to_string(),
                 allowed_hosts: vec!["api.legitimate.com".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3399,6 +3647,7 @@ mod tests {
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -3676,6 +3925,7 @@ mod tests {
                 placeholder: "PH".to_string(),
                 allowed_hosts: vec!["api.example.com".to_string(), "127.0.0.1".to_string()],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
         let mut manager = ConnectionManager::new(
@@ -4104,12 +4354,17 @@ mod tests {
         let m = framing_manager();
         assert!(
             m.policy
-                .substitute_secrets_in_text("PH", "authorization", "api.example.com.")
+                .substitute_secrets_in_text("PH", "authorization", "api.example.com.", ANY_REQUEST)
                 .is_ok()
         );
         assert!(
             m.policy
-                .substitute_secrets_in_text("PH", "authorization", "other.example.com.")
+                .substitute_secrets_in_text(
+                    "PH",
+                    "authorization",
+                    "other.example.com.",
+                    ANY_REQUEST
+                )
                 .is_err()
         );
 
