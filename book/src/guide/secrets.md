@@ -185,7 +185,7 @@ so an allowed host that echoes request headers returns the base64 of the real
 value, which isn't masked.
 
 To also limit which endpoints a secret can reach on its host, add
-[method and path rules](./networking.md#method-and-path-rules) for that host.
+[method, path and query rules](./networking.md#method-path-and-query-rules) for that host.
 Like secret substitution, they only apply to requests the host can parse: TLS
 done by the sandboxed code itself isn't checked.
 

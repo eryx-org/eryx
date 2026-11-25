@@ -449,9 +449,13 @@ class HttpRule:
     Methods are compared ignoring case. Paths match whole segments:
     ``/repos/org/repo`` matches it and anything under ``/repos/org/repo/``,
     but not ``/repos/org/repo-evil``; a path ending in ``/`` matches anything
-    under it. The request's query is ignored and percent-escapes decoded
-    first; a path with ``.``/``..`` or empty segments, or an escaped ``/`` or
-    backslash, never matches.
+    under it. Paths are matched without the query and with percent-escapes
+    decoded; a path with ``.``/``..`` or empty segments, or an escaped ``/``
+    or backslash, never matches. Queries are regular expressions (Rust
+    ``regex`` syntax), each matched against the whole raw query string: the
+    text after ``?`` as sent, not decoded, and empty when there's none.
+    ``service=git-upload-pack`` matches only that query, and
+    ``(service=git-upload-pack)?`` also no query.
 
     Example:
         net = NetConfig(
@@ -477,12 +481,18 @@ class HttpRule:
         """The allowed path prefixes; empty allows any."""
         ...
 
+    @property
+    def queries(self) -> list[str]:
+        """The allowed query patterns; empty allows any."""
+        ...
+
     def __new__(
         cls,
         host: str,
         *,
         methods: Optional[Sequence[str]] = None,
         paths: Optional[Sequence[str]] = None,
+        queries: Optional[Sequence[str]] = None,
     ) -> HttpRule:
         """Create a rule for hosts matching ``host`` (same patterns as allowed_hosts).
 
@@ -492,9 +502,12 @@ class HttpRule:
             paths: Allowed path prefixes; None or empty allows any. Must be
                 normalized absolute paths (no ``.``/``..`` or empty segments,
                 query or escapes).
+            queries: Allowed queries, as regular expressions matched against
+                the whole raw query; None or empty allows any.
 
         Raises:
-            ValueError: If a path can't match any request.
+            ValueError: If a path can't match any request, or a query
+                pattern isn't a valid regular expression.
         """
         ...
 

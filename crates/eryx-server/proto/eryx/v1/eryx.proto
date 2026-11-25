@@ -580,6 +580,12 @@ message HttpRule {
   // percent-decoded path without its query. Empty = any path. Paths must be
   // normalized: no "." or ".." segments, "//", query or escapes.
   repeated string paths = 3;
+  // Allowed queries: regular expressions (Rust regex syntax), each matched
+  // against the whole raw query string, the text after "?" as sent (not
+  // decoded; empty when there's none). "service=git-upload-pack" matches
+  // only that query; "(service=git-upload-pack)?" also matches none.
+  // Empty = any query.
+  repeated string queries = 4;
 }
 
 // A secret to inject into the sandbox environment.

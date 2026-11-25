@@ -248,6 +248,7 @@ impl ServerLimits {
                 HttpRule::new(r.host)
                     .with_methods(r.methods)
                     .with_paths(r.paths)
+                    .with_queries(r.queries)
             }))
             .allow_plaintext_secrets(nc.allow_plaintext_secrets);
         if !nc.blocked_hosts.is_empty() {

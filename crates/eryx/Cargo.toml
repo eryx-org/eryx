@@ -116,6 +116,8 @@ http.workspace = true
 ipnet.workspace = true
 # Secrets support
 rand.workspace = true
+# HTTP rule query patterns
+regex.workspace = true
 # TLS networking
 # Child proxy (net/proxy.rs): its CA and leaf certificates
 rcgen.workspace = true

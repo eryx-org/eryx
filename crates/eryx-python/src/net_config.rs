@@ -92,9 +92,13 @@ pub struct NetConfig {
 /// Methods are compared ignoring case. Paths match whole segments:
 /// `/repos/org/repo` matches it and anything under `/repos/org/repo/`, but
 /// not `/repos/org/repo-evil`; a path ending in `/` matches anything under
-/// it. The request's query is ignored and percent-escapes decoded first; a
-/// path with `.`/`..` or empty segments, or an escaped `/` or `\`, never
-/// matches.
+/// it. Paths are matched without the query and with percent-escapes
+/// decoded; a path with `.`/`..` or empty segments, or an escaped `/` or
+/// `\`, never matches. Queries are regular expressions (Rust `regex`
+/// syntax), each matched against the whole raw query string: the text after
+/// `?` as sent, not decoded, and empty when there's none.
+/// `service=git-upload-pack` matches only that query, and
+/// `(service=git-upload-pack)?` also no query.
 ///
 /// Example:
 ///     net = NetConfig(
@@ -118,19 +122,24 @@ impl HttpRule {
     ///     paths: Allowed path prefixes; None or empty allows any. Must be
     ///         normalized absolute paths (no `.`/`..` or empty segments, query
     ///         or escapes).
+    ///     queries: Allowed queries, as regular expressions matched against
+    ///         the whole raw query; None or empty allows any.
     ///
     /// Raises:
-    ///     ValueError: If a path can't match any request.
+    ///     ValueError: If a path can't match any request, or a query
+    ///         pattern isn't a valid regular expression.
     #[new]
-    #[pyo3(signature = (host, *, methods=None, paths=None))]
+    #[pyo3(signature = (host, *, methods=None, paths=None, queries=None))]
     fn new(
         host: String,
         methods: Option<Vec<String>>,
         paths: Option<Vec<String>>,
+        queries: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let rule = eryx::HttpRule::new(host)
             .with_methods(methods.unwrap_or_default())
-            .with_paths(paths.unwrap_or_default());
+            .with_paths(paths.unwrap_or_default())
+            .with_queries(queries.unwrap_or_default());
         eryx::NetConfig::default()
             .allow_http(rule.clone())
             .validate()
@@ -156,12 +165,19 @@ impl HttpRule {
         self.0.paths().to_vec()
     }
 
+    /// The allowed query patterns; empty allows any.
+    #[getter]
+    fn queries(&self) -> Vec<String> {
+        self.0.queries().to_vec()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "HttpRule({:?}, methods={:?}, paths={:?})",
+            "HttpRule({:?}, methods={:?}, paths={:?}, queries={:?})",
             self.0.host(),
             self.0.methods(),
-            self.0.paths()
+            self.0.paths(),
+            self.0.queries()
         )
     }
 }

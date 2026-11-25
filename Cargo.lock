@@ -1141,6 +1141,7 @@ dependencies = [
  "ipnet",
  "rand 0.10.4",
  "rcgen",
+ "regex",
  "rustix",
  "rustls",
  "schemars",
