@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.16.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.1...eryx-precompile-v0.16.2) - 2026-11-25
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx-build` - [0.16.2](https://github.com/eryx-org/eryx/compare/eryx-build-v0.16.1...eryx-build-v0.16.2) - 2026-11-25
+
+### Added
+- *(eryx-build)* build Go's own commands, and Go commands importing eryx WIT ([#1190](https://github.com/eryx-org/eryx/pull/1190))
+
+## `eryx` - [0.16.2](https://github.com/eryx-org/eryx/compare/eryx-v0.16.1...eryx-v0.16.2) - 2026-11-25
+
+### Added
+- *(commands)* a command's own mounts and default env ([#1205](https://github.com/eryx-org/eryx/pull/1205))
+- *(eryx-vfs)* a public copy-on-write OverlayStorage ([#1204](https://github.com/eryx-org/eryx/pull/1204))
+- *(net)* scope secrets by request and header ([#1210](https://github.com/eryx-org/eryx/pull/1210))
+- *(net)* match query strings in HTTP rules ([#1207](https://github.com/eryx-org/eryx/pull/1207))
+- *(server)* pass environment variables to executions ([#1203](https://github.com/eryx-org/eryx/pull/1203))
+
+## `eryx-vfs` - [0.14.4](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.3...eryx-vfs-v0.14.4) - 2026-11-25
+
+### Added
+- *(commands)* a command's own mounts and default env ([#1205](https://github.com/eryx-org/eryx/pull/1205))
+- *(eryx-vfs)* a public copy-on-write OverlayStorage ([#1204](https://github.com/eryx-org/eryx/pull/1204))
+
 ## `eryx-precompile` - [0.16.1](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.0...eryx-precompile-v0.16.1) - 2026-11-22
 
 ### Fixed
