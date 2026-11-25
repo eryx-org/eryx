@@ -16,9 +16,18 @@ publish = false
 wasmtime = { version = "51.0.0", features = ["stack-switching"] }
 wasmparser = "0.263"
 wasm-encoder = "0.263"
-# only src/bin/eryx_shell.rs, the comparison benchmark
-eryx = { path = "../eryx", default-features = false, features = ["embedded", "shell"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Only for src/bin/eryx_shell.rs, the comparison benchmark (`--features
+# compare`). eryx's build script needs its precompiled runtimes, so the
+# Linux host itself must not depend on it.
+eryx = { path = "../eryx", default-features = false, features = ["embedded", "shell"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[features]
+compare = ["dep:eryx", "dep:tokio"]
+
+[[bin]]
+name = "eryx_shell"
+required-features = ["compare"]
 
 [profile.release]
 debug = 1

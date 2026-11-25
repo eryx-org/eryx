@@ -68,8 +68,13 @@ Other flags:
 - `--timeout S`
 
 The comparison benchmark, `src/bin/eryx_shell.rs`, embeds eryx's shell
-runtime. It needs the `ERYX_RUNTIME_CWASM`, `ERYX_RUNTIME_CWASM_SHELL` and
-`ERYX_COREUTILS_CWASM` paths set.
+runtime, so it sits behind a feature. It also needs the paths of eryx's
+precompiled runtimes:
+
+```sh
+ERYX_RUNTIME_CWASM=... ERYX_RUNTIME_CWASM_SHELL=... ERYX_COREUTILS_CWASM=... \
+    cargo run --release --features compare --bin eryx_shell
+```
 
 ## What we measured (2026-11-24, x86_64)
 
