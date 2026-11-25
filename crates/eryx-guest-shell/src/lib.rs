@@ -536,7 +536,13 @@ impl EryxLauncher {
             return Err(std::io::ErrorKind::IsADirectory.into());
         }
         if is_wasm(&path)? {
-            let name = path.to_string_lossy().into_owned();
+            // As typed, as bash's argv[0] is: the host resolves a relative
+            // path against the working directory too.
+            let name = if request.program.components().count() > 1 {
+                request.program.to_string_lossy().into_owned()
+            } else {
+                path.to_string_lossy().into_owned()
+            };
             let args = request.args.clone();
             return spawn_child(&name, &args, request);
         }

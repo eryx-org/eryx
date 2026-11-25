@@ -1721,6 +1721,13 @@ impl Spawner {
             return Err(e);
         }
 
+        // A nested shell runs what its caller may: files only if its caller
+        // could.
+        let runs_files = if command.is_guest() {
+            self.runs_files
+        } else {
+            command.runs_files
+        };
         let (stdin_tx, stdin_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stdout_tx, stdout_rx) = pipe::pipe(PIPE_CAPACITY);
         let (stderr_tx, stderr_rx) = pipe::pipe(PIPE_CAPACITY);
@@ -1742,7 +1749,7 @@ impl Spawner {
             spawner: command.spawns.then(|| Spawner {
                 within: scope,
                 depth: self.depth + 1,
-                runs_files: command.runs_files,
+                runs_files,
                 traces: Some(self.traces.clone().unwrap_or_default()),
                 // Set once its trace starts (`NestedTrace::start`).
                 parent: None,
@@ -2890,7 +2897,6 @@ impl ChildRun {
     }
 }
 
-/// Feeds a guest's `stream<u8>` into a child's stdin pipe.
 impl ChildRun {
     /// Read and compile the wasm file this run runs (see [`FileCommands`]),
     /// or take it from the execution's compiled files, and charge the
@@ -2901,8 +2907,9 @@ impl ChildRun {
         let config = &file.config;
         let path = &file.path;
         let fail = |why: String| format!("eryx: {path}: {why}");
-        // Held until it's compiled: one compile at a time.
-        let mut cache = budget.files.lock().await;
+        // Held until it's compiled, by the compile itself (see below): one
+        // compile at a time.
+        let mut cache = Arc::clone(&budget.files).lock_owned().await;
         let wasm = self
             .read_file(path, config.max_file_bytes.saturating_add(1))
             .await
@@ -2935,7 +2942,7 @@ impl ChildRun {
                         config.compile_time.as_secs()
                     )));
                 }
-                let Some(_compiling) = ChildMemory::reserve(
+                let Some(compiling) = ChildMemory::reserve(
                     Arc::clone(&budget.memory),
                     budget.memory_limit,
                     wasm.len().saturating_mul(COMPILE_MEMORY_FACTOR),
@@ -2943,14 +2950,21 @@ impl ChildRun {
                     return Err(budget.pool_full(&self.argv[0]).trim_end().to_owned());
                 };
                 cache.compiles += 1;
-                let started = std::time::Instant::now();
-                // Off the async runtime: Cranelift can't be interrupted.
+                // Off the async runtime: Cranelift can't be interrupted. The
+                // compile holds the lock and its memory, and charges its
+                // time, until it ends, even if this run times out or is
+                // dropped first, so an abandoned compile still counts.
                 let compiled = tokio::time::timeout(
                     left,
-                    tokio::task::spawn_blocking(move || Command::from_bytes(&wasm)),
+                    tokio::task::spawn_blocking(move || {
+                        let started = std::time::Instant::now();
+                        let command = Command::from_bytes(&wasm);
+                        cache.spent += started.elapsed();
+                        drop(compiling);
+                        (command, cache)
+                    }),
                 )
                 .await;
-                cache.spent += started.elapsed();
                 let command = match compiled {
                     Err(_) => {
                         return Err(fail(format!(
@@ -2960,8 +2974,13 @@ impl ChildRun {
                         )));
                     }
                     Ok(Err(e)) => return Err(fail(format!("compiling it failed: {e}"))),
-                    Ok(Ok(Err(e))) => return Err(fail(format!("it can't run as a command: {e}"))),
-                    Ok(Ok(Ok(command))) => command,
+                    Ok(Ok((Err(e), _))) => {
+                        return Err(fail(format!("it can't run as a command: {e}")));
+                    }
+                    Ok(Ok((Ok(command), back))) => {
+                        cache = back;
+                        command
+                    }
                 };
                 if cache.compiled.len() >= MAX_CACHED_FILES {
                     cache.compiled.pop_front();
@@ -2992,6 +3011,7 @@ impl ChildRun {
     }
 }
 
+/// Feeds a guest's `stream<u8>` into a child's stdin pipe.
 struct PipeConsumer(pipe::Writer);
 
 impl<D> StreamConsumer<D> for PipeConsumer {

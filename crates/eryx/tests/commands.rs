@@ -3123,11 +3123,11 @@ mod files {
         let sandbox = sandbox(&dir, Some(FileCommands::new()));
         let (out, err) = run(
             &sandbox,
-            "cd /vol; echo hi | ./tc.wasm; /vol/tc3.wasm argv0; ./tc1.wasm env PWD; ./script",
+            "cd /vol; echo hi | ./tc.wasm; /vol/tc3.wasm argv0; ./tc1.wasm env PWD; ./tc.wasm argv0; ./script",
             &ExecuteOptions::new(),
         )
         .await;
-        assert_eq!(out, "HI\n/vol/tc3.wasm\n/vol\nscript\n", "{err}");
+        assert_eq!(out, "HI\n/vol/tc3.wasm\n/vol\n./tc.wasm\nscript\n", "{err}");
     }
 
     /// An execution compiles at most `max_compiles` files, and running one
@@ -3179,6 +3179,18 @@ mod files {
         .await;
         assert_eq!(out, "error: command-not-found\n/vol/tc.wasm\n", "{err}");
         assert!(err.contains("this command may not run wasm files"), "{err}");
+
+        // A relative path is the caller's, against its working directory,
+        // and a shell a command runs may run files only if it may.
+        let (out, err) = run(
+            &on,
+            "cd /vol; spf spawn ./tc.wasm argv0 </dev/null; \
+             spf spawn sh -c '/vol/tc.wasm argv0' </dev/null; \
+             sp spawn sh -c '/vol/tc.wasm argv0; echo \"status=$?\"' </dev/null",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "./tc.wasm\n/vol/tc.wasm\nstatus=127\n", "{err}");
     }
 
     /// A file over the size limit, or that isn't a command children can

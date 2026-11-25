@@ -581,7 +581,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsCtx<S> {
             let fd = state.push_opened(opened)?;
             let mut data = Vec::new();
             let outcome = loop {
-                let left = limit - data.len() as u64;
+                let left = limit.saturating_sub(data.len() as u64);
                 if left == 0 {
                     break Ok(());
                 }
