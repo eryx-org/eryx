@@ -753,9 +753,9 @@ impl NetConfig {
 ///   neither `service=git-upload-pack&service=git-receive-pack` nor
 ///   `service=git%2Dupload-pack`. No queries means any query.
 /// - Paths are matched without the query, with percent-escapes decoded. A
-///   path with a `.` or `..` segment (escaped or not, or
-///   with `;` parameters), an empty segment (`//`), an escaped `/` or `\`, or
-///   a malformed escape never matches, nor does a target that isn't a path or
+///   path with a `.` or `..` segment (escaped or not, or with `;`
+///   parameters), an empty segment (`//`), an escaped `/` or `\`, or a
+///   malformed escape never matches, nor does a target that isn't a path or
 ///   an absolute URL (`CONNECT`, `OPTIONS *`).
 ///
 /// ```
@@ -821,7 +821,7 @@ impl HttpRule {
 
     /// Only allow requests whose raw query matches one of these anchored
     /// regular expressions; see [`HttpRule`]. A pattern that doesn't compile
-    /// fails [`NetConfig::validate`].
+    /// fails [`NetConfig::validate`], and the rule matches nothing.
     #[must_use]
     pub fn with_queries(mut self, queries: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.queries = QueryPatterns::new(queries.into_iter().map(Into::into).collect());
@@ -887,16 +887,26 @@ pub(crate) struct QueryPatterns {
 
 impl QueryPatterns {
     pub(crate) fn new(patterns: Vec<String>) -> Self {
+        // Query patterns are short; the default 10 MiB would let one
+        // pattern (`\pL{50}{50}`) cost a server real time and memory.
+        let compile = |p: &str| regex::RegexBuilder::new(p).size_limit(1 << 20).build();
         let compiled = patterns
             .iter()
             .map(|p| {
                 // Compiled alone first: wrapping a pattern like `a)|(b`
                 // would compile, unanchored.
-                regex::Regex::new(p)
-                    .and_then(|_| regex::Regex::new(&format!(r"\A(?:{p})\z")))
-                    .map_err(|e| {
-                        format!("query pattern {p:?} is not a valid regular expression: {e}")
-                    })
+                compile(p).map_err(|e| {
+                    format!("query pattern {p:?} is not a valid regular expression: {e}")
+                })?;
+                // Only a trailing `#` comment in verbose mode (`(?x)`)
+                // compiles alone but not anchored: it comments out the
+                // closing anchor.
+                compile(&format!(r"\A(?:{p})\z")).map_err(|e| {
+                    format!(
+                        "query pattern {p:?} can't be anchored (end a trailing `#` comment \
+                         with a newline): {e}"
+                    )
+                })
             })
             .collect();
         Self { patterns, compiled }
@@ -4672,6 +4682,16 @@ mod tests {
                 "{q}"
             );
         }
+        // A verbose-mode comment would swallow the closing anchor; ended
+        // with a newline, it's fine.
+        let err = config("(?x) a # fetch").validate().unwrap_err();
+        assert!(err.contains("can't be anchored"), "{err}");
+        let commented = config("(?x) a = 1 # fetch\n");
+        assert!(commented.validate().is_ok());
+        assert!(commented.check_http_request("h", "GET", "/?a=1").is_ok());
+        assert!(commented.check_http_request("h", "GET", "/?a=1&b").is_err());
+        // Patterns that would compile to something huge are refused.
+        assert!(config(r"\pL{50}{50}").validate().is_err());
         let rule = HttpRule::new("h").with_queries(["a"]);
         assert_eq!(rule.queries(), ["a"]);
         assert_eq!(rule, HttpRule::new("h").with_queries(["a"]));
