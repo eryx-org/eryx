@@ -55,6 +55,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-output-bytes` | `ERYX_MAX_OUTPUT_BYTES` | `16777216` (16 MiB) | Most stdout plus stderr bytes kept and streamed per execution, at most 16 MiB. See [Output cap](#output-cap). |
 | `--max-open-host-files` | `ERYX_MAX_OPEN_HOST_FILES` | `256` | Most host files (stdlib and site-packages) one execution may hold open; opens past it fail with `EDQUOT`. Not settable per request. |
 | `--max-open-host-files-total` | `ERYX_MAX_OPEN_HOST_FILES_TOTAL` | *(half the soft `RLIMIT_NOFILE`, at least 256)* | Most host files all executions in the server may hold open together. |
+| `--mount-root` | `ERYX_MOUNT_ROOTS` (`,`-separated) | `/mnt/` | Where [mounts](#mounts) may go. A root with a trailing slash, like `/mnt/`, takes mounts below it (`/mnt/repo`, not `/mnt`); one without, like `/workspace`, takes a mount at it too. Repeatable; empty entries are skipped. Startup fails for `/` and for roots at, inside or around what the sandbox needs: `/eryx`, `/python-stdlib`, `/site-packages` (and `/site-packages-N`), `/tmp` and `/etc/ssl/certs`. |
 | `--max-mounts` | `ERYX_MAX_MOUNTS` | `8` | Most [mounts](#mounts) one request may have. |
 | `--max-mount-ops` | `ERYX_MAX_MOUNT_OPS` | `1000` | Most `FsRequest`s one execution sends its client; past it, the code's file operations on its mounts fail. |
 | `--max-mount-transfer-bytes` | `ERYX_MAX_MOUNT_TRANSFER_BYTES` | `268435456` (256 MiB) | Most bytes of `FsResponse`s a client may send one execution. |
@@ -213,6 +214,7 @@ Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_N
 
 - Mounts are read-only unless `writable` (see below): writing, creating or deleting files in them fails.
 - A run reads each thing once: a file changed on the client mid-run may be seen as it was, and reads stop at the size the file had when the code first looked at it. Reads fetch 256 KiB at a time.
+- Each mount's path is under one of the server's [`--mount-root`s](#running-the-server), `/mnt/` by default, without `.`, `..`, empty components or a trailing slash. To serve a directory where existing code expects it, such as `/workspace`, start the server with `--mount-root /workspace`.
 - Mounts can't overlap, and the [`--max-mount*` flags](#running-the-server) bound each run: how many mounts it may have, how many `FsRequest`s it makes and bytes of `FsResponse`s it's sent (past either, the code's file operations on its mounts fail), and the host memory its file data and listings may hold. Each `FsResponse` must fit in the server's `--max-message-size`.
 - They work for every language. They aren't saved with `persist_state`, nor recorded in a [callback journal](#callback-replay): a replayed run asks for them again.
 - If the client half-closes or disconnects, file operations waiting for an answer, and any after, fail at once.

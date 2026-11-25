@@ -184,6 +184,7 @@ async fn exchange(
 ) -> (ExecuteResult, usize, Vec<FsChange>) {
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
+    let mount = request.mounts.first().map(|m| m.path.clone());
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(request))),
     })
@@ -200,7 +201,7 @@ async fn exchange(
         match msg.message {
             Some(server_message::Message::FsRequest(req)) => {
                 ops += 1;
-                assert_eq!(req.mount, "/mnt/repo");
+                assert_eq!(Some(&req.mount), mount.as_ref());
                 let result = answer(req.op.unwrap(), &req.path);
                 tx.send(ClientMessage {
                     message: Some(client_message::Message::FsResponse(FsResponse {
@@ -335,6 +336,45 @@ async fn javascript_reads_a_mount() {
         stdout(&result),
         "README.md,big.bin,private,src\nprint('hi')\n300000\nread-only\n"
     );
+}
+
+/// With `--mount-root /workspace`, a mount can be at `/workspace` itself, and
+/// `/mnt/` no longer takes mounts
+#[tokio::test]
+async fn the_operators_mount_root_applies() {
+    let limits = eryx_server::service::ServerLimits {
+        mount_roots: eryx_server::mounts::MountRoots::new(["/workspace".to_string()]).unwrap(),
+        ..Default::default()
+    };
+    let channel = start_server_with(limits).await;
+    let request = |path: &str| ExecuteRequest {
+        code: "import os\nprint(sorted(os.listdir('/workspace')))\n\
+               print(open('/workspace/README.md').read(), end='')"
+            .into(),
+        mounts: vec![Mount {
+            path: path.into(),
+            writable: false,
+        }],
+        ..Default::default()
+    };
+    let (result, _) = run_request(channel.clone(), request("/workspace")).await;
+    assert_eq!(
+        stdout(&result),
+        "['README.md', 'big.bin', 'private', 'src']\nhello mounts\n"
+    );
+
+    let mut client = EryxClient::new(channel);
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(request(
+            "/mnt/repo",
+        )))),
+    })
+    .await
+    .unwrap();
+    let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("/workspace"), "{status:?}");
 }
 
 /// The operator's limits apply: more mounts than `max_mounts` are refused,
