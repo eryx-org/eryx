@@ -363,6 +363,30 @@ async fn the_operators_mount_root_applies() {
         "['README.md', 'big.bin', 'private', 'src']\nhello mounts\n"
     );
 
+    // A writable mount at the root: its changes are relative to it
+    let writable = ExecuteRequest {
+        code: "open('/workspace/new.txt', 'w').write('hi')".into(),
+        mounts: vec![Mount {
+            path: "/workspace".into(),
+            writable: true,
+        }],
+        ..Default::default()
+    };
+    let (result, _, changes) = exchange(channel.clone(), writable).await;
+    assert!(result.success, "{}", result.error);
+    let changes: Vec<_> = changes
+        .into_iter()
+        .map(|c| (c.mount, c.path, c.change))
+        .collect();
+    assert!(
+        matches!(
+            &changes[..],
+            [(mount, path, Some(fs_change::Change::Write(w)))]
+                if mount == "/workspace" && path == "new.txt" && w.data == b"hi"
+        ),
+        "{changes:?}"
+    );
+
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(1);
     tx.send(ClientMessage {

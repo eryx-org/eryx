@@ -36,11 +36,12 @@ use crate::proto::eryx::v1::{
 };
 
 /// What the guest needs, so no mount root may be at, inside or around one:
-/// the server's files and environments (`/eryx`), the stdlib, `/tmp` (also
-/// `HOME`) and the CA certificates. Site-packages directories are checked
+/// the server's files and environments (`/eryx`), the scratch storage a
+/// request with mounts but no `files` gets (`/data`), the stdlib, `/tmp`
+/// (also `HOME`) and the CA certificates. Site-packages directories are checked
 /// apart, as there's one per `--site-packages` (`/site-packages`,
 /// `/site-packages-1`, ...).
-const RESERVED: &[&str] = &["/eryx", "/python-stdlib", "/tmp", "/etc/ssl/certs"];
+const RESERVED: &[&str] = &["/eryx", "/data", "/python-stdlib", "/tmp", "/etc/ssl/certs"];
 /// What a read that misses the cache fetches, aligned to it
 // ponytail: fixed block size; adaptive readahead and prefetch when sequential
 // reads of big files need fewer round trips
@@ -138,10 +139,13 @@ impl MountRoots {
                      components, like /mnt/ or /workspace"
                 ));
             }
-            let site_packages = base
-                .split('/')
-                .nth(1)
-                .is_some_and(|c| c.starts_with("site-packages"));
+            let site_packages = base.split('/').nth(1).is_some_and(|c| {
+                c.strip_prefix("site-packages").is_some_and(|n| {
+                    n.is_empty()
+                        || n.strip_prefix('-')
+                            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                })
+            });
             let shadowed = RESERVED
                 .iter()
                 .copied()
@@ -969,6 +973,9 @@ mod tests {
             "/python-stdlib",
             "/site-packages",
             "/site-packages-2/",
+            "/site-packages/x",
+            "/data",
+            "/data/repos/",
             "/tmp/",
             "/tmp/work",
         ] {
@@ -984,9 +991,11 @@ mod tests {
         for good in [
             "/mnt/",
             "/workspace",
-            "/data/repos/",
+            "/srv/repos/",
             "/tmpfiles",
             "/etc/app",
+            "/site-packages-extra",
+            "/site-packagesx",
         ] {
             assert!(MountRoots::new([good.to_string()]).is_ok(), "{good}");
         }

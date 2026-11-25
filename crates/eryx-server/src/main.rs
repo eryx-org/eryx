@@ -195,10 +195,10 @@ struct Args {
     /// Where a request's mounts (`ExecuteRequest.mounts`) may go. A root
     /// with a trailing slash, like the default /mnt/, takes mounts below it;
     /// one without, like /workspace, takes a mount at it too. Repeat for more
-    /// roots; in the environment, separate them with `,` (empty entries are
-    /// skipped). Startup fails for `/` and for roots that would shadow what
-    /// the sandbox needs (/eryx, the stdlib, site-packages, /tmp,
-    /// /etc/ssl/certs).
+    /// roots, or separate them with `,`, in the flag and the environment
+    /// alike (empty entries are skipped). Startup fails for `/` and for roots
+    /// that would shadow what the sandbox needs (/eryx, /data, the stdlib,
+    /// site-packages, /tmp, /etc/ssl/certs).
     #[arg(
         long = "mount-root",
         env = "ERYX_MOUNT_ROOTS",
