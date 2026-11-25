@@ -1816,6 +1816,44 @@ mod tests {
         assert!(!received(&seen).contains(REAL));
     }
 
+    /// A secret scoped by HTTP rules is substituted in a child's request
+    /// they match, and a request they don't is refused, through the proxy
+    /// as on the sandbox's own connections.
+    #[tokio::test]
+    async fn secret_http_rules_apply_to_children() {
+        let (port, cert, seen) = upstream(true).await;
+        let secret = SecretConfig {
+            placeholder: PH.to_string(),
+            ..SecretConfig::new(REAL, vec!["api.test".into()])
+        }
+        .with_http_rules([crate::HttpRule::new("api.test").with_paths(["/ok"])]);
+        let proxy = ChildProxy::start(
+            config(&cert),
+            HashMap::from([("KEY".to_string(), secret)]),
+            ChildNetwork::Inherit,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let send = async |path: &str| {
+            let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            assert!(status.contains(" 200 "), "{status}");
+            let mut tls = tls(&proxy, stream, "api.test").await;
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: api.test\r\nAuthorization: {PH}\r\nConnection: close\r\n\r\n"
+            );
+            exchange(&mut tls, request.as_bytes()).await
+        };
+
+        let response = send("/elsewhere").await;
+        assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+        assert!(!received(&seen).contains(REAL));
+
+        let response = send("/ok/x").await;
+        assert!(response.contains(" 200 OK"), "{response}");
+        assert!(received(&seen).contains(&format!("Authorization: {REAL}")));
+    }
+
     /// A permissive narrow config still can't reach a host the sandbox
     /// doesn't allow.
     #[tokio::test]

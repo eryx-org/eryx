@@ -235,6 +235,7 @@ async fn execute_selects_the_language_pool() {
                 name: "TOKEN".to_string(),
                 value: "s3cret".to_string(),
                 allowed_hosts: vec![],
+                ..Default::default()
             }],
             ..Default::default()
         },
@@ -1268,6 +1269,7 @@ async fn execute_secret_in_uncaught_exception_is_scrubbed() {
                     name: "MY_SECRET".to_string(),
                     value: REAL_SECRET.to_string(),
                     allowed_hosts: vec![],
+                    ..Default::default()
                 }],
                 callbacks: vec![],
                 resource_limits: Some(ResourceLimits {
@@ -3788,6 +3790,7 @@ async fn secret_without_allowed_hosts_is_rejected() {
         name: "TOKEN".to_string(),
         value: "value".to_string(),
         allowed_hosts,
+        ..Default::default()
     };
     let request = |secret, network_config| ExecuteRequest {
         code: "print('ran')".to_string(),
@@ -3866,6 +3869,7 @@ async fn plaintext_secret_substitution_is_opt_in() {
                     name: "TOKEN".to_string(),
                     value: REAL_SECRET.to_string(),
                     allowed_hosts: vec!["127.0.0.1".to_string()],
+                    ..Default::default()
                 }],
                 network_config: Some(NetworkConfig {
                     allow_all_hosts: true,
@@ -3892,6 +3896,114 @@ async fn plaintext_secret_substitution_is_opt_in() {
             received.to_lossy()
         );
     }
+}
+
+/// A secret's `header` and `http_rules` limit where its real value is
+/// substituted: a request outside them is refused, never sent. A rule that
+/// can't match is rejected up front.
+#[tokio::test]
+async fn secret_scope_limits_substitution() {
+    use eryx_server::proto::eryx::v1::{HttpRule, NetworkConfig, SecretConfig};
+    use tokio::io::AsyncReadExt;
+
+    const REAL_SECRET: &str = "scoped-real-secret-42";
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+    let request = |code, paths: Vec<String>| ExecuteRequest {
+        code,
+        secrets: vec![SecretConfig {
+            name: "TOKEN".to_string(),
+            value: REAL_SECRET.to_string(),
+            allowed_hosts: vec!["127.0.0.1".to_string()],
+            header: "authorization".to_string(),
+            http_rules: vec![HttpRule {
+                host: "127.0.0.1".to_string(),
+                methods: vec!["GET".to_string()],
+                paths,
+                queries: vec!["service=git-upload-pack".to_string()],
+            }],
+        }],
+        network_config: Some(NetworkConfig {
+            allow_all_hosts: true,
+            blocked_hosts: vec!["blocked.invalid".to_string()],
+            allowed_networks: vec!["127.0.0.0/8".to_string()],
+            allow_plaintext_secrets: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let err = execute_half_closed(
+        &mut client,
+        request("pass".to_string(), vec!["/a/../b".to_string()]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+    assert!(
+        err.message().contains("secret 'TOKEN'"),
+        "{}",
+        err.message()
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            sock.read_to_end(&mut buf).await.unwrap();
+            received.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+        received
+    });
+    let code = format!(
+        "import os, socket\n\
+         for target, header in (('/repo/info/refs?service=git-receive-pack', 'Authorization'), ('/repo/info/refs?service=git-upload-pack', 'X-Token'), ('/repo/info/refs?service=git-upload-pack', 'Authorization')):\n\
+         \x20   s = socket.create_connection(('127.0.0.1', {port}))\n\
+         \x20   try:\n\
+         \x20       s.sendall(f\"GET {{target}} HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\n{{header}}: {{os.environ['TOKEN']}}\\r\\n\\r\\n\".encode())\n\
+         \x20       print(target, header, 'sent')\n\
+         \x20   except OSError:\n\
+         \x20       print(target, header, 'refused')\n\
+         \x20   s.close()"
+    );
+    let result = execute_half_closed(
+        &mut client,
+        request(code, vec!["/repo/info/refs".to_string()]),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("git-receive-pack Authorization refused"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("git-upload-pack X-Token refused"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("git-upload-pack Authorization sent"),
+        "{stdout}"
+    );
+
+    let received = tokio::time::timeout(Duration::from_secs(30), server)
+        .await
+        .expect("the sandbox never connected")
+        .unwrap();
+    assert_eq!(received[..2], ["", ""], "{received:?}");
+    assert!(
+        received[2].contains(&format!("Authorization: {REAL_SECRET}")),
+        "{received:?}"
+    );
 }
 
 /// By default the server rejects a request that sets
@@ -4169,6 +4281,7 @@ async fn shell_children_get_the_requests_network_and_no_more() {
                         name: "TOKEN".to_string(),
                         value: REAL.to_string(),
                         allowed_hosts: vec!["127.0.0.1".to_string()],
+                        ..Default::default()
                     }],
                     ..Default::default()
                 },

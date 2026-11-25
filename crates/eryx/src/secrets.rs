@@ -26,6 +26,9 @@ pub struct SecretConfig {
     /// The only HTTP header the real value may be sent in, if set (compared
     /// ignoring case).
     pub(crate) header: Option<String>,
+    /// The only requests the real value may be sent in, if set; see
+    /// [`SecretConfig::with_http_rules`].
+    pub(crate) http_rules: Vec<crate::net::HttpRule>,
 }
 
 impl SecretConfig {
@@ -42,6 +45,7 @@ impl SecretConfig {
             placeholder: random_placeholder(),
             allowed_hosts,
             header: None,
+            http_rules: Vec::new(),
         }
     }
 
@@ -53,6 +57,7 @@ impl SecretConfig {
             placeholder: value,
             allowed_hosts: Vec::new(),
             header: None,
+            http_rules: Vec::new(),
         }
     }
 
@@ -62,6 +67,43 @@ impl SecretConfig {
     #[must_use]
     pub fn only_in_header(mut self, name: impl Into<String>) -> Self {
         self.header = Some(name.into());
+        self
+    }
+
+    /// Only substitute the real value in requests matching one of `rules`:
+    /// the request's host, method, path and query are matched as
+    /// [`NetConfig`](crate::NetConfig)'s HTTP rules match them, on top of
+    /// the secret's allowed hosts, so a rule for a host outside them never
+    /// matches. A request with the placeholder that no rule matches is
+    /// refused, as for a host the secret isn't allowed for.
+    /// No rules means any request to an allowed host.
+    ///
+    /// A rule that can't match (see [`HttpRule`](crate::HttpRule)) fails
+    /// [`NetConfig::check_secret_hosts`](crate::NetConfig::check_secret_hosts).
+    ///
+    /// ```
+    /// use eryx::{HttpRule, SecretConfig};
+    ///
+    /// // A Git password only sent to fetch, in `Authorization`.
+    /// let secret = SecretConfig::new("hunter2", vec!["git.example.com".into()])
+    ///     .only_in_header("Authorization")
+    ///     .with_http_rules([
+    ///         HttpRule::new("git.example.com")
+    ///             .with_methods(["GET"])
+    ///             .with_paths(["/org/repo.git/info/refs"])
+    ///             .with_queries(["service=git-upload-pack"]),
+    ///         HttpRule::new("git.example.com")
+    ///             .with_methods(["POST"])
+    ///             .with_paths(["/org/repo.git/git-upload-pack"]),
+    ///     ]);
+    /// assert_eq!(secret.http_rules().len(), 2);
+    /// ```
+    #[must_use]
+    pub fn with_http_rules(
+        mut self,
+        rules: impl IntoIterator<Item = crate::net::HttpRule>,
+    ) -> Self {
+        self.http_rules = rules.into_iter().collect();
         self
     }
 
@@ -109,6 +151,13 @@ impl SecretConfig {
     pub fn header(&self) -> Option<&str> {
         self.header.as_deref()
     }
+
+    /// The requests the real value may be sent in; empty means any request
+    /// to an allowed host.
+    #[must_use]
+    pub fn http_rules(&self) -> &[crate::net::HttpRule] {
+        &self.http_rules
+    }
 }
 
 impl std::fmt::Debug for SecretConfig {
@@ -118,6 +167,7 @@ impl std::fmt::Debug for SecretConfig {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .field("header", &self.header)
+            .field("http_rules", &self.http_rules)
             .finish()
     }
 }
@@ -357,6 +407,7 @@ mod tests {
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -375,6 +426,7 @@ mod tests {
                 placeholder: "PLACEHOLDER_1".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
         secrets.insert(
@@ -384,6 +436,7 @@ mod tests {
                 placeholder: "PLACEHOLDER_2".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 
@@ -430,6 +483,7 @@ mod tests {
                 placeholder: "PLACEHOLDER".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
 

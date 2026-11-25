@@ -38,7 +38,8 @@ use super::response::{self, CARRY_GRACE, RequestKind, UNSOLICITED};
 use super::{
     Body, IpNet, MAX_HEADER_LEN, NetConfig, TcpError, TlsError, embedded_ipv4, find_header_end,
     host_matches_pattern, is_absolute_form, is_http2, read_buf_len, request_authorities,
-    request_body, request_line, request_start, same_host, strip_port, switches_protocols,
+    request_body, request_line, request_matches_rules, request_start, same_host, strip_port,
+    switches_protocols,
 };
 use crate::secrets::SecretConfig;
 
@@ -496,6 +497,10 @@ impl NetPolicy {
             ));
         }
 
+        // What a secret's HTTP rules match. A malformed request line was
+        // refused before this; if one got here, no rule would match it.
+        let request = request_line(&text).unwrap_or_default();
+
         let mut result = String::new();
 
         let mut lines = text.lines();
@@ -517,7 +522,7 @@ impl NetPolicy {
 
                 // Substitute secrets in header value
                 let substituted_value =
-                    self.substitute_secrets_in_text(value, name, target_host)?;
+                    self.substitute_secrets_in_text(value, name, target_host, request)?;
                 // A placeholder inside `Basic` credentials isn't visible to the
                 // check above.
                 if !names_target && substituted_value != value {
@@ -542,7 +547,9 @@ impl NetPolicy {
     ///
     /// A secret is only substituted for a host matching
     /// [`NetConfig::secret_hosts`]; a secret with no hosts there is never
-    /// substituted. A secret limited to one header is only substituted there.
+    /// substituted. A secret limited to one header is only substituted there,
+    /// and one with HTTP rules only in a `request` (method and target) one
+    /// of them matches.
     ///
     /// Placeholders in `Authorization: Basic` credentials, which clients
     /// base64-encode, are substituted in the decoded `user:password` and the
@@ -552,6 +559,7 @@ impl NetPolicy {
         text: &str,
         header: &str,
         target_host: &str,
+        request: (&str, &str),
     ) -> Result<String, TcpError> {
         if header.eq_ignore_ascii_case("authorization")
             && let Some((scheme, token)) = text.split_once(' ')
@@ -559,12 +567,13 @@ impl NetPolicy {
             && let Ok(decoded) = BASE64_STANDARD.decode(token.trim())
             && let Ok(credentials) = String::from_utf8(decoded)
         {
-            let substituted = self.substitute_placeholders(&credentials, header, target_host)?;
+            let substituted =
+                self.substitute_placeholders(&credentials, header, target_host, request)?;
             if substituted != credentials {
                 return Ok(format!("Basic {}", BASE64_STANDARD.encode(substituted)));
             }
         }
-        self.substitute_placeholders(text, header, target_host)
+        self.substitute_placeholders(text, header, target_host, request)
     }
 
     /// Substitute secret placeholders appearing verbatim in `text`, the value
@@ -575,6 +584,7 @@ impl NetPolicy {
         text: &str,
         header: &str,
         target_host: &str,
+        (method, target): (&str, &str),
     ) -> Result<String, TcpError> {
         let mut result = text.to_string();
 
@@ -601,6 +611,11 @@ impl NetPolicy {
             {
                 return Err(TcpError::NotPermitted(format!(
                     "Secret not allowed in the {header} header"
+                )));
+            }
+            if !request_matches_rules(&secret_config.http_rules, target_host, method, target) {
+                return Err(TcpError::NotPermitted(format!(
+                    "Secret not allowed for this request: {method} {target}"
                 )));
             }
 

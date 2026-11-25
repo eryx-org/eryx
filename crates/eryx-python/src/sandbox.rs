@@ -15,6 +15,7 @@ use eryx::{CancellationToken, OutputHandler};
 use crate::callback::extract_callbacks;
 use crate::error::{InitializationError, eryx_error_to_py};
 use crate::execution::{CancelToken, call_token, run_async, run_blocking};
+use crate::net_config::HttpRule;
 use crate::net_config::NetConfig;
 use crate::resource_limits::ResourceLimits;
 use crate::result::{ExecuteResult, ReplayOutcome};
@@ -668,16 +669,38 @@ pub(crate) fn apply_secrets<L: eryx::language::GuestLanguage, R>(
     mut builder: eryx::SandboxBuilder<L, R>,
     secrets_dict: &Bound<'_, PyDict>,
 ) -> PyResult<eryx::SandboxBuilder<L, R>> {
-    for (name, value, allowed_hosts) in extract_secrets(secrets_dict)? {
-        builder = builder.with_secret(name, value, allowed_hosts);
+    for (name, secret) in extract_secrets(secrets_dict)? {
+        builder = builder.with_secret_config(name, secret.config());
     }
     Ok(builder)
 }
 
-/// Parse a Python secrets dict into `(name, value, allowed_hosts)` triples.
-pub(crate) fn extract_secrets(
-    secrets_dict: &Bound<'_, PyDict>,
-) -> PyResult<Vec<(String, String, Vec<String>)>> {
+/// A secret from a Python secrets dict, which [`Secret::config`] turns into
+/// a [`eryx::SecretConfig`] with a new placeholder each time.
+#[derive(Clone)]
+pub(crate) struct Secret {
+    value: String,
+    allowed_hosts: Vec<String>,
+    header: Option<String>,
+    http_rules: Vec<eryx::HttpRule>,
+}
+
+impl Secret {
+    pub(crate) fn config(&self) -> eryx::SecretConfig {
+        let config = eryx::SecretConfig::new(self.value.clone(), self.allowed_hosts.clone())
+            .with_http_rules(self.http_rules.iter().cloned());
+        match &self.header {
+            Some(header) => config.only_in_header(header.clone()),
+            None => config,
+        }
+    }
+}
+
+/// Parse a Python secrets dict into `(name, secret)` pairs. Each secret is a
+/// dict with a `value` and, optionally, `allowed_hosts` (a list of host
+/// patterns), `header` (a header name) and `http_rules` (a list of
+/// `HttpRule`); the last two limit where it's substituted.
+pub(crate) fn extract_secrets(secrets_dict: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Secret)>> {
     let mut secrets = Vec::with_capacity(secrets_dict.len());
     for (key, value) in secrets_dict.iter() {
         let name: String = key
@@ -704,18 +727,42 @@ pub(crate) fn extract_secrets(
                 ))
             })?;
 
+        let type_error = |key: &str, expected: &str| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "secret '{name}' {key} must be {expected}"
+            ))
+        };
         let allowed_hosts: Vec<String> = value_dict
             .get_item("allowed_hosts")?
+            .filter(|v| !v.is_none())
             .map(|v| v.extract())
             .transpose()
-            .map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err(format!(
-                    "secret '{name}' allowed_hosts must be a list of strings"
-                ))
-            })?
+            .map_err(|_| type_error("allowed_hosts", "a list of strings"))?
+            .unwrap_or_default();
+        let header: Option<String> = value_dict
+            .get_item("header")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract())
+            .transpose()
+            .map_err(|_| type_error("header", "a string"))?
+            .filter(|h: &String| !h.is_empty());
+        let http_rules: Vec<HttpRule> = value_dict
+            .get_item("http_rules")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract())
+            .transpose()
+            .map_err(|_| type_error("http_rules", "a list of HttpRule"))?
             .unwrap_or_default();
 
-        secrets.push((name, secret_value, allowed_hosts));
+        secrets.push((
+            name,
+            Secret {
+                value: secret_value,
+                allowed_hosts,
+                header,
+                http_rules: http_rules.into_iter().map(|r| r.0).collect(),
+            },
+        ));
     }
     Ok(secrets)
 }

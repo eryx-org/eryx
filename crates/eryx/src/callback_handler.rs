@@ -428,6 +428,7 @@ mod tests {
                 placeholder: "ERYX_SECRET_PLACEHOLDER_abc123".to_string(),
                 allowed_hosts: vec![],
                 header: None,
+                http_rules: Vec::new(),
             },
         );
         secrets
