@@ -33,15 +33,23 @@ fn test_cmd_wasm() -> Vec<u8> {
 
 /// The test command built for WASI 0.3: a p3 command component.
 fn test_cmd_p3() -> Command {
+    Command::from_bytes(&test_cmd_p3_wasm()).unwrap()
+}
+
+fn test_cmd_p3_wasm() -> Vec<u8> {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    Command::from_bytes(WASM.get_or_init(|| build_test_cmd("wasm32-wasip3"))).unwrap()
+    WASM.get_or_init(|| build_test_cmd("wasm32-wasip3")).clone()
 }
 
 /// The test command built for WASI preview 1: a core module, which
 /// `Command::from_bytes` adapts into a WASI 0.2 command component.
 fn test_cmd_p1() -> Command {
+    Command::from_bytes(&test_cmd_p1_wasm()).unwrap()
+}
+
+fn test_cmd_p1_wasm() -> Vec<u8> {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    Command::from_bytes(WASM.get_or_init(|| build_test_cmd("wasm32-wasip1"))).unwrap()
+    WASM.get_or_init(|| build_test_cmd("wasm32-wasip1")).clone()
 }
 
 fn build_test_cmd(target: &str) -> Vec<u8> {
@@ -3048,5 +3056,177 @@ mod background_jobs {
             .expect("cancellation stops the jobs")
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Cancelled), "{err:?}");
+    }
+}
+
+/// Running wasm files from the sandbox's filesystem as commands (#1202):
+/// the test command, built for each WASI version, in a host directory
+/// mounted at `/vol`.
+#[cfg(feature = "unstable-vfs")]
+mod files {
+    use super::*;
+    use eryx::session::VolumeMount;
+    use eryx::{ExecuteOptions, FileCommands};
+
+    /// `/vol`'s files: the test command for WASI 0.2 (`tc.wasm`), 0.3
+    /// (`tc3.wasm`) and preview 1 (`tc1.wasm`), a component importing
+    /// `wasi:http`, which children don't get (`http.wasm`), and a script.
+    fn files() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let write =
+            |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
+        write("tc.wasm", &test_cmd_wasm());
+        write("tc3.wasm", &test_cmd_p3_wasm());
+        write("tc1.wasm", &test_cmd_p1_wasm());
+        write(
+            "http.wasm",
+            &wat::parse_str(
+                r#"(component (import "wasi:http/outgoing-handler@0.2.0" (instance)))"#,
+            )
+            .unwrap(),
+        );
+        write("script", b"echo script\n");
+        dir
+    }
+
+    fn sandbox(dir: &tempfile::TempDir, files: Option<FileCommands>) -> Sandbox {
+        let mut builder = shell()
+            .with_volume(VolumeMount::new(dir.path(), "/vol"))
+            .with_command("sp", test_cmd().allow_spawn())
+            .with_command("spf", test_cmd().allow_spawn().allow_file_commands());
+        if let Some(files) = files {
+            builder = builder.with_file_commands(files);
+        }
+        builder.build().unwrap()
+    }
+
+    /// The script's stdout and stderr, whether or not it failed.
+    async fn run(sandbox: &Sandbox, script: &str, options: &ExecuteOptions) -> (String, String) {
+        let (stdout, stderr) = match sandbox.execute_with(script, options).await {
+            Ok(out) => (out.stdout, out.stderr),
+            Err(e) => match e.kind() {
+                ErrorKind::ScriptFailed { stdout, stderr, .. } => (stdout.clone(), stderr.clone()),
+                _ => panic!("{e}"),
+            },
+        };
+        (
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )
+    }
+
+    /// The shell runs a wasm file by its path, absolute or relative, for
+    /// each kind of WASI command, and still runs other files as scripts.
+    #[tokio::test]
+    async fn the_shell_runs_wasm_files() {
+        let dir = files();
+        let sandbox = sandbox(&dir, Some(FileCommands::new()));
+        let (out, err) = run(
+            &sandbox,
+            "cd /vol; echo hi | ./tc.wasm; /vol/tc3.wasm argv0; ./tc1.wasm env PWD; ./script",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "HI\n/vol/tc3.wasm\n/vol\nscript\n", "{err}");
+    }
+
+    /// An execution compiles at most `max_compiles` files, and running one
+    /// it has compiled again doesn't count.
+    #[tokio::test]
+    async fn compiles_are_capped_per_execution() {
+        let dir = files();
+        let sandbox = sandbox(&dir, Some(FileCommands::new().with_max_compiles(1)));
+        let script =
+            "/vol/tc.wasm argv0; /vol/tc.wasm argv0; /vol/tc3.wasm argv0; echo \"status=$?\"";
+        let (out, err) = run(&sandbox, script, &ExecuteOptions::new()).await;
+        assert_eq!(out, "/vol/tc.wasm\n/vol/tc.wasm\nstatus=134\n", "{err}");
+        assert!(
+            err.contains("compiled as many wasm files as it may (1)"),
+            "{err}"
+        );
+        // The next execution starts afresh.
+        let (out, _) = run(&sandbox, "/vol/tc3.wasm argv0", &ExecuteOptions::new()).await;
+        assert_eq!(out, "/vol/tc3.wasm\n");
+    }
+
+    /// Files don't run unless the sandbox runs them, nor in an execution
+    /// with an allow-list, nor for a spawning command not allowed to.
+    #[tokio::test]
+    async fn wasm_files_only_run_where_allowed() {
+        let dir = files();
+        let off = sandbox(&dir, None);
+        let (out, err) = run(
+            &off,
+            "/vol/tc.wasm argv0; echo \"status=$?\"",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "status=127\n", "{err}");
+        assert!(err.contains("running wasm files isn't enabled"), "{err}");
+
+        let on = sandbox(&dir, Some(FileCommands::new()));
+        let listed = ExecuteOptions::new().with_allowed_commands(["sp", "spf"]);
+        let (out, err) = run(&on, "/vol/tc.wasm argv0; echo \"status=$?\"", &listed).await;
+        assert_eq!(out, "status=127\n", "{err}");
+        assert!(err.contains("running wasm files isn't enabled"), "{err}");
+
+        // Only a command allowed to run files does.
+        let (out, err) = run(
+            &on,
+            "sp spawn /vol/tc.wasm argv0 </dev/null; spf spawn /vol/tc.wasm argv0 </dev/null",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "error: command-not-found\n/vol/tc.wasm\n", "{err}");
+        assert!(err.contains("this command may not run wasm files"), "{err}");
+    }
+
+    /// A file over the size limit, or that isn't a command children can
+    /// run, is refused, saying why.
+    #[tokio::test]
+    async fn oversized_and_unrunnable_files_are_refused() {
+        let dir = files();
+        let small = sandbox(&dir, Some(FileCommands::new().with_max_file_bytes(1024)));
+        let (out, err) = run(
+            &small,
+            "/vol/tc.wasm argv0; echo \"status=$?\"",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "status=134\n", "{err}");
+        assert!(err.contains("over the limit of 1024 bytes"), "{err}");
+
+        let on = sandbox(&dir, Some(FileCommands::new()));
+        let (out, err) = run(
+            &on,
+            "/vol/http.wasm; echo \"status=$?\"",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "status=134\n", "{err}");
+        assert!(err.contains("can't run as a command"), "{err}");
+        assert!(err.contains("wasi:http"), "{err}");
+        let (out, err) = run(
+            &on,
+            "/vol/missing.wasm; echo \"status=$?\"",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "status=127\n", "{err}");
+    }
+
+    /// A file a spawning command runs can't run commands itself, whatever
+    /// its caller may do.
+    #[tokio::test]
+    async fn wasm_files_run_no_commands() {
+        let dir = files();
+        let on = sandbox(&dir, Some(FileCommands::new()));
+        let (out, err) = run(
+            &on,
+            "/vol/tc.wasm spawn sp argv0 </dev/null; spf spawn /vol/tc.wasm spawn sp argv0 </dev/null",
+            &ExecuteOptions::new(),
+        )
+        .await;
+        assert_eq!(out, "error: spawn-failed\nerror: spawn-failed\n", "{err}");
     }
 }

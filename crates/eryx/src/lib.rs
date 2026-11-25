@@ -145,7 +145,9 @@ pub use net::{
 };
 pub use package::{ExtractedPackage, PackageFormat};
 pub use pool::{PoolConfig, PoolError, PoolStats, PooledSandbox, SandboxPool};
-pub use process::{Command, CommandImport, CommandInfo, CommandOptions, ImportSupport};
+pub use process::{
+    Command, CommandImport, CommandInfo, CommandOptions, FileCommands, ImportSupport,
+};
 pub use replay::{
     CallbackJournal, CallbackJournalEntry, CallbackOutcome, ReplayCallback, ReplayState,
     SuspendedCallback,

@@ -1718,3 +1718,39 @@ async fn git_clones_from_github_over_https() {
     .await;
     assert!(out.contains("Merge pull request #6"), "{out}");
 }
+
+/// A wasm file run as a command (#1202) is offline, even when the shell's
+/// children and the command running it have network.
+#[cfg(feature = "unstable-vfs")]
+#[tokio::test]
+async fn wasm_files_get_no_network() {
+    let (port, received) = upstream(None).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tc.wasm"),
+        fixture("test-cmd", "eryx-test-cmd"),
+    )
+    .unwrap();
+    let sandbox = shell(network())
+        .with_volume(eryx::session::VolumeMount::new(dir.path(), "/vol"))
+        .with_file_commands(eryx::FileCommands::new())
+        .with_command("spf", test_cmd().allow_spawn().allow_file_commands())
+        .build()
+        .unwrap();
+    let out = run(
+        &sandbox,
+        &format!(
+            "p=$(tc env HTTPS_PROXY); echo \"${{p%%:*}}\"; echo \"file=$(/vol/tc.wasm env HTTPS_PROXY)\"; \
+             /vol/tc.wasm proxy-get http://api.test:{port}/; \
+             spf spawn /vol/tc.wasm connect 127.0.0.1:{port} </dev/null"
+        ),
+    )
+    .await;
+    assert!(out.starts_with("http\nfile=\n"), "{out}");
+    assert!(
+        out.contains("eryx: networking not enabled for this command (/vol/tc.wasm has no network)"),
+        "{out}"
+    );
+    assert!(!out.contains("connected"), "{out}");
+    assert!(received.lock().unwrap().is_empty(), "{out}");
+}

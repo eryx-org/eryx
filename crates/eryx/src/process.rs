@@ -561,6 +561,8 @@ pub(crate) struct ChildBudget {
     /// the run was dropped before its final charge (see [`Owed`]). The
     /// execution's guest is charged it on its next spawn or charge.
     owed_fuel: Arc<AtomicU64>,
+    /// The files its children have compiled (see [`FileCommands`]).
+    files: Arc<tokio::sync::Mutex<FileCache>>,
 }
 
 impl Default for ChildBudget {
@@ -582,6 +584,7 @@ impl ChildBudget {
             memory_limit: usize::try_from(memory).unwrap_or(usize::MAX),
             stderr,
             owed_fuel: Arc::default(),
+            files: Arc::default(),
         }
     }
 
@@ -662,6 +665,9 @@ pub struct Command {
     tunnels: bool,
     /// Whether its children may run commands themselves.
     spawns: bool,
+    /// Whether the commands its children run may be wasm files (see
+    /// [`Command::allow_file_commands`]).
+    runs_files: bool,
     /// Host memory its instances' metadata takes, charged to the children's
     /// memory pool while one runs (see `vmctx`).
     vmctx: usize,
@@ -812,7 +818,7 @@ impl Command {
             Err(e) => return Err(e),
         };
         let mut info = imports::inspect(&component)?;
-        info.preview1 = matches!(component, std::borrow::Cow::Owned(_));
+        info.preview1 = preview1::is_preview1(wasm);
         Ok(info)
     }
 
@@ -969,6 +975,7 @@ impl Command {
             tunnels: false,
             // The shell runs commands; it's what it's for.
             spawns: language == crate::Language::Shell,
+            runs_files: false,
             // Not `precompiled_vmctx`: a runtime is rarely stamped, so it'd
             // only warn.
             vmctx: usize::try_from(
@@ -1041,6 +1048,7 @@ impl Command {
             pre,
             tunnels: false,
             spawns: false,
+            runs_files: false,
             vmctx: usize::try_from(vmctx).unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
@@ -1114,6 +1122,118 @@ impl Command {
         self.spawns = true;
         self
     }
+
+    /// Let this command's children run wasm files from their filesystem as
+    /// commands, as `go test` runs the binary it built: a `cmd` containing
+    /// `/` given to `eryx:process/run` or `pipe`. Only in a sandbox that
+    /// runs files at all (see
+    /// [`SandboxBuilder::with_file_commands`](crate::SandboxBuilder::with_file_commands)),
+    /// and only with [`allow_spawn`](Self::allow_spawn), without which its
+    /// children run nothing.
+    #[must_use]
+    pub fn allow_file_commands(mut self) -> Self {
+        self.runs_files = true;
+        self
+    }
+}
+
+/// How a shell sandbox runs wasm files from its own filesystem as commands
+/// (see
+/// [`SandboxBuilder::with_file_commands`](crate::SandboxBuilder::with_file_commands)),
+/// and the limits on compiling them, each per execution.
+///
+/// A file runs when a `cmd` given to `eryx:process` contains `/` (and isn't
+/// a registered name): the shell's `./a.out`, or a command registered with
+/// [`Command::allow_file_commands`] running the binary it built. It's read
+/// as its caller would read it, so any file the caller can read can run. It
+/// must be a WASI command, as for [`Command::from_bytes`]: a component, a
+/// WASI preview 1 module, or a core module with a `component-type` custom
+/// section. It runs as a child with the usual limits, and gets no network,
+/// credentials or tunnels and runs no commands, whatever its caller has.
+///
+/// The host compiles it outside the execution's fuel, in the execution's
+/// time, so compiling is bounded: by the size of the file, the number of
+/// compiles and the time they take, and the execution's child memory pool,
+/// which holds four times the file's size while it compiles. An execution
+/// compiles one file at a time and keeps its last four compiled, so running
+/// one again is cheap; nothing is kept between executions.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct FileCommands {
+    max_file_bytes: u64,
+    max_compiles: usize,
+    compile_time: std::time::Duration,
+}
+
+impl Default for FileCommands {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 32 * 1024 * 1024,
+            max_compiles: 8,
+            compile_time: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+impl FileCommands {
+    /// The defaults: files up to 32 MiB, and 8 compiles taking at most 60
+    /// seconds together, per execution.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The largest file that may run, in bytes.
+    #[must_use]
+    pub fn with_max_file_bytes(mut self, bytes: u64) -> Self {
+        self.max_file_bytes = bytes;
+        self
+    }
+
+    /// How many files one execution may compile. Running one it has
+    /// compiled already, and still holds, doesn't count.
+    #[must_use]
+    pub fn with_max_compiles(mut self, compiles: usize) -> Self {
+        self.max_compiles = compiles;
+        self
+    }
+
+    /// How long one execution's compiles may take together. A compile
+    /// can't be interrupted, so one that runs past it finishes on its own
+    /// and is thrown away, and the run fails.
+    #[must_use]
+    pub fn with_compile_time(mut self, time: std::time::Duration) -> Self {
+        self.compile_time = time;
+        self
+    }
+}
+
+/// How much of the child memory pool a compile holds, per byte of its file:
+/// the file, its component and Cranelift's working memory, which wasmtime
+/// doesn't report.
+const COMPILE_MEMORY_FACTOR: usize = 4;
+
+/// How many compiled files an execution keeps, to run again.
+const MAX_CACHED_FILES: usize = 4;
+
+/// A wasm file a child runs (see [`FileCommands`]), until its run reads and
+/// compiles it.
+struct FileSource {
+    /// Its absolute guest path.
+    path: String,
+    engine: Engine,
+    config: FileCommands,
+}
+
+/// An execution's compiled files, and what its compiles have used of its
+/// [`FileCommands`] limits. Locked for a whole compile, so an execution
+/// compiles one file at a time.
+#[derive(Debug, Default)]
+struct FileCache {
+    /// By the SHA-256 of the file, oldest first.
+    compiled: std::collections::VecDeque<([u8; 32], Command)>,
+    compiles: usize,
+    spent: std::time::Duration,
 }
 
 /// Stamp `precompiled`, wasmtime's output for `wasm`, with what its
@@ -1330,6 +1450,9 @@ pub(crate) struct Spawner {
     within: Option<NetScope>,
     /// How deep the children it spawns are (the shell's are 1).
     depth: usize,
+    /// Whether they may be wasm files, if the sandbox runs files (see
+    /// [`Command::allow_file_commands`]): always for the shell's.
+    runs_files: bool,
     /// Where its children's process events go, for the shell's `wait` to
     /// report: shared by every descendant of one of the shell's children.
     traces: Option<Arc<std::sync::Mutex<NestedTraces>>>,
@@ -1484,11 +1607,17 @@ impl Spawner {
             tracing::warn!(cmd, depth = self.depth, "nested spawns too deep");
             return Err(ProcessError::LimitExceeded);
         }
-        let command = self
-            .commands
-            .get(&cmd)
-            .ok_or(ProcessError::CommandNotFound)?
-            .clone();
+        let command = match self.commands.get(&cmd) {
+            Some(command) => command.clone(),
+            None if cmd.contains('/') => {
+                #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+                let has_vfs = vfs.is_some();
+                #[cfg(not(any(feature = "unstable-vfs", feature = "shell")))]
+                let has_vfs = false;
+                self.file_command(&cmd, &cwd, has_vfs)?
+            }
+            None => return Err(ProcessError::CommandNotFound),
+        };
         // WASI 0.2 has no working directory; tell the child where it is.
         if !env.iter().any(|(k, _)| k == "PWD") {
             env.push(("PWD".to_owned(), cwd));
@@ -1613,6 +1742,7 @@ impl Spawner {
             spawner: command.spawns.then(|| Spawner {
                 within: scope,
                 depth: self.depth + 1,
+                runs_files: command.runs_files,
                 traces: Some(self.traces.clone().unwrap_or_default()),
                 // Set once its trace starts (`NestedTrace::start`).
                 parent: None,
@@ -1632,6 +1762,52 @@ impl Spawner {
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,
+        })
+    }
+}
+
+impl Spawner {
+    /// The command for the wasm file `cmd` (relative to `cwd`) that a child
+    /// runs: read and compiled when it runs (see [`ChildRun::load_file`]),
+    /// with no network, tunnels, credentials or spawning. Refused, telling
+    /// the caller why, unless the sandbox runs files, this caller may, and
+    /// it has a filesystem (`has_vfs`) to run them from.
+    fn file_command(&self, cmd: &str, cwd: &str, has_vfs: bool) -> Result<Command, ProcessError> {
+        let refuse = |why: &str| {
+            self.notices.write(&format!("eryx: {cmd}: {why}\n"));
+            Err(ProcessError::CommandNotFound)
+        };
+        let Some(config) = &self.commands.files else {
+            return refuse("running wasm files isn't enabled in this sandbox");
+        };
+        if !self.runs_files {
+            return refuse("this command may not run wasm files");
+        }
+        if !has_vfs {
+            return refuse("there's no filesystem to run it from");
+        }
+        let path = if cmd.starts_with('/') {
+            cmd.to_owned()
+        } else {
+            format!("{cwd}/{cmd}")
+        };
+        let engine = crate::Executor::child_engine().map_err(|e| {
+            tracing::warn!(error = %e, "no child engine to compile a file with");
+            ProcessError::SpawnFailed
+        })?;
+        Ok(Command {
+            pre: Pre::File(Arc::new(FileSource {
+                path,
+                engine,
+                config: config.clone(),
+            })),
+            tunnels: false,
+            spawns: false,
+            runs_files: false,
+            // Charged once it's compiled.
+            vmctx: 0,
+            network: Some(crate::net::ChildNetwork::None),
+            credentials: Vec::new(),
         })
     }
 }
@@ -1681,6 +1857,7 @@ impl Command {
             pre,
             tunnels: false,
             spawns: false,
+            runs_files: false,
             vmctx: usize::try_from(precompiled_vmctx(precompiled)).unwrap_or(usize::MAX),
             network: None,
             credentials: Vec::new(),
@@ -1782,6 +1959,8 @@ enum Pre {
         any(feature = "unstable-vfs", feature = "shell")
     ))]
     Guest(Arc<crate::Executor>),
+    /// A wasm file, until its run compiles it (see [`ChildRun::load_file`]).
+    File(Arc<FileSource>),
 }
 
 impl Pre {
@@ -1821,6 +2000,7 @@ impl Pre {
                 any(feature = "unstable-vfs", feature = "shell")
             ))]
             Self::Guest(executor) => executor.engine(),
+            Self::File(file) => &file.engine,
         }
     }
 
@@ -1836,6 +2016,9 @@ impl Pre {
                 return Err(wasmtime::Error::msg(
                     "a guest command runs in a sandbox store, not a child's",
                 ));
+            }
+            Self::File(_) => {
+                return Err(wasmtime::Error::msg("a wasm file runs once it's compiled"));
             }
             Self::P2(pre) => {
                 let command = pre.instantiate_async(&mut *store).await?;
@@ -1874,6 +2057,8 @@ pub(crate) struct Commands {
     registered: Arc<HashMap<String, Command>>,
     /// Which of [`GUEST_COMMANDS`] this execution allows; `None` allows all.
     guest: Option<Vec<&'static str>>,
+    /// Whether, and how, wasm files run (see [`FileCommands`]).
+    files: Option<FileCommands>,
 }
 
 impl Commands {
@@ -1886,9 +2071,15 @@ impl Commands {
         Arc::make_mut(&mut self.registered).insert(name, command);
     }
 
+    /// Run wasm files as `files` says (see [`FileCommands`]).
+    pub(crate) fn run_files(&mut self, files: FileCommands) {
+        self.files = Some(files);
+    }
+
     /// Just the commands named in `allowed`, for one execution; `None`
     /// keeps them all, and `Some` of an empty list leaves none. Names that
-    /// aren't registered or [`GUEST_COMMANDS`] are ignored.
+    /// aren't registered or [`GUEST_COMMANDS`] are ignored. An allow-list
+    /// runs no wasm files: it has no name for them.
     pub(crate) fn only(&self, allowed: Option<&[String]>) -> Self {
         let Some(allowed) = allowed else {
             return self.clone();
@@ -1907,6 +2098,7 @@ impl Commands {
         Self {
             registered: Arc::new(registered),
             guest: Some(guest),
+            files: None,
         }
     }
 
@@ -2503,7 +2695,14 @@ impl<T> Drop for Metered<T> {
 impl ChildRun {
     /// Run the child to completion, returning its exit code and the fuel it
     /// burned.
-    async fn run(self) -> (Result<i32, String>, u64) {
+    async fn run(mut self) -> (Result<i32, String>, u64) {
+        if let Pre::File(file) = &self.pre {
+            let file = Arc::clone(file);
+            if let Err(e) = self.load_file(&file).await {
+                self.notices.write(&format!("{e}\n"));
+                return (Err(e), 0);
+            }
+        }
         #[cfg(all(
             any(feature = "embedded", feature = "preinit"),
             any(feature = "unstable-vfs", feature = "shell")
@@ -2692,6 +2891,107 @@ impl ChildRun {
 }
 
 /// Feeds a guest's `stream<u8>` into a child's stdin pipe.
+impl ChildRun {
+    /// Read and compile the wasm file this run runs (see [`FileCommands`]),
+    /// or take it from the execution's compiled files, and charge the
+    /// child memory pool for its instances' metadata. The error is the
+    /// line telling its caller why it can't run.
+    async fn load_file(&mut self, file: &FileSource) -> Result<(), String> {
+        let budget = self._args.budget.clone();
+        let config = &file.config;
+        let path = &file.path;
+        let fail = |why: String| format!("eryx: {path}: {why}");
+        // Held until it's compiled: one compile at a time.
+        let mut cache = budget.files.lock().await;
+        let wasm = self
+            .read_file(path, config.max_file_bytes.saturating_add(1))
+            .await
+            .map_err(fail)?;
+        if wasm.len() as u64 > config.max_file_bytes {
+            return Err(fail(format!(
+                "it's over the limit of {} bytes on wasm files that run",
+                config.max_file_bytes
+            )));
+        }
+        let hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&wasm).into();
+        let cached = cache
+            .compiled
+            .iter()
+            .find(|(h, _)| *h == hash)
+            .map(|(_, command)| command.clone());
+        let command = match cached {
+            Some(command) => command,
+            None => {
+                if cache.compiles >= config.max_compiles {
+                    return Err(fail(format!(
+                        "this execution has compiled as many wasm files as it may ({})",
+                        config.max_compiles
+                    )));
+                }
+                let left = config.compile_time.saturating_sub(cache.spent);
+                if left.is_zero() {
+                    return Err(fail(format!(
+                        "this execution has spent its {} s of compiling wasm files",
+                        config.compile_time.as_secs()
+                    )));
+                }
+                let Some(_compiling) = ChildMemory::reserve(
+                    Arc::clone(&budget.memory),
+                    budget.memory_limit,
+                    wasm.len().saturating_mul(COMPILE_MEMORY_FACTOR),
+                ) else {
+                    return Err(budget.pool_full(&self.argv[0]).trim_end().to_owned());
+                };
+                cache.compiles += 1;
+                let started = std::time::Instant::now();
+                // Off the async runtime: Cranelift can't be interrupted.
+                let compiled = tokio::time::timeout(
+                    left,
+                    tokio::task::spawn_blocking(move || Command::from_bytes(&wasm)),
+                )
+                .await;
+                cache.spent += started.elapsed();
+                let command = match compiled {
+                    Err(_) => {
+                        return Err(fail(format!(
+                            "compiling it took longer than the {} s this execution may spend \
+                             compiling wasm files",
+                            config.compile_time.as_secs()
+                        )));
+                    }
+                    Ok(Err(e)) => return Err(fail(format!("compiling it failed: {e}"))),
+                    Ok(Ok(Err(e))) => return Err(fail(format!("it can't run as a command: {e}"))),
+                    Ok(Ok(Ok(command))) => command,
+                };
+                if cache.compiled.len() >= MAX_CACHED_FILES {
+                    cache.compiled.pop_front();
+                }
+                cache.compiled.push_back((hash, command.clone()));
+                command
+            }
+        };
+        if !self.memory.charge(command.vmctx) {
+            return Err(budget.pool_full(&self.argv[0]).trim_end().to_owned());
+        }
+        self.pre = command.pre;
+        Ok(())
+    }
+
+    /// Up to `limit` bytes of the file at `path`, read as the child's
+    /// caller would read it.
+    async fn read_file(&mut self, path: &str, limit: u64) -> Result<Vec<u8>, String> {
+        #[cfg(any(feature = "unstable-vfs", feature = "shell"))]
+        if let Some(vfs) = self.vfs.as_mut() {
+            return vfs
+                .read_file(path, limit)
+                .await
+                .map_err(|e| format!("can't read it: {e}"));
+        }
+        let _ = (path, limit);
+        Err("there's no filesystem to run it from".to_owned())
+    }
+}
+
 struct PipeConsumer(pipe::Writer);
 
 impl<D> StreamConsumer<D> for PipeConsumer {
@@ -2778,6 +3078,7 @@ impl ExecutorState {
             net: self.child_net.as_ref().map(Arc::downgrade),
             within: Some(NetScope::execution()),
             depth: 1,
+            runs_files: true,
             traces: None,
             parent: None,
             notices: self
@@ -3837,6 +4138,46 @@ pub(crate) mod tests {
         assert!(info.preview1 && info.runnable(), "{info:?}");
         assert_eq!(info.wasi, Some("0.2"));
         assert!(matches!(Command::from_bytes(&p1).unwrap().pre, Pre::P2(_)));
+    }
+
+    /// A core module carrying a `component-type` section (as a wasip3 Go
+    /// binary does) is encoded as the component it describes, and then
+    /// checked like any other: this one imports something children don't
+    /// get.
+    #[test]
+    fn core_modules_with_a_component_type_are_encoded() {
+        use wit_component_wasmtime::StringEncoding;
+        use wit_parser_wasmtime::{LiftLowerAbi, ManglingAndAbi, Resolve};
+
+        let mut resolve = Resolve::default();
+        let package = resolve
+            .push_str(
+                "w.wit",
+                "package a:b;\ninterface c { f: func(); }\nworld w { import c; }\n",
+            )
+            .unwrap();
+        let world = resolve.select_world(&[package], Some("w")).unwrap();
+        let mut module = wit_component_wasmtime::dummy_module(
+            &resolve,
+            world,
+            ManglingAndAbi::Legacy(LiftLowerAbi::Sync),
+        );
+        wit_component_wasmtime::embed_component_metadata(
+            &mut module,
+            &resolve,
+            world,
+            StringEncoding::UTF8,
+            false,
+        )
+        .unwrap();
+        let component = Command::to_component(&module).unwrap();
+        assert!(wasmparser::Parser::is_component(&component));
+        assert!(!Command::inspect(&module).unwrap().preview1);
+        let err = Command::from_bytes(&module).unwrap_err();
+        let ErrorKind::CommandImports { missing } = err.kind() else {
+            panic!("{err}");
+        };
+        assert_eq!(missing[0].name, "a:b/c");
     }
 
     /// Only commands that can get a credential (allowed, with a network, not

@@ -401,6 +401,21 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   they last one execution.
 - **Lookup:** the shell looks for functions first, then builtins, then
   callbacks, then registered commands. An unregistered name exits 127.
+- **Wasm files:** with `with_file_commands(FileCommands::new())` (off by
+  default), a wasm file in the sandbox's filesystem runs as a command, by
+  its path: `./a.out` in the shell, or a `cmd` containing `/` given to
+  `eryx:process/run` or `pipe` by a command registered with
+  `allow_spawn().allow_file_commands()`, as `go test` runs the binary it
+  built. Any file its caller can read may run, if it's a WASI command
+  (a component, a preview 1 module, or a core module with a `component-type`
+  section). It gets no network, credentials or tunnels and runs no commands,
+  whatever its caller has, and an execution with `with_allowed_commands`
+  runs none. The host compiles it outside the execution's fuel, so each
+  execution is limited to files of 32 MiB, 8 compiles and 60 s of compiling
+  (`FileCommands::with_max_file_bytes`, `with_max_compiles`,
+  `with_compile_time`), one compile at a time holding four times the file's
+  size of the children's memory pool. An execution keeps its last four
+  compiled files to run again; nothing is kept between executions.
 - **Running:** each command runs as a child process with `argv[0]` set to the
   name it was called by, which is how a multicall binary picks its tool. It gets
   the shell's environment, with `PWD` set to the shell's directory, which is
