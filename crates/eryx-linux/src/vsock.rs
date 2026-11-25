@@ -256,6 +256,15 @@ impl Vsock {
     fn finish(&mut self, mut run: Run) {
         run.res.total_time = run.started.elapsed();
         run.res.finished = Some(Instant::now());
+        // as they finish, so a long run still shows its progress
+        eprintln!(
+            "[exec-done] {:?}: {:?} in {:.1} ms\n[exec-done]   stdout: {:?}\n[exec-done]   stderr: {:?}",
+            run.res.cmd,
+            run.res.status,
+            run.res.total_time.as_secs_f64() * 1e3,
+            String::from_utf8_lossy(&run.res.stdout),
+            String::from_utf8_lossy(&run.res.stderr),
+        );
         self.results.push(run.res);
         self.retry_at = None;
     }
