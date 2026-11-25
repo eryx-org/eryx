@@ -101,18 +101,86 @@ Pure Python packages (no native extensions) work out of the box:
 - `httpx`
 - `beautifulsoup4`
 
-### WASI-Compiled Packages
+### Prebuilt Native Packages
 
-Some packages with native extensions have WASI-compiled versions available:
+Packages with native code (C, C++, Rust), such as `numpy` and `pandas`, need builds for eryx's WASI: their wheels for Linux or macOS won't load. We publish WASI builds of some at a public pip index, built from the recipes in [eryx-recipes](https://github.com/eryx-org/eryx-recipes/tree/main/wheels): `numpy`, `pandas`, `pydantic-core`, `rapidfuzz`, `markupsafe` and `ujson` so far, and [the index](https://wheels.eryx.run/cp314-wasip2-sdk33/simple/) lists them all.
 
-- Check [pypi.org](https://pypi.org) for wheels with `wasi` in the platform tag
-- Multiple `wasi-wheels` repositories exist, including:
-  - [dicej/wasi-wheels](https://github.com/dicej/wasi-wheels/)
-  - [benbrandt/wasi-wheels](https://github.com/benbrandt/wasi-wheels/) (see also [this PR](https://github.com/benbrandt/wasi-wheels/pull/272) for an example of adding a new wheel)]
+Download them with pip, for the WASI platform. Pure-Python dependencies come from PyPI as usual:
 
-### Native Extensions
+```bash
+pip download --dest wheels --only-binary :all: \
+    --python-version 3.14 --implementation cp --abi cp314 \
+    --platform wasi_0_0_0_wasm32 --platform any \
+    --extra-index-url https://wheels.eryx.run/cp314-wasip2-sdk33/simple/ \
+    pandas
+```
 
-Packages with native C extensions (like `numpy`, `pandas`) require WASI-compiled wheels. Check if WASI builds are available for your specific package.
+Then add the wheels as packages, as above:
+
+```python
+import glob
+import eryx
+
+factory = eryx.SandboxFactory(
+    packages=sorted(glob.glob("wheels/*.whl")),
+    imports=["pandas"],
+)
+```
+
+#### With uv
+
+To keep the packages in a `pyproject.toml` and lock them, point uv at the index for the packages with native code:
+
+```toml
+[project]
+name = "sandbox-packages"
+version = "0"
+requires-python = "==3.14.*"
+# List every package with native code here, even one that's only a
+# dependency of another (numpy for pandas, markupsafe for jinja2): uv only
+# applies tool.uv.sources to direct dependencies, and takes the rest from PyPI.
+dependencies = ["pandas", "numpy", "jinja2", "markupsafe"]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "eryx-wasi"
+url = "https://wheels.eryx.run/cp314-wasip2-sdk33/simple/"
+explicit = true
+
+[tool.uv.sources]
+numpy = { index = "eryx-wasi" }
+pandas = { index = "eryx-wasi" }
+markupsafe = { index = "eryx-wasi" }
+```
+
+uv locks for WASI fine but can't install for it, so export the lock and let pip download the locked wheels:
+
+```bash
+uv lock
+uv export --format requirements-txt --no-emit-project -o requirements.txt
+pip download --dest wheels --no-deps --require-hashes --only-binary :all: \
+    --python-version 3.14 --implementation cp --abi cp314 \
+    --platform wasi_0_0_0_wasm32 --platform any \
+    --extra-index-url https://wheels.eryx.run/cp314-wasip2-sdk33/simple/ \
+    -r requirements.txt
+```
+
+A package whose native wheel isn't there fails `pip download` (it finds only a Linux or macOS wheel): give it a source on the `eryx-wasi` index. If one of our builds is rebuilt at the same version (eryx changed what it links to), its hash changes: `uv lock --upgrade-package <name>` picks up the new file.
+
+In Rust, native extensions need the `native-extensions` feature (see [Installation](../getting-started/installation.md)). `eryx-precompile compile --preinit --package <wheel> ...` bakes them into a [precompiled runtime](./precompile.md).
+
+The index's path, `cp314-wasip2-sdk33`, is what the wheels need: CPython 3.14 on eryx's WASI (`wasip2`), built with wasi-sdk 33, which every eryx since 0.6 uses. Their extension modules are shared libraries linked against eryx's own `libpython`, so they load in eryx (and other runtimes that link Python modules the same way, like componentize-py), not in CPython's own WASI build. If eryx moves to another wasi-sdk, the builds for it get a new path.
+
+To ask for another package, [open an issue](https://github.com/eryx-org/eryx-recipes/issues) in eryx-recipes, or add a recipe (its `wheels/README.md` says how).
+
+### Other WASI Builds
+
+Some other projects publish WASI builds too, mostly for [componentize-py](https://github.com/bytecodealliance/componentize-py). Check that they're built for the same CPython and wasi-sdk before using them:
+
+- [dicej/wasi-wheels](https://github.com/dicej/wasi-wheels/)
+- [benbrandt/wasi-wheels](https://github.com/benbrandt/wasi-wheels/) (see also [this PR](https://github.com/benbrandt/wasi-wheels/pull/272) for an example of adding a new wheel)
 
 ## Baking Callbacks into the Factory
 

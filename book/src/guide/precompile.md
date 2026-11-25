@@ -228,7 +228,23 @@ eryx-precompile commands inspect --json rg.wasm
 
 ### Commands from a Registry
 
-eryx doesn't fetch commands itself: get the `.wasm` with an OCI client, check it against your pinned digest, then check and precompile it. Commands are published as single-layer Wasm OCI artifacts, so [wkg](https://github.com/bytecodealliance/wasm-pkg-tools) writes one straight to a file:
+eryx doesn't fetch commands itself: get the `.wasm` with an OCI client, check it against your pinned digest, then check and precompile it. We publish builds of common CLI tools (ripgrep, jq, curl, git, gh, sed, sqlite3, ...) from the recipes in [eryx-recipes](https://github.com/eryx-org/eryx-recipes), to `ghcr.io/eryx-org/commands/<namespace>/<name>:<version>`: namespace `eryx` for permissively licensed ones and `eryx-gpl` for GPL ones, and `<version>` the upstream release plus our build revision (`15.1.0-r.2`). Versions never change once published.
+
+Commands are single-layer Wasm OCI artifacts in [wkg](https://github.com/bytecodealliance/wasm-pkg-tools)'s layout, so wkg can fetch one by package name from the `eryx.run` registry, whose `/.well-known/wasm-pkg/registry.json` points it at ghcr.io:
+
+```bash
+wkg get --registry eryx.run eryx:rg@15.1.0-r.2 -o ./rg.wasm
+```
+
+Without `@<version>`, wkg takes the newest. To skip `--registry`, map the namespaces in wkg's config (`~/.config/wasm-pkg/config.toml` on Linux):
+
+```toml
+[namespace_registries]
+eryx = "eryx.run"
+eryx-gpl = "eryx.run"
+```
+
+Or pull by OCI reference, without either:
 
 ```bash
 wkg oci pull ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2 -o rg.wasm
@@ -246,6 +262,15 @@ The pin is the digest of the `.wasm` itself, which is the manifest's layer diges
 echo "<hex>  rg.wasm" | sha256sum -c
 eryx-precompile commands inspect rg.wasm
 eryx-precompile compile rg.wasm --output rg.cwasm
+```
+
+Each published command is signed with [cosign](https://github.com/sigstore/cosign) by eryx-recipes' publish workflow, and has its SLSA provenance, third-party notices and SBOM (and, for GPL commands, the complete source) attached as OCI referrers. To check the signature before pinning a version (eryx-recipes was eryx-commands until November 2026, and what was published before then is signed under that name):
+
+```bash
+cosign verify ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/eryx-org/eryx-(commands|recipes)/\.github/workflows/ci\.yml@refs/heads/main$'
+oras discover ghcr.io/eryx-org/commands/eryx/rg:15.1.0-r.2   # the notices, SBOM and source offer
 ```
 
 A Rust host can skip the separate steps: `Command::load_cached(path, Some("sha256:<hex>"))` checks the digest, refuses a command eryx can't run, and compiles it once into eryx's cache directory (`commands/` under the first usable of `$XDG_CACHE_HOME/eryx`, the platform cache directory (`~/.cache/eryx` on Linux) and `$TMPDIR/eryx-<uid>`; with none usable, it compiles in memory and warns). `Command::from_file_expecting(path, "sha256:<hex>")` checks the digest without caching.
