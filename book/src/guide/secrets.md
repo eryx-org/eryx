@@ -53,7 +53,8 @@ const res = await fetch("https://api.github.com/user", {
 console.log(process.env.TOKEN); // Prints: [REDACTED]
 ```
 
-`process` only exists when the sandbox has secrets, and only has `env`. The
+`process` only exists when the sandbox has secrets or [environment
+variables](./sandboxes.md#environment-variables), and only has `env`. The
 shell exports each placeholder as a variable, for its commands; with
 [child network](./sandboxes.md#external-commands), their proxy substitutes the real values.
 
