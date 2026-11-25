@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "eryx"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-build"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "hex",
@@ -1185,14 +1185,14 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-call"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "wit-dylib-ffi",
 ]
 
 [[package]]
 name = "eryx-guest-js"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "eryx-guest-call",
  "httparse",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-guest-python"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "eryx-guest-call",
  "pyo3",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-linker-wasm"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "wasm-bindgen",
  "wit-component",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-macros"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "eryx",
  "proc-macro2",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-precompile"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-python"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-runtime"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-server"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "eryx-vfs"
-version = "0.14.3"
+version = "0.14.4"
 dependencies = [
  "ambient-authority",
  "anyhow",
@@ -5498,7 +5498,7 @@ dependencies = [
 
 [[package]]
 name = "wit-dylib-ffi"
-version = "0.16.1"
+version = "0.16.2"
 
 [[package]]
 name = "wit-parser"
