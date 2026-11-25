@@ -746,9 +746,9 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         };
 
         // The secrets' placeholders and the request's env (`os.environ`,
-        // `process.env`, or exported to the shell's children), then the Python builtins injection, so
-        // callbacks are reachable from imported modules, and the sys.path
-        // setup for supporting files. As a preamble, it doesn't shift the
+        // `process.env`, or exported to the shell's children), then the
+        // Python builtins injection, so callbacks are reachable from imported
+        // modules, and the sys.path setup for supporting files. As a preamble, it doesn't shift the
         // user code's line numbers.
         let library_preamble = match language {
             eryx::Language::Python if vfs_storage.is_some() => {

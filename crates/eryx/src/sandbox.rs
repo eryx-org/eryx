@@ -889,7 +889,9 @@ impl Sandbox {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Initialization`] if `config` is invalid, a secret
-    /// has no host it could be sent to, or placeholders overlap, as
+    /// has no host it could be sent to, placeholders overlap, or a secret has
+    /// the name of one of the sandbox's
+    /// [environment variables](SandboxBuilder::with_env), as
     /// [`SandboxBuilder::build`] does; the sandbox is left unchanged.
     pub fn set_network(
         &mut self,
@@ -1107,7 +1109,9 @@ fn language_preamble(
 /// Check the environment variables given with secrets `secrets`: each name
 /// matches `[A-Za-z_][A-Za-z0-9_]*`, so every guest can set it (the shell
 /// can't export other names), and isn't one the sandbox sets itself, which
-/// the guest relies on, or a secret's, whose placeholder it would replace;
+/// the guest relies on, one the shell manages ([`SHELL_MANAGED_ENV`] and
+/// `BASH*`), which it couldn't set, or a secret's, whose placeholder it
+/// would replace;
 /// and no value has a NUL byte, which no guest's environment can hold.
 /// The same names are refused for every language, so a request's
 /// environment means the same whichever runs it.
@@ -1127,6 +1131,11 @@ fn check_env(
                 "environment variable {name} is set by the sandbox itself, so it can't be given"
             ));
         }
+        if name.starts_with("BASH") || SHELL_MANAGED_ENV.contains(&name.as_str()) {
+            return invalid(format!(
+                "environment variable {name} is managed by the shell, so it can't be given"
+            ));
+        }
         if secrets.contains_key(name) {
             return invalid(format!(
                 "environment variable {name} collides with the secret {name}; \
@@ -1141,6 +1150,28 @@ fn check_env(
     }
     Ok(())
 }
+
+/// Variables the shell (brush) manages itself, besides its `BASH*` ones:
+/// readonly or computed on each read, so an `export` of them fails or is
+/// ignored, and the preamble's status isn't checked. [`check_env`] refuses
+/// them, and the `BASH` prefix (`BASHOPTS`, `BASH_ENV`, `BASH_FUNC_*`...).
+const SHELL_MANAGED_ENV: &[&str] = &[
+    "DIRSTACK",
+    "EPOCHREALTIME",
+    "EPOCHSECONDS",
+    "EUID",
+    "FUNCNAME",
+    "GROUPS",
+    "HISTCMD",
+    "LINENO",
+    "PIPESTATUS",
+    "PPID",
+    "RANDOM",
+    "SECONDS",
+    "SHELLOPTS",
+    "SRANDOM",
+    "UID",
+];
 
 /// Whether `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_identifier(name: &str) -> bool {
@@ -3269,8 +3300,10 @@ impl<L: GuestLanguage, R> SandboxBuilder<L, R> {
     ///
     /// [`build`](Self::build) fails if `name` doesn't match
     /// `[A-Za-z_][A-Za-z0-9_]*`, is one the sandbox sets itself (`HOME`,
-    /// `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`) or a
-    /// secret's, or if `value` contains a NUL byte.
+    /// `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`), one the
+    /// shell manages (`UID`, `RANDOM`, `SHELLOPTS`, any `BASH*`, ...) or a
+    /// secret's, or if `value` contains a NUL byte. The same names are
+    /// refused in every language.
     #[must_use]
     pub fn with_env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(name.into(), value.into());
@@ -5269,6 +5302,9 @@ mod tests {
             refused(&[("X=Y", "x")], "invalid environment variable name");
             for (name, _) in crate::wasm::SHELL_ENV {
                 refused(&[(name, "x")], "set by the sandbox itself");
+            }
+            for name in ["UID", "RANDOM", "SHELLOPTS", "BASHOPTS", "BASH_ENV"] {
+                refused(&[(name, "x")], "managed by the shell");
             }
             refused(&[("TOKEN", "x")], "collides with the secret TOKEN");
             refused(&[("NUL", "a\0b")], "NUL byte");

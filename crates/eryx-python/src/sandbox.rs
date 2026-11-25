@@ -119,8 +119,10 @@ impl Sandbox {
     ///         shell, so its commands inherit them. For configuration, not
     ///         secrets: values aren't scrubbed from output. A name must match
     ///         `[A-Za-z_][A-Za-z0-9_]*` and not be one the sandbox sets
-    ///         (HOME, PATH, PWD, USER, TMPDIR, TERM, LANG, LC_ALL) or a
-    ///         secret's.
+    ///         (HOME, PATH, PWD, USER, TMPDIR, TERM, LANG, LC_ALL), one the
+    ///         shell manages (UID, RANDOM, SHELLOPTS, any BASH*, ...) or a
+    ///         secret's, and a value must not contain a NUL byte; otherwise
+    ///         InitializationError.
     ///     callback_namespace: Install the callbacks (and MCP tools) under
     ///         this name rather than as top-level names: with "tools", a
     ///         callback `get_time` is `await tools.get_time()` (the command

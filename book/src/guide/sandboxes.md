@@ -576,7 +576,10 @@ result = sandbox.execute("import os; print(os.environ['GIT_AUTHOR_NAME'])")
 
 - Names must match `[A-Za-z_][A-Za-z0-9_]*`, and can't be one the sandbox
   sets itself (`HOME`, `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`,
-  `LC_ALL`) or a [secret](./secrets.md)'s name. A value can hold anything
+  `LC_ALL`), one the shell manages, which it couldn't set (any `BASH*`,
+  `UID`, `EUID`, `PPID`, `RANDOM`, `SRANDOM`, `SECONDS`, `LINENO`,
+  `SHELLOPTS`, `DIRSTACK`, `FUNCNAME`, `GROUPS`, `HISTCMD`, `PIPESTATUS`,
+  `EPOCHSECONDS`, `EPOCHREALTIME`), or a [secret](./secrets.md)'s name. A value can hold anything
   but a NUL byte: quotes and newlines arrive as they were given, never as
   code. The same names are refused in every language, and building the
   sandbox fails otherwise (`ErrorKind::Initialization`; `InitializationError`

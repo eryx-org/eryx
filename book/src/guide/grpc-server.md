@@ -204,7 +204,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 
 `env` gives the code ordinary configuration, such as `{"GIT_AUTHOR_NAME": "Eryx"}`, in every language: Python's `os.environ`, JavaScript's `process.env`, and exported in the shell, so its commands inherit it.
 
-- Each name must match `[A-Za-z_][A-Za-z0-9_]*` and must not be one the sandbox sets itself (`HOME`, `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`) or a secret's name, and a value must not contain a NUL byte; otherwise the request is `INVALID_ARGUMENT`. Quotes and newlines in a value arrive as sent, never as code.
+- Each name must match `[A-Za-z_][A-Za-z0-9_]*` and must not be one the sandbox sets itself (`HOME`, `PATH`, `PWD`, `USER`, `TMPDIR`, `TERM`, `LANG`, `LC_ALL`), one the shell manages (any `BASH*`, `UID`, `RANDOM`, `SHELLOPTS` and the others listed under [Environment variables](./sandboxes.md#environment-variables)) or a secret's name, and a value must not contain a NUL byte; otherwise the request is `INVALID_ARGUMENT`. Quotes and newlines in a value arrive as sent, never as code.
 - It isn't scrubbed: printing a variable prints its value. Put credentials in `secrets`, not here.
 - With `persist_state`, a request's variables replace restored values of the same names. The shell's snapshot keeps what an earlier request exported, its `env` included, like any other shell variable; Python and JavaScript start each request with only that request's variables.
 - A [callback journal](#callback-replay) is bound to the variables it was recorded with.

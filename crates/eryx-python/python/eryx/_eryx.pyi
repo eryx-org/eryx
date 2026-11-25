@@ -904,15 +904,18 @@ class Sandbox:
                 Each value is a dict with "value" (required) and "allowed_hosts"
                 (optional, defaults to []).
                 Python code sees a placeholder instead of the real value.
+                The real secret is only substituted when writing to an allowed host.
             env: Optional environment variables, by name: in ``os.environ``
                 (Python), ``process.env`` (JavaScript), or exported in the
                 shell, so its commands inherit them. For configuration such
                 as ``GIT_AUTHOR_NAME``, not secrets: values aren't scrubbed
-                from output. A name must match ``[A-Za-z_][A-Za-z0-9_]*`` and
+                from output. Names and values must be strings (TypeError
+                otherwise). A name must match ``[A-Za-z_][A-Za-z0-9_]*`` and
                 must not be one the sandbox sets itself (HOME, PATH, PWD,
-                USER, TMPDIR, TERM, LANG, LC_ALL) or a secret's, and a value
-                must not contain a NUL byte; otherwise InitializationError.
-                The real secret is only substituted when writing to an allowed host.
+                USER, TMPDIR, TERM, LANG, LC_ALL), one the shell manages
+                (UID, RANDOM, SHELLOPTS, any BASH*, ...) or a secret's, and a
+                value must not contain a NUL byte; otherwise
+                InitializationError.
             scrub_stdout: Whether to scrub secret placeholders from stdout.
                 Defaults to True when secrets are provided.
             scrub_stderr: Whether to scrub secret placeholders from stderr.
