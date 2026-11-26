@@ -6,40 +6,58 @@
 [![npm](https://img.shields.io/npm/v/@eryx-org/eryx.svg)](https://www.npmjs.com/package/@eryx-org/eryx)
 [![docs](https://img.shields.io/badge/docs-docs.eryx.run-blue)](https://docs.eryx.run)
 
-A WebAssembly sandbox for running **untrusted Python** safely — memory and CPU limits, no filesystem or network access by default, and async host callbacks for the access you _do_ want to allow.
+A WebAssembly sandbox for running untrusted code from AI agents and users: **Python** (real CPython 3.14), **JavaScript** (QuickJS), and a **bash-compatible shell** that runs real CLI tools such as coreutils, ripgrep, jq, curl, git and gh. It has memory and CPU limits, and no filesystem or network access by default. Networking and secrets are host-controlled, and async host callbacks give the access you _do_ want to allow.
 
-Embed it from **Python**, **JavaScript**, or **Rust**. Runs full **CPython 3.14** (not a limited subset), so the real standard library and most pure-Python packages just work. [Try the demo](https://demo.eryx.run) or [read the docs](https://docs.eryx.run).
+Embed it from **Rust**, **Python** or **JavaScript**, or run it as an **MCP server** or a **gRPC server**. [Try the demo](https://demo.eryx.run) or [read the docs](https://docs.eryx.run).
 
 > **Used in production at [Grafana](https://grafana.com/).**
 
 > **eryx** (noun): A genus of sand boas (Erycinae) — non-venomous snakes that live _in_ sand.
-> Perfect for "Python running inside a sandbox."
+> Perfect for code running inside a sandbox.
 
 ## Features
 
-- **Async callback mechanism** — Callbacks are exposed as direct async functions (e.g., `await get_time()`)
-- **Parallel execution** — Multiple callbacks can run concurrently via `asyncio.gather()`
-- **Session state persistence** — Variables, functions, and classes persist between executions for REPL-style usage
-- **State snapshots** — Capture and restore Python state with pickle-based serialization
-- **Execution tracing** — Line-level progress reporting via `sys.settrace`
-- **Stderr capture** — Separate stdout and stderr streams with optional streaming handlers
-- **Execution cancellation** — Cancel long-running executions via `ExecutionHandle`
-- **TCP/TLS networking** — Host-controlled network access with configurable policies
-- **Introspection** — Python can discover available callbacks at runtime
-- **Composable runtime libraries** — Pre-built APIs with Python wrappers and type stubs
-- **Pre-compiled Wasm** — 41x faster sandbox creation with ahead-of-time compilation
-- **Sandbox pooling** — Managed pool of warm sandbox instances for high-throughput scenarios
+### Three guest languages, one API
 
-## Python Version
+- **Python**: full CPython 3.14, not a subset, so the standard library and most pure-Python packages just work. Add `.whl` and `.tar.gz` packages, including WASI builds of native extensions.
+- **JavaScript**: QuickJS (quickjs-ng), with `fetch` and `node:fs`.
+- **Shell**: a bash-compatible shell (brush). Pipelines, nested `sh` and `bash`, and shebang scripts work, and `grep` is built in.
+- Callbacks, resource limits, sessions and snapshots work the same way in each.
 
-Eryx embeds **CPython 3.14** compiled to WebAssembly (WASI). The WASI-compiled CPython and standard library come from the [componentize-py](https://github.com/bytecodealliance/componentize-py) project by the Bytecode Alliance.
+### Real commands in the shell
+
+- External commands are WASI command components: uutils coreutils is embedded, and you register others by name.
+- [eryx-recipes](https://github.com/eryx-org/eryx-recipes) publishes signed builds of ripgrep, jq, curl, git, gh, sqlite3 and more to `ghcr.io/eryx-org/commands`. To build your own, see [Building Commands](https://docs.eryx.run/latest/book/guide/building-commands.html).
+- A pipeline's stages stream into each other, and commands can run commands of their own (git runs git; go runs its compiler).
+- Each command can get its own network policy, mounts and environment.
+
+### Secure by default
+
+- **Filesystem**: an isolated virtual filesystem, with opt-in host directory mounts, read-only or writable.
+- **Resource limits**: execution timeouts, memory caps, CPU fuel and filesystem entry limits.
+- **Networking**: off by default. Opt in with host allowlists and blocklists, HTTP rules and connection limits.
+- **Secrets**: sandboxed code only ever sees placeholders. The real values are substituted only in requests to the hosts you allow, and scrubbed from output.
+
+### Host integration
+
+- **Async callbacks**: host functions called as `await get_time()` in Python and JavaScript, or as commands in the shell. They can run in parallel, and can be replayed and suspended.
+- **Sessions and snapshots**: state persists between executions, for REPL-style use, and can be saved and restored.
+- **Output streaming, tracing and cancellation**.
+
+### Ways to run it
+
+- **Embedded**, from Rust, Python or JavaScript (the browser or Node.js).
+- **A CLI**: `uvx --with pyeryx eryx -c 'print("hi")'`, with `-l javascript` or `-l shell` for the other languages.
+- **An MCP server** (`eryx serve`, with `pyeryx[serve]`) that gives AI assistants a `run_python` tool.
+- **[eryx-server](https://docs.eryx.run/latest/book/guide/grpc-server.html)**, a gRPC server for remote, multi-tenant execution in all three languages, published as a Docker image.
+- **Fast**: pre-compiled and pre-initialized runtimes, and a pool of warm instances. See [Performance Tuning](https://docs.eryx.run/latest/book/guide/performance.html).
 
 ## Quick Start
 
 ### Python
 
 ```bash
-pip install pyeryx
+pip install pyeryx                # or pyeryx[javascript], pyeryx[shell], pyeryx[all]
 ```
 
 > The package is published as `pyeryx` but imported as `eryx`.
@@ -47,18 +65,16 @@ pip install pyeryx
 ```python
 import eryx
 
-# Zero-config: ships with a pre-initialized CPython runtime, so this is fast (~1-5ms)
 sandbox = eryx.Sandbox()
+result = sandbox.execute('print(f"2 + 2 = {2 + 2}")')
+print(result.stdout_text)
 
-result = sandbox.execute('''
-print("Hello from the sandbox!")
-print(f"2 + 2 = {2 + 2}")
-''')
-
-print(result.stdout)
+# With pyeryx[shell]:
+sh = eryx.Sandbox(language="shell")
+print(sh.execute("printf 'b\\na\\nc\\n' | sort | head -1").stdout_text)
 ```
 
-See the [PyPI package](https://pypi.org/project/pyeryx/) and [`crates/eryx-python`](crates/eryx-python/README.md) for the full Python API (sessions, callbacks, package loading, resource limits).
+See [`crates/eryx-python`](crates/eryx-python/README.md) for the full Python API.
 
 ### JavaScript
 
@@ -66,49 +82,28 @@ See the [PyPI package](https://pypi.org/project/pyeryx/) and [`crates/eryx-pytho
 npm install @eryx-org/eryx
 ```
 
+```js
+import { Sandbox } from "@eryx-org/eryx";
+
+const sandbox = new Sandbox();
+const result = await sandbox.execute('print("Hello from Python!")');
+console.log(result.stdout);
+
+const sh = new Sandbox({ language: "shell", callbacks: { add: ({ a, b }) => a + b } });
+await sh.execute('echo "sum $(add --a 2 --b 3)"'); // stdout "sum 5\n"
+```
+
+See [`js/eryx`](js/eryx/README.md) for browser and Node.js requirements.
+
 ### Rust
 
 ```bash
-cargo add eryx --features embedded
+cargo add eryx --features embedded,macros   # add `javascript` and `shell` for those languages
 ```
-
-```rust
-use eryx::Sandbox;
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    // Sandbox::embedded() provides zero-config setup (requires `embedded` feature)
-    let sandbox = Sandbox::embedded().build()?;
-
-    let result = sandbox.execute(r#"
-        print("Hello from Python!")
-        import sys
-        print("This goes to stderr", file=sys.stderr)
-    "#).await?;
-
-    println!("stdout: {}", result.stdout);
-    println!("stderr: {}", result.stderr);
-    Ok(())
-}
-```
-
-## With Callbacks
-
-Use the `#[callback]` macro for strongly-typed callbacks with automatic schema generation:
 
 ```rust
 use eryx::{callback, CallbackError, Sandbox};
 use serde_json::{json, Value};
-
-/// Returns the current Unix timestamp
-#[callback]
-async fn get_time() -> Result<Value, CallbackError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    Ok(json!(now))
-}
 
 /// Echoes back the message
 #[callback]
@@ -118,242 +113,30 @@ async fn echo(message: String) -> Result<Value, CallbackError> {
 
 #[tokio::main]
 async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded()
-        .with_callback(get_time)
-        .with_callback(echo)
-        .build()?;
+    let sandbox = Sandbox::embedded().with_callback(echo).build()?;
 
-    let result = sandbox.execute(r#"
-# Callbacks are available as direct async functions
-timestamp = await get_time()
-print(f"Current time: {timestamp}")
-
-response = await echo(message="Hello!")
-print(f"Echo: {response}")
-    "#).await?;
-
-    println!("{}", result.stdout);
+    let result = sandbox
+        .execute(r#"print(await echo(message="Hello!"))"#)
+        .await?;
+    println!("{}", result.stdout_text());
     Ok(())
 }
 ```
 
-For runtime-defined callbacks (plugin systems, dynamic APIs), implement the `Callback` trait directly.
-See the `runtime_callbacks` example.
+For callbacks defined at run time (plugin systems, dynamic APIs), implement the `Callback` trait directly; see the `runtime_callbacks` example.
 
-## Sandbox Pooling
+## Learn more
 
-For high-throughput scenarios where you need to execute many Python scripts concurrently, use `SandboxPool` to maintain a pool of warm sandbox instances:
+The [docs](https://docs.eryx.run) cover everything else:
 
-```rust
-use eryx::{Sandbox, SandboxPool, PoolConfig};
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    // Create a pool with custom configuration
-    let config = PoolConfig::default()
-        .with_max_size(10)
-        .with_min_idle(2)
-        .with_idle_timeout(Duration::from_secs(300))
-        .with_acquire_timeout(Duration::from_secs(30));
-
-    let pool = SandboxPool::new(Sandbox::embedded(), config).await?;
-
-    // Acquire a sandbox from the pool
-    let sandbox = pool.acquire().await?;
-
-    // Use the sandbox normally
-    let result = sandbox.execute("print('Hello from pool!')").await?;
-    println!("{}", result.stdout);
-
-    // Sandbox automatically returns to pool when dropped
-    drop(sandbox);
-
-    // Check pool statistics
-    let stats = pool.stats();
-    println!("Acquisitions: {}, Creations: {}",
-             stats.total_acquisitions, stats.total_creations);
-
-    Ok(())
-}
-```
-
-For custom sandbox configurations with callbacks:
-
-```rust
-use eryx::{Sandbox, SandboxPool, PoolConfig};
-
-let pool = SandboxPool::with_builder(
-    || {
-        Sandbox::embedded()
-            .with_callback(MyCallback)
-            .build()
-    },
-    PoolConfig::default(),
-).await?;
-```
-
-Key features:
-
-- **Pre-warming**: Pool creates `min_idle` sandboxes upfront for immediate availability
-- **Bounded concurrency**: `max_size` limits concurrent sandbox usage via semaphore
-- **Statistics tracking**: Monitor acquisitions, creations, and wait times
-- **Idle eviction**: Sandboxes idle longer than `idle_timeout` are automatically evicted
-- **Non-blocking acquire**: Use `try_acquire()` to get a sandbox without waiting
-
-## Session State Persistence
-
-For REPL-style usage where state persists between executions:
-
-```rust
-use eryx::{Sandbox, session::InProcessSession};
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let sandbox = Sandbox::embedded().build()?;
-    let mut session = InProcessSession::new(&sandbox).await?;
-
-    // First execution defines a variable
-    session.execute("x = 42").await?;
-
-    // Second execution can access it
-    let result = session.execute("print(x * 2)").await?;
-    println!("{}", result.stdout); // "84"
-
-    // Snapshot and restore state
-    let snapshot = session.snapshot_state().await?;
-    session.clear_state().await?;
-    session.restore_state(&snapshot).await?;
-
-    Ok(())
-}
-```
-
-## Execution Cancellation
-
-Cancel long-running or infinite executions using `ExecutionHandle`:
-
-```rust
-use std::time::Duration;
-use eryx::{Sandbox, Error, ErrorKind};
-
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    let sandbox = Sandbox::embedded().build()?;
-
-    // Start a cancellable execution
-    let handle = sandbox.execute_cancellable("while True: pass");
-
-    // Cancel from another task after a delay
-    let token = handle.cancellation_token();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        token.cancel();
-    });
-
-    // Wait for result
-    match handle.wait().await.map_err(eryx::Error::into_kind) {
-        Ok(result) => println!("Completed: {}", result.stdout),
-        Err(ErrorKind::Cancelled) => println!("Execution was cancelled"),
-        Err(e) => println!("Error: {e}"),
-    }
-
-    Ok(())
-}
-```
-
-The cancellation uses Wasmtime's epoch-based interruption for prompt termination.
-
-## Networking
-
-Enable TCP and TLS networking with host-controlled policies using `NetConfig`:
-
-```rust
-use std::time::Duration;
-use eryx::{Sandbox, NetConfig};
-
-#[tokio::main]
-async fn main() -> Result<(), eryx::Error> {
-    let net_config = NetConfig::default()
-        .allow_host("api.example.com")
-        .allow_host("*.trusted.org")
-        .with_connect_timeout(Duration::from_secs(10))
-        .with_max_connections(5);
-
-    let sandbox = Sandbox::embedded()
-        .with_network(net_config)
-        .build()?;
-
-    let result = sandbox.execute(r#"
-import urllib.request
-response = urllib.request.urlopen("https://api.example.com/data")
-print(response.read().decode())
-    "#).await?;
-
-    println!("{}", result.stdout);
-    Ok(())
-}
-```
-
-By default, networking is disabled. When enabled via `with_network()`:
-
-- Localhost and private networks are blocked by default, checked against the resolved address
-- Use `allowed_hosts` patterns with wildcards (e.g., `*.example.com`)
-- The host handles DNS resolution and connection management
-- TLS connections use the system certificate store (with optional custom certs)
-
-## Feature Flags
-
-| Feature             | Description                                                             | Trade-offs                                     |
-| ------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- |
-| `embedded`          | Zero-config sandboxes: embeds pre-compiled Wasm runtime + Python stdlib | +32MB binary size; enables `unsafe` code paths |
-| `preinit`           | Pre-initialization support for ~25x faster sandbox creation             | Adds `eryx-runtime` dep; requires build step   |
-| `native-extensions` | Native Python extension support (e.g., numpy) via late-linking          | Implies `preinit`; experimental                |
-
-Package support (`with_package()` for `.whl` and `.tar.gz` files) is always available — no feature flag required.
-
-### Pre-initialization
-
-The `preinit` feature provides ~25x faster sandbox creation by capturing Python's initialized memory state at build time. This works with or without native extensions — you can pre-import stdlib modules like `json`, `asyncio`, `re`, etc.
-
-| Metric           | Without Pre-init | With Pre-init | Speedup        |
-| ---------------- | ---------------- | ------------- | -------------- |
-| Sandbox creation | ~450ms           | ~18ms         | **25x faster** |
-
-### Recommended Configurations
-
-```rust
-// Fastest startup, zero configuration (recommended for most users)
-// Features: embedded
-let sandbox = Sandbox::embedded().build()?;
-
-// With pre-initialization for faster sandbox creation
-// Features: embedded, preinit
-// Pre-import common stdlib modules during build for ~25x speedup
-let preinit_bytes = eryx::preinit::pre_initialize(
-    &stdlib_path, None, &["json", "asyncio", "re"], &[]
-).await?;
-
-// With package support for third-party libraries
-// Features: embedded (packages always available)
-let sandbox = Sandbox::embedded()
-    .with_package("requests-2.31.0-py3-none-any.whl")?
-    .build()?;
-
-// With native extensions (numpy, etc.)
-// Features: embedded, native-extensions
-let sandbox = Sandbox::embedded()
-    .with_package("numpy-wasi.tar.gz")?
-    .build()?;
-```
-
-## Performance
-
-| Metric                 | Normal Wasm | Pre-compiled | Speedup        |
-| ---------------------- | ----------- | ------------ | -------------- |
-| Sandbox creation       | ~650ms      | ~16ms        | **41x faster** |
-| Per-execution overhead | ~1.8ms      | ~1.6ms       | 14% faster     |
-| Session (5 executions) | ~70ms       | ~3ms         | **23x faster** |
+- [Sandboxes](https://docs.eryx.run/latest/book/guide/sandboxes.html): guest languages, the shell and its external commands
+- [Callbacks](https://docs.eryx.run/latest/book/guide/callbacks.html), and [replay and suspension](https://docs.eryx.run/latest/book/guide/callback-replay.html)
+- [Sessions](https://docs.eryx.run/latest/book/guide/sessions.html) and the [sandbox pool](https://docs.eryx.run/latest/book/guide/sandbox-pool.html)
+- [VFS and file persistence](https://docs.eryx.run/latest/book/guide/vfs.html), [resource limits](https://docs.eryx.run/latest/book/guide/resource-limits.html), [networking](https://docs.eryx.run/latest/book/guide/networking.html) and [secrets](https://docs.eryx.run/latest/book/guide/secrets.html)
+- [Packages](https://docs.eryx.run/latest/book/guide/packages.html) and [environments](https://docs.eryx.run/latest/book/guide/environments.html)
+- [The MCP server](https://docs.eryx.run/latest/book/guide/mcp-server.html) and [the gRPC server](https://docs.eryx.run/latest/book/guide/grpc-server.html)
+- [Pre-compiling runtimes](https://docs.eryx.run/latest/book/guide/precompile.html) and [performance tuning](https://docs.eryx.run/latest/book/guide/performance.html)
+- [Installation](https://docs.eryx.run/latest/book/getting-started/installation.html), including the Rust feature flags
 
 ## Development
 
@@ -453,88 +236,19 @@ cargo run --example precompile --features embedded          # Pre-compilation de
 cargo run --example embedded_runtime --features embedded    # Embedded runtime
 ```
 
-## Project Structure
-
-```
-eryx/
-├── Cargo.toml              # Workspace root
-├── Cargo.lock              # Dependency lock file
-├── mise.toml               # mise configuration and tasks
-├── rustfmt.toml            # Formatting configuration
-├── .config/
-│   └── nextest.toml        # nextest configuration
-├── .github/
-│   └── workflows/          # CI workflows
-├── crates/
-│   ├── eryx/               # Core library crate
-│   │   ├── Cargo.toml
-│   │   ├── build.rs        # Pre-compilation for embedded-runtime
-│   │   ├── benches/        # Criterion benchmarks
-│   │   ├── examples/       # Example programs
-│   │   ├── tests/          # Integration tests
-│   │   └── src/
-│   │       ├── lib.rs      # Public API exports
-│   │       ├── sandbox.rs  # Sandbox struct, execute()
-│   │       ├── callback.rs # Callback trait, CallbackError
-│   │       ├── library.rs  # RuntimeLibrary struct
-│   │       ├── trace.rs    # TraceEvent, TraceHandler
-│   │       ├── wasm.rs     # wasmtime setup, Executor
-│   │       ├── error.rs    # Error types
-│   │       └── session/    # Session state persistence
-│   │           ├── mod.rs
-│   │           ├── executor.rs   # SessionExecutor
-│   │           └── in_process.rs # InProcessSession
-│   ├── eryx-runtime/       # Python Wasm runtime packaging
-│   │   ├── Cargo.toml
-│   │   ├── build.rs        # Links eryx-guest-python + libpython + WASI libs
-│   │   ├── runtime.wit     # WIT interface definition
-│   │   ├── runtime-python.wasm    # Built Wasm component (~47MB)
-│   │   ├── runtime-python.cwasm   # Pre-compiled native code (~52MB)
-│   │   └── libs/           # WASI libraries (zstd compressed)
-│   └── eryx-guest-python/  # Rust runtime implementation (compiled to Wasm)
-│       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs      # WIT export implementations
-│           └── python.rs   # Python interpreter FFI, tracing
-└── docs/plans/             # Design documents
-```
-
 ## Inspiration & Acknowledgements
 
-Eryx is heavily inspired by and closely related to [**componentize-py**](https://github.com/bytecodealliance/componentize-py/), a Bytecode Alliance project that pioneered running Python in WebAssembly via the Component Model. Eryx builds on the same foundational work (CPython compiled to Wasm, WASI support) but takes a different architectural approach. Python bindings are also available, allowing you to run sandboxed Python from within a Python host.
+Eryx is heavily inspired by and closely related to [**componentize-py**](https://github.com/bytecodealliance/componentize-py/), a Bytecode Alliance project that pioneered running Python in WebAssembly via the Component Model. Eryx's Python runtime builds on the same foundational work: the WASI-compiled CPython and standard library come from componentize-py. The difference is direction: componentize-py builds Python _components_ that export WIT interfaces for hosts to call, while eryx embeds a sandbox in your application, which runs code you hand it and calls back into your host.
 
-This project builds on excellent work from the [Bytecode Alliance](https://bytecodealliance.org/):
+This project builds on excellent work from the [Bytecode Alliance](https://bytecodealliance.org/) and others:
 
 - [**wasmtime**](https://github.com/bytecodealliance/wasmtime) — The WebAssembly runtime that powers eryx's sandboxed execution
 - [**wasm-tools**](https://github.com/bytecodealliance/wasm-tools) — WebAssembly tooling including `wit-component`, `wit-parser`, and component linking
 - [**componentize-py**](https://github.com/bytecodealliance/componentize-py) — The foundation for running CPython in Wasm, including the WASI-compatible Python build
 - [**component-init**](https://github.com/dicej/component-init) — Pre-initialization support for faster sandbox startup (by [@dicej](https://github.com/dicej))
-
-### Comparison with componentize-py
-
-| Aspect                   | componentize-py                                      | eryx                                                 |
-| ------------------------ | ---------------------------------------------------- | ---------------------------------------------------- |
-| **Primary Use Case**     | Build Python _components_ that export WIT interfaces | Embed Python as a _sandbox_ within a Rust host       |
-| **Direction of Control** | Python exports functions for hosts to call           | Rust host executes Python code and exposes callbacks |
-| **WIT Usage**            | Python implements WIT worlds (exports)               | Internal implementation detail (not user-facing)     |
-| **Output**               | Standalone `.wasm` component files                   | In-process sandboxed execution                       |
-| **Async Model**          | Component Model async (if supported)                 | Python `asyncio` with Rust `async` callbacks         |
-| **Target Audience**      | Python developers building Wasm components           | Rust/Python developers embedding sandboxed scripting |
-| **State Management**     | Stateless component invocations                      | Session persistence, snapshots, REPL-style           |
-| **Package Loading**      | Build-time only (bundled into component)             | Dynamic at runtime via `with_package()`              |
-
-**When to use componentize-py:**
-
-- You're building a Python application to distribute as a Wasm component
-- You want Python to implement a WIT interface that other components/hosts consume
-- You're working in a component-model-native ecosystem (e.g., wasmCloud, Spin)
-
-**When to use eryx:**
-
-- You're building a Rust or Python application that needs to run user-provided Python code
-- You need a sandboxed scripting environment with controlled host callbacks
-- You want REPL-style sessions with state persistence between executions
-- You need fine-grained execution tracing and resource limits
+- [**quickjs-ng**](https://github.com/quickjs-ng/quickjs), through [rquickjs](https://github.com/DelSkayn/rquickjs) — The JavaScript engine
+- [**brush**](https://github.com/reubeno/brush) — The bash-compatible shell
+- [**uutils coreutils**](https://github.com/uutils/coreutils) — The shell's default commands
 
 ## License
 
