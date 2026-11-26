@@ -240,6 +240,7 @@ A walk of a mount (`os.walk`, `ls -R`, `cp -r`) lists one directory at a time, a
 - Protobuf decoders limit how deeply messages nest (prost, which the server uses, to 100 messages, two per level), so nest at most 40 levels: the server can't decode a deeper message, and ends the run as if the client had gone.
 - A writable mount's changes go over nested listings as over fetched ones.
 - Older servers ignore `listing`, and walk as before.
+- The server's metrics count what clients nest: `eryx_mount_nested_listing_dirs_total` (`outcome` is `kept`, or `ignored` for a directory the run already had), `eryx_mount_nested_listing_entries_total` (entries in the kept ones), and `eryx_mount_nested_listings_rejected_total` by `reason`: `bad_name`, `bad_content` (inline content that isn't the file's size), `not_a_directory`, `duplicate`, `too_many_entries` or `listing_bytes`.
 
 ### Writable mounts
 
@@ -378,7 +379,7 @@ This matters for [secrets](./secrets.md): a `SecretConfig.value` is transmitted 
 
 ## Observability
 
-- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms.
+- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, execution counters/histograms, and counters of [nested listings](#nested-listings).
 - **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span.
 
 ## Next Steps

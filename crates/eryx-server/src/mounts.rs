@@ -550,6 +550,37 @@ impl Cache {
         self.blocks.insert(key, fetch);
     }
 
+    /// The client's `listing` of `dir`, once [`check_listings`] passes it,
+    /// keeping the listings nested in it for their directories' later
+    /// listings
+    fn take_listing(
+        &mut self,
+        limits: MountLimits,
+        dir: String,
+        listing: FsListing,
+    ) -> Result<Arc<BTreeMap<String, Stat>>, Failure> {
+        let checked = check_listings(self, limits, dir, listing)?;
+        self.listed += checked.bytes;
+        // The first is the one asked for, whose fetch this is
+        let mut dirs = checked.dirs.into_iter();
+        let (dir, entries) = dirs.next().ok_or_else(|| wrong_answer("listing"))?;
+        let listing = self.keep_listing(&dir, entries);
+        let (mut nested, mut entries_in_them) = (0, 0);
+        for (path, entries) in dirs {
+            nested += 1;
+            entries_in_them += entries.len() as u64;
+            let kept = self.keep_listing(&path, entries);
+            self.lists.insert(path, fetched(kept));
+        }
+        if nested + checked.ignored > 0 {
+            let dirs = "eryx_mount_nested_listing_dirs_total";
+            metrics::counter!(dirs, "outcome" => "kept").increment(nested);
+            metrics::counter!(dirs, "outcome" => "ignored").increment(checked.ignored);
+            metrics::counter!("eryx_mount_nested_listing_entries_total").increment(entries_in_them);
+        }
+        Ok(listing)
+    }
+
     /// The listing of `dir` from its [`check_listings`]ed `entries`, keeping
     /// small files' inline contents
     fn keep_listing(&mut self, dir: &str, entries: Vec<FsEntry>) -> Arc<BTreeMap<String, Stat>> {
@@ -580,14 +611,58 @@ impl Cache {
 /// A directory's cache key and its entries, as the client sent them
 type DirListing = (String, Vec<FsEntry>);
 
+/// A listing answer that passed [`check_listings`]
+struct Checked {
+    /// Each directory to keep, the one asked for first
+    dirs: Vec<DirListing>,
+    /// The bytes they hold
+    bytes: u64,
+    /// Nested listings skipped, as the cache already had their directories
+    ignored: u64,
+}
+
+/// Why a nested listing failed its answer, for
+/// `eryx_mount_nested_listings_rejected_total`
+#[derive(Debug, Clone, Copy)]
+enum Rejection {
+    BadName,
+    BadContent,
+    NotADirectory,
+    Duplicate,
+    TooManyEntries,
+    ListingBytes,
+}
+
+impl Rejection {
+    fn label(self) -> &'static str {
+        match self {
+            Rejection::BadName => "bad_name",
+            Rejection::BadContent => "bad_content",
+            Rejection::NotADirectory => "not_a_directory",
+            Rejection::Duplicate => "duplicate",
+            Rejection::TooManyEntries => "too_many_entries",
+            Rejection::ListingBytes => "listing_bytes",
+        }
+    }
+
+    /// `failure`, counted when it's a nested listing's (a top-level
+    /// listing's failures are as before nested listings, and uncounted)
+    fn fail(self, nested: bool, failure: Failure) -> Failure {
+        if nested {
+            metrics::counter!("eryx_mount_nested_listings_rejected_total", "reason" => self.label())
+                .increment(1);
+        }
+        failure
+    }
+}
+
 /// Check the client's `listing` of `dir` (a cache key) and the listings
 /// nested in its entries, before the cache keeps any of them: each
 /// directory's entries are plain names, at most `max_dir_entries`, and a file's
 /// inline content is its size; only a directory has a nested listing; and
 /// together they fit in what's left of `max_listing_bytes`, each nested one
 /// counting its path and [`NESTED_BYTES`] too; and no directory is nested
-/// twice. Returns each directory to keep, `dir` first, and
-/// the bytes they hold.
+/// twice.
 ///
 /// The cache keeps the first listing it has of a directory, so a nested one
 /// it already has (or is fetching) is skipped, with what's nested in it,
@@ -598,36 +673,41 @@ fn check_listings(
     limits: MountLimits,
     dir: String,
     listing: FsListing,
-) -> Result<(Vec<DirListing>, u64), Failure> {
+) -> Result<Checked, Failure> {
     let mut dirs = Vec::new();
     let mut nested_paths = std::collections::HashSet::new();
     let mut bytes = 0;
+    let mut ignored = 0;
     // A stack rather than recursion, so no nesting can overflow ours
     let mut todo = vec![(dir, listing.entries)];
     while let Some((dir, mut entries)) = todo.pop() {
+        let nested = !dirs.is_empty();
         if entries.len() > limits.max_dir_entries {
-            return Err(Failure::Other(format!(
+            let failure = Failure::Other(format!(
                 "a directory can have at most {} entries",
                 limits.max_dir_entries
-            )));
+            ));
+            return Err(Rejection::TooManyEntries.fail(nested, failure));
         }
         let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
-        let path = if dirs.is_empty() {
-            0
-        } else {
+        let path = if nested {
             NESTED_BYTES + dir.len() as u64
+        } else {
+            0
         };
         bytes += path + names + ENTRY_BYTES * entries.len() as u64;
         if cache.listed + bytes > limits.max_listing_bytes {
-            return Err(Failure::Other(format!(
+            let failure = Failure::Other(format!(
                 "the mounts' listings can hold at most {} MiB",
                 limits.max_listing_bytes >> 20
-            )));
+            ));
+            return Err(Rejection::ListingBytes.fail(nested, failure));
         }
         for entry in &mut entries {
             let name = &entry.name;
             if name.is_empty() || name.contains('/') || name == "." || name == ".." {
-                return Err(Failure::Other(format!("bad entry name {name:?}")));
+                let failure = Failure::Other(format!("bad entry name {name:?}"));
+                return Err(Rejection::BadName.fail(nested, failure));
             }
             let (is_dir, size) = entry
                 .metadata
@@ -637,29 +717,37 @@ fn check_listings(
                 && !is_dir
                 && content.len() as u64 != size
             {
-                return Err(Failure::Other(format!(
+                let failure = Failure::Other(format!(
                     "{name:?} has {} bytes of content, not its size of {size}",
                     content.len()
-                )));
+                ));
+                return Err(Rejection::BadContent.fail(nested, failure));
             }
-            if let Some(nested) = entry.listing.take() {
+            if let Some(listing) = entry.listing.take() {
                 if !is_dir {
-                    return Err(Failure::Other(format!(
-                        "{name:?} has a listing but isn't a directory"
-                    )));
+                    let failure =
+                        Failure::Other(format!("{name:?} has a listing but isn't a directory"));
+                    return Err(Rejection::NotADirectory.fail(true, failure));
                 }
                 let path = format!("{dir}/{name}");
                 if !nested_paths.insert(path.clone()) {
-                    return Err(Failure::Other(format!("{name:?} is listed twice")));
+                    let failure = Failure::Other(format!("{name:?} is listed twice"));
+                    return Err(Rejection::Duplicate.fail(true, failure));
                 }
-                if !cache.lists.contains_key(&path) {
-                    todo.push((path, nested.entries));
+                if cache.lists.contains_key(&path) {
+                    ignored += 1;
+                } else {
+                    todo.push((path, listing.entries));
                 }
             }
         }
         dirs.push((dir, entries));
     }
-    Ok((dirs, bytes))
+    Ok(Checked {
+        dirs,
+        bytes,
+        ignored,
+    })
 }
 
 impl Remote {
@@ -804,19 +892,7 @@ impl RemoteStorage {
             let fs_response::Result::Listing(listing) = request.await? else {
                 return Err(wrong_answer("listing"));
             };
-            let mut cache = lock(&remote.cache);
-            let (dirs, bytes) = check_listings(&cache, remote.limits, dir, listing)?;
-            cache.listed += bytes;
-            // The first is the one asked for, whose fetch this is; the
-            // nested ones answer their directories' later listings
-            let mut dirs = dirs.into_iter();
-            let (dir, entries) = dirs.next().ok_or_else(|| wrong_answer("listing"))?;
-            let listing = cache.keep_listing(&dir, entries);
-            for (nested, entries) in dirs {
-                let kept = cache.keep_listing(&nested, entries);
-                cache.lists.insert(nested, fetched(kept));
-            }
-            Ok(listing)
+            lock(&remote.cache).take_listing(remote.limits, dir, listing)
         }
         .boxed()
         .shared()
@@ -1567,6 +1643,55 @@ mod tests {
             assert_eq!(cache.lists.len(), 1, "{case}: only the failed listing");
             assert!(cache.blocks.is_empty() && cache.listed == 0, "{case}");
         }
+    }
+
+    /// What nested listings the clients send, and why the server refuses
+    /// them, is counted; a top-level listing's failures aren't
+    #[test]
+    fn nested_listings_are_counted() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let limits = MountLimits::default();
+            let mut cache = Cache::new(limits.max_cache_bytes);
+            // a/b is listed already, so it's ignored
+            cache
+                .lists
+                .insert("/mnt/m/a/b".into(), fetched(Arc::default()));
+            let root = |nested| FsListing {
+                entries: vec![dir("n", Some(nested))],
+            };
+            cache
+                .take_listing(limits, "/mnt/m".into(), nested_root())
+                .unwrap();
+            for bad in [
+                root(vec![inline("x/y", b"")]),
+                root(vec![inline("", b"")]),
+                FsListing {
+                    entries: vec![FsEntry {
+                        listing: Some(FsListing::default()),
+                        ..entry("f", file(0))
+                    }],
+                },
+                // Not a nested listing's: uncounted
+                FsListing {
+                    entries: vec![inline("..", b"")],
+                },
+            ] {
+                assert!(cache.take_listing(limits, "/mnt/m".into(), bad).is_err());
+            }
+        });
+        let text = handle.render();
+        for line in [
+            r#"eryx_mount_nested_listing_dirs_total{outcome="kept"} 1"#,
+            r#"eryx_mount_nested_listing_dirs_total{outcome="ignored"} 1"#,
+            "eryx_mount_nested_listing_entries_total 2",
+            r#"eryx_mount_nested_listings_rejected_total{reason="bad_name"} 2"#,
+            r#"eryx_mount_nested_listings_rejected_total{reason="not_a_directory"} 1"#,
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line} in\n{text}");
+        }
+        assert_eq!(text.matches("rejected_total{").count(), 2, "{text}");
     }
 
     /// Nested listings count towards the listing bytes as if listed apart,
