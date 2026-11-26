@@ -47,7 +47,7 @@ Embed it from **Rust**, **Python** or **JavaScript**, or run it as an **MCP serv
 ### Ways to run it
 
 - **Embedded**, from Rust, Python or JavaScript (the browser or Node.js).
-- **A CLI**: `uvx --with pyeryx eryx -c 'print("hi")'`, with `-l javascript` or `-l shell` for the other languages.
+- **A CLI**: `uvx --with pyeryx eryx -c 'print("hi")'`, with `-l javascript` or `-l shell` for the other languages (`--with 'pyeryx[javascript]'` or `--with 'pyeryx[shell]'`).
 - **An MCP server** (`eryx serve`, with `pyeryx[serve]`) that gives AI assistants a `run_python` tool.
 - **[eryx-server](https://docs.eryx.run/latest/book/guide/grpc-server.html)**, a gRPC server for remote, multi-tenant execution in all three languages, published as a Docker image.
 - **Fast**: pre-compiled and pre-initialized runtimes, and a pool of warm instances. See [Performance Tuning](https://docs.eryx.run/latest/book/guide/performance.html).
@@ -99,6 +99,10 @@ See [`js/eryx`](js/eryx/README.md) for browser and Node.js requirements.
 
 ```bash
 cargo add eryx --features embedded,macros   # add `javascript` and `shell` for those languages
+
+# One-time: download and pre-compile the runtimes `embedded` puts in your binary
+cargo binstall eryx-precompile
+eryx-precompile setup                        # or --language python --language javascript --language shell
 ```
 
 ```rust

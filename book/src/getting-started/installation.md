@@ -21,6 +21,12 @@ cargo binstall eryx-precompile   # install the pre-compile tool
 eryx-precompile setup            # download runtime + pre-compile for your platform
 ```
 
+`setup` sets up the Python runtime. With the `javascript` or `shell` features, set up those runtimes too (`--language shell` also sets up the shell's coreutils):
+
+```bash
+eryx-precompile setup --language python --language javascript --language shell
+```
+
 After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime-python.cwasm` to use a specific file, which is embedded without the checksum and ownership checks applied to the cached runtime. See [Pre-compiling Runtimes](../guide/precompile.md) for advanced options like cross-compilation, CPU targeting, and bundling packages.
 
 ### Feature Flags
