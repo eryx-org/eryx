@@ -353,6 +353,10 @@ message FsRequest {
     // Bytes of the file `path`: answer with FsResponse.data.
     FsRead read = 6;
   }
+  // W3C traceparent of the server's span for this operation, so the client
+  // can make its handling a child of it, as CallbackRequest.trace_context.
+  // Empty when tracing is not configured.
+  string trace_context = 7;
 }
 
 message FsStat {}

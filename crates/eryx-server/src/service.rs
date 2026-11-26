@@ -1041,6 +1041,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 // Fail anything still asking the client, and free the cache.
                 if let Some(mounts) = &mounts {
                     mounts.close();
+                    metrics::histogram!("eryx_mount_requests_per_execution")
+                        .record(f64::from(mounts.requests()));
                 }
 
                 match result_msg {

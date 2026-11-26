@@ -38,6 +38,8 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument as _;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 /// A block of a file's data, shared by the reads that need it
 type Bytes = Arc<Vec<u8>>;
@@ -373,11 +375,7 @@ impl Mounts {
                         report: *report,
                     }),
                 };
-                let storage: Arc<dyn VfsStorage> = if *report {
-                    Arc::new(Guest(storage))
-                } else {
-                    storage
-                };
+                let storage: Arc<dyn VfsStorage> = Arc::new(Guest(storage));
                 if overlay.is_some() {
                     VolumeMount::storage(path.clone(), storage)
                 } else {
@@ -385,6 +383,14 @@ impl Mounts {
                 }
             })
             .collect()
+    }
+
+    /// How many `FsRequest`s the run sent its client
+    pub fn requests(&self) -> u32 {
+        self.remote
+            .ops
+            .load(Ordering::Relaxed)
+            .min(self.remote.limits.max_ops)
     }
 
     /// Whether any mount has `report_access`
@@ -474,6 +480,7 @@ impl Mounts {
         let received = self.remote.received.fetch_add(len, Ordering::Relaxed) + len;
         let max = self.remote.limits.max_transfer_bytes;
         let answer = if received > max {
+            limit_hit("transfer_bytes");
             Err(Failure::Other(format!(
                 "the client sent more than {} MiB",
                 max >> 20
@@ -652,6 +659,22 @@ impl Remote {
     ) -> BoxFuture<'static, Answer> {
         let remote = Arc::clone(self);
         let (mount, path) = (mount.to_string(), path.to_string());
+        let kind = match op {
+            fs_request::Op::Stat(_) => "stat",
+            fs_request::Op::List(_) => "list",
+            fs_request::Op::Read(_) => "read",
+        };
+        // A child of the guest's operation, whose context the client gets
+        let span = tracing::info_span!("fs_request", op = kind, error = tracing::field::Empty);
+        let trace_context = {
+            let cx = span.context();
+            let mut fields = HashMap::new();
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&cx, &mut fields);
+            });
+            fields.remove("traceparent").unwrap_or_default()
+        };
+        let request_span = span.clone();
         async move {
             if remote.closed.is_cancelled() {
                 return Err(gone());
@@ -670,6 +693,7 @@ impl Remote {
                     mount,
                     path,
                     op: Some(op),
+                    trace_context,
                 })),
             };
             if requests.send(message).await.is_err() {
@@ -677,11 +701,17 @@ impl Remote {
                 return Err(gone());
             }
             drop(requests);
+            let sent = std::time::Instant::now();
             let answer = tokio::select! {
-                answer = rx => answer.map_err(|_| gone())??,
+                answer = rx => answer.map_err(|_| gone()),
                 () = remote.closed.cancelled() => return Err(gone()),
             };
-            match answer {
+            // Only answers the client sent count: not the run giving up
+            if answer.is_ok() {
+                metrics::histogram!("eryx_mount_request_duration_seconds", "op" => kind)
+                    .record(sent.elapsed().as_secs_f64());
+            }
+            match answer?? {
                 fs_response::Result::Error(error) => Err(match error.code() {
                     FsErrorCode::NotFound => Failure::NotFound,
                     FsErrorCode::NotADirectory => Failure::NotDirectory,
@@ -692,6 +722,12 @@ impl Remote {
                 answer => Ok(answer),
             }
         }
+        .inspect(move |answer| {
+            if let Err(failure) = answer {
+                request_span.record("error", tracing::field::debug(failure));
+            }
+        })
+        .instrument(span)
         .boxed()
     }
 }
@@ -700,7 +736,21 @@ fn gone() -> Failure {
     Failure::Other("the client can no longer answer".to_string())
 }
 
+/// Count an operation refused at one of the `MountLimits`, by a fixed name
+fn limit_hit(limit: &'static str) {
+    metrics::counter!("eryx_mount_limit_hits_total", "limit" => limit).increment(1);
+}
+
+/// Count a lookup the run's cache answered (or joined) without a new
+/// `FsRequest`, or one that needed it
+fn cache_lookup(op: &'static str, hit: bool) {
+    let result = if hit { "hit" } else { "miss" };
+    metrics::counter!("eryx_mount_cache_lookups_total", "op" => op, "result" => result)
+        .increment(1);
+}
+
 fn too_many_ops(max: u32) -> Failure {
+    limit_hit("ops");
     Failure::Other(format!(
         "a run can make at most {max} file operations on its mounts"
     ))
@@ -740,10 +790,19 @@ tokio::task_local! {
     static GUEST: (Use, String);
 }
 
-/// The storage the guest sees for a mount that reports what it used: runs
-/// each of the guest's reads, stats and listings in [`GUEST`], for the
-/// [`RemoteStorage`] below (directly, or under an overlay) to record. A
-/// writable mount's overlay also looks up the client's files to place the
+/// Count a write refused at `max_write_bytes`
+fn quota<T>(result: VfsResult<T>) -> VfsResult<T> {
+    if let Err(VfsError::QuotaExceeded(_)) = &result {
+        limit_hit("write_bytes");
+    }
+    result
+}
+
+/// The storage the guest sees for a mount: counts the writes
+/// `max_write_bytes` refuses, and runs each of the guest's reads, stats and
+/// listings in [`GUEST`], for the [`RemoteStorage`] below (directly, or
+/// under an overlay) to record if the mount reports access. A writable
+/// mount's overlay also looks up the client's files to place the
 /// guest's writes, copy files up and check renames; those run outside
 /// [`GUEST`], or for another path, and aren't recorded. Nor is what the
 /// overlay answers from its upper layer, as the client's storage never
@@ -764,23 +823,23 @@ impl VfsStorage for Guest {
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
-        self.0.write(path, data).await
+        quota(self.0.write(path, data).await)
     }
 
     async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
-        self.0.write_at(path, offset, data).await
+        quota(self.0.write_at(path, offset, data).await)
     }
 
     async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
-        self.0.append(path, data).await
+        quota(self.0.append(path, data).await)
     }
 
     async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
-        self.0.create_file(path, exclusive).await
+        quota(self.0.create_file(path, exclusive).await)
     }
 
     async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
-        self.0.set_size(path, size).await
+        quota(self.0.set_size(path, size).await)
     }
 
     async fn delete(&self, path: &str) -> VfsResult<()> {
@@ -811,7 +870,7 @@ impl VfsStorage for Guest {
     }
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
-        self.0.mkdir(path).await
+        quota(self.0.mkdir(path).await)
     }
 
     async fn rmdir(&self, path: &str) -> VfsResult<()> {
@@ -819,7 +878,7 @@ impl VfsStorage for Guest {
     }
 
     async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
-        self.0.rename(from, to).await
+        quota(self.0.rename(from, to).await)
     }
 
     async fn set_times(
@@ -828,7 +887,7 @@ impl VfsStorage for Guest {
         accessed: Option<SystemTime>,
         modified: Option<SystemTime>,
     ) -> VfsResult<()> {
-        self.0.set_times(path, accessed, modified).await
+        quota(self.0.set_times(path, accessed, modified).await)
     }
 
     fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
@@ -906,11 +965,15 @@ impl RemoteStorage {
         let fetch = {
             let mut cache = lock(&self.remote.cache);
             match cache.lists.get(&key) {
-                Some(fetch) => fetch.clone(),
+                Some(fetch) => {
+                    cache_lookup("list", true);
+                    fetch.clone()
+                }
                 None => {
                     if let Some(failure) = self.remote.refusal() {
                         return Err(failure.into_vfs(path));
                     }
+                    cache_lookup("list", false);
                     let fetch = self.fetch_listing(&key, rel);
                     cache.lists.insert(key, fetch.clone());
                     fetch
@@ -933,6 +996,7 @@ impl RemoteStorage {
             let entries = listing.entries;
             let limits = remote.limits;
             if entries.len() > limits.max_dir_entries {
+                limit_hit("dir_entries");
                 return Err(Failure::Other(format!(
                     "a directory can have at most {} entries",
                     limits.max_dir_entries
@@ -955,6 +1019,7 @@ impl RemoteStorage {
                 .sum();
             let bytes = names + ENTRY_BYTES * entries.len() as u64;
             if cache.listed + bytes > limits.max_listing_bytes {
+                limit_hit("listing_bytes");
                 return Err(Failure::Other(format!(
                     "the mounts' listings can hold at most {} MiB",
                     limits.max_listing_bytes >> 20
@@ -1011,16 +1076,17 @@ impl RemoteStorage {
             if let Some((parent, name)) = key.rsplit_once('/')
                 && let Some(Ok(listing)) = cache.lists.get(parent).and_then(|l| l.peek())
             {
+                cache_lookup("stat", true);
                 return listing
                     .get(name)
                     .cloned()
                     .ok_or_else(|| VfsError::NotFound(path.to_string()));
             }
-            if !cache.stats.contains_key(&key)
-                && let Some(failure) = self.remote.refusal()
-            {
+            let cached = cache.stats.contains_key(&key);
+            if !cached && let Some(failure) = self.remote.refusal() {
                 return Err(failure.into_vfs(path));
             }
+            cache_lookup("stat", cached);
             let stat = cache.stats.entry(key).or_insert_with(|| {
                 let request =
                     self.remote
@@ -1045,12 +1111,16 @@ impl RemoteStorage {
         let key = (self.key(rel), index);
         let mut cache = lock(&self.remote.cache);
         if let Some(fetch) = cache.blocks.get(&key) {
+            cache_lookup("read", true);
             return Ok(fetch.clone());
         }
         if let Some(failure) = self.remote.refusal() {
             return Err(failure);
         }
-        cache.reserve(size)?;
+        cache
+            .reserve(size)
+            .inspect_err(|_| limit_hit("cache_bytes"))?;
+        cache_lookup("read", false);
         let op = fs_request::Op::Read(FsRead {
             offset: index * BLOCK_SIZE,
             len: size,
