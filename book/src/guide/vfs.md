@@ -319,7 +319,9 @@ let saved = storage.snapshot().await; // e.g. to persist it
 
 The storage keeps its own size and entry limits
 (`InMemoryStorage::with_max_bytes` and `with_max_entries`); `max_vfs_bytes`
-and `max_vfs_entries` only apply to storage eryx creates. On a pooled sandbox,
+and `max_vfs_entries` only apply to storage eryx creates. To bound several
+storages together as well, give each the same `SharedLimit` with
+`with_shared_limit`. On a pooled sandbox,
 use `PooledSandbox::with_vfs_storage`, which the pool clears when the sandbox
 goes back.
 

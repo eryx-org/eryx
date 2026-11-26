@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -326,9 +327,8 @@ impl StorageState {
         self.files.len() + self.directories.len()
     }
 
-    /// Add directory `path` (which must not exist), charging for it.
+    /// Add directory `path` (which must not exist), already charged for.
     fn insert_dir(&mut self, path: String, now: SystemTime) {
-        self.used = self.used.saturating_add(dir_cost(&path));
         self.touch_parent(&path, now);
         self.dir_times.insert(path.clone(), DirTimes::at(now));
         self.directories.insert(path);
@@ -457,6 +457,87 @@ pub struct InMemoryStorage {
     max_bytes: u64,
     /// Maximum number of files and directories, the root included.
     max_entries: usize,
+    /// A limit shared with other storages, charged as well as `max_bytes`.
+    shared: Option<Arc<SharedLimit>>,
+}
+
+/// A size limit several [`InMemoryStorage`]s share, on top of each one's own
+/// [`max_bytes`](InMemoryStorage::max_bytes).
+///
+/// Give each storage it with [`InMemoryStorage::with_shared_limit`]. What they
+/// hold together, counted as each counts its own, stays within
+/// [`max_bytes`](Self::max_bytes): a change that would take it past fails with
+/// [`VfsError::QuotaExceeded`], like one past the storage's own limit. A
+/// storage gives back what it held when it's dropped.
+///
+/// ```rust
+/// use std::sync::Arc;
+/// use eryx_vfs::{InMemoryStorage, SharedLimit};
+///
+/// // Two storages of up to 1 MiB each, but 1.5 MiB between them
+/// let limit = Arc::new(SharedLimit::new(3 << 19));
+/// let a = InMemoryStorage::with_max_bytes(1 << 20).with_shared_limit(Arc::clone(&limit));
+/// let b = InMemoryStorage::with_max_bytes(1 << 20).with_shared_limit(limit);
+/// ```
+#[derive(Debug)]
+pub struct SharedLimit {
+    max_bytes: u64,
+    used: AtomicU64,
+}
+
+impl SharedLimit {
+    /// A limit of `max_bytes` bytes, none of them used yet.
+    #[must_use]
+    pub fn new(max_bytes: u64) -> Self {
+        Self {
+            max_bytes,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    /// The limit, in bytes.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// The bytes the storages sharing it hold.
+    #[must_use]
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Take `bytes` more, if they fit.
+    fn reserve(&self, path: &str, bytes: u64) -> VfsResult<()> {
+        self.used
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes).filter(|&total| total <= self.max_bytes)
+            })
+            .map(drop)
+            .map_err(|used| {
+                VfsError::QuotaExceeded(format!(
+                    "{path}: the filesystems would grow to {} bytes, over their shared {} byte limit",
+                    used.saturating_add(bytes),
+                    self.max_bytes
+                ))
+            })
+    }
+
+    /// Give back `bytes`.
+    fn release(&self, bytes: u64) {
+        self.used
+            .update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.saturating_sub(bytes)
+            });
+    }
+}
+
+impl Drop for InMemoryStorage {
+    fn drop(&mut self) {
+        if let Some(shared) = &self.shared {
+            shared.release(self.state.get_mut().used);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -553,7 +634,22 @@ impl InMemoryStorage {
             }),
             max_bytes,
             max_entries: MAX_ENTRIES,
+            shared: None,
         }
+    }
+
+    /// Also charge this storage's contents to `limit`, which other storages
+    /// may share (see [`SharedLimit`]). What it already holds is charged at
+    /// once, even past the limit.
+    #[must_use]
+    pub fn with_shared_limit(mut self, limit: Arc<SharedLimit>) -> Self {
+        let used = self.state.get_mut().used;
+        if let Some(old) = self.shared.take() {
+            old.release(used);
+        }
+        limit.used.fetch_add(used, Ordering::Relaxed);
+        self.shared = Some(limit);
+        self
     }
 
     /// Change the limit on the number of files and directories, the root
@@ -605,7 +701,9 @@ impl InMemoryStorage {
     /// storage's limits; the storage is left unchanged.
     pub async fn restore(&self, snapshot: &InMemorySnapshot) -> VfsResult<()> {
         let state = Self::checked_state(snapshot, self.max_bytes, self.max_entries)?;
-        *self.state.write().await = state;
+        let mut current = self.state.write().await;
+        self.charge_shared("/", current.used, state.used)?;
+        *current = state;
         Ok(())
     }
 
@@ -628,6 +726,7 @@ impl InMemoryStorage {
             )?),
             max_bytes: snapshot.max_bytes,
             max_entries: snapshot.max_entries,
+            shared: None,
         })
     }
 
@@ -765,13 +864,44 @@ impl InMemoryStorage {
     }
 
     /// Record that file `path` changed from `old_len` bytes (`None`: it
-    /// didn't exist) to `new_len`.
-    fn charge_file(state: &mut StorageState, path: &str, old_len: Option<usize>, new_len: usize) {
+    /// didn't exist) to `new_len`, once [`check_budget`](Self::check_budget)
+    /// has passed. Fails only on the shared limit, before changing anything.
+    fn charge_file(
+        &self,
+        state: &mut StorageState,
+        path: &str,
+        old_len: Option<usize>,
+        new_len: usize,
+    ) -> VfsResult<()> {
         let old = old_len.map_or(0, |len| file_cost(path, len));
-        state.used = state
-            .used
-            .saturating_sub(old)
-            .saturating_add(file_cost(path, new_len));
+        self.charge(state, path, old, file_cost(path, new_len))
+    }
+
+    /// Charge something now `new` bytes instead of `current`, once its own
+    /// limit has been checked. Fails only on the shared limit, before
+    /// changing anything.
+    fn charge(
+        &self,
+        state: &mut StorageState,
+        path: &str,
+        current: u64,
+        new: u64,
+    ) -> VfsResult<()> {
+        self.charge_shared(path, current, new)?;
+        state.used = state.used.saturating_sub(current).saturating_add(new);
+        Ok(())
+    }
+
+    /// The shared limit's part of [`charge`](Self::charge).
+    fn charge_shared(&self, path: &str, current: u64, new: u64) -> VfsResult<()> {
+        if let Some(shared) = &self.shared {
+            if new > current {
+                shared.reserve(path, new - current)?;
+            } else {
+                shared.release(current - new);
+            }
+        }
+        Ok(())
     }
 
     /// [`VfsStorage::write_at`], with the storage lock already held.
@@ -803,7 +933,7 @@ impl InMemoryStorage {
 
         let old_len = state.files.get(&path).map(|f| f.content.len());
         let new_len = old_len.unwrap_or(0).max(needed_len);
-        Self::charge_file(state, &path, old_len, new_len);
+        self.charge_file(state, &path, old_len, new_len)?;
         let now = SystemTime::now();
         if old_len.is_none() {
             state.touch_parent(&path, now);
@@ -837,7 +967,7 @@ impl InMemoryStorage {
         self.check_budget(state, &path, data.len().try_into().unwrap_or(u64::MAX))?;
 
         let old_len = state.files.get(&path).map(|f| f.content.len());
-        Self::charge_file(state, &path, old_len, data.len());
+        self.charge_file(state, &path, old_len, data.len())?;
         let now = SystemTime::now();
         if old_len.is_none() {
             state.touch_parent(&path, now);
@@ -973,7 +1103,7 @@ impl VfsStorage for InMemoryStorage {
         let size = self.check_budget(&state, &path, size)?;
 
         let old_len = state.files.get(&path).map(|f| f.content.len());
-        Self::charge_file(&mut state, &path, old_len, size);
+        self.charge_file(&mut state, &path, old_len, size)?;
         match state.files.get_mut(&path) {
             Some(data) => {
                 data.content.resize(size, 0);
@@ -988,9 +1118,7 @@ impl VfsStorage for InMemoryStorage {
         let path = Self::normalize_path(path)?;
         let mut state = self.state.write().await;
         if let Some(data) = state.files.remove(&path) {
-            state.used = state
-                .used
-                .saturating_sub(file_cost(&path, data.content.len()));
+            self.charge(&mut state, &path, file_cost(&path, data.content.len()), 0)?;
             state.touch_parent(&path, SystemTime::now());
             Ok(())
         } else if state.directories.contains(&path) {
@@ -1104,6 +1232,7 @@ impl VfsStorage for InMemoryStorage {
 
         self.check_new_entry(&state, &path)?;
         self.check_growth(&state, &path, 0, dir_cost(&path))?;
+        self.charge(&mut state, &path, 0, dir_cost(&path))?;
         state.insert_dir(path, SystemTime::now());
         Ok(())
     }
@@ -1143,7 +1272,7 @@ impl VfsStorage for InMemoryStorage {
 
         state.directories.remove(&path);
         state.dir_times.remove(&path);
-        state.used = state.used.saturating_sub(dir_cost(&path));
+        self.charge(&mut state, &path, dir_cost(&path), 0)?;
         state.touch_parent(&path, SystemTime::now());
         Ok(())
     }
@@ -1175,13 +1304,13 @@ impl VfsStorage for InMemoryStorage {
                 .map_or(0, |f| file_cost(&to, f.content.len()));
             let (current, new) = (file_cost(&from, len) + replaced, file_cost(&to, len));
             self.check_growth(&state, &to, current, new)?;
+            self.charge(&mut state, &to, current, new)?;
 
             if let Some(data) = state.files.remove(&from) {
                 let now = SystemTime::now();
                 state.touch_parent(&from, now);
                 state.touch_parent(&to, now);
                 state.files.insert(to, data);
-                state.used = state.used.saturating_sub(current).saturating_add(new);
                 return Ok(());
             }
         }
@@ -1259,7 +1388,7 @@ impl VfsStorage for InMemoryStorage {
                 .saturating_add(replaced);
             let new = (to.len() as u64).saturating_mul(moved);
             self.check_growth(&state, &to, current, new)?;
-            state.used = state.used.saturating_sub(current).saturating_add(new);
+            self.charge(&mut state, &to, current, new)?;
 
             for old_path in files_to_rename {
                 if let Some(data) = state.files.remove(&old_path) {
@@ -1339,6 +1468,7 @@ impl VfsStorage for InMemoryStorage {
                 if !state.directories.contains(&current) {
                     self.check_new_entry(state, &current)?;
                     self.check_growth(state, &current, 0, dir_cost(&current))?;
+                    self.charge(state, &current, 0, dir_cost(&current))?;
                     state.insert_dir(current.clone(), now);
                 }
             }
@@ -2097,5 +2227,44 @@ mod tests {
             storage.set_times("/missing", Some(t), None).await,
             Err(VfsError::NotFound(_))
         ));
+    }
+
+    /// Storages sharing a limit hold at most it between them, each within its
+    /// own, and every change that frees space gives it back
+    #[tokio::test]
+    async fn a_shared_limit_bounds_storages_together() {
+        let limit = Arc::new(SharedLimit::new(1000));
+        let a = InMemoryStorage::with_max_bytes(800).with_shared_limit(Arc::clone(&limit));
+        let b = InMemoryStorage::with_max_bytes(800).with_shared_limit(Arc::clone(&limit));
+        let quota = |r: VfsResult<()>| matches!(r, Err(VfsError::QuotaExceeded(_)));
+
+        a.write("/f", &[0; 600]).await.unwrap();
+        assert_eq!(limit.used(), file_cost("/f", 600));
+        // Within b's own limit, but not the shared one: nothing changes
+        assert!(quota(b.write("/f", &[0; 600]).await));
+        assert!(quota(b.write_at("/f", 0, &[0; 600]).await));
+        assert!(!b.exists("/f").await.unwrap());
+        assert_eq!(limit.used(), file_cost("/f", 600));
+
+        b.mkdir("/d").await.unwrap();
+        b.rename("/d", "/e").await.unwrap();
+        b.rmdir("/e").await.unwrap();
+        a.set_size("/f", 100).await.unwrap();
+        b.write("/g", &[0; 600]).await.unwrap();
+        assert_eq!(limit.used(), file_cost("/f", 100) + file_cost("/g", 600));
+
+        a.delete("/f").await.unwrap();
+        assert_eq!(limit.used(), file_cost("/g", 600));
+        // A restore is charged too, and a storage gives back what it held
+        // when dropped
+        let snapshot = b.snapshot().await;
+        assert!(quota(a.restore(&snapshot).await));
+        assert!(!a.exists("/g").await.unwrap());
+        drop(b);
+        assert_eq!(limit.used(), 0);
+        a.restore(&snapshot).await.unwrap();
+        assert_eq!(limit.used(), file_cost("/g", 600));
+        drop(a);
+        assert_eq!(limit.used(), 0);
     }
 }
