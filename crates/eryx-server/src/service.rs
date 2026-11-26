@@ -1144,7 +1144,14 @@ async fn send_mount_accesses(
     server_tx: &mpsc::Sender<ServerMessage>,
     result: &mut ExecuteResult,
 ) {
+    if !mounts.report_access() {
+        return;
+    }
     let (accesses, truncated) = mounts.accesses();
+    metrics::histogram!("eryx_mount_accesses_reported").record(accesses.len() as f64);
+    if truncated {
+        metrics::counter!("eryx_mount_access_reports_truncated_total").increment(1);
+    }
     result.fs_accesses_truncated = truncated;
     for access in accesses {
         let msg = ServerMessage {

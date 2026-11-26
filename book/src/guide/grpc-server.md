@@ -387,7 +387,7 @@ This matters for [secrets](./secrets.md): a `SecretConfig.value` is transmitted 
 
 ## Observability
 
-- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms.
+- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms. For [mounts that report access](#reporting-what-the-code-used), `eryx_mount_accesses_reported` is a histogram of the paths each run reported, and `eryx_mount_access_reports_truncated_total` counts reports cut short by `--max-mount-access-entries`.
 - **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span.
 
 ## Next Steps

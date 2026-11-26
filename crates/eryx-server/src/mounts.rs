@@ -387,6 +387,11 @@ impl Mounts {
             .collect()
     }
 
+    /// Whether any mount has `report_access`
+    pub fn report_access(&self) -> bool {
+        self.mounts.iter().any(|(_, _, report)| *report)
+    }
+
     /// The paths the guest used on mounts with `report_access`, by mount and
     /// path, and whether there were more than `max_access_entries`
     pub fn accesses(&self) -> (Vec<FsAccess>, bool) {
