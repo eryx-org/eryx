@@ -139,6 +139,16 @@ pub trait VfsStorage: Send + Sync {
     /// Get file/directory metadata.
     async fn stat(&self, path: &str) -> VfsResult<Metadata>;
 
+    /// Get metadata only to tell what's at `path` apart from other files:
+    /// the WASI layer hashes it into the inode number the guest sees, which
+    /// wasi-libc asks for each entry of a directory it reads. Only its
+    /// existence and kind reach the guest, so a storage that tracks what the
+    /// guest uses can count this apart from [`stat`](Self::stat). The
+    /// default is `stat`; a storage wrapping another forwards it.
+    async fn identity(&self, path: &str) -> VfsResult<Metadata> {
+        self.stat(path).await
+    }
+
     /// Create a directory.
     async fn mkdir(&self, path: &str) -> VfsResult<()>;
 
@@ -256,6 +266,10 @@ impl VfsStorage for ArcStorage {
 
     async fn stat(&self, path: &str) -> VfsResult<Metadata> {
         self.0.stat(path).await
+    }
+
+    async fn identity(&self, path: &str) -> VfsResult<Metadata> {
+        self.0.identity(path).await
     }
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {

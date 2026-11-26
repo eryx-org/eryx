@@ -1598,7 +1598,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 let path = vfs_desc.path.clone();
                 let storage = self.ctx.storage_for(vfs_desc).clone();
                 Ok(op(async move {
-                    let meta = storage.stat(&path).await?;
+                    let meta = storage.identity(&path).await?;
                     let hash = crate::wasi_impl::vfs_metadata_hash(&path, &meta);
                     Ok(types::MetadataHashValue {
                         lower: hash,
@@ -1639,7 +1639,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                 let full_path = vfs_desc.resolve_path(&path)?;
                 let storage = self.ctx.storage_for(vfs_desc).clone();
                 Ok(op(async move {
-                    let meta = storage.stat(&full_path).await?;
+                    let meta = storage.identity(&full_path).await?;
                     let hash = crate::wasi_impl::vfs_metadata_hash(&full_path, &meta);
                     Ok(types::MetadataHashValue {
                         lower: hash,

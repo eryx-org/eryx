@@ -607,7 +607,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
         fd: Resource<VfsDescriptor>,
     ) -> VfsFsResult<types::MetadataHashValue> {
         let descriptor = self.table.get(&fd)?;
-        let meta = self.ctx.storage.stat(&descriptor.path).await?;
+        let meta = self.ctx.storage.identity(&descriptor.path).await?;
         let hash = vfs_metadata_hash(&descriptor.path, &meta);
         Ok(types::MetadataHashValue {
             lower: hash,
@@ -623,7 +623,7 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
     ) -> VfsFsResult<types::MetadataHashValue> {
         let descriptor = self.table.get(&fd)?;
         let full_path = descriptor.resolve_path(&path)?;
-        let meta = self.ctx.storage.stat(&full_path).await?;
+        let meta = self.ctx.storage.identity(&full_path).await?;
         let hash = vfs_metadata_hash(&full_path, &meta);
         Ok(types::MetadataHashValue {
             lower: hash,
