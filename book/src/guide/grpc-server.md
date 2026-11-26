@@ -387,8 +387,17 @@ This matters for [secrets](./secrets.md): a `SecretConfig.value` is transmitted 
 
 ## Observability
 
-- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms. For [mounts that report access](#reporting-what-the-code-used), `eryx_mount_accesses_reported` is a histogram of the paths each run reported, and `eryx_mount_access_reports_truncated_total` counts reports cut short by `--max-mount-access-entries`.
-- **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span.
+- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms. For [mounts](#mounts):
+
+  | Metric | Type | Labels | What |
+  |--------|------|--------|------|
+  | `eryx_mount_request_duration_seconds` | histogram | `op`: `stat`, `list`, `read` | An `FsRequest`'s round trip, from sending it to the client's answer. |
+  | `eryx_mount_requests_per_execution` | histogram | | `FsRequest`s each execution with mounts sent. |
+  | `eryx_mount_cache_lookups_total` | counter | `op`: `stat`, `list`, `read`; `result`: `hit`, `miss` | Lookups the run's cache answered, or joined a request already made for, and those that needed a new `FsRequest`. A stat answered from its parent's listing is a hit. |
+  | `eryx_mount_limit_hits_total` | counter | `limit`: `ops`, `transfer_bytes`, `cache_bytes`, `listing_bytes`, `dir_entries`, `write_bytes` | Operations refused at a [`--max-mount*` limit](#running-the-server). |
+  | `eryx_mount_accesses_reported` | histogram | | Paths each run [reported as used](#reporting-what-the-code-used), for requests with `report_access`. |
+  | `eryx_mount_access_reports_truncated_total` | counter | | Access reports cut short by `--max-mount-access-entries`. |
+- **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span. Each `FsRequest` has a server-side `fs_request` span (with its `op`, and the failure as `error`), and its `trace_context` carries that span's `traceparent` the same way.
 
 ## Next Steps
 

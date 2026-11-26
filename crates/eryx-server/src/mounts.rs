@@ -375,7 +375,11 @@ impl Mounts {
                         report: *report,
                     }),
                 };
-                let storage: Arc<dyn VfsStorage> = Arc::new(Guest(storage));
+                let report = report.then(|| Report {
+                    remote: Arc::clone(&self.remote),
+                    mount: path.clone(),
+                });
+                let storage: Arc<dyn VfsStorage> = Arc::new(Guest(storage, report));
                 if overlay.is_some() {
                     VolumeMount::storage(path.clone(), storage)
                 } else {
@@ -629,7 +633,9 @@ impl Remote {
     }
 
     /// Record that the guest used `rel` on `mount` as `kind`, keeping the
-    /// strongest use (the enum's order) and its version
+    /// strongest use (the enum's order) and the first version seen: if the
+    /// client's answers changed mid-run, the first is the one the client
+    /// will find has changed since
     fn saw(&self, mount: &str, rel: &str, kind: fs_access::Kind, version: Option<&str>) {
         let mut log = lock(&self.accesses);
         let log = &mut *log;
@@ -638,8 +644,10 @@ impl Remote {
         let full = log.paths.len() >= self.limits.max_access_entries;
         match log.paths.entry(key) {
             std::collections::btree_map::Entry::Occupied(mut old) => {
-                if old.get().0 < kind {
-                    old.insert(entry);
+                let old = old.get_mut();
+                old.0 = old.0.max(kind);
+                if old.1.is_empty() {
+                    old.1 = entry.1;
                 }
             }
             std::collections::btree_map::Entry::Vacant(_) if full => log.truncated = true,
@@ -765,6 +773,19 @@ fn wrong_answer(wanted: &str) -> Failure {
 // Storage
 // ============================================================================
 
+/// `path` relative to the mount at `mount`, refusing `.` and `..`
+fn relative<'a>(mount: &str, path: &'a str) -> VfsResult<&'a str> {
+    let rest = path
+        .strip_prefix(mount)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .ok_or_else(|| VfsError::InvalidPath(path.to_string()))?
+        .trim_matches('/');
+    if rest.split('/').any(|c| c == "." || c == "..") {
+        return Err(VfsError::InvalidPath(path.to_string()));
+    }
+    Ok(rest)
+}
+
 /// One mount's storage: asks the client, through its run's cache
 struct RemoteStorage {
     /// The mount's guest path
@@ -785,9 +806,22 @@ enum Use {
     Identity,
 }
 
+/// The guest's operation in progress on a mount
+struct GuestOp {
+    op: Use,
+    path: String,
+    /// The client's storage found `path` missing during it
+    missing: std::cell::Cell<bool>,
+}
+
 tokio::task_local! {
-    /// The guest's operation in progress on a reporting mount, and its path
-    static GUEST: (Use, String);
+    static GUEST: GuestOp;
+}
+
+/// Where a reporting mount's [`Guest`] records what the guest found missing
+struct Report {
+    remote: Arc<Remote>,
+    mount: String,
 }
 
 /// Count a write refused at `max_write_bytes`
@@ -807,19 +841,66 @@ fn quota<T>(result: VfsResult<T>) -> VfsResult<T> {
 /// [`GUEST`], or for another path, and aren't recorded. Nor is what the
 /// overlay answers from its upper layer, as the client's storage never
 /// sees it.
-struct Guest(Arc<dyn VfsStorage>);
+///
+/// A path is missing to the guest when its operation fails as not found and
+/// the client's storage found it missing too: not when the overlay hid it
+/// (the guest deleted it), nor when the overlay's probe of the client's
+/// storage failed but the guest's operation didn't (a directory the guest
+/// made).
+struct Guest(Arc<dyn VfsStorage>, Option<Report>);
+
+impl Guest {
+    /// Run the guest's `op` on `path`, recording it as missing if `missed`
+    /// says its result is a miss and the client's storage found it missing
+    async fn reading<T>(
+        &self,
+        op: Use,
+        path: &str,
+        run: impl Future<Output = VfsResult<T>> + Send,
+        missed: impl FnOnce(&VfsResult<T>) -> bool,
+    ) -> VfsResult<T> {
+        let guest = GuestOp {
+            op,
+            path: path.into(),
+            missing: std::cell::Cell::new(false),
+        };
+        let (result, missing) = GUEST
+            .scope(guest, async {
+                let result = run.await;
+                (result, GUEST.with(|g| g.missing.get()))
+            })
+            .await;
+        if missing
+            && missed(&result)
+            && let Some(report) = &self.1
+            && let Ok(rel) = relative(&report.mount, path)
+        {
+            report
+                .remote
+                .saw(&report.mount, rel, fs_access::Kind::Missing, None);
+        }
+        result
+    }
+}
+
+/// The result is a failure that says the path isn't there
+fn not_found<T>(result: &VfsResult<T>) -> bool {
+    matches!(
+        result,
+        Err(VfsError::NotFound(_) | VfsError::NotDirectory(_))
+    )
+}
 
 #[async_trait]
 impl VfsStorage for Guest {
     async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
-        GUEST
-            .scope((Use::Read, path.into()), self.0.read(path))
+        self.reading(Use::Read, path, self.0.read(path), not_found)
             .await
     }
 
     async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
         let read = self.0.read_at(path, offset, len);
-        GUEST.scope((Use::Read, path.into()), read).await
+        self.reading(Use::Read, path, read, not_found).await
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
@@ -847,26 +928,24 @@ impl VfsStorage for Guest {
     }
 
     async fn exists(&self, path: &str) -> VfsResult<bool> {
-        GUEST
-            .scope((Use::Stat, path.into()), self.0.exists(path))
-            .await
+        let exists = self.0.exists(path);
+        let missed = |r: &VfsResult<bool>| matches!(r, Ok(false)) || not_found(r);
+        self.reading(Use::Stat, path, exists, missed).await
     }
 
     async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        GUEST
-            .scope((Use::List, path.into()), self.0.list(path))
+        self.reading(Use::List, path, self.0.list(path), not_found)
             .await
     }
 
     async fn stat(&self, path: &str) -> VfsResult<Metadata> {
-        GUEST
-            .scope((Use::Stat, path.into()), self.0.stat(path))
+        self.reading(Use::Stat, path, self.0.stat(path), not_found)
             .await
     }
 
     async fn identity(&self, path: &str) -> VfsResult<Metadata> {
         let identity = self.0.identity(path);
-        GUEST.scope((Use::Identity, path.into()), identity).await
+        self.reading(Use::Identity, path, identity, not_found).await
     }
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
@@ -899,32 +978,29 @@ impl RemoteStorage {
     /// `path` relative to the mount, refusing `.` and `..` (eryx resolves
     /// them first, but the client shouldn't have to trust that)
     fn relative<'a>(&self, path: &'a str) -> VfsResult<&'a str> {
-        let rest = path
-            .strip_prefix(self.mount.as_str())
-            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-            .ok_or_else(|| VfsError::InvalidPath(path.to_string()))?
-            .trim_matches('/');
-        if rest.split('/').any(|c| c == "." || c == "..") {
-            return Err(VfsError::InvalidPath(path.to_string()));
-        }
-        Ok(rest)
+        relative(&self.mount, path)
     }
 
     /// Record the guest's use of `path` as `kind`, if this is the guest's
-    /// operation on it ([`GUEST`]): one that reads it as `kind` does, or any
-    /// that found it missing. A read's own stat, or an overlay's lookup of
-    /// another path, isn't.
+    /// operation on it ([`GUEST`]) and one that reads it as `kind` does. A
+    /// read's own stat, or an overlay's lookup of another path, isn't. A
+    /// miss is only noted, for [`Guest`] to record if the guest's operation
+    /// fails as one.
     fn saw(&self, path: &str, kind: fs_access::Kind, version: Option<&str>) {
         if !self.report {
             return;
         }
-        let guest = GUEST.try_with(|(op, at)| {
-            at == path
+        let guest = GUEST.try_with(|g| {
+            g.path == path
                 && match kind {
-                    fs_access::Kind::Missing => true,
-                    fs_access::Kind::Read => *op == Use::Read,
-                    fs_access::Kind::Stated => *op == Use::Stat,
-                    fs_access::Kind::Listed => *op == Use::List,
+                    // The guest's operation decides, by how it ends
+                    fs_access::Kind::Missing => {
+                        g.missing.set(true);
+                        false
+                    }
+                    fs_access::Kind::Read => g.op == Use::Read,
+                    fs_access::Kind::Stated => g.op == Use::Stat,
+                    fs_access::Kind::Listed => g.op == Use::List,
                     fs_access::Kind::Unspecified => false,
                 }
         });
@@ -1605,6 +1681,10 @@ mod tests {
             .rename("/mnt/m/dir/b.txt", "/mnt/m/b.txt")
             .await
             .unwrap();
+        // The overlay probes the client for a directory the guest made, and
+        // finds nothing there, but the guest's listing succeeds
+        storage.mkdir("/mnt/m/made").await.unwrap();
+        assert!(storage.list("/mnt/m/made").await.unwrap().is_empty());
         assert!(accesses(&mounts).is_empty(), "{:?}", accesses(&mounts));
 
         // The client's files still count when the guest reads them
@@ -1615,6 +1695,23 @@ mod tests {
         assert_eq!(
             accesses(&mounts),
             [seen("a.txt", Read, "a.txt"), seen("b.txt", Stated, "b.txt")]
+        );
+    }
+
+    /// A stronger use keeps the first version seen (the client's answers
+    /// changed mid-run if they differ), or takes one if there was none
+    #[test]
+    fn the_first_version_seen_is_kept() {
+        use fs_access::Kind::{Listed, Read, Stated};
+        let (_storage, mounts, _rx, _tx, _closed) = mount();
+        let remote = &mounts.remote;
+        remote.saw("/mnt/m", "f", Stated, Some("v1"));
+        remote.saw("/mnt/m", "f", Read, Some("v2"));
+        remote.saw("/mnt/m", "d", Listed, None);
+        remote.saw("/mnt/m", "d", Stated, Some("d1"));
+        assert_eq!(
+            accesses(&mounts),
+            [seen("d", Listed, "d1"), seen("f", Read, "v1")]
         );
     }
 

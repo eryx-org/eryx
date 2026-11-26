@@ -278,7 +278,9 @@ message Mount {
 }
 
 // A path the code used on a mount with report_access, once per path with
-// its strongest use.
+// its strongest use. A path whose lookup the client refused with an error
+// other than NOT_FOUND or NOT_A_DIRECTORY isn't reported: refuse a path
+// consistently, or treat its refusal as a change.
 message FsAccess {
   // The mount's path, as in ExecuteRequest.mounts.
   string mount = 1;
@@ -288,7 +290,8 @@ message FsAccess {
   // The FsMetadata.version the code saw for the path: the file's for READ
   // and STATED, the directory's for LISTED (empty if the run had no
   // metadata of its own for it, as when only listing the mount itself).
-  // Empty for MISSING, and when the client sent none.
+  // Empty for MISSING, and when the client sent none. If the client's
+  // answers gave it different versions mid-run, the first.
   string version = 4;
 
   // How the code used the path, weakest first; the strongest wins.
