@@ -27,8 +27,8 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use eryx::vfs::{
-    DirEntry, ENTRY_OVERHEAD_BYTES, InMemoryStorage, Metadata, OverlayChange, OverlayStorage,
-    SharedLimit, VfsError, VfsResult, VfsStorage,
+    DirEntry, InMemoryStorage, Metadata, OverlayChange, OverlayStorage, SharedLimit, VfsError,
+    VfsResult, VfsStorage,
 };
 use eryx::{CancellationToken, VolumeMount};
 use futures::FutureExt;
@@ -102,16 +102,14 @@ impl Default for MountLimits {
     }
 }
 
-/// What an upper layer charges for a mount's directory and those above it:
-/// each directory's path twice plus [`ENTRY_OVERHEAD_BYTES`], as
-/// [`InMemoryStorage`] counts them
+/// What an upper layer charges for a mount's directory and those above it,
+/// which the run's writes don't pay for
 fn root_charge(path: &str) -> u64 {
-    path.match_indices('/')
-        .map(|(i, _)| i)
-        .skip(1)
-        .chain([path.len()])
-        .map(|len| 2 * len as u64 + ENTRY_OVERHEAD_BYTES)
-        .sum()
+    let probe = Arc::new(SharedLimit::new(u64::MAX));
+    let storage = InMemoryStorage::with_max_bytes(u64::MAX).with_shared_limit(Arc::clone(&probe));
+    // Fails only for a path `check` refuses
+    let _ = storage.mkdir_sync(path);
+    probe.used()
 }
 
 /// `a` is `b` or inside it
@@ -338,7 +336,16 @@ impl Mounts {
             received: AtomicUsize::new(0),
             cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
         });
-        let shared = Arc::new(SharedLimit::new(limits.max_write_bytes));
+        // Each mount's directory is charged to its own upper layer, so the
+        // shared limit grows by them all: the run's writes don't pay for them
+        let roots: u64 = defs
+            .iter()
+            .filter(|d| d.writable)
+            .map(|d| root_charge(&d.path))
+            .sum();
+        let shared = Arc::new(SharedLimit::new(
+            limits.max_write_bytes.saturating_add(roots),
+        ));
         let mounts = defs
             .iter()
             .map(|def| {
@@ -352,10 +359,9 @@ impl Mounts {
                     let max = def
                         .max_write_bytes
                         .map_or(limits.max_write_bytes, |budget| {
-                            budget
-                                .saturating_add(root_charge(&def.path))
-                                .min(limits.max_write_bytes)
-                        });
+                            budget.min(limits.max_write_bytes)
+                        })
+                        .saturating_add(root_charge(&def.path));
                     let upper =
                         InMemoryStorage::with_max_bytes(max).with_shared_limit(Arc::clone(&shared));
                     let overlay = OverlayStorage::new(&def.path, lower, Arc::new(upper));
@@ -975,6 +981,7 @@ impl VfsStorage for RemoteStorage {
 mod tests {
     use super::*;
     use crate::proto::eryx::v1::{FsEntry, FsError, FsListing};
+    use eryx::vfs::ENTRY_OVERHEAD_BYTES;
 
     fn defs(paths: &[&str]) -> Vec<Mount> {
         paths
@@ -1441,12 +1448,29 @@ mod tests {
         a.write("/mnt/a/f", &[0; 800]).await.unwrap();
         assert!(quota(c.write("/mnt/c/f", b"").await));
         assert!(quota(c.mkdir("/mnt/c/d").await));
-        // b has the server's limit, less what a holds
-        assert!(quota(b.write("/mnt/b/f", &[0; 9500]).await));
-        b.write("/mnt/b/f", &[0; 8000]).await.unwrap();
-        assert!(quota(b.write("/mnt/b/f", &[0; 9000]).await));
+        // b has the server's limit, less what a holds; the mounts'
+        // directories are free
+        let cost = |len: u64| len + "/mnt/b/f".len() as u64 + ENTRY_OVERHEAD_BYTES;
+        let a_holds = cost(800);
+        let fits = |len: u64| cost(len) + a_holds <= 10_000;
+        assert!(fits(9056) && !fits(9057));
+        assert!(quota(b.write("/mnt/b/f", &[0; 9057]).await));
+        b.write("/mnt/b/f", &[0; 9056]).await.unwrap();
         a.delete("/mnt/a/f").await.unwrap();
-        b.write("/mnt/b/f", &[0; 9000]).await.unwrap();
+        b.write("/mnt/b/f", &[0; 9928]).await.unwrap();
+        assert!(quota(b.write("/mnt/b/f", &[0; 9929]).await));
+
+        // A server limit of 0 still mounts them all
+        let limits = MountLimits {
+            max_write_bytes: 0,
+            ..MountLimits::default()
+        };
+        let defs: Vec<_> = (0..8)
+            .map(|i| writable(&format!("/mnt/{i}"), None))
+            .collect();
+        let mounts = empty_mounts(&defs, limits);
+        let overlay = mounts.mounts[7].1.as_ref().unwrap();
+        assert!(quota(overlay.write("/mnt/7/f", b"").await));
     }
 
     /// A writable mount's changes are relative to it, and a big file comes

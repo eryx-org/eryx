@@ -711,7 +711,9 @@ impl InMemoryStorage {
     /// the size and entry limits of the storage the snapshot was taken from.
     ///
     /// Useful for forking a session: the returned storage shares no state with
-    /// the original, so the two can diverge freely.
+    /// the original, so the two can diverge freely. It has no
+    /// [`SharedLimit`]; give it one with
+    /// [`with_shared_limit`](Self::with_shared_limit).
     ///
     /// # Errors
     ///
