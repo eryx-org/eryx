@@ -995,7 +995,7 @@ jobs:
       - uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
         if: github.event_name == 'push'
         with:
-          cosign-release: v3.1.5
+          cosign-release: v3.1.6
       - uses: oras-project/setup-oras@ac735097e22fe643015b0d19645f7c9a69942128 # v2.0.4
         if: github.event_name == 'push'
         with:
