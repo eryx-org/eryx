@@ -63,6 +63,9 @@ pub const INLINE_MAX: u64 = 64 * 1024;
 const MAX_READ: u64 = 1024 * 1024;
 /// What a listing's entry counts for in the cache, besides its name
 const ENTRY_BYTES: u64 = 64;
+/// What a nested listing counts for in the cache, besides its path and
+/// entries: its own cache entry and allocations
+const NESTED_BYTES: u64 = 256;
 
 /// Per-run limits on a request's mounts, set by the operator (the
 /// `--max-mount*` flags). Not client-controllable: the cache and listings are
@@ -582,7 +585,8 @@ type DirListing = (String, Vec<FsEntry>);
 /// directory's entries are plain names, at most `max_dir_entries`, and a file's
 /// inline content is its size; only a directory has a nested listing; and
 /// together they fit in what's left of `max_listing_bytes`, each nested one
-/// counting its path too. Returns each directory to keep, `dir` first, and
+/// counting its path and [`NESTED_BYTES`] too; and no directory is nested
+/// twice. Returns each directory to keep, `dir` first, and
 /// the bytes they hold.
 ///
 /// The cache keeps the first listing it has of a directory, so a nested one
@@ -596,6 +600,7 @@ fn check_listings(
     listing: FsListing,
 ) -> Result<(Vec<DirListing>, u64), Failure> {
     let mut dirs = Vec::new();
+    let mut nested_paths = std::collections::HashSet::new();
     let mut bytes = 0;
     // A stack rather than recursion, so no nesting can overflow ours
     let mut todo = vec![(dir, listing.entries)];
@@ -607,7 +612,11 @@ fn check_listings(
             )));
         }
         let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
-        let path = if dirs.is_empty() { 0 } else { dir.len() as u64 };
+        let path = if dirs.is_empty() {
+            0
+        } else {
+            NESTED_BYTES + dir.len() as u64
+        };
         bytes += path + names + ENTRY_BYTES * entries.len() as u64;
         if cache.listed + bytes > limits.max_listing_bytes {
             return Err(Failure::Other(format!(
@@ -640,6 +649,9 @@ fn check_listings(
                     )));
                 }
                 let path = format!("{dir}/{name}");
+                if !nested_paths.insert(path.clone()) {
+                    return Err(Failure::Other(format!("{name:?} is listed twice")));
+                }
                 if !cache.lists.contains_key(&path) {
                     todo.push((path, nested.entries));
                 }
@@ -654,7 +666,8 @@ impl Remote {
     /// Why a new operation would fail without asking: the client can't
     /// answer, or the run has used up its operations. Checked before a new
     /// entry goes in the cache, so failures past the limit aren't kept, and
-    /// the cache holds at most about `max_ops` entries besides blocks.
+    /// the cache holds at most about `max_ops` entries besides blocks and
+    /// nested listings (which `max_listing_bytes` bounds).
     fn refusal(&self) -> Option<Failure> {
         if self.closed.is_cancelled() {
             Some(gone())
@@ -1535,6 +1548,10 @@ mod tests {
             ("content", vec![bad_size]),
             ("a listing on a file", vec![on_a_file]),
             ("too many entries", too_many),
+            (
+                "twice",
+                vec![dir("t", Some(vec![])), dir("t", Some(vec![]))],
+            ),
         ] {
             let entries = vec![
                 inline("ok", b"ok"),
@@ -1556,8 +1573,9 @@ mod tests {
     /// with their paths
     #[tokio::test]
     async fn nested_listings_count_towards_the_listing_bytes() {
-        // The root's `d` (1 + 64), and `/mnt/m/d`'s `f` with its path (8 + 1 + 64)
-        let needed = 65 + 73;
+        // The root's `d` (1 + 64), and `/mnt/m/d`'s `f` with its path
+        // (8 + 1 + 64 + NESTED_BYTES)
+        let needed = 65 + 73 + NESTED_BYTES;
         for (max, ok) in [(needed, true), (needed - 1, false)] {
             let limits = MountLimits {
                 max_listing_bytes: max,

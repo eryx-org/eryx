@@ -391,13 +391,15 @@ message FsEntry {
   // for it when the code lists it. Optional, and ignored by older servers.
   //
   // Nested entries count towards --max-mount-dir-entries (per directory)
-  // and --max-mount-listing-bytes (with each nested directory's path) as if
-  // they had been listed apart, but the answer is one operation towards
-  // --max-mount-ops. A bad nested listing (a bad name, a listing on a file,
-  // a limit passed) fails the whole answer, as a bad top-level one does. A
-  // directory the run already has a listing of keeps it: the nested one,
-  // and what's nested in it, is ignored. Protobuf decoders limit nesting
-  // (prost to 100 messages, two per level), so nest at most 40 levels.
+  // and --max-mount-listing-bytes (with each nested directory's path and
+  // 256 bytes) as if they had been listed apart, but the answer is one
+  // operation towards --max-mount-ops. A bad nested listing (a bad name, a
+  // listing on a file, the same directory nested twice, a limit passed)
+  // fails the whole answer, as a bad top-level one does. A directory the
+  // run already has a listing of keeps it: the nested one, and what's
+  // nested in it, is ignored. Protobuf decoders limit nesting (prost to 100
+  // messages, two per level), so nest at most 40 levels: the server can't
+  // decode a deeper message, and ends the run as if the client had gone.
   optional FsListing listing = 4;
 }
 

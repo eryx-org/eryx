@@ -234,10 +234,10 @@ Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_N
 
 A walk of a mount (`os.walk`, `ls -R`, `cp -r`) lists one directory at a time, and costs a round trip per directory. If listing a subtree is cheap for the client, it can answer a `list` with the subdirectories' listings too: set a directory entry's `listing` to that directory's own complete listing, which can nest again, its entries carrying `content` as at the top. The server keeps every nested listing for the run, so the code's later listing of those directories, and stats and reads of the small files in them, need no request. Leave `listing` unset for a directory you can't send whole: the server asks for it when the code gets there.
 
-- Nested entries count towards `--max-mount-dir-entries` (per directory) and `--max-mount-listing-bytes` (with each nested directory's path) as if they'd been listed apart, but the whole answer is one request towards `--max-mount-ops`, so a tree with more directories than that can be walked.
-- A bad nested listing, such as one with a bad name, one on a file, or one past a limit, fails the whole answer, as a bad top-level listing does.
+- Nested entries count towards `--max-mount-dir-entries` (per directory) and `--max-mount-listing-bytes` (with each nested directory's path and 256 bytes) as if they'd been listed apart, but the whole answer is one request towards `--max-mount-ops`, so a tree with more directories than that can be walked.
+- A bad nested listing, such as one with a bad name, one on a file, the same directory nested twice, or one past a limit, fails the whole answer, as a bad top-level listing does.
 - A directory the run already has a listing of keeps it: a nested listing of it that comes later, and what's nested in it, is ignored, so the code never sees a directory change mid-run.
-- Protobuf decoders limit how deeply messages nest (prost, which the server uses, to 100 messages, two per level), so nest at most 40 levels.
+- Protobuf decoders limit how deeply messages nest (prost, which the server uses, to 100 messages, two per level), so nest at most 40 levels: the server can't decode a deeper message, and ends the run as if the client had gone.
 - A writable mount's changes go over nested listings as over fetched ones.
 - Older servers ignore `listing`, and walk as before.
 
