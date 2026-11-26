@@ -9,9 +9,10 @@ use std::time::Duration;
 use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_client::EryxClient;
 use eryx_server::proto::eryx::v1::{
-    ClientMessage, ExecuteRequest, ExecuteResult, FileKind, FsChange, FsEntry, FsError,
-    FsErrorCode, FsListing, FsMetadata, FsResponse, Language, Mount, SupportingFile,
-    client_message, fs_change, fs_request, fs_response, server_message,
+    CallbackDeclaration, CallbackOutcome, CallbackResponse, ClientMessage, ExecuteRequest,
+    ExecuteResult, FileKind, FsAccess, FsChange, FsEntry, FsError, FsErrorCode, FsListing,
+    FsMetadata, FsResponse, Language, Mount, SupportingFile, callback_response, client_message,
+    fs_access, fs_change, fs_request, fs_response, server_message,
 };
 use eryx_server::service::EryxService;
 use tokio::net::TcpListener;
@@ -42,13 +43,16 @@ fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
         || files
             .iter()
             .any(|(p, _)| p.starts_with(&format!("{path}/")));
-    let meta = |c: &[u8]| FsMetadata {
+    // The version a client might attach, here just the path
+    let meta = |p: &str, c: &[u8]| FsMetadata {
         is_dir: false,
         size: c.len() as u64,
         modified: Some(1_700_000_000.0),
+        version: Some(format!("v:{p}")),
     };
-    let dir = FsMetadata {
+    let dir = |p: &str| FsMetadata {
         is_dir: true,
+        version: Some(format!("v:{p}/")),
         ..FsMetadata::default()
     };
     let error = |code: FsErrorCode| {
@@ -59,8 +63,8 @@ fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
     };
     match (op, file) {
         (_, Some(("private/key", _))) => error(FsErrorCode::PermissionDenied),
-        (fs_request::Op::Stat(_), Some((_, c))) => fs_response::Result::Stat(meta(c)),
-        (fs_request::Op::Stat(_), None) if is_dir => fs_response::Result::Stat(dir),
+        (fs_request::Op::Stat(_), Some((p, c))) => fs_response::Result::Stat(meta(p, c)),
+        (fs_request::Op::Stat(_), None) if is_dir => fs_response::Result::Stat(dir(path)),
         (fs_request::Op::List(_), None) if is_dir => {
             let prefix = if path.is_empty() {
                 String::new()
@@ -76,14 +80,14 @@ fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
                     Some((sub, _)) if !entries.iter().any(|e| e.name == sub) => {
                         entries.push(FsEntry {
                             name: sub.into(),
-                            metadata: Some(dir),
+                            metadata: Some(dir(&format!("{prefix}{sub}"))),
                             content: None,
                         });
                     }
                     Some(_) => {}
                     None => entries.push(FsEntry {
                         name: rest.into(),
-                        metadata: Some(meta(c)),
+                        metadata: Some(meta(p, c)),
                         // Small files come with the listing
                         content: (c.len() < 64).then(|| c.clone()),
                     }),
@@ -161,7 +165,7 @@ async fn run(channel: Channel, language: Language, code: &str) -> (ExecuteResult
         language: language.into(),
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
-            writable: false,
+            ..Mount::default()
         }],
         ..Default::default()
     };
@@ -170,18 +174,20 @@ async fn run(channel: Channel, language: Language, code: &str) -> (ExecuteResult
 
 /// Send `request`, answering the server's file operations from `tree`.
 async fn run_request(channel: Channel, request: ExecuteRequest) -> (ExecuteResult, usize) {
-    let (result, ops, changes) = exchange(channel, request).await;
+    let (result, ops, changes, accesses) = exchange(channel, request).await;
     assert!(changes.is_empty(), "{changes:?}");
+    assert!(accesses.is_empty(), "{accesses:?}");
     (result, ops)
 }
 
-/// Send `request`, answering the server's file operations from `tree`, and
-/// return the result, how many operations it asked for, and the changes it
-/// sent for writable mounts.
+/// Send `request`, answering the server's file operations from `tree` (and
+/// any callback by suspending), and return the result, how many operations
+/// it asked for, the changes it sent for writable mounts, and the accesses
+/// it reported.
 async fn exchange(
     channel: Channel,
     request: ExecuteRequest,
-) -> (ExecuteResult, usize, Vec<FsChange>) {
+) -> (ExecuteResult, usize, Vec<FsChange>, Vec<FsAccess>) {
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
     let mount = request.mounts.first().map(|m| m.path.clone());
@@ -197,6 +203,7 @@ async fn exchange(
         .into_inner();
     let mut ops = 0;
     let mut changes = Vec::new();
+    let mut accesses = Vec::new();
     while let Some(msg) = stream.message().await.unwrap() {
         match msg.message {
             Some(server_message::Message::FsRequest(req)) => {
@@ -212,10 +219,28 @@ async fn exchange(
                 .await
                 .unwrap();
             }
-            Some(server_message::Message::FsChange(change)) => changes.push(change),
+            Some(server_message::Message::FsChange(change)) => {
+                assert!(accesses.is_empty(), "an FsChange after an FsAccess");
+                changes.push(change);
+            }
+            Some(server_message::Message::FsAccess(access)) => accesses.push(access),
+            Some(server_message::Message::CallbackRequest(req)) => {
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: CallbackOutcome::Suspend.into(),
+                            result: Some(callback_response::Result::Error("later".into())),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
             Some(server_message::Message::ExecuteResult(result)) => {
                 assert_eq!(result.fs_changes as usize, changes.len());
-                return (*result, ops, changes);
+                assert_eq!(result.fs_accesses as usize, accesses.len());
+                return (*result, ops, changes, accesses);
             }
             _ => {}
         }
@@ -281,7 +306,7 @@ except OSError:
         }],
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
-            writable: false,
+            ..Mount::default()
         }],
         ..Default::default()
     };
@@ -353,7 +378,7 @@ async fn the_operators_mount_root_applies() {
             .into(),
         mounts: vec![Mount {
             path: path.into(),
-            writable: false,
+            ..Mount::default()
         }],
         ..Default::default()
     };
@@ -369,10 +394,11 @@ async fn the_operators_mount_root_applies() {
         mounts: vec![Mount {
             path: "/workspace".into(),
             writable: true,
+            ..Mount::default()
         }],
         ..Default::default()
     };
-    let (result, _, changes) = exchange(channel.clone(), writable).await;
+    let (result, _, changes, _) = exchange(channel.clone(), writable).await;
     assert!(result.success, "{}", result.error);
     let changes: Vec<_> = changes
         .into_iter()
@@ -419,7 +445,7 @@ async fn the_operators_mount_limits_apply() {
     let (tx, rx) = mpsc::channel(1);
     let two = ["/mnt/a", "/mnt/b"].map(|path| Mount {
         path: path.into(),
-        writable: false,
+        ..Mount::default()
     });
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(
@@ -465,10 +491,11 @@ async fn run_writable(
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
             writable: true,
+            ..Mount::default()
         }],
         ..Default::default()
     };
-    let (result, _, changes) = exchange(channel, request).await;
+    let (result, _, changes, _) = exchange(channel, request).await;
     let mut out: Vec<(String, String)> = Vec::new();
     for change in changes {
         assert_eq!(change.mount, "/mnt/repo");
@@ -575,7 +602,7 @@ async fn bad_mounts_are_refused() {
                 code: "print(1)".into(),
                 mounts: vec![Mount {
                     path: "/etc".into(),
-                    writable: false,
+                    ..Mount::default()
                 }],
                 ..Default::default()
             },
@@ -586,4 +613,154 @@ async fn bad_mounts_are_refused() {
     let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(status.message().contains("/mnt/"), "{status:?}");
+}
+
+/// Run `request` with its mount reporting access, and return its result and
+/// what it reported, as `(path, kind, version)`
+async fn accessed(
+    channel: Channel,
+    mut request: ExecuteRequest,
+) -> (ExecuteResult, Vec<(String, fs_access::Kind, String)>) {
+    for mount in &mut request.mounts {
+        mount.report_access = true;
+    }
+    let (result, _, _, accesses) = exchange(channel, request).await;
+    let accesses = accesses
+        .into_iter()
+        .map(|a| {
+            assert_eq!(a.mount, "/mnt/repo");
+            {
+                let kind = a.kind();
+                (a.path, kind, a.version)
+            }
+        })
+        .collect();
+    (result, accesses)
+}
+
+fn mounted(language: Language, code: &str, writable: bool) -> ExecuteRequest {
+    ExecuteRequest {
+        code: code.into(),
+        language: language.into(),
+        mounts: vec![Mount {
+            path: "/mnt/repo".into(),
+            writable,
+            ..Mount::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn access(path: &str, kind: fs_access::Kind, version: &str) -> (String, fs_access::Kind, String) {
+    (path.into(), kind, version.into())
+}
+
+use fs_access::Kind::{Listed, Missing, Read, Stated};
+
+/// Only what the code used is reported: a listing's names, not the files it
+/// brought; a file read from its inline content; a size; a missing path
+#[tokio::test]
+async fn python_reports_what_the_code_used() {
+    let channel = start_server().await;
+    let code = r"
+import os
+os.listdir('/mnt/repo')
+os.listdir('/mnt/repo/src')
+open('/mnt/repo/README.md').read()
+os.path.getsize('/mnt/repo/big.bin')
+os.path.exists('/mnt/repo/missing')
+";
+    let (result, accesses) = accessed(channel, mounted(Language::Python, code, false)).await;
+    stdout(&result);
+    assert_eq!(
+        accesses,
+        [
+            access("", Listed, "v:/"),
+            access("README.md", Read, "v:README.md"),
+            access("big.bin", Stated, "v:big.bin"),
+            access("missing", Missing, ""),
+            access("src", Listed, "v:src/"),
+        ]
+    );
+}
+
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn the_shell_reports_what_the_code_used() {
+    let channel = start_server().await;
+    // A glob reads only the directory's names; `ls` stats each entry too
+    let code = "echo /mnt/repo/* > /dev/null; cat /mnt/repo/src/main.py > /dev/null";
+    let (result, accesses) = accessed(channel, mounted(Language::Shell, code, false)).await;
+    stdout(&result);
+    assert_eq!(
+        accesses,
+        [
+            access("", Listed, "v:/"),
+            access("src/main.py", Read, "v:src/main.py"),
+        ]
+    );
+}
+
+/// On a writable mount, what the code reads back from its own writes isn't
+/// reported, nor is copying a file up to append to it
+#[tokio::test]
+async fn a_writable_mount_reports_only_the_clients_files() {
+    let channel = start_server().await;
+    let code = r"
+import os
+open('/mnt/repo/new.txt', 'w').write('x')
+open('/mnt/repo/new.txt').read()
+with open('/mnt/repo/README.md', 'a') as f:
+    f.write('more')
+open('/mnt/repo/README.md').read()
+os.mkdir('/mnt/repo/out')
+open('/mnt/repo/out/a', 'w').write('a')
+";
+    let (result, accesses) = accessed(channel, mounted(Language::Python, code, true)).await;
+    stdout(&result);
+    assert_eq!(accesses, [access("README.md", Stated, "v:README.md")]);
+}
+
+/// A failed run reports what it used, as its changes come; a suspended one
+/// doesn't, as it starts again from the client's files
+#[tokio::test]
+async fn failed_runs_report_and_suspended_ones_dont() {
+    let channel = start_server().await;
+    let code = "open('/mnt/repo/README.md').read()\nraise SystemExit(1)";
+    let (result, accesses) =
+        accessed(channel.clone(), mounted(Language::Python, code, false)).await;
+    assert!(!result.success);
+    assert_eq!(accesses, [access("README.md", Read, "v:README.md")]);
+
+    let code = "open('/mnt/repo/README.md').read()\nawait approve()";
+    let mut request = mounted(Language::Python, code, true);
+    request.callbacks = vec![CallbackDeclaration {
+        name: "approve".into(),
+        ..Default::default()
+    }];
+    let (result, accesses) = accessed(channel, request).await;
+    assert!(result.suspended, "{}", result.error);
+    assert!(accesses.is_empty(), "{accesses:?}");
+    assert_eq!(result.fs_accesses, 0);
+}
+
+/// Past `max_access_entries` paths, the report is cut short and says so
+#[tokio::test]
+async fn the_access_report_is_bounded() {
+    let limits = eryx_server::service::ServerLimits {
+        mounts: eryx_server::mounts::MountLimits {
+            max_access_entries: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let channel = start_server_with(limits).await;
+    let code = r"
+for name in ['README.md', 'src/main.py', 'big.bin']:
+    open('/mnt/repo/' + name, 'rb').read()
+";
+    let (result, accesses) = accessed(channel, mounted(Language::Python, code, false)).await;
+    stdout(&result);
+    assert!(result.fs_accesses_truncated);
+    assert_eq!(accesses.len(), 2, "{accesses:?}");
 }

@@ -1055,6 +1055,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             && !skipped.contains(&result_msg.failure_kind)
                         {
                             send_mount_changes(mounts, &server_tx_result, &mut result_msg).await;
+                            send_mount_accesses(mounts, &server_tx_result, &mut result_msg).await;
                         }
                         let msg = ServerMessage {
                             message: Some(server_message::Message::ExecuteResult(Box::new(
@@ -1133,6 +1134,26 @@ async fn send_mount_changes(
             return;
         }
         result.fs_changes += 1;
+    }
+}
+
+/// Send what the run used on its `report_access` mounts as `FsAccess`
+/// messages, counting them in `result`
+async fn send_mount_accesses(
+    mounts: &crate::mounts::Mounts,
+    server_tx: &mpsc::Sender<ServerMessage>,
+    result: &mut ExecuteResult,
+) {
+    let (accesses, truncated) = mounts.accesses();
+    result.fs_accesses_truncated = truncated;
+    for access in accesses {
+        let msg = ServerMessage {
+            message: Some(server_message::Message::FsAccess(access)),
+        };
+        if server_tx.send(msg).await.is_err() {
+            return;
+        }
+        result.fs_accesses += 1;
     }
 }
 
@@ -1812,6 +1833,8 @@ async fn execute_with_session(
                 exit_code: (params.language == eryx::Language::Shell).then_some(0),
                 // Counted as they're sent, after the execution
                 fs_changes: 0,
+                fs_accesses: 0,
+                fs_accesses_truncated: false,
             }
         }
         Err(e) => {
@@ -1872,6 +1895,8 @@ async fn execute_with_session(
                     _ => None,
                 },
                 fs_changes: 0,
+                fs_accesses: 0,
+                fs_accesses_truncated: false,
             }
         }
     }

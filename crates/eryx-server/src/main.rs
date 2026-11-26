@@ -241,6 +241,12 @@ struct Args {
     #[arg(long, default_value_t = MountLimits::default().max_write_bytes, env = "ERYX_MAX_MOUNT_WRITE_BYTES")]
     max_mount_write_bytes: u64,
 
+    /// Most paths one execution may report as used on its mounts with
+    /// `report_access`, all together; past it, the report is marked
+    /// truncated and the client must treat everything it served as used.
+    #[arg(long, default_value_t = MountLimits::default().max_access_entries, env = "ERYX_MAX_MOUNT_ACCESS_ENTRIES")]
+    max_mount_access_entries: usize,
+
     /// Let requests set `network_config.allow_plaintext_secrets`, which sends
     /// real secret values over unencrypted connections. Without it, such
     /// requests are rejected and secrets are only substituted over TLS.
@@ -1033,6 +1039,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_listing_bytes: args.max_mount_listing_bytes,
             max_dir_entries: args.max_mount_dir_entries,
             max_write_bytes: args.max_mount_write_bytes,
+            max_access_entries: args.max_mount_access_entries,
         },
         mount_roots: MountRoots::new(args.mount_roots.clone())?,
     };

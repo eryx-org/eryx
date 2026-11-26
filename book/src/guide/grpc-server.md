@@ -63,6 +63,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-mount-listing-bytes` | `ERYX_MAX_MOUNT_LISTING_BYTES` | `16777216` (16 MiB) | Most host memory one execution's directory listings may hold, kept for the execution. |
 | `--max-mount-dir-entries` | `ERYX_MAX_MOUNT_DIR_ENTRIES` | `10000` | Most entries one directory's listing may have. |
 | `--max-mount-write-bytes` | `ERYX_MAX_MOUNT_WRITE_BYTES` | `67108864` (64 MiB) | Most host memory one execution's changes to its [writable mounts](#writable-mounts) may hold, all together; past it, writes fail with `ENOSPC`. |
+| `--max-mount-access-entries` | `ERYX_MAX_MOUNT_ACCESS_ENTRIES` | `10000` | Most paths one execution [reports as used](#reporting-what-the-code-used) on its mounts, all together; past it, the report is marked truncated. |
 | `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
 | `--shell-command` | `ERYX_SHELL_COMMANDS` (`;`-separated) | *(none)* | A shell command, `NAME[,NAME...]=PATH[@sha256:<hex>]`: a `.wasm` or `.cwasm` file, the `.wasm` optionally pinned to its digest. Repeatable; empty entries and an empty variable mean none. See [Commands from a registry](#commands-from-a-registry) and [External Commands](./sandboxes.md#external-commands). |
 | `--shell-command-tunnels` | `ERYX_SHELL_COMMAND_TUNNELS` (`,`-separated) | *(none)* | Let a `--shell-command` name open blind `CONNECT` tunnels through the child proxy (no secret substitution, no HTTP rules). A request can turn it off (`commands`), not on. |
@@ -217,7 +218,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 
 | `FsRequest.op` | Answer with |
 |----------------|-------------|
-| `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch). |
+| `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch, and an optional opaque `version`, which the server only [reports back](#reporting-what-the-code-used)). |
 | `list` | `listing`: the directory's entries, each with its metadata. Put a small file's whole contents in its entry's `content`: the server keeps those up to 64 KiB, so reading a tree of small files costs one round trip per directory. |
 | `read` | `data`: up to `len` bytes of the file from `offset`, fewer at its end. |
 
@@ -244,7 +245,26 @@ With `writable: true`, the code can change a mount, but the client's files are n
 - The changes come from the sandboxed code: treat them as untrusted. Resolve each path inside the mount without following symlinks out of it, and think twice before applying writes to files that run code, such as `.git/hooks`, build scripts or `.env`.
 - Writing part of a file fetches it whole first; replacing it, or truncating it to nothing (`open(path, 'w')`), doesn't. The changes may hold up to `--max-mount-write-bytes`, past which writes fail with `ENOSPC`.
 - Renaming a file works. Renaming a directory the client served fails with `EXDEV`, which `shutil.move` and `mv` handle by copying; one the code made itself renames.
-- Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported.
+- Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported. To apply them only if what the code depended on hasn't changed since, have the run report what it used.
+
+### Reporting what the code used
+
+A client that applies a writable mount's changes with optimistic concurrency needs to know what the code depended on, and what it served isn't that: a listing brings every entry's metadata, and often small files' contents, whether the code uses them or not. With `report_access: true` on a mount, the server reports the paths the code used on it, as `FsAccess` messages after the `FsChange`s and before the `ExecuteResult`, whose `fs_accesses` counts them. They come when `FsChange`s would: for a failed run too, not for a cancelled or suspended one. A read-only mount can report too.
+
+Each path comes once, with its strongest use (`path` is relative to `mount`, as in `FsChange`):
+
+| `FsAccess.kind` | The code |
+|-----------------|----------|
+| `KIND_READ` | Read the file's contents, or part of them. |
+| `KIND_LISTED` | Read the directory's entries: their names and kinds. |
+| `KIND_STATED` | Used its metadata: a stat or an existence check, including those an open makes, or a program such as `ls` that stats each entry it lists. |
+| `KIND_MISSING` | Looked it up and didn't find it, and never saw it exist. |
+
+`version` is the `FsMetadata.version` the client sent for the path, as the code saw it: give each file and directory one, such as a content hash or revision, and refuse the changes if any reported path's version is different now, or a `KIND_MISSING` path exists. A directory listed but not stat'd itself, such as the mount, has no version reported.
+
+- Only the code's own use counts, wherever the server answered it from: its cache, a listing's inline `content`, a fetched block. A listing with inline files reports the directory as listed, not its files as read, until the code opens them.
+- The server's own lookups don't count: to place the code's writes, copy a file up before a partial write, or check a rename. Nor does what the code reads back from its own writes, or a path after it deleted it: those are in the `FsChange`s.
+- Past `--max-mount-access-entries` paths, all mounts together, `ExecuteResult.fs_accesses_truncated` is set and the report is incomplete: treat everything served to the run as used.
 
 ## Reading the result
 
