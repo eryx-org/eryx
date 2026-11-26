@@ -38,8 +38,9 @@ use tokio::sync::{mpsc, oneshot};
 type Bytes = Arc<Vec<u8>>;
 
 use crate::proto::eryx::v1::{
-    FsChange, FsErrorCode, FsList, FsMetadata, FsMkdir, FsRead, FsRemove, FsRequest, FsResponse,
-    FsStat, FsWrite, Mount, ServerMessage, fs_change, fs_request, fs_response, server_message,
+    FsChange, FsEntry, FsErrorCode, FsList, FsListing, FsMetadata, FsMkdir, FsRead, FsRemove,
+    FsRequest, FsResponse, FsStat, FsWrite, Mount, ServerMessage, fs_change, fs_request,
+    fs_response, server_message,
 };
 
 /// The largest `FsWrite` chunk of a changed file
@@ -545,6 +546,108 @@ impl Cache {
         self.order.push_back((key.clone(), size));
         self.blocks.insert(key, fetch);
     }
+
+    /// The listing of `dir` from its [`check_listings`]ed `entries`, keeping
+    /// small files' inline contents
+    fn keep_listing(&mut self, dir: &str, entries: Vec<FsEntry>) -> Arc<BTreeMap<String, Stat>> {
+        let mut listing = BTreeMap::new();
+        for entry in entries {
+            let stat = Stat::from(entry.metadata.unwrap_or_default());
+            if let Some(content) = entry.content
+                && !stat.is_dir
+            {
+                // Small files fit in their first block (bigger ones are read
+                // in blocks); without room they're fetched when read. The
+                // path counts too, as a nested listing's can be long.
+                let key = (format!("{dir}/{}", entry.name), 0);
+                let size = stat.size + key.0.len() as u64;
+                if stat.size <= INLINE_MAX.min(BLOCK_SIZE)
+                    && !self.blocks.contains_key(&key)
+                    && self.reserve(size).is_ok()
+                {
+                    self.add_block(key, size, fetched(Arc::new(content)));
+                }
+            }
+            listing.insert(entry.name, stat);
+        }
+        Arc::new(listing)
+    }
+}
+
+/// A directory's cache key and its entries, as the client sent them
+type DirListing = (String, Vec<FsEntry>);
+
+/// Check the client's `listing` of `dir` (a cache key) and the listings
+/// nested in its entries, before the cache keeps any of them: each
+/// directory's entries are plain names, at most `max_dir_entries`, and a file's
+/// inline content is its size; only a directory has a nested listing; and
+/// together they fit in what's left of `max_listing_bytes`, each nested one
+/// counting its path too. Returns each directory to keep, `dir` first, and
+/// the bytes they hold.
+///
+/// The cache keeps the first listing it has of a directory, so a nested one
+/// it already has (or is fetching) is skipped, with what's nested in it,
+/// unchecked: the code may have seen the one it has. One bad nested listing
+/// fails the whole answer rather than being dropped, so a client's bug shows.
+fn check_listings(
+    cache: &Cache,
+    limits: MountLimits,
+    dir: String,
+    listing: FsListing,
+) -> Result<(Vec<DirListing>, u64), Failure> {
+    let mut dirs = Vec::new();
+    let mut bytes = 0;
+    // A stack rather than recursion, so no nesting can overflow ours
+    let mut todo = vec![(dir, listing.entries)];
+    while let Some((dir, mut entries)) = todo.pop() {
+        if entries.len() > limits.max_dir_entries {
+            return Err(Failure::Other(format!(
+                "a directory can have at most {} entries",
+                limits.max_dir_entries
+            )));
+        }
+        let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
+        let path = if dirs.is_empty() { 0 } else { dir.len() as u64 };
+        bytes += path + names + ENTRY_BYTES * entries.len() as u64;
+        if cache.listed + bytes > limits.max_listing_bytes {
+            return Err(Failure::Other(format!(
+                "the mounts' listings can hold at most {} MiB",
+                limits.max_listing_bytes >> 20
+            )));
+        }
+        for entry in &mut entries {
+            let name = &entry.name;
+            if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                return Err(Failure::Other(format!("bad entry name {name:?}")));
+            }
+            let (is_dir, size) = entry
+                .metadata
+                .as_ref()
+                .map_or((false, 0), |m| (m.is_dir, m.size));
+            if let Some(content) = &entry.content
+                && !is_dir
+                && content.len() as u64 != size
+            {
+                return Err(Failure::Other(format!(
+                    "{name:?} has {} bytes of content, not its size of {size}",
+                    content.len()
+                )));
+            }
+            if let Some(nested) = entry.listing.take() {
+                if !is_dir {
+                    return Err(Failure::Other(format!(
+                        "{name:?} has a listing but isn't a directory"
+                    )));
+                }
+                let path = format!("{dir}/{name}");
+                if !cache.lists.contains_key(&path) {
+                    todo.push((path, nested.entries));
+                }
+            }
+        }
+        dirs.push((dir, entries));
+    }
+    Ok((dirs, bytes))
 }
 
 impl Remote {
@@ -688,57 +791,19 @@ impl RemoteStorage {
             let fs_response::Result::Listing(listing) = request.await? else {
                 return Err(wrong_answer("listing"));
             };
-            let entries = listing.entries;
-            let limits = remote.limits;
-            if entries.len() > limits.max_dir_entries {
-                return Err(Failure::Other(format!(
-                    "a directory can have at most {} entries",
-                    limits.max_dir_entries
-                )));
-            }
-            if let Some(entry) = entries.iter().find(|e| {
-                e.name.is_empty() || e.name.contains('/') || e.name == "." || e.name == ".."
-            }) {
-                return Err(Failure::Other(format!("bad entry name {:?}", entry.name)));
-            }
-            let mut listing = BTreeMap::new();
             let mut cache = lock(&remote.cache);
-            let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
-            let bytes = names + ENTRY_BYTES * entries.len() as u64;
-            if cache.listed + bytes > limits.max_listing_bytes {
-                return Err(Failure::Other(format!(
-                    "the mounts' listings can hold at most {} MiB",
-                    limits.max_listing_bytes >> 20
-                )));
-            }
+            let (dirs, bytes) = check_listings(&cache, remote.limits, dir, listing)?;
             cache.listed += bytes;
-            for entry in entries {
-                let stat = Stat::from(entry.metadata.unwrap_or_default());
-                if let Some(content) = entry.content
-                    && !stat.is_dir
-                {
-                    if content.len() as u64 != stat.size {
-                        return Err(Failure::Other(format!(
-                            "{:?} has {} bytes of content, not its size of {}",
-                            entry.name,
-                            content.len(),
-                            stat.size
-                        )));
-                    }
-                    // Small files fit in their first block (bigger ones are
-                    // read in blocks); without room they're fetched when read
-                    let key = (format!("{dir}/{}", entry.name), 0);
-                    let size = stat.size;
-                    if size <= INLINE_MAX.min(BLOCK_SIZE)
-                        && !cache.blocks.contains_key(&key)
-                        && cache.reserve(size).is_ok()
-                    {
-                        cache.add_block(key, size, fetched(Arc::new(content)));
-                    }
-                }
-                listing.insert(entry.name, stat);
+            // The first is the one asked for, whose fetch this is; the
+            // nested ones answer their directories' later listings
+            let mut dirs = dirs.into_iter();
+            let (dir, entries) = dirs.next().ok_or_else(|| wrong_answer("listing"))?;
+            let listing = cache.keep_listing(&dir, entries);
+            for (nested, entries) in dirs {
+                let kept = cache.keep_listing(&nested, entries);
+                cache.lists.insert(nested, fetched(kept));
             }
-            Ok(Arc::new(listing))
+            Ok(listing)
         }
         .boxed()
         .shared()
@@ -950,7 +1015,7 @@ impl VfsStorage for RemoteStorage {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::proto::eryx::v1::{FsEntry, FsError, FsListing};
+    use crate::proto::eryx::v1::FsError;
 
     fn defs(paths: &[&str]) -> Vec<Mount> {
         paths
@@ -1059,16 +1124,22 @@ mod tests {
         mpsc::Sender<ServerMessage>,
         CancellationToken,
     ) {
+        mount_with(MountLimits::default())
+    }
+
+    fn mount_with(
+        limits: MountLimits,
+    ) -> (
+        RemoteStorage,
+        Arc<Mounts>,
+        mpsc::Receiver<ServerMessage>,
+        mpsc::Sender<ServerMessage>,
+        CancellationToken,
+    ) {
         let (tx, rx) = mpsc::channel(16);
         let closed = CancellationToken::new();
         let mounts = Arc::new(
-            Mounts::new(
-                &defs(&["/mnt/m"]),
-                MountLimits::default(),
-                tx.downgrade(),
-                closed.clone(),
-            )
-            .unwrap(),
+            Mounts::new(&defs(&["/mnt/m"]), limits, tx.downgrade(), closed.clone()).unwrap(),
         );
         let storage = RemoteStorage {
             mount: "/mnt/m".into(),
@@ -1131,6 +1202,7 @@ mod tests {
                                     name: name.into(),
                                     metadata: Some(file(c.len())),
                                     content: (c.len() <= 4).then(|| c.to_vec()),
+                                    listing: None,
                                 })
                             })
                             .collect();
@@ -1319,6 +1391,235 @@ mod tests {
         drop(stat);
         drop((storage, mounts));
         assert!(remote.upgrade().is_none());
+    }
+
+    fn entry(name: &str, meta: FsMetadata) -> FsEntry {
+        FsEntry {
+            name: name.into(),
+            metadata: Some(meta),
+            content: None,
+            listing: None,
+        }
+    }
+
+    fn dir(name: &str, listing: Option<Vec<FsEntry>>) -> FsEntry {
+        let meta = FsMetadata {
+            is_dir: true,
+            ..FsMetadata::default()
+        };
+        FsEntry {
+            listing: listing.map(|entries| FsListing { entries }),
+            ..entry(name, meta)
+        }
+    }
+
+    fn inline(name: &str, content: &[u8]) -> FsEntry {
+        FsEntry {
+            content: Some(content.to_vec()),
+            ..entry(name, file(content.len()))
+        }
+    }
+
+    /// A fake client answering with `answer`, recording the requests' paths
+    fn serve_with(
+        limits: MountLimits,
+        answer: impl Fn(&FsRequest) -> fs_response::Result + Send + 'static,
+    ) -> (RemoteStorage, Arc<Mutex<Vec<String>>>) {
+        let (storage, mounts, mut rx, tx, _closed) = mount_with(limits);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&asked);
+        tokio::spawn(async move {
+            let _tx = tx;
+            while let Some(msg) = rx.recv().await {
+                let req = fs_request(msg);
+                lock(&seen).push(req.path.clone());
+                mounts.reply(FsResponse {
+                    result: Some(answer(&req)),
+                    op_id: req.op_id,
+                });
+            }
+        });
+        (storage, asked)
+    }
+
+    /// The root's listing, nesting `a` (with `x` inline and `b` nested in
+    /// it, `b` holding `y` without its contents) and leaving `c` out
+    fn nested_root() -> FsListing {
+        let b = dir("b", Some(vec![entry("y", file(3))]));
+        let a = dir("a", Some(vec![inline("x", b"hi"), b]));
+        FsListing {
+            entries: vec![a, dir("c", None), inline("top", b"t")],
+        }
+    }
+
+    fn names(entries: Vec<DirEntry>) -> Vec<String> {
+        entries.into_iter().map(|e| e.name).collect()
+    }
+
+    /// The nested listings answer the code's later listings of their
+    /// directories, and stats and reads of what's in them, without asking
+    #[tokio::test]
+    async fn nested_listings_answer_later_operations() {
+        let (storage, asked) = serve_with(MountLimits::default(), |req| match req.op {
+            Some(fs_request::Op::List(_)) if req.path.is_empty() => {
+                fs_response::Result::Listing(nested_root())
+            }
+            Some(fs_request::Op::List(_)) => fs_response::Result::Listing(FsListing {
+                entries: vec![inline("z", b"z")],
+            }),
+            _ => fs_response::Result::Data(b"why".to_vec()),
+        });
+        let asked = || lock(&asked).clone();
+        assert_eq!(
+            names(storage.list("/mnt/m").await.unwrap()),
+            ["a", "c", "top"]
+        );
+        assert_eq!(names(storage.list("/mnt/m/a").await.unwrap()), ["b", "x"]);
+        assert_eq!(names(storage.list("/mnt/m/a/b").await.unwrap()), ["y"]);
+        assert!(storage.stat("/mnt/m/a/b").await.unwrap().is_dir);
+        assert_eq!(storage.stat("/mnt/m/a/b/y").await.unwrap().size, 3);
+        assert!(!storage.exists("/mnt/m/a/b/nope").await.unwrap());
+        assert_eq!(storage.read("/mnt/m/a/x").await.unwrap(), b"hi");
+        assert_eq!(asked(), [""], "one request for all of that");
+
+        // What the client left out is asked for as before
+        assert_eq!(storage.read("/mnt/m/a/b/y").await.unwrap(), b"why");
+        assert_eq!(names(storage.list("/mnt/m/c").await.unwrap()), ["z"]);
+        assert_eq!(asked(), ["", "a/b/y", "c"]);
+    }
+
+    /// The cache keeps the first listing it has of a directory: a nested
+    /// one that comes later is ignored, with what's nested in it
+    #[tokio::test]
+    async fn a_listed_directory_keeps_its_first_listing() {
+        let (storage, asked) = serve_with(MountLimits::default(), |req| {
+            fs_response::Result::Listing(if req.path.is_empty() {
+                nested_root()
+            } else {
+                FsListing {
+                    entries: vec![inline("first", b"1")],
+                }
+            })
+        });
+        assert_eq!(names(storage.list("/mnt/m/a").await.unwrap()), ["first"]);
+        storage.list("/mnt/m").await.unwrap();
+        assert_eq!(names(storage.list("/mnt/m/a").await.unwrap()), ["first"]);
+        assert!(!storage.exists("/mnt/m/a/x").await.unwrap());
+        // a/b was nested in the ignored listing, so it's asked for
+        assert_eq!(names(storage.list("/mnt/m/a/b").await.unwrap()), ["first"]);
+        assert_eq!(*lock(&asked), ["a", "", "a/b"]);
+    }
+
+    /// A bad nested listing fails the whole answer, and the cache keeps
+    /// none of it
+    #[tokio::test]
+    async fn bad_nested_listings_fail_the_answer() {
+        let limits = MountLimits {
+            max_dir_entries: 2,
+            ..MountLimits::default()
+        };
+        let bad_size = FsEntry {
+            content: Some(b"four".to_vec()),
+            ..entry("f", file(3))
+        };
+        let on_a_file = FsEntry {
+            listing: Some(FsListing::default()),
+            ..entry("f", file(0))
+        };
+        let too_many = vec![inline("1", b""), inline("2", b""), inline("3", b"")];
+        for (case, nested) in [
+            ("a slash", vec![inline("x/y", b"")]),
+            ("dot", vec![dir(".", Some(vec![]))]),
+            ("dot dot", vec![inline("..", b"")]),
+            ("empty", vec![inline("", b"")]),
+            ("content", vec![bad_size]),
+            ("a listing on a file", vec![on_a_file]),
+            ("too many entries", too_many),
+        ] {
+            let entries = vec![
+                inline("ok", b"ok"),
+                dir("d", Some(vec![dir("e", Some(nested))])),
+            ];
+            let listing = FsListing { entries };
+            let (storage, _asked) = serve_with(limits, move |_| {
+                fs_response::Result::Listing(listing.clone())
+            });
+            let err = storage.list("/mnt/m").await.unwrap_err();
+            assert!(matches!(err, VfsError::Io(_)), "{case}: {err:?}");
+            let cache = lock(&storage.remote.cache);
+            assert_eq!(cache.lists.len(), 1, "{case}: only the failed listing");
+            assert!(cache.blocks.is_empty() && cache.listed == 0, "{case}");
+        }
+    }
+
+    /// Nested listings count towards the listing bytes as if listed apart,
+    /// with their paths
+    #[tokio::test]
+    async fn nested_listings_count_towards_the_listing_bytes() {
+        // The root's `d` (1 + 64), and `/mnt/m/d`'s `f` with its path (8 + 1 + 64)
+        let needed = 65 + 73;
+        for (max, ok) in [(needed, true), (needed - 1, false)] {
+            let limits = MountLimits {
+                max_listing_bytes: max,
+                ..MountLimits::default()
+            };
+            let (storage, _asked) = serve_with(limits, |_| {
+                fs_response::Result::Listing(FsListing {
+                    entries: vec![dir("d", Some(vec![entry("f", file(1))]))],
+                })
+            });
+            assert_eq!(storage.list("/mnt/m").await.is_ok(), ok, "{max}");
+            let listed = lock(&storage.remote.cache).listed;
+            assert_eq!(listed, if ok { needed } else { 0 });
+        }
+    }
+
+    /// Nesting deeper than a protobuf decoder allows is checked without
+    /// recursion, and each level is cached
+    #[tokio::test]
+    async fn deep_nesting_is_walked_without_recursion() {
+        const DEPTH: usize = 500;
+        let mut listing = None;
+        for _ in 0..DEPTH {
+            listing = Some(vec![dir("d", listing)]);
+        }
+        let entries = listing.unwrap();
+        let (storage, asked) = serve_with(MountLimits::default(), move |_| {
+            fs_response::Result::Listing(FsListing {
+                entries: entries.clone(),
+            })
+        });
+        storage.list("/mnt/m").await.unwrap();
+        let deepest = format!("/mnt/m{}", "/d".repeat(DEPTH - 1));
+        assert_eq!(names(storage.list(&deepest).await.unwrap()), ["d"]);
+        assert_eq!(lock(&asked).len(), 1);
+    }
+
+    /// What the proto's comment promises: 40 levels of nested listings
+    /// decode, and prost refuses too many
+    #[test]
+    fn forty_levels_of_nesting_decode() {
+        use crate::proto::eryx::v1::{ClientMessage, client_message};
+        let message = |depth: usize| {
+            let mut listing = FsListing::default();
+            for _ in 0..depth {
+                listing = FsListing {
+                    entries: vec![FsEntry {
+                        listing: Some(listing),
+                        ..dir("d", None)
+                    }],
+                };
+            }
+            ClientMessage {
+                message: Some(client_message::Message::FsResponse(FsResponse {
+                    op_id: String::new(),
+                    result: Some(fs_response::Result::Listing(listing)),
+                })),
+            }
+            .encode_to_vec()
+        };
+        assert!(ClientMessage::decode(message(40).as_slice()).is_ok());
+        assert!(ClientMessage::decode(message(60).as_slice()).is_err());
     }
 
     #[test]

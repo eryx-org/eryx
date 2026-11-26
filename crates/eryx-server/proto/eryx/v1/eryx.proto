@@ -384,6 +384,21 @@ message FsEntry {
   // those up to 64 KiB), as reading a whole tree of them then costs one
   // round trip per directory.
   optional bytes content = 3;
+  // For a directory, its own complete listing, so the code's later listing
+  // of it, and stats and reads of what's in it, need no further FsRequest.
+  // Nested listings can nest again, and their entries can carry `content`.
+  // Leave it unset for a directory you can't send whole: the server asks
+  // for it when the code lists it. Optional, and ignored by older servers.
+  //
+  // Nested entries count towards --max-mount-dir-entries (per directory)
+  // and --max-mount-listing-bytes (with each nested directory's path) as if
+  // they had been listed apart, but the answer is one operation towards
+  // --max-mount-ops. A bad nested listing (a bad name, a listing on a file,
+  // a limit passed) fails the whole answer, as a bad top-level one does. A
+  // directory the run already has a listing of keeps it: the nested one,
+  // and what's nested in it, is ignored. Protobuf decoders limit nesting
+  // (prost to 100 messages, two per level), so nest at most 40 levels.
+  optional FsListing listing = 4;
 }
 
 // Per-execution options for one of the server's shell commands; see
