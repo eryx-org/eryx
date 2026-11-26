@@ -8,7 +8,7 @@ Add Eryx to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-eryx = { version = "0.3", features = ["embedded"] }
+eryx = { version = "0.16", features = ["embedded"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -21,12 +21,22 @@ cargo binstall eryx-precompile   # install the pre-compile tool
 eryx-precompile setup            # download runtime + pre-compile for your platform
 ```
 
+`setup` sets up the Python runtime. With the `javascript` or `shell` features, set up those runtimes too (`--language shell` also sets up the shell's coreutils):
+
+```bash
+eryx-precompile setup --language python --language javascript --language shell
+```
+
 After this one-time setup, `cargo build` will find the cached runtime automatically. You can also set `ERYX_RUNTIME_CWASM=/path/to/runtime-python.cwasm` to use a specific file, which is embedded without the checksum and ownership checks applied to the cached runtime. See [Pre-compiling Runtimes](../guide/precompile.md) for advanced options like cross-compilation, CPU targeting, and bundling packages.
 
 ### Feature Flags
 
 | Feature              | Description                                                                         | Trade-offs                               |
 |----------------------|-------------------------------------------------------------------------------------|------------------------------------------|
+| `python`             | The Python guest language (on by default)                                           |                                          |
+| `javascript`         | The JavaScript guest language (`Sandbox::embedded().javascript()`)                  | With `embedded`, embeds its runtime too  |
+| `shell`              | The shell guest language (`Sandbox::embedded().shell()`); implies `coreutils`       | With `embedded`, embeds its runtime too  |
+| `coreutils`          | Registers uutils coreutils as the shell's default external commands                 | ~16MB more binary size; needs `embedded` |
 | `embedded`           | Embeds pre-compiled Wasm runtime + Python stdlib into your binary                   | +55MB binary size; requires one-time setup (see above) |
 | `macros`             | Enables the `#[callback]` proc macro for simplified callback definitions            | Adds proc-macro compile time             |
 | `preinit`            | Pre-initialization support for ~25x faster sandbox creation                         | Adds `eryx-runtime` dep; requires build step |

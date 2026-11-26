@@ -177,7 +177,7 @@ if (first.suspended) {
 const resumed = await sandbox.executeWithJournal(code, { journal: load() });
 ```
 
-See the [Callback Replay & Suspension guide](https://docs.eryx.run/latest/guide/callback-replay.html) for the matching rules and caveats.
+See the [Callback Replay & Suspension guide](https://docs.eryx.run/latest/book/guide/callback-replay.html) for the matching rules and caveats.
 
 ### Streaming output
 
