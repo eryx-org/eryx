@@ -718,7 +718,7 @@ pub(crate) struct RequestFramer {
     port: u16,
     /// Whether the connection is TLS (the proxy's terminated TLS).
     over_tls: bool,
-    /// The child proxy's credentials for this connection (see
+    /// The credentials for this connection's host and port (see
     /// [`RequestFramer::with_credentials`]).
     credentials: Vec<Arc<Credential>>,
     /// Whether secret placeholders are substituted.
@@ -745,13 +745,16 @@ impl RequestFramer {
         self
     }
 
-    /// Add those of the child proxy's `credentials` that are for this
-    /// connection's host and transport to its requests (see
-    /// [`inject_credentials`]), and mask them out of its responses.
+    /// Add those of `credentials` that are for this connection's host and
+    /// port to its requests (see [`inject_credentials`]), and mask them out
+    /// of its responses. The connection then takes nothing but HTTP/1.1
+    /// requests naming its host, as with [`http_only`](Self::http_only), and
+    /// a request one applies to that it can't be sent over (plain HTTP,
+    /// without [`Credential::allow_plaintext`]) is refused.
     pub(crate) fn with_credentials(mut self, credentials: &[Arc<Credential>]) -> Self {
         self.credentials = credentials
             .iter()
-            .filter(|c| c.for_connection(&self.host, self.port, self.over_tls))
+            .filter(|c| c.for_host(&self.host, self.port))
             .cloned()
             .collect();
         self
@@ -817,7 +820,9 @@ impl RequestFramer {
     ) -> Result<Vec<u8>, TcpError> {
         let policy = &*self.policy;
         let (host, port) = (self.host.as_str(), self.port);
-        let http_only = self.http_only;
+        // A connection carrying credentials takes only requests it can
+        // frame, check and inject into, as the child proxy's do.
+        let http_only = self.http_only || !self.credentials.is_empty();
         let checked = http_only || policy.any_http_rules();
         let mut out = Vec::new();
         let mut input = data.to_vec();
@@ -939,9 +944,9 @@ impl RequestFramer {
                     let headers = if self.credentials.is_empty() {
                         headers
                     } else {
-                        inject_credentials(&headers, &self.credentials)
+                        inject_credentials(&headers, &self.credentials, host, port, self.over_tls)?
                     };
-                    if http_only {
+                    if self.http_only {
                         out.extend(to_origin_form(&headers, &self.authority));
                     } else {
                         out.extend(headers);
@@ -1030,31 +1035,54 @@ fn to_origin_form(headers: &[u8], connected: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// The request head `headers` with `credentials` applied: each one for the
-/// request's path replaces every header of its name the child sent (the
-/// first for a name wins, so callers put an execution's before the
-/// sandbox's), and `Accept-Encoding` asks for `identity`, since a credential
-/// can't be masked out of a compressed response. Every request loses its
-/// `Range` and `If-Range`, whether it gets a credential or not, so an echo of
-/// one (a log of earlier requests, say) can't be fetched in pieces shorter
-/// than the masks. A `CONNECT` or `Upgrade` request gets none (the framer
-/// refuses them on these connections anyway): what follows it isn't framed
-/// or masked.
-fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8> {
+/// The request head `headers`, on a connection to `host` on `port` (`over_tls`
+/// or not), with `credentials` applied: each one for the request replaces
+/// every header of its names the request had, and adds all of its own (the
+/// first to set a name wins, and one sharing a name with a credential
+/// already applied isn't applied at all, so callers put an execution's
+/// before the sandbox's), and `Accept-Encoding` asks for `identity`, since a
+/// credential can't be masked out of a compressed response. Every request
+/// loses its `Range` and `If-Range`, whether it gets a credential or not, so
+/// an echo of one (a log of earlier requests, say) can't be fetched in
+/// pieces shorter than the masks. A `CONNECT` or `Upgrade` request gets none
+/// (the framer refuses them on these connections anyway): what follows it
+/// isn't framed or masked.
+///
+/// # Errors
+///
+/// Refuses a request a credential applies to that it can't be sent over
+/// (plain HTTP without [`Credential::allow_plaintext`]), rather than send it
+/// without.
+fn inject_credentials(
+    headers: &[u8],
+    credentials: &[Arc<Credential>],
+    host: &str,
+    port: u16,
+    over_tls: bool,
+) -> Result<Vec<u8>, TcpError> {
     // `request_body` has checked that the headers are UTF-8, and the
     // request line parses (`classify`).
     let text = String::from_utf8_lossy(headers);
-    let path = request_line(&text).and_then(|(_, target)| super::request_path(target));
+    let (method, target) = request_line(&text).unwrap_or_default();
     let mut applied: Vec<&Credential> = Vec::new();
+    // Every credential the request matches strips its headers, applied or
+    // not, so no copy of them gets through.
+    let mut matched: Vec<&Credential> = Vec::new();
     if !switches_protocols(headers) {
-        for credential in credentials.iter().filter(|c| c.for_path(path.as_deref())) {
-            let taken = applied.iter().any(|a| {
-                a.header_name()
-                    .eq_ignore_ascii_case(credential.header_name())
-            });
-            if !taken {
-                applied.push(credential);
+        for credential in credentials
+            .iter()
+            .filter(|c| c.for_request(host, port, method, target))
+        {
+            matched.push(credential);
+            if applied.iter().any(|a| a.overlaps(credential)) {
+                continue;
             }
+            if !credential.sends_over(over_tls) {
+                return Err(TcpError::NotPermitted(format!(
+                    "a credential for {host} is only sent over TLS: use https"
+                )));
+            }
+            applied.push(credential);
         }
     }
     let mut lines = text.lines();
@@ -1068,9 +1096,8 @@ fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8
         let ranged = name.eq_ignore_ascii_case("range") || name.eq_ignore_ascii_case("if-range");
         if name.eq_ignore_ascii_case("accept-encoding")
             || ranged
-            || applied
-                .iter()
-                .any(|c| c.header_name().eq_ignore_ascii_case(name))
+            || applied.iter().any(|c| c.sets(name))
+            || matched.iter().any(|c| c.strips(name))
         {
             continue;
         }
@@ -1078,10 +1105,10 @@ fn inject_credentials(headers: &[u8], credentials: &[Arc<Credential>]) -> Vec<u8
         out.push_str("\r\n");
     }
     for credential in applied {
-        out.push_str(&credential.header_line());
+        out.push_str(&credential.header_lines());
     }
     out.push_str("Accept-Encoding: identity\r\n\r\n");
-    out.into_bytes()
+    Ok(out.into_bytes())
 }
 
 /// Frames and masks the responses read from one connection, by the requests
@@ -1371,7 +1398,10 @@ mod tests {
             ),
         ];
         let inject = |head: &str, credentials: &[Arc<Credential>]| {
-            String::from_utf8(inject_credentials(head.as_bytes(), credentials)).unwrap()
+            String::from_utf8(
+                inject_credentials(head.as_bytes(), credentials, "api.test", 443, true).unwrap(),
+            )
+            .unwrap()
         };
         let out = inject(
             "GET /keyed/x HTTP/1.1\r\nHost: api.test\r\nRange: bytes=0-3\r\nif-range: \"e\"\r\n\r\n",
@@ -1390,6 +1420,127 @@ mod tests {
         );
         assert!(!out.contains("X-Key"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("range"), "{out}");
+    }
+
+    /// A credential's headers go together: each replaces every copy the
+    /// request had, whatever its case, and one sharing a header with a
+    /// credential already applied (an execution's, say) isn't applied at
+    /// all, so a request never carries part of one.
+    #[test]
+    fn credentials_apply_whole_or_not_at_all() {
+        let pair = || {
+            Arc::new(
+                Credential::headers([("Authorization", "Bearer pair"), ("X-Id-Token", "id")])
+                    .for_hosts(["api.test"]),
+            )
+        };
+        let inject = |head: &str, credentials: &[Arc<Credential>]| {
+            String::from_utf8(
+                inject_credentials(head.as_bytes(), credentials, "api.test", 443, true).unwrap(),
+            )
+            .unwrap()
+        };
+        let head = "GET / HTTP/1.1\r\nHost: api.test\r\nauthorization: Bearer guest\r\n\
+                    X-ID-TOKEN: guest\r\nx-id-token: again\r\nX-Other: kept\r\n\r\n";
+        let out = inject(head, &[pair()]);
+        assert_eq!(
+            out,
+            "GET / HTTP/1.1\r\nHost: api.test\r\nX-Other: kept\r\n\
+             Authorization: Bearer pair\r\nX-Id-Token: id\r\nAccept-Encoding: identity\r\n\r\n"
+        );
+        let first = Arc::new(Credential::bearer("first").for_hosts(["api.test"]));
+        let out = inject(head, &[first, pair()]);
+        assert!(out.contains("Authorization: Bearer first\r\n"), "{out}");
+        assert!(
+            !out.contains("pair") && !out.contains("X-Id-Token: id"),
+            "{out}"
+        );
+        // The pair didn't apply, so the request's own copy stays.
+        assert!(out.contains("X-ID-TOKEN: guest"), "{out}");
+
+        // A stripped header goes from every request a credential matches,
+        // even when another's headers win, and stays elsewhere.
+        let token = || {
+            Arc::new(
+                Credential::header("X-Access-Token", "{secret}", "tok")
+                    .for_hosts(["api.test"])
+                    .for_paths(["/api/"])
+                    .stripping(["X-Grafana-Id"]),
+            )
+        };
+        let head = "GET /api/x HTTP/1.1\r\nHost: api.test\r\nx-grafana-id: guest\r\n\
+                    X-Grafana-ID: again\r\nX-Access-Token: guest\r\n\r\n";
+        let out = inject(head, &[token()]);
+        assert!(!out.to_ascii_lowercase().contains("x-grafana-id"), "{out}");
+        assert!(
+            out.contains("X-Access-Token: tok\r\n") && !out.contains("guest"),
+            "{out}"
+        );
+        let first = Arc::new(
+            Credential::header("X-Access-Token", "{secret}", "first").for_hosts(["api.test"]),
+        );
+        let out = inject(head, &[first, token()]);
+        assert!(out.contains("X-Access-Token: first\r\n"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("x-grafana-id"), "{out}");
+        let out = inject(&head.replace("/api/x", "/public"), &[token()]);
+        assert!(out.contains("x-grafana-id: guest"), "{out}");
+    }
+
+    /// On a connection to a credential's host, the script's `eryx:net`
+    /// framer (no `http_only`) refuses what it couldn't inject into or
+    /// would send the credential somewhere else: bytes that aren't a
+    /// request, a request naming another host, and over plain TCP a request
+    /// the credential applies to (others go, without it).
+    #[test]
+    fn credentialed_connections_fail_closed() {
+        let policy = Arc::new(NetPolicy::new(NetConfig::default(), HashMap::new()).unwrap());
+        let credentials = [Arc::new(
+            Credential::headers([("X-A", "a-value"), ("X-B", "b-value")])
+                .for_hosts(["api.test:443"])
+                .for_paths(["/api/"]),
+        )];
+        let frame = |port: u16, over_tls: bool, data: &[u8]| {
+            policy
+                .request_framer("api.test", port, over_tls)
+                .with_credentials(&credentials)
+                .frame(data)
+                .map(|out| String::from_utf8(out).unwrap())
+        };
+        let out = frame(443, true, b"GET /api/x HTTP/1.1\r\nHost: api.test\r\n\r\n").unwrap();
+        assert!(out.contains("X-A: a-value\r\nX-B: b-value\r\n"), "{out}");
+        for (data, why) in [
+            (&b"\x16\x03\x01 not http"[..], "only HTTP/1.1"),
+            (
+                b"GET /api/x HTTP/1.1\r\nHost: evil.test\r\n\r\n",
+                "other than",
+            ),
+            (
+                b"GET https://evil.test/api/x HTTP/1.1\r\n\r\n",
+                "other than",
+            ),
+        ] {
+            let err = frame(443, true, data).unwrap_err().to_string();
+            assert!(err.contains(why), "{why}: {err}");
+        }
+        let err = frame(443, false, b"GET /api/x HTTP/1.1\r\nHost: api.test\r\n\r\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only sent over TLS"), "{err}");
+        let out = frame(
+            443,
+            false,
+            b"GET /public HTTP/1.1\r\nHost: api.test\r\n\r\n",
+        )
+        .unwrap();
+        assert!(!out.contains("a-value"), "{out}");
+        // Another port isn't the credential's: nothing added, nothing refused.
+        let out = frame(
+            8443,
+            true,
+            b"GET /api/x HTTP/1.1\r\nHost: evil.test\r\n\r\n",
+        )
+        .unwrap();
+        assert!(!out.contains("a-value"), "{out}");
     }
 
     /// A connection carrying a credential refuses `Upgrade` and `CONNECT`

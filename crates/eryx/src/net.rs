@@ -1518,6 +1518,9 @@ pub struct ConnectionManager {
     connection_hosts: HashMap<u32, (String, u16)>,
     /// Response masking per connection handle, created on first read.
     read_states: HashMap<u32, ResponseMasker>,
+    /// The credentials the script's own requests get (see
+    /// [`ConnectionManager::with_credentials`]).
+    credentials: Vec<Arc<Credential>>,
 }
 
 /// Bytes an execution sent and received over the network, as the guest
@@ -1601,7 +1604,38 @@ impl ConnectionManager {
             http_states: HashMap::new(),
             connection_hosts: HashMap::new(),
             read_states: HashMap::new(),
+            credentials: Vec::new(),
         })
+    }
+
+    /// Add those of `credentials` that are
+    /// [for the script](Credential::for_script) to the script's own requests
+    /// to their hosts, and mask them out of the responses. Where two set a
+    /// header in common, the first applies and the other doesn't, so put an
+    /// execution's before a sandbox's. The child proxies get theirs from the
+    /// execution (see
+    /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential)),
+    /// not from here.
+    ///
+    /// A connection to one of their hosts then takes only HTTP/1.1 requests
+    /// naming that host, and refuses `CONNECT` and `Upgrade` requests; over
+    /// plain TCP, a request one applies to is refused unless it
+    /// [allows plaintext](Credential::allow_plaintext).
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`Credential::validate`] does, if one is invalid.
+    pub fn with_credentials(
+        mut self,
+        credentials: impl IntoIterator<Item = Credential>,
+    ) -> Result<Self, String> {
+        for credential in credentials {
+            credential.validate()?;
+            if credential.is_for_script() {
+                self.credentials.push(Arc::new(credential));
+            }
+        }
+        Ok(self)
     }
 
     /// The network for this execution's child processes, if `network` gives
@@ -1668,9 +1702,10 @@ impl ConnectionManager {
                 .connection_hosts
                 .get(&handle)
                 .ok_or(TcpError::InvalidHandle)?;
-            let framer =
-                self.policy
-                    .request_framer(host, *port, self.tls_connections.contains_key(&handle));
+            let framer = self
+                .policy
+                .request_framer(host, *port, self.tls_connections.contains_key(&handle))
+                .with_credentials(&self.credentials);
             self.http_states.insert(handle, framer);
         }
         self.http_states
@@ -1688,10 +1723,17 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Whether writes on `handle` go through HTTP request framing.
+    /// Whether writes on `handle` go through HTTP request framing: with
+    /// secrets or HTTP rules, or to a credential's host.
     fn frames_requests(&self, handle: u32) -> bool {
         self.policy
             .frames_requests(self.tls_connections.contains_key(&handle))
+            || self
+                .connection_hosts
+                .get(&handle)
+                .is_some_and(|(host, port)| {
+                    self.credentials.iter().any(|c| c.for_host(host, *port))
+                })
     }
 
     // ========================================================================
@@ -2556,6 +2598,19 @@ mod tests {
         let a = super::NetConfig::default().with_resolver(std::sync::Arc::clone(&shared));
         let b = super::NetConfig::default().with_resolver(shared);
         assert!(a.resolver().is_some() && b.resolver().is_some());
+    }
+
+    /// The script's credentials are validated on the way in, and only those
+    /// for the script are kept.
+    #[test]
+    fn manager_credentials_are_validated() {
+        let manager = || ConnectionManager::new(NetConfig::default(), HashMap::new()).unwrap();
+        let bad = Credential::header("Host", "{secret}", "s").for_hosts(["api.test"]);
+        assert!(manager().with_credentials([bad]).is_err());
+        let children = Credential::bearer("s").for_hosts(["api.test"]);
+        let script = children.clone().for_script();
+        let manager = manager().with_credentials([children, script]).unwrap();
+        assert_eq!(manager.credentials.len(), 1);
     }
 
     #[test]

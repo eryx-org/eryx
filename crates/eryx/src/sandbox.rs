@@ -392,7 +392,12 @@ impl Sandbox {
         // output can be scrubbed of the child proxies' passwords)
         let (net_tx, net_handler, child_net) = if let Some(ref config) = self.net_config {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            // The execution's credentials first, so they win over the
+            // sandbox's for a header both set.
+            let credentials = (options.credentials.iter().cloned())
+                .chain(self.executor.credentials().iter().map(|c| (**c).clone()));
             let manager = ConnectionManager::new(config.clone(), self.secrets.clone())
+                .and_then(|manager| manager.with_credentials(credentials))
                 .map_err(ErrorKind::Initialization)?;
             // Children draw on the guest's budget.
             let child_net = manager
@@ -726,36 +731,8 @@ impl Sandbox {
         command_options: &HashMap<String, crate::process::CommandOptions>,
         child_net: Option<&crate::net::ChildNetPolicy>,
     ) -> HashMap<String, crate::secrets::SecretConfig> {
-        let mut secrets = self.secrets.clone();
-        let credentials: Vec<&crate::net::Credential> = self
-            .executor
-            .credentials()
-            .iter()
-            .map(|c| &**c)
-            .chain(extra)
-            .collect();
-        // The commands that may get a proxy of their own with a password.
-        let names =
-            self.executor
-                .commands()
-                .credentialed_names(allowed, command_options, &credentials);
-        let passwords = child_net.into_iter().flat_map(|net| {
-            names
-                .iter()
-                .flat_map(move |name| net.proxy_sensitive_values(name))
-        });
-        let values = credentials
-            .iter()
-            .flat_map(|c| c.sensitive_values())
-            .chain(passwords);
-        for (i, value) in values.enumerate() {
-            // Not a name a secret can have (names are env var names).
-            secrets.insert(
-                format!("eryx credential {i}"),
-                crate::secrets::SecretConfig::scrub_only(value),
-            );
-        }
-        secrets
+        self.executor
+            .scrub_secrets(&self.secrets, extra, allowed, command_options, child_net)
     }
 
     /// Scrub `secrets` (from [`Self::scrub_secrets`]) from an execution's
@@ -1510,16 +1487,21 @@ impl ExecuteOptions {
     /// well as the sandbox's own
     /// ([`SandboxBuilder::with_credential`](crate::SandboxBuilder::with_credential)):
     /// the child proxy adds it to their requests to its hosts, and the
-    /// sandbox never sees the secret. Hosted services can give each request
-    /// its own token this way. The execution fails to start if the credential
-    /// is invalid, names a command that isn't registered, has no network or
-    /// opens blind tunnels, or if the sandbox gives children no network.
-    /// Sessions take the same option on
-    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s builder.
+    /// sandbox never sees the secret. With
+    /// [`Credential::for_script`](crate::Credential::for_script), the
+    /// script's own requests get it too, in any language. Hosted services
+    /// can give each request its own token this way. The execution fails to
+    /// start if the credential is invalid, names a command that isn't
+    /// registered, has no network or opens blind tunnels, or if it's for
+    /// children and the sandbox gives them no network. Sessions take the
+    /// same option on
+    /// [`SessionExecutor::execute`](crate::SessionExecutor::execute)'s
+    /// builder, whose script gets those for it from
+    /// [`ConnectionManager::with_credentials`](crate::ConnectionManager::with_credentials).
     ///
-    /// Where it and one of the sandbox's both apply to a request and set the
-    /// same header, this one wins: the request carries its value, not the
-    /// sandbox's. Between an execution's own, the one given first wins.
+    /// Where it and one of the sandbox's both apply to a request and set a
+    /// header in common, this one wins: the request carries its headers, not
+    /// the sandbox's. Between an execution's own, the one given first wins.
     #[must_use]
     pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
         self.credentials.push(credential);
@@ -3008,13 +2990,16 @@ impl<R> SandboxBuilder<Shell, R> {
     /// Give every execution's child processes `credential`: the child proxy
     /// adds it to their requests to its hosts, so they authenticate without
     /// the sandbox ever seeing the secret (see
-    /// [`Credential`](crate::net::Credential)). For one execution, use
-    /// [`ExecuteOptions::with_credential`]. Needs a child network; an
-    /// execution fails to start if the credential is invalid or names a
-    /// command that isn't registered, has no network or opens blind tunnels.
+    /// [`Credential`](crate::net::Credential)), and with
+    /// [`for_script`](crate::net::Credential::for_script) the script's own
+    /// requests get it too. For one execution, use
+    /// [`ExecuteOptions::with_credential`]. A credential for children needs
+    /// a child network; an execution fails to start if the credential is
+    /// invalid or names a command that isn't registered, has no network or
+    /// opens blind tunnels.
     ///
-    /// Where it and an execution's own both apply to a request and set the
-    /// same header, the execution's wins, so a per-request token overrides
+    /// Where it and an execution's own both apply to a request and set a
+    /// header in common, the execution's wins, so a per-request token overrides
     /// a sandbox-wide default. Between the sandbox's own, the one given
     /// first wins.
     #[must_use]

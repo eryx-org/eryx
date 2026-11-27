@@ -2131,13 +2131,25 @@ impl Commands {
         if credentials.is_empty() {
             return Ok(());
         }
-        if !child_net {
-            return fail(
-                "credentials need a child network: the execution gives children none".into(),
-            );
-        }
         for credential in credentials {
             credential.validate().map_err(ErrorKind::Initialization)?;
+        }
+        if !child_net {
+            // The script's own requests get those for it; any for children
+            // could never be used.
+            if credentials
+                .iter()
+                .any(|c| !c.is_for_script() || c.commands().is_some_and(|cs| !cs.is_empty()))
+            {
+                return fail(
+                    "credentials for commands need a child network: the execution gives \
+                     children none"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
+        for credential in credentials {
             for name in credential.commands().unwrap_or_default() {
                 if !self.registered.contains_key(name) {
                     return fail(format!(

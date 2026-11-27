@@ -512,18 +512,24 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
   ```
 
   `bearer`, `token` (`Authorization: token …`), `basic(user, …)` and
-  `header(name, template, …)` build the value. `for_hosts` is required, and
+  `header(name, template, …)` build the value; `headers([(name, value), …])`
+  sets several that go together or not at all. `for_hosts` is required, and
   takes exact names, IP addresses, or `*.` and a name of two labels or more
-  (`*.github.com`, not `*.com`), no other `*`, port, path or non-ASCII
-  character (write punycode); it doesn't scope by port. `for_paths` and `for_commands` narrow it (with
-  no `for_commands`, every child gets it). Give one execution its own with
+  (`*.github.com`, not `*.com`), each optionally with a port
+  (`api.github.com:443`), no other `*`, path or non-ASCII character (write
+  punycode). `for_paths`, `for_requests` (HTTP rules) and `for_commands`
+  narrow it (with no `for_commands`, every child gets it), and `for_script`
+  gives it to the script's own requests too (see
+  [Credentials](./secrets.md#credentials)). Give one execution its own with
   `ExecuteOptions::with_credential` (a hosted service's per-user token): where
   it and a sandbox's both set a header on a request, the execution's wins.
   Take them from one command with `CommandOptions::without_credentials()`.
   - **Where:** only on requests the proxy inspects: over the TLS it
-    terminates, or plain HTTP with `allow_plaintext()`. A connection to a
-    credential's host refuses `Upgrade` and `CONNECT` requests outright, so
-    those hosts can't be used for WebSockets or other upgrades. Any header of the same name the child sent is replaced, so `gh`
+    terminates, or plain HTTP with `allow_plaintext()`; a plain-HTTP request
+    it applies to without that is refused, not sent without it. A connection
+    to a credential's host refuses `Upgrade` and `CONNECT` requests outright,
+    so those hosts can't be used for WebSockets or other upgrades. Any
+    header of the same names the child sent is replaced, so `gh`
     can run with a dummy `GH_TOKEN`. A command opening blind tunnels can't
     carry one: naming it fails the execution, and a tunnelling proxy refuses
     a credential's hosts.
@@ -531,8 +537,8 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     its own, which wants a password from its `HTTPS_PROXY` URL (scrubbed
     from the output like the credential), and no
     connection, the sandbox's or a child's, may reach a child proxy, even
-    with `allow_localhost`. Other commands and the script's own requests
-    never get the header.
+    with `allow_localhost`. Other commands never get the header, nor do the
+    script's own requests unless it's `for_script`.
   - **Responses:** on a connection with a credential, requests ask for
     `Accept-Encoding: identity` and a compressed or transfer-coded response
     ends the connection, since the credential can't be found in an encoded
@@ -545,10 +551,11 @@ let result = sandbox.execute("printf 'b\na\n' | sort | head -n 1").await?;
     alone, hex, JSON's `\/` for `/`) or in pieces isn't masked, so don't give
     credentials for hosts that echo request headers. Output scrubbing is
     defence in depth, not a boundary (see
-    [Credentials](./secrets.md#credentials-for-child-processes)).
+    [Credentials](./secrets.md#credentials)).
   - **Limits:** a command with a credential can do anything with it its hosts
     and paths allow, whatever the script asks: scope it as narrowly as you
-    can. Credentials are Rust-only for now.
+    can. Credentials are Rust and gRPC (`network_config.header_injections`)
+    only for now.
 - **Limits:** children count against the execution's `max_fuel` as they
   run (a child may burn all the fuel the execution has left, so with no
   `max_fuel` only the timeout bounds it), and stop at its

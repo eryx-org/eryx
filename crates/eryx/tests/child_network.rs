@@ -1250,6 +1250,52 @@ async fn credentials_are_injected_over_inspected_tls() {
     );
 }
 
+/// A credential of several headers, scoped to a host and port, reaches a
+/// command's requests through the proxy with all of them, replacing the
+/// command's own, and none on another port.
+#[tokio::test]
+async fn credentials_of_several_headers_reach_commands_together() {
+    const ID: &str = "id-token-0123456789";
+    let (cert, tls) = tls_config();
+    let (port, seen) = upstream(Some(tls.clone())).await;
+    let (other_port, other_seen) = upstream(Some(tls)).await;
+    let sandbox = shell(network().with_root_cert(cert))
+        .with_command("https-get", https_get())
+        .build()
+        .unwrap();
+    let options = eryx::ExecuteOptions::new().with_credential(
+        eryx::Credential::headers([
+            ("Authorization", format!("Bearer {INJECTED}")),
+            ("X-Id-Token", ID.to_string()),
+        ])
+        .for_hosts([format!("api.test:{port}")])
+        .for_script(),
+    );
+    let out = run_with(
+        &sandbox,
+        &format!(
+            "https-get https://api.test:{port}/x \"x-id-token: dummy\"; \
+             https-get https://api.test:{other_port}/x \"x-id-token: dummy\""
+        ),
+        &options,
+    )
+    .await;
+    assert_eq!(out.matches(" 200 OK").count(), 2, "{out}");
+    let got = seen.lock().unwrap().clone();
+    assert!(
+        got.contains(&format!("Authorization: Bearer {INJECTED}\r\n"))
+            && got.contains(&format!("X-Id-Token: {ID}\r\n"))
+            && !got.contains("dummy"),
+        "{got}"
+    );
+    let other = other_seen.lock().unwrap().clone();
+    assert!(
+        other.contains("dummy") && !other.contains(INJECTED) && !other.contains(ID),
+        "{other}"
+    );
+    assert!(!out.contains(INJECTED) && !out.contains(ID), "{out}");
+}
+
 /// A credential that can't be used fails the execution before it runs: for
 /// an unregistered command, a command with tunnels or no network, or with
 /// no child network at all.

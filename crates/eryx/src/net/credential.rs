@@ -1,18 +1,26 @@
-//! Credentials the child proxy adds to child processes' requests.
+//! Credentials the host adds to sandboxed code's requests.
 //!
-//! A [`Credential`] is a header the host gives some commands' requests to
-//! some hosts, built from a secret the guest never sees: not as a value, and
-//! not as a placeholder. The child proxy adds it to each matching request it
-//! inspects (replacing any header of that name the child sent), and masks it
-//! out of the responses. The guest's own requests (`eryx:net`) never get it.
+//! A [`Credential`] is one or more headers the host gives some requests to
+//! some hosts, built from secrets the guest never sees: not as values, and
+//! not as placeholders. The child proxy adds it to each matching request of
+//! the commands it's for, and with [`Credential::for_script`] `eryx:net`
+//! adds it to the script's own (Python's and JavaScript's), replacing any
+//! header of those names the request had, and masks it out of the
+//! responses.
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
 
-use super::{host_matches_pattern, is_normalized_path};
+use super::{
+    HttpRule, host_matches_pattern, is_normalized_path, is_valid_host_pattern,
+    request_matches_rules, split_pattern_port,
+};
 
 /// What a masked credential reads as in a response.
 const MASKED: &[u8] = b"[REDACTED]";
+
+/// The most bytes a credential's headers (names and values) may take.
+const MAX_HEADERS_LEN: usize = 16 * 1024;
 
 /// Headers a credential can't set: the ones that frame the request or route
 /// it, or that the proxy itself handles.
@@ -28,8 +36,8 @@ const RESERVED_HEADERS: [&str; 9] = [
     "accept-encoding",
 ];
 
-/// A header the child proxy adds to child processes' requests to some
-/// hosts, built from a secret the sandbox never sees.
+/// Headers the host adds to some requests to some hosts, built from secrets
+/// the sandbox never sees.
 ///
 /// ```rust,ignore
 /// let gh = Credential::bearer(token).for_hosts(["api.github.com"]).for_commands(["gh"]);
@@ -37,55 +45,76 @@ const RESERVED_HEADERS: [&str; 9] = [
 ///     .for_hosts(["github.com"])
 ///     .for_paths(["/my-org/"])
 ///     .for_commands(["git"]);
+/// // Two headers that always travel together, for the script and every child.
+/// let api = Credential::headers([("Authorization", access), ("X-Id-Token", id)])
+///     .for_hosts(["api.example.com:443"])
+///     .for_script();
 /// ```
 ///
 /// Give it to a sandbox with
 /// [`SandboxBuilder::with_credential`](crate::SandboxBuilder::with_credential),
 /// or to one execution with
 /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+/// It goes to child processes' requests (through the child proxy) and, with
+/// [`for_script`](Self::for_script), to the script's own.
 ///
-/// The proxy adds it only to requests it inspects: over TLS it terminated
-/// (not blind tunnels, which can't reach its hosts at all) or, with
-/// [`allow_plaintext`](Self::allow_plaintext), plain HTTP. A connection to
-/// a host one applies to refuses `Upgrade` and `CONNECT` requests outright,
-/// so its hosts can't be used for WebSockets or other upgrades. Any header of the same name the child sent is
-/// replaced, so a client that needs a token to send requests at all (like
-/// `gh`) can be given a dummy one. Responses on such a connection are asked
-/// for and must come uncompressed, and have the credential masked out; every
-/// request on such a connection loses its `Range` and `If-Range` headers.
+/// It's added only to requests the host inspects: over TLS the host does
+/// (`eryx:net`'s, or the child proxy's terminated TLS; not blind tunnels,
+/// which can't reach its hosts at all) or, with
+/// [`allow_plaintext`](Self::allow_plaintext), plain HTTP. A request it
+/// applies to over plain HTTP without that is refused rather than sent
+/// without it, and so is anything but an HTTP/1.1 request on a connection to
+/// one of its hosts. A connection to a host one applies to refuses `Upgrade`
+/// and `CONNECT` requests outright, so its hosts can't be used for
+/// WebSockets or other upgrades, and requests naming another host than the
+/// connection's (in `Host` or an absolute-form target). Every header it sets
+/// is added together: any header of those names the request had is
+/// dropped, so code that needs a token to send requests at all (like `gh`)
+/// can be given a dummy one, and can't send one without the others.
+/// Responses on such a connection are asked for and must come uncompressed,
+/// and have the credential masked out; every request on such a connection
+/// loses its `Range` and `If-Range` headers.
 ///
 /// Where an execution's credential and the sandbox's both apply to a request
-/// and set the same header, the execution's wins.
+/// and set a header in common, the execution's wins and the sandbox's isn't
+/// added at all; between one level's own, the first given wins the same way.
 ///
-/// Masking only hides whole, verbatim echoes of the value (and of a `Basic`
-/// payload, and the secret): not pieces of it, nor forms a host re-escapes
-/// or re-encodes it into (JSON's `\/` for `/`, say). So don't give
-/// credentials for hosts that echo requests. The value and the proxy's
+/// Masking only hides whole, verbatim echoes of the values (and of a `Basic`
+/// payload, and the secret): not pieces of them, nor forms a host re-escapes
+/// or re-encodes them into (JSON's `\/` for `/`, say). So don't give
+/// credentials for hosts that echo requests. The values and the proxy's
 /// password are also scrubbed from the output and traces, but that's defence
 /// in depth, not a boundary: a script that gets hold of either can transform
-/// it first. [`for_hosts`](Self::for_hosts) doesn't scope by port.
+/// it first.
 ///
-/// A command given a credential can do anything with it that its hosts and
-/// paths allow, on the guest's behalf: scope it as narrowly as you can.
+/// Code given a credential can do anything with it that its hosts and
+/// requests allow, on the guest's behalf: scope it as narrowly as you can.
 #[derive(Clone)]
 pub struct Credential {
-    header: String,
-    /// The header's value, with the secret in it.
-    value: String,
-    secret: String,
+    /// The headers it sets, name and value, with the secrets in them.
+    headers: Vec<(String, String)>,
+    /// The secrets the values were built from, masked like them.
+    secrets: Vec<String>,
     hosts: Vec<String>,
     paths: Vec<String>,
+    rules: Vec<HttpRule>,
+    /// Headers dropped from every request it applies to, set or not.
+    strip: Vec<String>,
     commands: Option<Vec<String>>,
+    script: bool,
     plaintext: bool,
 }
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Credential")
-            .field("header", &self.header)
+            .field("headers", &self.header_names().collect::<Vec<_>>())
             .field("hosts", &self.hosts)
             .field("paths", &self.paths)
+            .field("rules", &self.rules)
+            .field("strip", &self.strip)
             .field("commands", &self.commands)
+            .field("script", &self.script)
             .field("plaintext", &self.plaintext)
             .finish_non_exhaustive()
     }
@@ -129,29 +158,51 @@ impl Credential {
         Self::new(name, value, secret)
     }
 
+    /// Several headers, each value a secret, added together or not at all
+    /// (an access token and an ID token, say). Names must differ, ignoring
+    /// case, and the names and values together take at most 16 KiB. Every
+    /// value is masked out of responses wherever it appears, so a short,
+    /// non-secret one (an org ID, say) masks every copy of itself too.
+    #[must_use]
+    pub fn headers(
+        headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        Self {
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into()))
+                .collect(),
+            secrets: Vec::new(),
+            ..Self::new(String::new(), String::new(), String::new())
+        }
+    }
+
     fn new(header: impl Into<String>, value: String, secret: String) -> Self {
         Self {
-            header: header.into(),
-            value,
-            secret,
+            headers: vec![(header.into(), value)],
+            secrets: vec![secret],
             hosts: Vec::new(),
             paths: Vec::new(),
+            rules: Vec::new(),
+            strip: Vec::new(),
             commands: None,
+            script: false,
             plaintext: false,
         }
     }
 
     /// The hosts it's sent to: each an exact name (`api.github.com`), or
     /// `*.` and a name for its subdomains (`*.github.com`, which doesn't
-    /// match `github.com` itself). Required, and narrower than
-    /// [`NetConfig::allow_host`](crate::NetConfig::allow_host)'s patterns: a
-    /// `*` anywhere else (`*`, `*.*`, `github.com*`, `*github.com`) is
-    /// refused, since it would match hosts the guest can register, and so is
-    /// `*.` and a single label (`*.com`). Names are ASCII letters, digits,
-    /// hyphens and dots (write internationalized names in punycode,
-    /// `xn--...`), or an IP address; a port, path or space is refused. Any
-    /// port the network allows on a host gets it: hosts aren't scoped by
-    /// port.
+    /// match `github.com` itself), optionally with a port
+    /// (`api.github.com:443`, `[::1]:8443`) to match only connections to
+    /// that port; without one, any port the network allows. Required, and
+    /// narrower than [`NetConfig::allow_host`](crate::NetConfig::allow_host)'s
+    /// patterns: a `*` anywhere else (`*`, `*.*`, `github.com*`,
+    /// `*github.com`) is refused, since it would match hosts the guest can
+    /// register, and so is `*.` and a single label (`*.com`). Names are
+    /// ASCII letters, digits, hyphens and dots (write internationalized names
+    /// in punycode, `xn--...`), or an IP address; a path, space or port
+    /// outside 1-65535 is refused.
     ///
     /// A wildcard under a public suffix (`*.co.uk`, `*.github.io`,
     /// `*.herokuapp.com`) isn't refused, since eryx doesn't carry the public
@@ -163,34 +214,82 @@ impl Credential {
     }
 
     /// Only requests for paths under these (decoded, as for
-    /// [`HttpRule::with_paths`](crate::HttpRule::with_paths)); by default,
-    /// every path.
+    /// [`HttpRule::with_paths`]); by default, every path.
     #[must_use]
     pub fn for_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.paths = paths.into_iter().map(Into::into).collect();
         self
     }
 
+    /// Only requests one of `rules` matches, by host, method, path and
+    /// query, as the network's
+    /// [`NetConfig::allow_http`](crate::NetConfig::allow_http) rules match.
+    /// They apply on top of [`for_hosts`](Self::for_hosts) (and
+    /// [`for_paths`](Self::for_paths)): a request has to be to one of its
+    /// hosts *and* match a rule. By default, every request to its hosts.
+    #[must_use]
+    pub fn for_requests(mut self, rules: impl IntoIterator<Item = HttpRule>) -> Self {
+        self.rules = rules.into_iter().collect();
+        self
+    }
+
+    /// Also drop these headers from every request it applies to, without
+    /// replacing them (an identity header the server would act on alongside
+    /// the credential, say). They're dropped even where another credential's
+    /// headers win (see [`Credential`]), so a request it matches never
+    /// carries the guest's copy. Names follow the rules for the headers it
+    /// sets.
+    #[must_use]
+    pub fn stripping(mut self, headers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.strip = headers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The headers it drops besides its own.
+    #[must_use]
+    pub fn stripped(&self) -> &[String] {
+        &self.strip
+    }
+
     /// Only these registered commands' requests (their own, not their
     /// children's, which have their own commands); by default every child's.
+    /// With [`for_script`](Self::for_script), an empty list gives it to the
+    /// script alone.
     #[must_use]
     pub fn for_commands(mut self, commands: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.commands = Some(commands.into_iter().map(Into::into).collect());
         self
     }
 
-    /// Also add it to plain-HTTP requests (`HTTP_PROXY`), sending the secret
-    /// unencrypted. Off by default.
+    /// Also add it to the script's own requests (`eryx:net`: Python's
+    /// sockets and HTTP clients, JavaScript's `fetch`), not just its
+    /// children's. Off by default.
+    #[must_use]
+    pub fn for_script(mut self) -> Self {
+        self.script = true;
+        self
+    }
+
+    /// Also add it to plain-HTTP requests, sending the secrets unencrypted.
+    /// Off by default.
     #[must_use]
     pub fn allow_plaintext(mut self) -> Self {
         self.plaintext = true;
         self
     }
 
-    /// The header it sets.
+    /// The name of the first header it sets. Every valid credential sets at
+    /// least one (one with none fails [`validate`](Self::validate), and
+    /// gives `""` here).
+    #[deprecated(note = "a credential can set several headers; use header_names")]
     #[must_use]
     pub fn header_name(&self) -> &str {
-        &self.header
+        self.header_names().next().unwrap_or_default()
+    }
+
+    /// The names of the headers it sets.
+    pub fn header_names(&self) -> impl Iterator<Item = &str> {
+        self.headers.iter().map(|(name, _)| name.as_str())
     }
 
     /// The host patterns it's sent to.
@@ -205,42 +304,95 @@ impl Credential {
         &self.paths
     }
 
+    /// The HTTP rules it's limited to; empty for every request.
+    #[must_use]
+    pub fn rules(&self) -> &[HttpRule] {
+        &self.rules
+    }
+
     /// The commands it's limited to; `None` for every child.
     #[must_use]
     pub fn commands(&self) -> Option<&[String]> {
         self.commands.as_deref()
     }
 
+    /// Whether the script's own requests get it.
+    #[must_use]
+    pub fn is_for_script(&self) -> bool {
+        self.script
+    }
+
     /// Fail if it can't be sent as configured.
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        let header = &self.header;
-        if header.is_empty() || !header.bytes().all(super::is_tchar) {
-            return Err(format!("credential header {header:?} isn't a header name"));
+    ///
+    /// # Errors
+    ///
+    /// Describes the first problem: no headers or hosts, a header name
+    /// that isn't one or is reserved (`Host`, `Content-Length`,
+    /// `Connection`, `Proxy-*`, ...), one set twice, an empty value or one
+    /// with a control character (CR, LF, NUL), headers over 16 KiB, a host
+    /// pattern, path or rule that can't match, or no commands without the
+    /// script.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.headers.is_empty() {
+            return Err("credential has no headers".into());
         }
-        let lower = header.to_ascii_lowercase();
-        if RESERVED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
-            return Err(format!("a credential can't set the {header} header"));
+        if self.secrets.iter().any(String::is_empty) {
+            let names = self.header_names().collect::<Vec<_>>().join(", ");
+            return Err(format!("credential for {names} has an empty secret"));
         }
-        if self.secret.is_empty() {
-            return Err(format!("credential for {header} has an empty secret"));
+        let mut len = 0;
+        for (i, (header, value)) in self.headers.iter().enumerate() {
+            if header.is_empty() || !header.bytes().all(super::is_tchar) {
+                return Err(format!("credential header {header:?} isn't a header name"));
+            }
+            let lower = header.to_ascii_lowercase();
+            if RESERVED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
+                return Err(format!("a credential can't set the {header} header"));
+            }
+            if self.headers[..i]
+                .iter()
+                .any(|(other, _)| other.eq_ignore_ascii_case(header))
+            {
+                return Err(format!("credential sets the {header} header twice"));
+            }
+            if value.is_empty() {
+                return Err(format!(
+                    "credential for {header} has an empty value (a header template needs \
+                     {{secret}})"
+                ));
+            }
+            if value.bytes().any(|b| b.is_ascii_control() && b != b'\t') {
+                return Err(format!(
+                    "credential for {header} contains a control character (CR, LF, NUL, ...)"
+                ));
+            }
+            // A server trims a value, so it could echo it back in a form the
+            // masks (the value as sent) wouldn't match.
+            if value.trim() != value {
+                return Err(format!(
+                    "credential for {header} starts or ends with whitespace"
+                ));
+            }
+            len += header.len() + value.len();
         }
-        if self.value.is_empty() {
+        if len > MAX_HEADERS_LEN {
             return Err(format!(
-                "credential for {header}: its template has no {{secret}}"
+                "credential headers take {len} bytes, over the {MAX_HEADERS_LEN} allowed"
             ));
         }
-        if self
-            .value
-            .bytes()
-            .any(|b| b.is_ascii_control() && b != b'\t')
-        {
-            return Err(format!(
-                "credential for {header} contains a control character (CR, LF, NUL, ...)"
-            ));
+        for header in &self.strip {
+            if header.is_empty() || !header.bytes().all(super::is_tchar) {
+                return Err(format!("stripped header {header:?} isn't a header name"));
+            }
+            let lower = header.to_ascii_lowercase();
+            if RESERVED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
+                return Err(format!("a credential can't strip the {header} header"));
+            }
         }
+        let names = self.header_names().collect::<Vec<_>>().join(", ");
         if self.hosts.is_empty() {
             return Err(format!(
-                "credential for {header} has no hosts: use for_hosts"
+                "credential for {names} has no hosts: use for_hosts"
             ));
         }
         for host in &self.hosts {
@@ -248,7 +400,8 @@ impl Credential {
                 return Err(format!(
                     "credential host pattern {host:?} must be an IP address, an ASCII host \
                      name (letters, digits, hyphens and dots; punycode for others), or `*.` and \
-                     a name of two labels or more (no other `*`, no port, path or spaces)"
+                     a name of two labels or more (no other `*`, path or spaces), optionally \
+                     with a port from 1 to 65535"
                 ));
             }
         }
@@ -259,9 +412,18 @@ impl Credential {
                 ));
             }
         }
-        if self.commands.as_ref().is_some_and(Vec::is_empty) {
+        for rule in &self.rules {
+            if !is_valid_host_pattern(rule.host()) {
+                return Err(format!(
+                    "credential HTTP rule host {:?} isn't a host pattern",
+                    rule.host()
+                ));
+            }
+            rule.validate()?;
+        }
+        if !self.script && self.commands.as_ref().is_some_and(Vec::is_empty) {
             return Err(format!(
-                "credential for {header} is for no commands: leave out for_commands for every child"
+                "credential for {names} is for no commands: leave out for_commands for every child"
             ));
         }
         Ok(())
@@ -274,48 +436,85 @@ impl Credential {
             .is_none_or(|commands| commands.iter().any(|c| c == name))
     }
 
-    /// Whether a connection to `host` on `port`, `over_tls` or not, may get
-    /// it.
-    pub(super) fn for_connection(&self, host: &str, port: u16, over_tls: bool) -> bool {
-        (over_tls || self.plaintext)
-            && self
-                .hosts
-                .iter()
-                .any(|p| host_matches_pattern(host, port, p))
+    /// Whether it's for connections to `host` on `port`, whatever their
+    /// transport.
+    pub(super) fn for_host(&self, host: &str, port: u16) -> bool {
+        self.hosts
+            .iter()
+            .any(|p| host_matches_pattern(host, port, p))
     }
 
-    /// Whether a request for the decoded `path` (`None` if it has none or
-    /// it's ambiguous) gets it.
-    pub(super) fn for_path(&self, path: Option<&str>) -> bool {
-        self.paths.is_empty()
-            || path.is_some_and(|path| self.paths.iter().any(|p| super::path_is_under(path, p)))
+    /// Whether it may be sent `over_tls` or not.
+    pub(super) fn sends_over(&self, over_tls: bool) -> bool {
+        over_tls || self.plaintext
+    }
+
+    /// Whether the request `method target` (on a connection to `host` on
+    /// `port`, one of its hosts) gets it: its decoded path is under one of
+    /// its paths, and a rule matches it.
+    pub(super) fn for_request(&self, host: &str, port: u16, method: &str, target: &str) -> bool {
+        let path = super::request_path(target);
+        let path_ok = self.paths.is_empty()
+            || path
+                .as_deref()
+                .is_some_and(|path| self.paths.iter().any(|p| super::path_is_under(path, p)));
+        path_ok && request_matches_rules(&self.rules, host, port, method, target)
+    }
+
+    /// Whether it sets a header `other` sets too.
+    pub(super) fn overlaps(&self, other: &Credential) -> bool {
+        self.header_names()
+            .any(|a| other.header_names().any(|b| a.eq_ignore_ascii_case(b)))
+    }
+
+    /// Whether it sets the header `name`.
+    pub(super) fn sets(&self, name: &str) -> bool {
+        self.header_names().any(|h| h.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether it drops the header `name` without setting it.
+    pub(super) fn strips(&self, name: &str) -> bool {
+        self.strip.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
     /// What output and traces are scrubbed of, should it get there some way
-    /// masking misses: the header value, a `Basic` payload, and the secret.
-    pub(crate) fn sensitive_values(&self) -> impl Iterator<Item = String> + '_ {
+    /// masking misses: the header values, `Basic` payloads, and the secrets.
+    pub fn sensitive_values(&self) -> impl Iterator<Item = String> + '_ {
         self.masks()
             .into_iter()
             .map(|(value, _)| String::from_utf8_lossy(&value).into_owned())
     }
 
-    /// The header line it adds.
-    pub(super) fn header_line(&self) -> String {
-        format!("{}: {}\r\n", self.header, self.value)
+    /// The header lines it adds.
+    pub(super) fn header_lines(&self) -> String {
+        self.headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect()
     }
 
-    /// `(value, mask)` pairs for responses: the header value, for `Basic`
-    /// its base64 payload, and the secret, each as `[REDACTED]`. Longest
-    /// first, since they're applied in turn and each contains the next.
+    /// `(value, mask)` pairs for responses: each header value, what follows
+    /// a leading scheme in one (`Bearer <token>`'s token, `Basic`'s base64
+    /// payload), and the secrets, each as `[REDACTED]`. Longest first, since
+    /// they're applied in turn and one may contain another.
     pub(super) fn masks(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut values = vec![self.value.clone()];
-        if let Some(payload) = self.value.strip_prefix("Basic ") {
-            values.push(payload.to_owned());
+        let mut values: Vec<&str> = Vec::new();
+        for (_, value) in &self.headers {
+            values.push(value);
+            if let Some((scheme, rest)) = value.split_once(' ')
+                && !scheme.is_empty()
+                && scheme.bytes().all(super::is_tchar)
+            {
+                values.push(rest.trim());
+            }
         }
-        values.push(self.secret.clone());
+        values.extend(self.secrets.iter().map(String::as_str));
+        values.retain(|v| !v.is_empty());
+        values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        values.dedup();
         values
             .into_iter()
-            .map(|v| (v.into_bytes(), MASKED.to_vec()))
+            .map(|v| (v.as_bytes().to_vec(), MASKED.to_vec()))
             .collect()
     }
 }
@@ -323,9 +522,14 @@ impl Credential {
 /// Whether `pattern` is an IP literal (bracketed or not, without a zone), an
 /// exact ASCII host name (letters, digits, hyphens and dots, no empty
 /// labels; a trailing dot and case are ignored), or `*.` and such a name of
-/// at least two labels (so not `*.com`). No port, path, space or non-ASCII
-/// character: those would never match, so they're refused as typos.
+/// at least two labels (so not `*.com`), optionally with a `:port` (1 to
+/// 65535; an IPv6 address takes one only in brackets). No path, space or
+/// non-ASCII character: those would never match, so they're refused as
+/// typos.
 fn is_credential_host_pattern(pattern: &str) -> bool {
+    let Some((pattern, _)) = split_pattern_port(pattern) else {
+        return false;
+    };
     let literal = pattern.strip_circumfix('[', ']').unwrap_or(pattern);
     if literal.parse::<std::net::IpAddr>().is_ok() {
         return true;
@@ -353,22 +557,22 @@ mod tests {
     fn values_are_built_from_the_secret() {
         let basic = Credential::basic("x-access-token", "s3cr3t");
         assert_eq!(
-            basic.header_line(),
+            basic.header_lines(),
             format!(
                 "Authorization: Basic {}\r\n",
                 BASE64_STANDARD.encode("x-access-token:s3cr3t")
             )
         );
         assert_eq!(
-            Credential::bearer("s").header_line(),
+            Credential::bearer("s").header_lines(),
             "Authorization: Bearer s\r\n"
         );
         assert_eq!(
-            Credential::token("s").header_line(),
+            Credential::token("s").header_lines(),
             "Authorization: token s\r\n"
         );
         assert_eq!(
-            Credential::header("X-Api-Key", "k={secret}", "s").header_line(),
+            Credential::header("X-Api-Key", "k={secret}", "s").header_lines(),
             "X-Api-Key: k=s\r\n"
         );
         // The masks cover the secret, the value and a Basic payload.
@@ -377,6 +581,34 @@ mod tests {
         assert!(masks.contains(&BASE64_STANDARD.encode("x-access-token:s3cr3t").into_bytes()));
         // Debug never shows the secret.
         assert!(!format!("{basic:?}").contains("s3cr3t"));
+
+        // Several headers go together, each value masked.
+        let both = Credential::headers([("Authorization", "Bearer a1"), ("X-Id-Token", "i2")]);
+        assert_eq!(
+            both.header_lines(),
+            "Authorization: Bearer a1\r\nX-Id-Token: i2\r\n"
+        );
+        let masks: Vec<_> = both.masks().into_iter().map(|(v, _)| v).collect();
+        assert_eq!(
+            masks,
+            [b"Bearer a1".to_vec(), b"a1".to_vec(), b"i2".to_vec()]
+        );
+        assert!(!format!("{both:?}").contains("a1"));
+        assert!(both.sets("x-id-token") && !both.sets("cookie"));
+        assert!(both.overlaps(&Credential::bearer("other")));
+    }
+
+    /// The deprecated single-header accessor names the first header.
+    #[test]
+    #[expect(deprecated, reason = "tests the deprecated shim")]
+    fn header_name_is_the_first_header() {
+        assert_eq!(Credential::bearer("s").header_name(), "Authorization");
+        let both = Credential::headers([("X-Access-Token", "a"), ("X-Other", "b")]);
+        assert_eq!(both.header_name(), "X-Access-Token");
+        assert_eq!(
+            Credential::headers(Vec::<(String, String)>::new()).header_name(),
+            ""
+        );
     }
 
     #[test]
@@ -404,7 +636,42 @@ mod tests {
             ),
             (
                 Credential::header("X-Key", "no placeholder", "s"),
-                "no {secret}",
+                "needs {secret}",
+            ),
+            (
+                Credential::headers(Vec::<(String, String)>::new()),
+                "no headers",
+            ),
+            (Credential::headers([("X-A", "1"), ("x-a", "2")]), "twice"),
+            (Credential::headers([("X-A", "")]), "empty value"),
+            (Credential::headers([("X-A", "tok ")]), "whitespace"),
+            (ok().stripping(["Bad Name"]), "isn't a header name"),
+            (ok().stripping(["Host"]), "can't strip"),
+            (Credential::headers([("X-A", "\ttok")]), "whitespace"),
+            (
+                Credential::headers([("X-A", "1"), ("X-B", "2\n")]),
+                "control character",
+            ),
+            (Credential::headers([("Connection", "close")]), "can't set"),
+            (
+                Credential::headers([("Transfer-Encoding", "x")]),
+                "can't set",
+            ),
+            (
+                Credential::headers([("X-A", "a".repeat(16 * 1024))]),
+                "over the",
+            ),
+            (
+                ok().for_requests([HttpRule::new("api.example.com").with_paths(["/a/../b"])]),
+                "normalized",
+            ),
+            (
+                ok().for_requests([HttpRule::new("api.example.com").with_queries(["("])]),
+                "HTTP rule",
+            ),
+            (
+                ok().for_requests([HttpRule::new("")]),
+                "isn't a host pattern",
             ),
             (ok().for_paths(["/a/../b"]), "normalized"),
             (ok().for_commands(Vec::<String>::new()), "no commands"),
@@ -417,6 +684,19 @@ mod tests {
             let err = bad.validate().unwrap_err();
             assert!(err.contains(why), "{why}: {err}");
         }
+        // The script alone: no commands.
+        assert!(
+            ok().for_script()
+                .for_commands(Vec::<String>::new())
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            Credential::headers([("X-A", "1"), ("X-B", "2")])
+                .for_hosts(["api.example.com:8443"])
+                .validate()
+                .is_ok()
+        );
     }
 
     /// Only an IP literal, an exact ASCII name, or `*.` and a name of two
@@ -437,6 +717,10 @@ mod tests {
             "my-host.example-1.com",
             "xn--bcher-kva.example",
             "*.xn--bcher-kva.example",
+            "api.github.com:443",
+            "*.github.com:8443",
+            "[::1]:443",
+            "127.0.0.1:80",
         ] {
             assert!(is_credential_host_pattern(ok), "{ok}");
             assert!(Credential::bearer("s").for_hosts([ok]).validate().is_ok());
@@ -460,8 +744,12 @@ mod tests {
             "*.com",
             "*.localhost",
             "*.com.",
-            "api.github.com:443",
-            "[::1]:443",
+            "api.github.com:0",
+            "api.github.com:x",
+            "api.github.com:",
+            "api.github.com:65536",
+            "[::1]:",
+            "*:443",
             "fe80::1%lo",
             "github.com/org",
             "api.github.com/",
@@ -483,23 +771,39 @@ mod tests {
     }
 
     #[test]
-    fn scope_is_hosts_paths_transport_and_commands() {
+    fn scope_is_hosts_ports_requests_transport_and_commands() {
         let c = Credential::bearer("s")
-            .for_hosts(["github.com"])
+            .for_hosts(["github.com", "api.example.com:8443"])
             .for_paths(["/org/"])
             .for_commands(["git"]);
-        assert!(c.for_connection("GitHub.com.", 443, true));
-        assert!(!c.for_connection("github.com", 443, false));
-        assert!(!c.for_connection("evil.com", 443, true));
-        assert!(c.allow_plaintext().for_connection("github.com", 443, false));
-        let c = Credential::bearer("s")
-            .for_hosts(["github.com"])
-            .for_paths(["/org/"])
-            .for_commands(["git"]);
-        assert!(c.for_path(Some("/org/repo.git/info/refs")));
-        assert!(!c.for_path(Some("/other/repo.git")));
-        assert!(!c.for_path(None));
+        assert!(c.for_host("GitHub.com.", 443) && c.for_host("github.com", 80));
+        assert!(c.for_host("api.example.com", 8443) && !c.for_host("api.example.com", 443));
+        assert!(!c.for_host("evil.com", 443));
+        assert!(c.sends_over(true) && !c.sends_over(false));
+        assert!(c.clone().allow_plaintext().sends_over(false));
+        let get = |target| c.for_request("github.com", 443, "GET", target);
+        assert!(get("/org/repo.git/info/refs"));
+        assert!(!get("/other/repo.git"));
+        assert!(!get("/org/../other"));
         assert!(c.for_command("git") && !c.for_command("curl"));
         assert!(Credential::bearer("s").for_command("anything"));
+        assert!(!c.is_for_script() && c.for_script().is_for_script());
+
+        // Rules on top of the hosts and paths: method, path and query.
+        let c = Credential::bearer("s")
+            .for_hosts(["github.com"])
+            .for_requests([HttpRule::new("github.com")
+                .with_methods(["GET"])
+                .with_paths(["/org/repo.git/info/refs"])
+                .with_queries(["service=git-upload-pack"])]);
+        let ok = "/org/repo.git/info/refs?service=git-upload-pack";
+        assert!(c.for_request("github.com", 443, "GET", ok));
+        assert!(!c.for_request("github.com", 443, "POST", ok));
+        assert!(!c.for_request(
+            "github.com",
+            443,
+            "GET",
+            "/org/repo.git/info/refs?service=git-receive-pack"
+        ));
     }
 }

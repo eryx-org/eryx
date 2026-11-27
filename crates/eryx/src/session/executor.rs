@@ -440,6 +440,10 @@ impl<'a> SessionExecuteBuilder<'a> {
 
     /// Give this execution's children `credential` too (shell only); see
     /// [`ExecuteOptions::with_credential`](crate::ExecuteOptions::with_credential).
+    /// For the script's own requests, give it to the
+    /// [`ConnectionManager`](crate::ConnectionManager) behind `with_network`
+    /// too, with
+    /// [`with_credentials`](crate::ConnectionManager::with_credentials).
     #[must_use]
     pub fn with_credential(mut self, credential: crate::net::Credential) -> Self {
         self.credentials.push(Arc::new(credential));
@@ -1625,6 +1629,31 @@ impl SessionExecutor {
     #[must_use]
     pub fn fuel_limit(&self) -> Option<u64> {
         self.fuel_limit
+    }
+
+    /// What to scrub an execution's output and traces of, for an execution
+    /// given `credentials` (its builder's
+    /// [`with_credential`](SessionExecuteBuilder::with_credential)s) and
+    /// `child_net`: `secrets`, plus the values of those credentials and the
+    /// session's own, and the passwords of the child proxies holding them,
+    /// for the commands `allowed_commands` and `command_options` leave them.
+    /// Pass the map to [`scrub_placeholders`](crate::scrub_placeholders).
+    #[must_use]
+    pub fn scrub_secrets(
+        &self,
+        secrets: &HashMap<String, crate::SecretConfig>,
+        credentials: &[crate::net::Credential],
+        allowed_commands: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        child_net: Option<&crate::net::ChildNetPolicy>,
+    ) -> HashMap<String, crate::SecretConfig> {
+        self.executor.scrub_secrets(
+            secrets,
+            credentials,
+            allowed_commands,
+            command_options,
+            child_net,
+        )
     }
 
     /// Execute Python code with a fluent builder API.
