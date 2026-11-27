@@ -808,6 +808,7 @@ fn mounted(code: &str, language: Language, writable: bool) -> ExecuteRequest {
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
             writable,
+            max_write_bytes: None,
         }],
         ..Default::default()
     }
