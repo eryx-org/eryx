@@ -218,7 +218,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 | `FsRequest.op` | Answer with |
 |----------------|-------------|
 | `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch). |
-| `list` | `listing`: the directory's entries, each with its metadata. Put a small file's whole contents in its entry's `content`: the server keeps those up to 64 KiB, so reading a tree of small files costs one round trip per directory. |
+| `list` | `listing`: the directory's entries, each with its metadata. Put a small file's whole contents in its entry's `content`: the server keeps those up to 64 KiB, so reading a tree of small files costs one round trip per directory, or one in all with [nested listings](#nested-listings). |
 | `read` | `data`: up to `len` bytes of the file from `offset`, fewer at its end. |
 
 Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_NOT_A_DIRECTORY`, `_IS_A_DIRECTORY` and `_PERMISSION_DENIED` reach the code as the matching exception (`FileNotFoundError`, ...), anything else as an `OSError` (EIO). A read's error is always EIO, as the file is already open by then: to refuse a file, refuse its `stat`. Once the code has listed a directory, its listing answers stats of its entries, and a name that isn't in it is not found without asking.
@@ -229,6 +229,18 @@ Any of them can instead be answered with `error`: `FS_ERROR_CODE_NOT_FOUND`, `_N
 - Mounts can't overlap, and the [`--max-mount*` flags](#running-the-server) bound each run: how many mounts it may have, how many `FsRequest`s it makes and bytes of `FsResponse`s it's sent (past either, the code's file operations on its mounts fail), and the host memory its file data and listings may hold. Each `FsResponse` must fit in the server's `--max-message-size`.
 - They work for every language. They aren't saved with `persist_state`, nor recorded in a [callback journal](#callback-replay): a replayed run asks for them again.
 - If the client half-closes or disconnects, file operations waiting for an answer, and any after, fail at once.
+
+### Nested listings
+
+A walk of a mount (`os.walk`, `ls -R`, `cp -r`) lists one directory at a time, and costs a round trip per directory. If listing a subtree is cheap for the client, it can answer a `list` with the subdirectories' listings too: set a directory entry's `listing` to that directory's own complete listing, which can nest again, its entries carrying `content` as at the top. The server keeps every nested listing for the run, so the code's later listing of those directories, and stats and reads of the small files in them, need no request. Leave `listing` unset for a directory you can't send whole: the server asks for it when the code gets there.
+
+- Nested entries count towards `--max-mount-dir-entries` (per directory) and `--max-mount-listing-bytes` (with each nested directory's path and 256 bytes) as if they'd been listed apart, but the whole answer is one request towards `--max-mount-ops`, so a tree with more directories than that can be walked.
+- A bad nested listing, such as one with a bad name, one on a file, the same directory nested twice, or one past a limit, fails the whole answer, as a bad top-level listing does.
+- A directory the run already has a listing of keeps it: a nested listing of it that comes later, and what's nested in it, is ignored, so the code never sees a directory change mid-run.
+- Protobuf decoders limit how deeply messages nest (prost, which the server uses, to 100 messages, two per level), so nest at most 40 levels: the server can't decode a deeper message, and ends the run as if the client had gone.
+- A writable mount's changes go over nested listings as over fetched ones.
+- Older servers ignore `listing`, and walk as before.
+- The server's metrics count what clients nest: `eryx_mount_nested_listing_dirs_total` (`outcome` is `kept`, or `ignored` for a directory the run already had), `eryx_mount_nested_listing_entries_total` (entries in the kept ones), and `eryx_mount_nested_listings_rejected_total` by `reason`: `bad_name`, `bad_content` (inline content that isn't the file's size), `not_a_directory`, `duplicate`, `too_many_entries` or `listing_bytes`.
 
 ### Writable mounts
 
@@ -368,7 +380,7 @@ This matters for [secrets](./secrets.md): a `SecretConfig.value` is transmitted 
 
 ## Observability
 
-- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, and execution counters/histograms.
+- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, execution counters/histograms, and counters of [nested listings](#nested-listings).
 - **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span.
 
 ## Next Steps
