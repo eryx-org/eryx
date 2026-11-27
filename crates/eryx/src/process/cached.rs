@@ -156,8 +156,7 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     }
     // A WASI preview 1 module compiles as the command component it's adapted
     // into, or its .cwasm wouldn't load as a command.
-    let component = Command::to_component(wasm)?;
-    let precompiled = crate::Executor::precompile(&component)?;
+    let precompiled = crate::Executor::precompile(&Command::to_component(wasm)?)?;
     // Through a temporary file and a rename, so a concurrent load of the same
     // command only ever sees a complete file.
     let written = tempfile::NamedTempFile::new_in(&dir).and_then(|mut file| {
@@ -166,6 +165,7 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
     });
     if let Err(e) = written {
         uncached(&dir, &e);
+        release_freed_memory();
         // SAFETY: this process compiled these bytes just now.
         return unsafe { Command::from_precompiled(&precompiled) };
     }
@@ -179,9 +179,9 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
 /// (gcx, 70 MB of wasm) frees over a gigabyte, which glibc's allocator
 /// otherwise keeps for the life of the process.
 #[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
-#[allow(unsafe_code)]
 fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[allow(unsafe_code)]
     // SAFETY: malloc_trim only releases free heap memory.
     unsafe {
         libc::malloc_trim(0);
