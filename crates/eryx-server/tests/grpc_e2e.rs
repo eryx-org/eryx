@@ -4578,7 +4578,7 @@ async fn header_injections_reach_the_guests_requests() {
         let code = format!(
             "import urllib.request\n\
              def get(path):\n\
-             \x20   req = urllib.request.Request(f'http://127.0.0.1:{port}{{path}}', headers={{'Authorization': 'Bearer guest'}})\n\
+             \x20   req = urllib.request.Request(f'http://127.0.0.1:{port}{{path}}', headers={{'Authorization': 'Bearer guest', 'X-Grafana-Id': 'guest-identity'}})\n\
              \x20   try:\n\
              \x20       return urllib.request.urlopen(req, timeout=10).read().decode()\n\
              \x20   except Exception as e:\n\
@@ -4608,6 +4608,7 @@ async fn header_injections_reach_the_guests_requests() {
                             },
                         ],
                         hosts: vec![format!("127.0.0.1:{port}")],
+                        strip_headers: vec!["X-Grafana-Id".to_string()],
                         http_rules: vec![HttpRule {
                             host: "127.0.0.1".to_string(),
                             methods: vec!["GET".to_string()],
@@ -4638,7 +4639,10 @@ async fn header_injections_reach_the_guests_requests() {
             .filter(|r| r.starts_with("GET /public "))
             .collect();
         assert!(
-            public.len() == 1 && public[0].contains("Bearer guest") && !public[0].contains(ID),
+            public.len() == 1
+                && public[0].contains("Bearer guest")
+                && public[0].contains("guest-identity")
+                && !public[0].contains(ID),
             "{received:?}"
         );
         if allow_plaintext_secrets {
@@ -4646,7 +4650,8 @@ async fn header_injections_reach_the_guests_requests() {
             assert!(
                 api[0].contains(&format!("Authorization: Bearer {ACCESS}\r\n"))
                     && api[0].contains(&format!("X-Id-Token: {ID}\r\n"))
-                    && !api[0].contains("guest"),
+                    && !api[0].contains("guest")
+                    && !api[0].to_ascii_lowercase().contains("x-grafana-id"),
                 "{}",
                 api[0]
             );
@@ -4681,7 +4686,7 @@ async fn invalid_header_injections_are_rejected() {
     let injection = |headers, hosts: &[&str]| HeaderInjection {
         headers,
         hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
-        http_rules: vec![],
+        ..Default::default()
     };
     let ok = || {
         injection(
@@ -4820,7 +4825,7 @@ async fn header_injections_reach_shell_commands_with_scrubbed_proxies() {
                         value: "shell-secret-value-1".to_string(),
                     }],
                     hosts: vec!["api.example.com".to_string()],
-                    http_rules: vec![],
+                    ..Default::default()
                 }],
                 ..Default::default()
             }),

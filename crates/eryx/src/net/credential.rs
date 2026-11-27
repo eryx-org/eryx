@@ -98,6 +98,8 @@ pub struct Credential {
     hosts: Vec<String>,
     paths: Vec<String>,
     rules: Vec<HttpRule>,
+    /// Headers dropped from every request it applies to, set or not.
+    strip: Vec<String>,
     commands: Option<Vec<String>>,
     script: bool,
     plaintext: bool,
@@ -110,6 +112,7 @@ impl std::fmt::Debug for Credential {
             .field("hosts", &self.hosts)
             .field("paths", &self.paths)
             .field("rules", &self.rules)
+            .field("strip", &self.strip)
             .field("commands", &self.commands)
             .field("script", &self.script)
             .field("plaintext", &self.plaintext)
@@ -181,6 +184,7 @@ impl Credential {
             hosts: Vec::new(),
             paths: Vec::new(),
             rules: Vec::new(),
+            strip: Vec::new(),
             commands: None,
             script: false,
             plaintext: false,
@@ -227,6 +231,24 @@ impl Credential {
     pub fn for_requests(mut self, rules: impl IntoIterator<Item = HttpRule>) -> Self {
         self.rules = rules.into_iter().collect();
         self
+    }
+
+    /// Also drop these headers from every request it applies to, without
+    /// replacing them (an identity header the server would act on alongside
+    /// the credential, say). They're dropped even where another credential's
+    /// headers win (see [`Credential`]), so a request it matches never
+    /// carries the guest's copy. Names follow the rules for the headers it
+    /// sets.
+    #[must_use]
+    pub fn stripping(mut self, headers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.strip = headers.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The headers it drops besides its own.
+    #[must_use]
+    pub fn stripped(&self) -> &[String] {
+        &self.strip
     }
 
     /// Only these registered commands' requests (their own, not their
@@ -349,6 +371,15 @@ impl Credential {
                 "credential headers take {len} bytes, over the {MAX_HEADERS_LEN} allowed"
             ));
         }
+        for header in &self.strip {
+            if header.is_empty() || !header.bytes().all(super::is_tchar) {
+                return Err(format!("stripped header {header:?} isn't a header name"));
+            }
+            let lower = header.to_ascii_lowercase();
+            if RESERVED_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") {
+                return Err(format!("a credential can't strip the {header} header"));
+            }
+        }
         let names = self.header_names().collect::<Vec<_>>().join(", ");
         if self.hosts.is_empty() {
             return Err(format!(
@@ -430,6 +461,11 @@ impl Credential {
     /// Whether it sets the header `name`.
     pub(super) fn sets(&self, name: &str) -> bool {
         self.header_names().any(|h| h.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether it drops the header `name` without setting it.
+    pub(super) fn strips(&self, name: &str) -> bool {
+        self.strip.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
     /// What output and traces are scrubbed of, should it get there some way
@@ -587,6 +623,8 @@ mod tests {
             (Credential::headers([("X-A", "1"), ("x-a", "2")]), "twice"),
             (Credential::headers([("X-A", "")]), "empty value"),
             (Credential::headers([("X-A", "tok ")]), "whitespace"),
+            (ok().stripping(["Bad Name"]), "isn't a header name"),
+            (ok().stripping(["Host"]), "can't strip"),
             (Credential::headers([("X-A", "\ttok")]), "whitespace"),
             (
                 Credential::headers([("X-A", "1"), ("X-B", "2\n")]),

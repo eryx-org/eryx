@@ -1232,6 +1232,7 @@ fn header_injections(
                 eryx::Credential::headers(injection.headers.into_iter().map(|h| (h.name, h.value)))
                     .for_hosts(injection.hosts)
                     .for_requests(injection.http_rules.into_iter().map(http_rule))
+                    .stripping(injection.strip_headers)
                     .for_script();
             if plaintext {
                 credential = credential.allow_plaintext();

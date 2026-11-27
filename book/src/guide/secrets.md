@@ -342,6 +342,11 @@ A few rules and limits worth knowing:
 - **Together:** a request a credential applies to loses every header of its
   names it had, whatever their case, and gets all of its headers, so the code
   can't override them, double them or send one without the others.
+- **Stripped headers:** `stripping(["X-Grafana-Id"])` (over gRPC,
+  `strip_headers`) also drops headers the credential doesn't set from every
+  request it applies to, such as an identity header the server would honour
+  alongside the token. They're dropped even where another credential's
+  headers win, so the code can never supply them to that host.
 - **Scope:** `for_hosts` (required, ports allowed: `api.example.com:443`),
   then `for_paths` and `for_requests` (methods, paths and queries, matched as
   [HTTP rules](./networking.md#method-path-and-query-rules) match) narrow

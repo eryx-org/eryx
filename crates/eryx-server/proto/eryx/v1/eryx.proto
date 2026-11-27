@@ -700,6 +700,12 @@ message HeaderInjection {
   // NetworkConfig.http_rules match), on top of `hosts`. Empty = every
   // request to `hosts`.
   repeated HttpRule http_rules = 3;
+  // Header names dropped from every request this injection matches, without
+  // being replaced: a header the server would act on alongside the injected
+  // ones (an identity override, say), which the guest mustn't supply. Dropped
+  // even where another injection's headers win. Same name rules as
+  // `headers`.
+  repeated string strip_headers = 4;
 }
 
 // One HTTP header.

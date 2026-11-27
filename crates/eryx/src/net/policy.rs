@@ -1065,11 +1065,15 @@ fn inject_credentials(
     let text = String::from_utf8_lossy(headers);
     let (method, target) = request_line(&text).unwrap_or_default();
     let mut applied: Vec<&Credential> = Vec::new();
+    // Every credential the request matches strips its headers, applied or
+    // not, so no copy of them gets through.
+    let mut matched: Vec<&Credential> = Vec::new();
     if !switches_protocols(headers) {
         for credential in credentials
             .iter()
             .filter(|c| c.for_request(host, port, method, target))
         {
+            matched.push(credential);
             if applied.iter().any(|a| a.overlaps(credential)) {
                 continue;
             }
@@ -1093,6 +1097,7 @@ fn inject_credentials(
         if name.eq_ignore_ascii_case("accept-encoding")
             || ranged
             || applied.iter().any(|c| c.sets(name))
+            || matched.iter().any(|c| c.strips(name))
         {
             continue;
         }
@@ -1452,6 +1457,33 @@ mod tests {
         );
         // The pair didn't apply, so the request's own copy stays.
         assert!(out.contains("X-ID-TOKEN: guest"), "{out}");
+
+        // A stripped header goes from every request a credential matches,
+        // even when another's headers win, and stays elsewhere.
+        let token = || {
+            Arc::new(
+                Credential::header("X-Access-Token", "{secret}", "tok")
+                    .for_hosts(["api.test"])
+                    .for_paths(["/api/"])
+                    .stripping(["X-Grafana-Id"]),
+            )
+        };
+        let head = "GET /api/x HTTP/1.1\r\nHost: api.test\r\nx-grafana-id: guest\r\n\
+                    X-Grafana-ID: again\r\nX-Access-Token: guest\r\n\r\n";
+        let out = inject(head, &[token()]);
+        assert!(!out.to_ascii_lowercase().contains("x-grafana-id"), "{out}");
+        assert!(
+            out.contains("X-Access-Token: tok\r\n") && !out.contains("guest"),
+            "{out}"
+        );
+        let first = Arc::new(
+            Credential::header("X-Access-Token", "{secret}", "first").for_hosts(["api.test"]),
+        );
+        let out = inject(head, &[first, token()]);
+        assert!(out.contains("X-Access-Token: first\r\n"), "{out}");
+        assert!(!out.to_ascii_lowercase().contains("x-grafana-id"), "{out}");
+        let out = inject(&head.replace("/api/x", "/public"), &[token()]);
+        assert!(out.contains("x-grafana-id: guest"), "{out}");
     }
 
     /// On a connection to a credential's host, the script's `eryx:net`

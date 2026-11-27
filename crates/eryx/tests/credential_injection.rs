@@ -265,3 +265,62 @@ async fn credentials_reach_the_script_only_when_for_it() {
     assert!(out.contains("Authorization: [REDACTED]"), "{out}");
     assert!(seen.lock().unwrap()[0].contains(&format!("Bearer {ACCESS}")));
 }
+
+/// One header carrying the identity on its own, with an identity header the
+/// guest mustn't supply stripped: a guest-sent `X-Grafana-Id` (any case,
+/// any number of copies) never reaches the matching host, and its own
+/// `X-Access-Token` is replaced.
+#[tokio::test]
+async fn stripped_headers_never_reach_the_matching_host() {
+    let (port, cert, seen) = server(true).await;
+    let sandbox = Sandbox::embedded()
+        .with_network(
+            NetConfig::default()
+                .allow_host("api.test")
+                .allow_network("127.0.0.0/8".parse::<IpNet>().unwrap())
+                .with_resolver(Localhost)
+                .with_root_cert(cert),
+        )
+        .build()
+        .unwrap();
+    let options = ExecuteOptions::new().with_credential(
+        Credential::headers([("X-Access-Token", ACCESS)])
+            .for_hosts([format!("api.test:{port}")])
+            .stripping(["X-Grafana-Id"])
+            .for_script(),
+    );
+    let code = format!(
+        r#"
+import http.client, ssl
+c = http.client.HTTPSConnection("api.test", {port}, context=ssl.create_default_context())
+c.putrequest("GET", "/api/echo")
+c.putheader("X-Access-Token", "guest")
+c.putheader("X-Grafana-Id", "guest-identity")
+c.putheader("x-grafana-id", "another-identity")
+c.endheaders()
+print(c.getresponse().read().decode())
+"#
+    );
+    let out = run(&sandbox, &code, &options).await;
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "{out}");
+    let head = &requests[0];
+    assert!(
+        !head.to_ascii_lowercase().contains("x-grafana-id"),
+        "{head}"
+    );
+    assert!(
+        !head.contains("-identity") && !head.contains("guest"),
+        "{head}"
+    );
+    assert_eq!(
+        head.matches(&format!("X-Access-Token: {ACCESS}\r\n"))
+            .count(),
+        1,
+        "{head}"
+    );
+    assert!(
+        out.contains("X-Access-Token: [REDACTED]") && !out.contains(ACCESS),
+        "{out}"
+    );
+}
