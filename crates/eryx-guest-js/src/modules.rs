@@ -323,7 +323,8 @@ fn require_sync<'js>(ctx: Ctx<'js>, name: String) -> Result<Value<'js>> {
                 };
             }
             PromiseState::Pending => {
-                if !ctx.execute_pending_job() {
+                // `Err`: a job threw and the rest are still queued, so go on.
+                if ctx.drain_jobs().is_ok() && promise.state() == PromiseState::Pending {
                     let message = format!(
                         "require({}) can't finish synchronously: the module uses top-level \
                          await. Use `await import({})` instead",
@@ -501,7 +502,7 @@ pub(crate) fn run_import(ctx: &Ctx<'_>, statement: &str) -> std::result::Result<
                 });
             }
             PromiseState::Pending => {
-                if !ctx.execute_pending_job() {
+                if ctx.drain_jobs().is_ok() && promise.state() == PromiseState::Pending {
                     return Err("the import uses top-level await, so it can't be restored".into());
                 }
             }
