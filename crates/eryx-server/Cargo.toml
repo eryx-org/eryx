@@ -45,6 +45,12 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 uuid = { workspace = true, features = ["v4"] }
 
+# jemalloc returns freed memory to the OS on its own, which glibc doesn't
+# (#1234). Linux only: the server ships for Linux, and jemalloc's background
+# threads, which do the returning, are Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator.workspace = true
+
 [build-dependencies]
 tonic-prost-build.workspace = true
 

@@ -68,6 +68,7 @@ sha2 = "0.11"
 tar = "0.4"
 tempfile = "3.20"
 thiserror = "2.0"
+tikv-jemallocator = { version = "0.7", features = ["background_threads"] } # eryx-server's allocator
 time = "0.3"                # child proxy certificate validity
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"

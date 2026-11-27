@@ -599,6 +599,19 @@ crate = "aws-lc-sys"
 crate_version = "0.47.0"
 
 [[component]]
+name = "jemalloc"
+version = "5.3.1"
+license = "BSD-2-Clause"
+url = "https://github.com/jemalloc/jemalloc"
+# The C library tikv-jemalloc-sys vendors and eryx-server links as its
+# allocator. cargo-about renders only the crate's own licences (MIT OR
+# Apache-2.0), not jemalloc's COPYING with its copyright notices.
+files = ["third_party/licenses/jemalloc-COPYING"]
+artifacts = ["host"]
+crate = "tikv-jemalloc-sys"
+crate_version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
+
+[[component]]
 name = "wit-dylib (generated bindings)"
 version = "0.263.0"
 license = "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
