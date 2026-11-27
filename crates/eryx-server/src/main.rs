@@ -807,6 +807,13 @@ fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
+/// jemalloc, with background threads, returns freed memory to the OS within
+/// seconds, where glibc keeps it in its arenas: after a burst of executions
+/// the server settles at a fraction of glibc's anonymous memory (#1234).
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracer_provider = setup_tracing()?;
