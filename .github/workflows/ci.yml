@@ -308,6 +308,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # All of Cargo.lock would bust this key on every lock-only bump; see the script.
+      - name: Hash the Cargo.lock entries it builds from
+        id: lock
+        run: echo "hash=$(scripts/lock-closure-hash.py eryx-guest-python eryx-runtime wasmtime)" >> "$GITHUB_OUTPUT"
+
       - name: Cache WASM runtime artifacts
         id: wasm-cache
         # Skipped on tag builds (see the note on `on.push.tags`); the cache-hit
@@ -336,7 +341,7 @@ jobs:
           # which the key covers. v7 -> v8: the engine enables the component
           # model's more async builtins (#816). v8 -> v9: runtimes carry their
           # guest-sources hash, so a stale one fails to load.
-          key: wasm-runtime-v9-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          key: wasm-runtime-v9-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}-${{ steps.lock.outputs.hash }}
 
       - name: Touch cached artifacts
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -489,6 +494,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # All of Cargo.lock would bust this key on every lock-only bump; see the script.
+      - name: Hash the Cargo.lock entries it builds from
+        id: lock
+        run: echo "hash=$(scripts/lock-closure-hash.py eryx-guest-js eryx-runtime wasmtime)" >> "$GITHUB_OUTPUT"
+
       - name: Cache JavaScript runtime
         id: wasm-cache
         # See the Python runtime's cache step for the tag-build caveats.
@@ -504,7 +514,7 @@ jobs:
           # aren't covered: bump the prefix when they change. v1 -> v2: v1
           # cwasms were built without the CPU presets (host features). v3 -> v4:
           # more async builtins (#816). v4 -> v5: the guest-sources hash.
-          key: wasm-runtime-javascript-v5-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          key: wasm-runtime-javascript-v5-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx/examples/precompile.rs', 'crates/eryx-runtime/src/preinit.rs', 'crates/eryx-guest-call/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}-${{ steps.lock.outputs.hash }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -751,6 +761,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # All of Cargo.lock would bust this key on every lock-only bump; see the script.
+      - name: Hash the Cargo.lock entries it builds from
+        id: lock
+        run: echo "hash=$(scripts/lock-closure-hash.py wasmtime)" >> "$GITHUB_OUTPUT"
+
       - name: Cache bundler
         id: wasm-cache
         # See the Python runtime's cache step for the tag-build caveats.
@@ -767,7 +782,7 @@ jobs:
           # async builtins (#816). v2 -> v3: the instance-metadata stamp (#942).
           # v3 -> v4: v3's were still unstamped (the precompile example didn't
           # stamp commands; precompiling does now, and the example checks it).
-          key: wasm-bundler-v4-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          key: wasm-bundler-v4-${{ hashFiles('crates/eryx-bundler/src/**', 'crates/eryx-bundler/vendor/**', 'crates/eryx-bundler/tests/**', 'crates/eryx-bundler/Cargo.*', 'crates/eryx-bundler/smoke.sh', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}-${{ steps.lock.outputs.hash }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
