@@ -977,6 +977,42 @@ async fn python3_streams_through_a_pipeline() {
     );
 }
 
+/// Output past a pipe's 64 KiB arrives whole and in order, into a pipe or
+/// a file, on stdout and stderr alike (#1239): a write takes only what the
+/// pipe has room for, and unbuffered stdio dropped the rest.
+#[tokio::test]
+async fn python3_writes_large_output_whole() {
+    let Some(builder) = python_shell() else {
+        return;
+    };
+    let sandbox = builder.build().unwrap();
+    // 600000 numbered lines, about 3.9 MB: the same bytes as `seq`.
+    let lines = "'\\n'.join(map(str, range(1, 600001))) + '\\n'";
+    let out = sandbox
+        .execute(&format!(
+            "seq 1 600000 | md5sum\n\
+             python3 -c \"import sys; sys.stdout.write({lines})\" | md5sum\n\
+             python3 -c \"print({lines}, end='')\" > /tmp/o.txt; md5sum < /tmp/o.txt\n\
+             python3 -c \"import sys; sys.stdout.buffer.write(({lines}).encode())\" | md5sum\n\
+             python3 -c \"import sys; sys.__stdout__.write({lines})\" | md5sum\n\
+             python3 -c \"import sys; sys.stderr.write({lines}); print('out')\" 2>/tmp/e.txt\n\
+             md5sum < /tmp/e.txt",
+        ))
+        .await
+        .unwrap();
+    let stdout = out.stdout_utf8().unwrap();
+    let mut sums = stdout.lines().filter(|l| *l != "out");
+    let seq = sums.next().unwrap();
+    assert_eq!(sums.clone().count(), 5, "{stdout}");
+    assert!(sums.all(|sum| sum == seq), "{stdout}");
+    assert!(stdout.contains("out\n"), "{stdout}");
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `timeout` stops a CPU-bound guest child: Python spinning never waits,
 /// but the host still polls the shell, whose timer kills it.
 ///
@@ -1174,6 +1210,22 @@ async fn node_runs_code_and_pipelines() {
     )
     .await;
     assert_eq!(stdout, "2\n2\n42\na b\n5\n3893\n0\n1\n", "{stderr}");
+}
+
+/// Output past a pipe's 64 KiB arrives whole and in order (#1239).
+#[cfg(feature = "javascript")]
+#[tokio::test]
+async fn node_writes_large_output_whole() {
+    let (stdout, stderr) = run_node_shell(
+        "seq 1 600000 | md5sum\n\
+         node -e 'let s = \"\"; for (let i = 1; i <= 600000; i++) s += i + \"\\n\"; process.stdout.write(s)' | md5sum\n\
+         node -e 'let s = \"\"; for (let i = 1; i <= 600000; i++) s += i + \"\\n\"; process.stdout.write(s)' > /tmp/o.txt\n\
+         md5sum < /tmp/o.txt",
+    )
+    .await;
+    let sums: Vec<&str> = stdout.lines().collect();
+    assert_eq!(sums.len(), 3, "{stdout} {stderr}");
+    assert!(sums.iter().all(|sum| *sum == sums[0]), "{stdout} {stderr}");
 }
 
 /// A command that keeps printing ends when its reader goes, rather than
