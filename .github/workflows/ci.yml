@@ -2218,8 +2218,17 @@ jobs:
           name: wasm-runtime
           path: crates/
 
-      - name: Prepare runtime-python.cwasm for Docker build context
-        run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+      # arm64 precompiles every runtime itself, so it drops the x86-64 cwasms:
+      # one the image's precompile stage skipped would otherwise be embedded.
+      - name: Prepare the cwasms for Docker build context
+        env:
+          RUNTIME_SOURCE: ${{ matrix.runtime-source }}
+        run: |
+          if [ "$RUNTIME_SOURCE" = custom ]; then
+            cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+          else
+            rm -f crates/eryx-runtime/*.cwasm
+          fi
 
       - name: Log in to Docker Hub
         if: env.PUBLISH == 'true'
@@ -2337,8 +2346,17 @@ jobs:
           merge-multiple: true
           path: crates/eryx-runtime/
 
-      - name: Prepare runtime-python.cwasm for Docker build context
-        run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+      # arm64 precompiles every runtime itself, so it drops the x86-64 cwasms:
+      # one the image's precompile stage skipped would otherwise be embedded.
+      - name: Prepare the cwasms for Docker build context
+        env:
+          RUNTIME_SOURCE: ${{ matrix.runtime-source }}
+        run: |
+          if [ "$RUNTIME_SOURCE" = custom ]; then
+            cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
+          else
+            rm -f crates/eryx-runtime/*.cwasm
+          fi
 
       - name: Log in to Docker Hub
         if: env.PUBLISH == 'true'

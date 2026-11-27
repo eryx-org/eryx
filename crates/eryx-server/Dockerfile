@@ -2,7 +2,8 @@
 #
 # Build arg: "default" precompiles the runtime-<language>.wasm components in
 # crates/eryx-runtime/ (python, javascript and shell), "custom" uses pre-built
-# .cwasm files. In CI, use RUNTIME_SOURCE=custom with the build-runtime-* artifacts.
+# .cwasm files. CI uses RUNTIME_SOURCE=custom with the build-runtime-* artifacts
+# on amd64; those cwasms are x86-64 only, so arm64 uses "default".
 ARG RUNTIME_SOURCE=default
 # The guest languages to build in, comma-separated. Python is always
 # included; with only `python` the image is Python-only, without the
