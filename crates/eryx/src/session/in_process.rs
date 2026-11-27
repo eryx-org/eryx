@@ -388,8 +388,8 @@ async fn run_code(
             let executor = sandbox.executor();
             let credentials = executor.credentials().iter().map(|c| (**c).clone());
             let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone())
-                .map_err(ErrorKind::Initialization)?
-                .with_credentials(credentials);
+                .and_then(|manager| manager.with_credentials(credentials))
+                .map_err(ErrorKind::Initialization)?;
             let child_net = manager
                 .child_network(sandbox.executor().child_network().clone())
                 .map_err(ErrorKind::Initialization)?;

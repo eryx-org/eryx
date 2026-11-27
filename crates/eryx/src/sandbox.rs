@@ -397,8 +397,8 @@ impl Sandbox {
             let credentials = (options.credentials.iter().cloned())
                 .chain(self.executor.credentials().iter().map(|c| (**c).clone()));
             let manager = ConnectionManager::new(config.clone(), self.secrets.clone())
-                .map_err(ErrorKind::Initialization)?
-                .with_credentials(credentials);
+                .and_then(|manager| manager.with_credentials(credentials))
+                .map_err(ErrorKind::Initialization)?;
             // Children draw on the guest's budget.
             let child_net = manager
                 .child_network(self.executor.child_network().clone())
@@ -2977,13 +2977,16 @@ impl<R> SandboxBuilder<Shell, R> {
     /// Give every execution's child processes `credential`: the child proxy
     /// adds it to their requests to its hosts, so they authenticate without
     /// the sandbox ever seeing the secret (see
-    /// [`Credential`](crate::net::Credential)). For one execution, use
-    /// [`ExecuteOptions::with_credential`]. Needs a child network; an
-    /// execution fails to start if the credential is invalid or names a
-    /// command that isn't registered, has no network or opens blind tunnels.
+    /// [`Credential`](crate::net::Credential)), and with
+    /// [`for_script`](crate::net::Credential::for_script) the script's own
+    /// requests get it too. For one execution, use
+    /// [`ExecuteOptions::with_credential`]. A credential for children needs
+    /// a child network; an execution fails to start if the credential is
+    /// invalid or names a command that isn't registered, has no network or
+    /// opens blind tunnels.
     ///
-    /// Where it and an execution's own both apply to a request and set the
-    /// same header, the execution's wins, so a per-request token overrides
+    /// Where it and an execution's own both apply to a request and set a
+    /// header in common, the execution's wins, so a per-request token overrides
     /// a sandbox-wide default. Between the sandbox's own, the one given
     /// first wins.
     #[must_use]

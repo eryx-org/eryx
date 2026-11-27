@@ -305,6 +305,10 @@ impl Credential {
         if self.headers.is_empty() {
             return Err("credential has no headers".into());
         }
+        if self.secrets.iter().any(String::is_empty) {
+            let names = self.header_names().collect::<Vec<_>>().join(", ");
+            return Err(format!("credential for {names} has an empty secret"));
+        }
         let mut len = 0;
         for (i, (header, value)) in self.headers.iter().enumerate() {
             if header.is_empty() || !header.bytes().all(super::is_tchar) {
@@ -331,6 +335,13 @@ impl Credential {
                     "credential for {header} contains a control character (CR, LF, NUL, ...)"
                 ));
             }
+            // A server trims a value, so it could echo it back in a form the
+            // masks (the value as sent) wouldn't match.
+            if value.trim() != value {
+                return Err(format!(
+                    "credential for {header} starts or ends with whitespace"
+                ));
+            }
             len += header.len() + value.len();
         }
         if len > MAX_HEADERS_LEN {
@@ -339,9 +350,6 @@ impl Credential {
             ));
         }
         let names = self.header_names().collect::<Vec<_>>().join(", ");
-        if self.secrets.iter().any(String::is_empty) {
-            return Err(format!("credential for {names} has an empty secret"));
-        }
         if self.hosts.is_empty() {
             return Err(format!(
                 "credential for {names} has no hosts: use for_hosts"
@@ -578,6 +586,8 @@ mod tests {
             ),
             (Credential::headers([("X-A", "1"), ("x-a", "2")]), "twice"),
             (Credential::headers([("X-A", "")]), "empty value"),
+            (Credential::headers([("X-A", "tok ")]), "whitespace"),
+            (Credential::headers([("X-A", "\ttok")]), "whitespace"),
             (
                 Credential::headers([("X-A", "1"), ("X-B", "2\n")]),
                 "control character",

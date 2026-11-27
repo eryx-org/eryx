@@ -1573,10 +1573,9 @@ async fn execute_with_session(
         let allowed_hosts = config.allowed_hosts().len();
         let max_connections = config.max_connections();
         // Validated with the request, so this is only the policy's own
-        // guarantee; the handlers spawned above stop once their channels
-        // drop.
+        // guarantee.
         let net = ConnectionManager::new(config, params.secrets.clone()).and_then(|manager| {
-            let manager = manager.with_credentials(params.credentials.iter().cloned());
+            let manager = manager.with_credentials(params.credentials.iter().cloned())?;
             // The shell's children share the guest's connection and byte budget.
             let child_net = manager.child_network(params.child_network.clone())?;
             Ok((manager, child_net))

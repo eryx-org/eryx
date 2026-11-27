@@ -1588,15 +1588,21 @@ impl ConnectionManager {
     /// naming that host, and refuses `CONNECT` and `Upgrade` requests; over
     /// plain TCP, a request one applies to is refused unless it
     /// [allows plaintext](Credential::allow_plaintext).
-    #[must_use]
-    pub fn with_credentials(mut self, credentials: impl IntoIterator<Item = Credential>) -> Self {
-        self.credentials.extend(
-            credentials
-                .into_iter()
-                .filter(Credential::is_for_script)
-                .map(Arc::new),
-        );
-        self
+    ///
+    /// # Errors
+    ///
+    /// Fails, as [`Credential::validate`] does, if one is invalid.
+    pub fn with_credentials(
+        mut self,
+        credentials: impl IntoIterator<Item = Credential>,
+    ) -> Result<Self, String> {
+        for credential in credentials {
+            credential.validate()?;
+            if credential.is_for_script() {
+                self.credentials.push(Arc::new(credential));
+            }
+        }
+        Ok(self)
     }
 
     /// The network for this execution's child processes, if `network` gives
@@ -2558,6 +2564,19 @@ mod tests {
         let a = super::NetConfig::default().with_resolver(std::sync::Arc::clone(&shared));
         let b = super::NetConfig::default().with_resolver(shared);
         assert!(a.resolver().is_some() && b.resolver().is_some());
+    }
+
+    /// The script's credentials are validated on the way in, and only those
+    /// for the script are kept.
+    #[test]
+    fn manager_credentials_are_validated() {
+        let manager = || ConnectionManager::new(NetConfig::default(), HashMap::new()).unwrap();
+        let bad = Credential::header("Host", "{secret}", "s").for_hosts(["api.test"]);
+        assert!(manager().with_credentials([bad]).is_err());
+        let children = Credential::bearer("s").for_hosts(["api.test"]);
+        let script = children.clone().for_script();
+        let manager = manager().with_credentials([children, script]).unwrap();
+        assert_eq!(manager.credentials.len(), 1);
     }
 
     #[test]
