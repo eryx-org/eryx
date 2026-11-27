@@ -11,6 +11,10 @@ GitHub OIDC token to ANTHROPIC_IDENTITY_TOKEN_FILE and the SDK exchanges it
 (with ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID) for a
 short-lived API token, so no API key is stored in the repo.
 
+Labels on the PR (PR_LABELS, comma-separated, fetched live by the workflow)
+force groups on: `ci:full` runs every group without calling Claude, and
+`ci:<group>` (e.g. `ci:windows`, `ci:feature-combinations`) runs that one.
+
 When no other CI run is in progress or queued (OTHER_CI_RUNS=0, counted by
 the workflow), it skips the call and runs everything: the gate exists to
 save runner slots, and an idle queue has slots to spare.
@@ -140,9 +144,15 @@ def usage_note(response) -> str:
     return note
 
 
-def decide(files: list[str]) -> tuple[dict[str, bool], str, str]:
+def label(group: str) -> str:
+    return "ci:" + group.replace("_", "-")
+
+
+def decide(files: list[str], labels: set[str]) -> tuple[dict[str, bool], str, str]:
     """Returns the decision, its reason, and the call's usage ("" if none)."""
     run_all = {g: True for g in GROUPS}
+    if "ci:full" in labels or all(label(g) in labels for g in GROUPS):
+        return run_all, "The ci:full label (or every group's label) is set: running everything.", ""
     token_file = os.environ.get("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
     has_federation = os.environ.get("ANTHROPIC_FEDERATION_RULE_ID") and (
         os.path.isfile(token_file) and os.path.getsize(token_file) > 0
@@ -195,7 +205,13 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str, str]:
 def main() -> None:
     budget = [MAX_TOTAL_PATCH_LINES]
     files = [describe(json.loads(line), budget) for line in sys.stdin if line.strip()]
-    decision, reason, usage = decide(files)
+    labels = {x for x in os.environ.get("PR_LABELS", "").split(",") if x}
+    decision, reason, usage = decide(files, labels)
+    forced = [g for g in GROUPS if label(g) in labels and not decision[g]]
+    for g in forced:
+        decision[g] = True
+    if forced:
+        reason += " Forced on by label: " + ", ".join(label(g) for g in forced) + "."
 
     oses = [os_ for g, os_ in (("windows", "windows-latest"), ("macos", "macos-latest")) if decision[g]]
     out = [f"{g}={str(v).lower()}" for g, v in decision.items()]
@@ -208,13 +224,18 @@ def main() -> None:
         summary += [f"Claude call: {usage}", ""]
     summary += ["| group | runs |", "|---|---|"]
     summary += [f"| {g} | {'yes' if v else '**skipped**'} |" for g, v in decision.items()]
-    summary += ["", "Add the `ci:full` label to run every group."]
+    summary += [
+        "",
+        "To run a skipped group, add its label (`ci:windows`, `ci:macos`, `ci:docker`, "
+        "`ci:feature-combinations`, `ci:examples`, `ci:book`), or `ci:full` for all, "
+        "then re-run all jobs.",
+    ]
     with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/stderr"), "a") as f:
         f.write("\n".join(summary) + "\n")
     # An annotation on the run and the PR's checks, and the log (the API
     # exposes logs, not summaries).
     skipped = [g for g, v in decision.items() if not v]
-    note = f"Skipped {', '.join(skipped)}." if skipped else "Running every group."
+    note = f"Skipped {', '.join(skipped)} (add ci:<group> and re-run all jobs to run one)." if skipped else "Running every group."
     if usage:
         note += f" Claude call: {usage}."
     note += f" {reason}"

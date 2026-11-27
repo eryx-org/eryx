@@ -227,12 +227,13 @@ jobs:
       # Docker, feature combinations, examples, book) this PR can affect, from
       # its changed paths. Lint, Test and the Linux Python tests always run,
       # pushes to main run everything, and any failure runs everything. The
-      # job summary shows the decision; the `ci:full` label skips the gate.
+      # job summary and a notice show the decision. Labels force groups on:
+      # `ci:full` for all, `ci:windows`, `ci:docker`... for one. They're read
+      # live (a re-run reuses the original event and its labels), so add one
+      # and "Re-run all jobs".
       - name: Ask Claude which optional jobs this PR needs
         id: gate
-        if: >-
-          github.event_name == 'pull_request'
-          && !contains(github.event.pull_request.labels.*.name, 'ci:full')
+        if: github.event_name == 'pull_request'
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -256,6 +257,8 @@ jobs:
               --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID)] | length"
           done | awk '{n += $1} END {print n}')
           export OTHER_CI_RUNS
+          PR_LABELS=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' | paste -sd, -)
+          export PR_LABELS
           if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
             curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
