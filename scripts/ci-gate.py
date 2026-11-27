@@ -11,6 +11,10 @@ GitHub OIDC token to ANTHROPIC_IDENTITY_TOKEN_FILE and the SDK exchanges it
 (with ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID) for a
 short-lived API token, so no API key is stored in the repo.
 
+When no other CI run is in progress or queued (OTHER_CI_RUNS=0, counted by
+the workflow), it skips the call and runs everything: the gate exists to
+save runner slots, and an idle queue has slots to spare.
+
 Best-effort and fail-open: with no credentials (fork PRs), on any API
 error, a refusal or an unparseable answer, every group runs. Pushes to main
 never call this and run everything, so a wrong skip surfaces there.
@@ -129,6 +133,8 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str]:
     )
     if not (has_federation or os.environ.get("ANTHROPIC_API_KEY")):
         return run_all, "No Anthropic credentials (fork PR?): running everything."
+    if os.environ.get("OTHER_CI_RUNS") == "0":
+        return run_all, "No other CI runs in progress or queued: running everything."
     if not files:
         return run_all, "No changed files listed: running everything."
     if len(files) > MAX_FILES:
