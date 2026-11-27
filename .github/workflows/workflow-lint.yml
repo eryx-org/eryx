@@ -27,6 +27,11 @@ on:
       - 'dist-workspace.toml'
       - 'mise.toml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request supersedes its old run; main runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions: {}
 
 jobs:
