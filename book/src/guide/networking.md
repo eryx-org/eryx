@@ -100,6 +100,14 @@ whatever spelling the resolver accepts: `2130706433`, `0x7f.1` and `127.1` all
 match `127.0.0.1`, `::ffff:127.0.0.1` matches it too, and a zone
 (`fe80::1%lo`, `127.0.0.1%lo`) is ignored.
 
+A pattern can end in `:port` to match only connections to that port:
+`api.example.com:443`, `*.example.com:8443`, `*:443` or `[::1]:8080` (a bare
+IPv6 address such as `::1` has no port). Without one, a pattern matches every
+port. So `allowed_hosts=["api.example.com:443"]` reaches only port 443 of that
+host, an HTTP rule for `api.example.com:443` leaves its other ports alone,
+and a secret whose `allowed_hosts` is `["api.example.com:443"]` is never sent
+to another port. A pattern whose port isn't 1 to 65535 is refused.
+
 ### Allowing Specific Hosts (Whitelist)
 
 When you specify `allowed_hosts`, only those hosts can be accessed:

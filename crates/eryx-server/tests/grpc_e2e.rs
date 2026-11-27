@@ -4006,6 +4006,116 @@ async fn secret_scope_limits_substitution() {
     );
 }
 
+/// Host patterns can name a port: a host listed with one is reachable only
+/// on that port, a secret listed with one is substituted only there, and a
+/// pattern whose port isn't one is rejected up front.
+#[tokio::test]
+async fn host_patterns_can_name_a_port() {
+    use eryx_server::proto::eryx::v1::{NetworkConfig, SecretConfig};
+    use tokio::io::AsyncReadExt;
+
+    const REAL_SECRET: &str = "port-scoped-real-secret-7";
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+    let request = |code, allowed_hosts: Vec<String>, secret_hosts: Vec<String>| ExecuteRequest {
+        code,
+        secrets: vec![SecretConfig {
+            name: "TOKEN".to_string(),
+            value: REAL_SECRET.to_string(),
+            allowed_hosts: secret_hosts,
+            ..Default::default()
+        }],
+        network_config: Some(NetworkConfig {
+            allowed_hosts,
+            blocked_hosts: vec!["blocked.invalid".to_string()],
+            allowed_networks: vec!["127.0.0.0/8".to_string()],
+            allow_plaintext_secrets: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let err = execute_half_closed(
+        &mut client,
+        request("pass".to_string(), vec!["127.0.0.1:0".to_string()], vec![]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err}");
+
+    let (a, b) = (
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    );
+    let (port_a, port_b) = (
+        a.local_addr().unwrap().port(),
+        b.local_addr().unwrap().port(),
+    );
+    let accept = |listener: TcpListener| {
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            sock.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let (server_a, server_b) = (accept(a), accept(b));
+    let code = format!(
+        "import os, socket\n\
+         for port in ({port_a}, {port_b}):\n\
+         \x20   try:\n\
+         \x20       s = socket.create_connection(('127.0.0.1', port))\n\
+         \x20   except OSError:\n\
+         \x20       print(port, 'unreachable')\n\
+         \x20       continue\n\
+         \x20   try:\n\
+         \x20       s.sendall(f\"GET / HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nAuthorization: {{os.environ['TOKEN']}}\\r\\n\\r\\n\".encode())\n\
+         \x20       print(port, 'sent')\n\
+         \x20   except OSError:\n\
+         \x20       print(port, 'refused')\n\
+         \x20   s.close()\n\
+         try:\n\
+         \x20   socket.create_connection(('127.0.0.1', 1))\n\
+         except OSError:\n\
+         \x20   print(1, 'unreachable')"
+    );
+    let result = execute_half_closed(
+        &mut client,
+        request(
+            code,
+            vec![format!("127.0.0.1:{port_a}"), format!("127.0.0.1:{port_b}")],
+            vec![format!("127.0.0.1:{port_a}")],
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains(&format!("{port_a} sent")), "{stdout}");
+    assert!(stdout.contains(&format!("{port_b} refused")), "{stdout}");
+    assert!(stdout.contains("1 unreachable"), "{stdout}");
+
+    let timeout = Duration::from_secs(30);
+    let received_a = tokio::time::timeout(timeout, server_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let received_b = tokio::time::timeout(timeout, server_b)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        received_a.contains(&format!("Authorization: {REAL_SECRET}")),
+        "{received_a:?}"
+    );
+    assert_eq!(received_b, "", "{received_b:?}");
+}
+
 /// By default the server rejects a request that sets
 /// `allow_plaintext_secrets`, instead of running it with the field ignored.
 #[tokio::test]

@@ -127,7 +127,8 @@ pub struct NetConfig {
     allow_all_hosts: bool,
     /// Allowed host patterns (only checked when `allow_all_hosts` is false).
     ///
-    /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`,
+    /// and an optional `:port` (see [`NetConfig::allow_host`]).
     allowed_hosts: Vec<String>,
     /// Blocked host patterns (checked after allowed).
     ///
@@ -298,7 +299,11 @@ impl NetConfig {
 
     /// Add a host pattern to the allowed list.
     ///
-    /// Patterns support wildcards: `*.example.com`, `api.*.com`
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`. A pattern
+    /// may end in `:port` (`api.example.com:443`, `*:443`, `[::1]:8080`) to
+    /// match only connections to that port; without one it matches every
+    /// port. The same goes for every host pattern: blocked and internal
+    /// hosts, [`HttpRule`] hosts and a secret's hosts.
     #[must_use]
     pub fn allow_host(mut self, pattern: impl Into<String>) -> Self {
         self.allowed_hosts.push(pattern.into());
@@ -462,27 +467,33 @@ impl NetConfig {
         &self.http_rules
     }
 
-    /// Whether any HTTP rule matches `host`.
-    fn has_http_rules(&self, host: &str) -> bool {
-        let host = normalize_host(host);
+    /// Whether any HTTP rule matches `host` on `port`.
+    fn has_http_rules(&self, host: &str, port: u16) -> bool {
         self.http_rules
             .iter()
-            .any(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
+            .any(|r| host_matches_pattern(host, port, &r.host))
     }
 
     /// Check a request with `method` and request target `target` (as in the
     /// request line: a path, or an absolute URL) against the HTTP rules for
-    /// `host`. A host no rule matches allows any request.
+    /// `host` on `port` (the port the connection was made to). A host no
+    /// rule matches allows any request.
     ///
     /// # Errors
     ///
     /// Describes the refused request.
-    pub fn check_http_request(&self, host: &str, method: &str, target: &str) -> Result<(), String> {
+    pub fn check_http_request(
+        &self,
+        host: &str,
+        port: u16,
+        method: &str,
+        target: &str,
+    ) -> Result<(), String> {
         let host = normalize_host(host);
         let mut rules = self
             .http_rules
             .iter()
-            .filter(|r| host_matches_pattern(&host, &normalize_host(&r.host)))
+            .filter(|r| host_matches_pattern(&host, port, &r.host))
             .peekable();
         if rules.peek().is_none() {
             return Ok(());
@@ -537,10 +548,10 @@ impl NetConfig {
                 ));
             }
             for rule in &secret.http_rules {
-                if rule.host != "*" && !is_host_pattern(&normalize_host(&rule.host)) {
+                if !is_valid_host_pattern(&rule.host) {
                     return Err(format!(
                         "secret '{name}': HTTP rule host {:?} names no host once its trailing \
-                         dot is ignored",
+                         dot is ignored, or has an invalid port",
                         rule.host
                     ));
                 }
@@ -585,10 +596,10 @@ impl NetConfig {
                 .map(|rule| ("an HTTP rule's host", &rule.host)),
         );
         for (field, pattern) in patterns {
-            if pattern != "*" && !is_host_pattern(&normalize_host(pattern)) {
+            if !is_valid_host_pattern(pattern) {
                 return Err(format!(
                     "{field} pattern {pattern:?} names no host once its trailing dot is \
-                     ignored"
+                     ignored, or has an invalid port"
                 ));
             }
         }
@@ -685,7 +696,8 @@ impl NetConfig {
 
     /// Allowed host patterns (only checked when `allow_all_hosts` is false).
     ///
-    /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`, `exact.host.com`,
+    /// and an optional `:port` (see [`NetConfig::allow_host`]).
     #[must_use]
     pub fn allowed_hosts(&self) -> &[String] {
         &self.allowed_hosts
@@ -779,9 +791,9 @@ impl NetConfig {
 ///             .with_methods(["GET", "POST"])
 ///             .with_paths(["/repos/org/repo"]),
 ///     );
-/// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo/issues?page=2").is_ok());
-/// assert!(config.check_http_request("api.github.com", "DELETE", "/repos/org/repo").is_err());
-/// assert!(config.check_http_request("api.github.com", "GET", "/repos/org/repo-evil").is_err());
+/// assert!(config.check_http_request("api.github.com", 443, "GET", "/repos/org/repo/issues?page=2").is_ok());
+/// assert!(config.check_http_request("api.github.com", 443, "DELETE", "/repos/org/repo").is_err());
+/// assert!(config.check_http_request("api.github.com", 443, "GET", "/repos/org/repo-evil").is_err());
 ///
 /// // Git fetches, but not pushes.
 /// let git = NetConfig::default().allow_host("git.example.com").allow_http(
@@ -790,7 +802,7 @@ impl NetConfig {
 ///         .with_paths(["/org/repo.git/info/refs"])
 ///         .with_queries(["service=git-upload-pack"]),
 /// );
-/// let check = |target| git.check_http_request("git.example.com", "GET", target);
+/// let check = |target| git.check_http_request("git.example.com", 443, "GET", target);
 /// assert!(check("/org/repo.git/info/refs?service=git-upload-pack").is_ok());
 /// assert!(check("/org/repo.git/info/refs?service=git-receive-pack").is_err());
 /// ```
@@ -958,23 +970,23 @@ impl PartialEq for QueryPatterns {
 
 impl Eq for QueryPatterns {}
 
-/// Whether a request to `host` matches one of `rules`, host included: the
+/// Whether a request to `host` on `port` matches one of `rules`, host included: the
 /// requests a secret's [HTTP rules](crate::SecretConfig::with_http_rules)
 /// allow it in. No rules matches any request.
 pub(crate) fn request_matches_rules(
     rules: &[HttpRule],
     host: &str,
+    port: u16,
     method: &str,
     target: &str,
 ) -> bool {
     if rules.is_empty() {
         return true;
     }
-    let host = normalize_host(host);
     request_target(target).is_some_and(|target| {
-        rules.iter().any(|r| {
-            host_matches_pattern(&host, &normalize_host(&r.host)) && r.allows(method, &target)
-        })
+        rules
+            .iter()
+            .any(|r| host_matches_pattern(host, port, &r.host) && r.allows(method, &target))
     })
 }
 
@@ -1459,8 +1471,8 @@ pub struct ConnectionManager {
     next_handle: u32,
     /// Request framing per connection handle, created on first write.
     http_states: HashMap<u32, RequestFramer>,
-    /// Track which host each connection is connected to
-    connection_hosts: HashMap<u32, String>,
+    /// The host and port each connection was made to.
+    connection_hosts: HashMap<u32, (String, u16)>,
     /// Response masking per connection handle, created on first read.
     read_states: HashMap<u32, ResponseMasker>,
 }
@@ -1609,13 +1621,13 @@ impl ConnectionManager {
     /// The request framer of `handle`, created on its first write or read.
     fn framer(&mut self, handle: u32) -> Result<&mut RequestFramer, TcpError> {
         if !self.http_states.contains_key(&handle) {
-            let host = self
+            let (host, port) = self
                 .connection_hosts
                 .get(&handle)
                 .ok_or(TcpError::InvalidHandle)?;
-            let framer = self
-                .policy
-                .request_framer(host, self.tls_connections.contains_key(&handle));
+            let framer =
+                self.policy
+                    .request_framer(host, *port, self.tls_connections.contains_key(&handle));
             self.http_states.insert(handle, framer);
         }
         self.http_states
@@ -1655,7 +1667,7 @@ impl ConnectionManager {
     ) -> Result<u32, TcpError> {
         // Refuse a disallowed host before the connection limit, as the
         // policy's own check in `connect` would.
-        self.policy.check_host(host)?;
+        self.policy.check_host(host, port)?;
         // A spent byte limit takes no new connections, whose lookups and
         // handshakes it wouldn't count, as the proxy refuses them.
         self.check_bytes_left()?;
@@ -1674,7 +1686,8 @@ impl ConnectionManager {
         if let Some(permit) = permit {
             self.permits.insert(handle, permit);
         }
-        self.connection_hosts.insert(handle, host.to_string());
+        self.connection_hosts
+            .insert(handle, (host.to_string(), port));
 
         tracing::debug!(handle, host, port, "TCP connection established");
         Ok(handle)
@@ -2347,17 +2360,29 @@ fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
     None
 }
 
-/// Check if a hostname matches a pattern with wildcards.
+/// Check if a connection to `host` on `port` matches a pattern with
+/// wildcards.
 ///
 /// Patterns:
 /// - `*` matches everything
 /// - `*.example.com` matches `api.example.com` but not `example.com`
 /// - `api.*.com` matches `api.foo.com`
 /// - `exact.host.com` matches only that exact host
+/// - any of these followed by `:port` (`example.com:443`, `*:443`,
+///   `[::1]:8080`) matches only connections to that port; without one, any
+///   port matches. A bare IPv6 address (`::1`) has no port.
 ///
-/// Both sides are compared as [`normalize_host`] leaves them: ignoring case,
-/// one trailing dot and IPv6 brackets.
-fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+/// Both host sides are compared as [`normalize_host`] leaves them: ignoring
+/// case, one trailing dot and IPv6 brackets. A pattern whose port isn't one
+/// (`example.com:x`, `example.com:0`) matches nothing;
+/// [`NetConfig::validate`] refuses it.
+fn host_matches_pattern(host: &str, port: u16, pattern: &str) -> bool {
+    let Some((pattern, pattern_port)) = split_pattern_port(pattern) else {
+        return false;
+    };
+    if pattern_port.is_some_and(|p| p != port) {
+        return false;
+    }
     if pattern == "*" {
         return true;
     }
@@ -2425,6 +2450,40 @@ async fn write_counted<S: tokio::io::AsyncWrite + Unpin>(
 /// empty, and not `*` (which is only a pattern as written).
 fn is_host_pattern(normalized: &str) -> bool {
     !normalized.is_empty() && normalized != "*"
+}
+
+/// Whether `pattern` is one [`host_matches_pattern`] can match: `*`, or a
+/// pattern that names some hosts once normalised, either one optionally
+/// followed by a valid `:port`.
+fn is_valid_host_pattern(pattern: &str) -> bool {
+    split_pattern_port(pattern)
+        .is_some_and(|(host, _)| host == "*" || is_host_pattern(&normalize_host(host)))
+}
+
+/// `pattern` split into its host pattern and the port it names, if any:
+/// `example.com:443` is `("example.com", Some(443))`, `[::1]:443` is
+/// `("[::1]", Some(443))`, and `example.com`, `[::1]` and a bare IPv6
+/// address (`::1`) have no port. `None` if what follows the `:` isn't a
+/// port from 1 to 65535.
+fn split_pattern_port(pattern: &str) -> Option<(&str, Option<u16>)> {
+    let (host, port) = if pattern.starts_with('[') {
+        match pattern.rsplit_once("]:") {
+            Some((v6, port)) => (&pattern[..=v6.len()], port),
+            None => return Some((pattern, None)),
+        }
+    } else {
+        match pattern.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, port),
+            _ => return Some((pattern, None)),
+        }
+    };
+    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    port.parse::<u16>()
+        .ok()
+        .filter(|&p| p != 0)
+        .map(|p| (host, Some(p)))
 }
 
 #[cfg(test)]
@@ -2558,39 +2617,203 @@ mod tests {
     #[test]
     fn test_pattern_matching() {
         // Exact match
-        assert!(host_matches_pattern("example.com", "example.com"));
-        assert!(host_matches_pattern("Example.COM", "example.com"));
-        assert!(!host_matches_pattern("example.org", "example.com"));
+        assert!(host_matches_pattern("example.com", 443, "example.com"));
+        assert!(host_matches_pattern("Example.COM", 443, "example.com"));
+        assert!(!host_matches_pattern("example.org", 443, "example.com"));
 
         // Wildcard at start
-        assert!(host_matches_pattern("api.example.com", "*.example.com"));
-        assert!(host_matches_pattern("foo.bar.example.com", "*.example.com"));
-        assert!(!host_matches_pattern("example.com", "*.example.com"));
+        assert!(host_matches_pattern(
+            "api.example.com",
+            443,
+            "*.example.com"
+        ));
+        assert!(host_matches_pattern(
+            "foo.bar.example.com",
+            443,
+            "*.example.com"
+        ));
+        assert!(!host_matches_pattern("example.com", 443, "*.example.com"));
 
         // Wildcard in middle
-        assert!(host_matches_pattern("api.foo.com", "api.*.com"));
-        assert!(!host_matches_pattern("web.foo.com", "api.*.com"));
+        assert!(host_matches_pattern("api.foo.com", 443, "api.*.com"));
+        assert!(!host_matches_pattern("web.foo.com", 443, "api.*.com"));
 
         // Wildcard at end
-        assert!(host_matches_pattern("10.0.0.1", "10.*"));
-        assert!(host_matches_pattern("10.255.255.255", "10.*"));
-        assert!(!host_matches_pattern("11.0.0.1", "10.*"));
+        assert!(host_matches_pattern("10.0.0.1", 443, "10.*"));
+        assert!(host_matches_pattern("10.255.255.255", 443, "10.*"));
+        assert!(!host_matches_pattern("11.0.0.1", 443, "10.*"));
 
         // Match all
-        assert!(host_matches_pattern("anything.com", "*"));
+        assert!(host_matches_pattern("anything.com", 443, "*"));
 
         // localhost patterns
-        assert!(host_matches_pattern("localhost", "localhost"));
-        assert!(host_matches_pattern("foo.localhost", "*.localhost"));
-        assert!(host_matches_pattern("127.0.0.1", "127.*"));
+        assert!(host_matches_pattern("localhost", 443, "localhost"));
+        assert!(host_matches_pattern("foo.localhost", 443, "*.localhost"));
+        assert!(host_matches_pattern("127.0.0.1", 443, "127.*"));
 
         // The trailing literal anchors at the end, even when it also occurs earlier
         assert!(host_matches_pattern(
             "a.example.com.example.com",
+            443,
             "*.example.com"
         ));
-        assert!(host_matches_pattern("api.com.foo.com", "api.*.com"));
-        assert!(!host_matches_pattern("api.com", "api.*.com"));
+        assert!(host_matches_pattern("api.com.foo.com", 443, "api.*.com"));
+        assert!(!host_matches_pattern("api.com", 443, "api.*.com"));
+    }
+
+    #[test]
+    fn host_patterns_can_name_a_port() {
+        // A port limits a pattern to connections to that port.
+        assert!(host_matches_pattern("example.com", 443, "example.com:443"));
+        assert!(!host_matches_pattern(
+            "example.com",
+            8443,
+            "example.com:443"
+        ));
+        assert!(host_matches_pattern(
+            "Example.COM.",
+            443,
+            "example.com.:443"
+        ));
+        assert!(host_matches_pattern(
+            "api.example.com",
+            443,
+            "*.example.com:443"
+        ));
+        assert!(!host_matches_pattern(
+            "example.com",
+            443,
+            "*.example.com:443"
+        ));
+        assert!(host_matches_pattern("anything.com", 443, "*:443"));
+        assert!(!host_matches_pattern("anything.com", 80, "*:443"));
+        assert!(host_matches_pattern("::1", 8080, "[::1]:8080"));
+        assert!(!host_matches_pattern("::1", 80, "[::1]:8080"));
+        assert!(host_matches_pattern("10.0.0.1", 22, "10.*:22"));
+        // Without one, every port matches; a bare IPv6 address has none.
+        assert!(host_matches_pattern("example.com", 8443, "example.com"));
+        assert!(host_matches_pattern("::1", 8443, "::1"));
+        assert!(host_matches_pattern("::1", 8443, "[::1]"));
+        // Something that isn't a port matches nothing.
+        for pattern in [
+            "example.com:",
+            "example.com:0",
+            "example.com:x",
+            "example.com:65536",
+        ] {
+            assert!(
+                !host_matches_pattern("example.com", 443, pattern),
+                "{pattern:?}"
+            );
+            assert!(
+                !host_matches_pattern("example.com", 0, pattern),
+                "{pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_patterns_with_invalid_ports_are_refused() {
+        for pattern in [
+            "example.com:",
+            "example.com:0",
+            "example.com:x",
+            "[::1]:",
+            ":443",
+        ] {
+            let err = NetConfig::default()
+                .allow_host(pattern)
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("invalid port"), "{pattern:?}: {err}");
+            let rule = NetConfig::default().allow_http(HttpRule::new(pattern));
+            assert!(rule.validate().is_err(), "{pattern:?}");
+        }
+        for pattern in [
+            "example.com:443",
+            "*:443",
+            "[::1]:443",
+            "*.example.com:8443",
+            "::1",
+        ] {
+            assert!(
+                NetConfig::default().allow_host(pattern).validate().is_ok(),
+                "{pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_and_blocked_hosts_can_name_a_port() {
+        let config = NetConfig::default()
+            .allow_host("api.example.com:443")
+            .allow_host("*.internal.example:8443")
+            .allow_host("ssh.example.com")
+            .block_host("ssh.example.com:22");
+        let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
+        let check = |host, port| manager.policy.check_host(host, port);
+
+        assert!(check("api.example.com", 443).is_ok());
+        assert!(check("api.example.com", 8443).is_err());
+        assert!(check("a.internal.example", 8443).is_ok());
+        assert!(check("a.internal.example", 443).is_err());
+        assert!(check("ssh.example.com", 443).is_ok());
+        assert!(check("ssh.example.com", 22).is_err());
+    }
+
+    #[test]
+    fn http_rules_can_name_a_port() {
+        // Only port 443 of the host has rules; its other ports don't.
+        let config = NetConfig::default()
+            .allow_host("api.example.com")
+            .allow_http(
+                HttpRule::new("api.example.com:443")
+                    .with_methods(["GET"])
+                    .with_paths(["/v1"]),
+            );
+        let check = |port, method, target| {
+            config.check_http_request("api.example.com", port, method, target)
+        };
+        assert!(check(443, "GET", "/v1/x").is_ok());
+        assert!(check(443, "DELETE", "/v1/x").is_err());
+        assert!(check(443, "GET", "/v2").is_err());
+        assert!(check(8443, "DELETE", "/v2").is_ok());
+    }
+
+    #[test]
+    fn secrets_scoped_to_a_port_are_only_sent_there() {
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            "KEY".to_string(),
+            crate::secrets::SecretConfig {
+                real_value: "top-secret".to_string(),
+                placeholder: "PH_AUTH".to_string(),
+                allowed_hosts: vec!["api.example.com:443".to_string()],
+                header: None,
+                http_rules: vec![HttpRule::new("api.example.com:443").with_paths(["/v1"])],
+            },
+        );
+        let manager = ConnectionManager::new(NetConfig::permissive(), secrets).unwrap();
+        let send = |port, target| {
+            manager.policy.substitute_secrets_in_text(
+                "PH_AUTH",
+                "Authorization",
+                "api.example.com",
+                port,
+                ("GET", target),
+            )
+        };
+
+        assert_eq!(send(443, "/v1/x").unwrap(), "top-secret");
+        assert!(send(8443, "/v1/x").is_err());
+        assert!(send(443, "/v2").is_err());
+        assert_eq!(manager.policy.read_masks("api.example.com", 443).len(), 1);
+        assert!(
+            manager
+                .policy
+                .read_masks("api.example.com", 8443)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2599,12 +2822,12 @@ mod tests {
         let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         // Default is allow_all_hosts=false with empty allowed_hosts, so nothing is permitted.
-        assert!(manager.policy.check_host("localhost").is_err());
-        assert!(manager.policy.check_host("127.0.0.1").is_err());
-        assert!(manager.policy.check_host("192.168.1.1").is_err());
-        assert!(manager.policy.check_host("10.0.0.1").is_err());
-        assert!(manager.policy.check_host("google.com").is_err());
-        assert!(manager.policy.check_host("api.example.com").is_err());
+        assert!(manager.policy.check_host("localhost", 443).is_err());
+        assert!(manager.policy.check_host("127.0.0.1", 443).is_err());
+        assert!(manager.policy.check_host("192.168.1.1", 443).is_err());
+        assert!(manager.policy.check_host("10.0.0.1", 443).is_err());
+        assert!(manager.policy.check_host("google.com", 443).is_err());
+        assert!(manager.policy.check_host("api.example.com", 443).is_err());
     }
 
     #[test]
@@ -2614,9 +2837,9 @@ mod tests {
             .allow_host("api.github.com");
         let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
-        assert!(manager.policy.check_host("api.example.com").is_ok());
-        assert!(manager.policy.check_host("api.github.com").is_ok());
-        assert!(manager.policy.check_host("google.com").is_err());
+        assert!(manager.policy.check_host("api.example.com", 443).is_ok());
+        assert!(manager.policy.check_host("api.github.com", 443).is_ok());
+        assert!(manager.policy.check_host("google.com", 443).is_err());
     }
 
     #[test]
@@ -2628,11 +2851,11 @@ mod tests {
         let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
         // allow_all_hosts=true permits all non-blocked hosts.
-        assert!(manager.policy.check_host("google.com").is_ok());
-        assert!(manager.policy.check_host("api.example.com").is_ok());
+        assert!(manager.policy.check_host("google.com", 443).is_ok());
+        assert!(manager.policy.check_host("api.example.com", 443).is_ok());
         // Blocked hosts are still blocked.
-        assert!(manager.policy.check_host("localhost").is_err());
-        assert!(manager.policy.check_host("127.0.0.1").is_err());
+        assert!(manager.policy.check_host("localhost", 443).is_err());
+        assert!(manager.policy.check_host("127.0.0.1", 443).is_err());
     }
 
     #[test]
@@ -2640,9 +2863,9 @@ mod tests {
         let config = NetConfig::permissive();
         let manager = ConnectionManager::new(config, HashMap::new()).unwrap();
 
-        assert!(manager.policy.check_host("localhost").is_ok());
-        assert!(manager.policy.check_host("127.0.0.1").is_ok());
-        assert!(manager.policy.check_host("google.com").is_ok());
+        assert!(manager.policy.check_host("localhost", 443).is_ok());
+        assert!(manager.policy.check_host("127.0.0.1", 443).is_ok());
+        assert!(manager.policy.check_host("google.com", 443).is_ok());
     }
 
     // HTTP parsing helper tests
@@ -2752,7 +2975,7 @@ mod tests {
             let handle = manager.alloc_handle();
             manager
                 .connection_hosts
-                .insert(handle, "api.example.com".to_string());
+                .insert(handle, ("api.example.com".to_string(), 443));
             manager.process_write_data(handle, request.as_bytes())
         };
         let request = "GET / HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n";
@@ -2790,6 +3013,7 @@ mod tests {
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "api.example.com",
+            443,
             ANY_REQUEST,
         );
         assert!(result.is_ok());
@@ -2800,6 +3024,7 @@ mod tests {
             "Bearer ERYX_SECRET_PLACEHOLDER_abc123",
             "Authorization",
             "evil.com",
+            443,
             ANY_REQUEST,
         );
         assert!(result.is_err());
@@ -2827,6 +3052,7 @@ mod tests {
                     "PH_HEADER",
                     "x-api-key",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .unwrap(),
@@ -2839,6 +3065,7 @@ mod tests {
                     "Bearer PH_HEADER",
                     "Authorization",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -2879,7 +3106,7 @@ mod tests {
                 HashMap::from([("TOKEN".into(), secret.clone())]),
             )
             .unwrap();
-            m.connection_hosts.insert(1, host.into());
+            m.connection_hosts.insert(1, (host.into(), 443));
             m.process_write_data(1, request.as_bytes())
                 .map(|out| String::from_utf8(out).unwrap())
         };
@@ -2979,6 +3206,7 @@ mod tests {
                     &basic("git:PH"),
                     "authorization",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .unwrap(),
@@ -2990,6 +3218,7 @@ mod tests {
                     &basic("git:PH"),
                     "Authorization",
                     "evil.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3002,6 +3231,7 @@ mod tests {
                     &format!("Basic {encoded}"),
                     "X-Auth",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .unwrap(),
@@ -3014,6 +3244,7 @@ mod tests {
                     "basic Z2l0OnB3",
                     "Authorization",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .unwrap(),
@@ -3041,6 +3272,7 @@ mod tests {
                     &basic("git:PH"),
                     "Authorization",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3074,6 +3306,7 @@ mod tests {
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
                     "any-host.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3101,6 +3334,7 @@ mod tests {
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
                     "api.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .unwrap(),
@@ -3113,6 +3347,7 @@ mod tests {
                     "Bearer PLACEHOLDER_XYZ",
                     "Authorization",
                     "other.example.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3145,25 +3380,43 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "evil.com", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_AUTH",
+                    "Authorization",
+                    "evil.com",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "127.0.0.1", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_AUTH",
+                    "Authorization",
+                    "127.0.0.1",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "localhost", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_AUTH",
+                    "Authorization",
+                    "localhost",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_AUTH", "Authorization", "", ANY_REQUEST)
+                .substitute_secrets_in_text("PH_AUTH", "Authorization", "", 443, ANY_REQUEST)
                 .is_err()
         );
     }
@@ -3204,6 +3457,7 @@ mod tests {
                     "PH_OPENAI",
                     "Authorization",
                     "api.openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_ok()
@@ -3216,6 +3470,7 @@ mod tests {
                     "PH_OPENAI",
                     "Authorization",
                     "api.github.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3228,6 +3483,7 @@ mod tests {
                     "PH_GITHUB",
                     "Authorization",
                     "api.github.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_ok()
@@ -3240,6 +3496,7 @@ mod tests {
                     "PH_GITHUB",
                     "Authorization",
                     "api.openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3271,6 +3528,7 @@ mod tests {
                     "PH_GLOB",
                     "Authorization",
                     "api.openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_ok()
@@ -3279,13 +3537,25 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GLOB", "Authorization", "openai.com", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_GLOB",
+                    "Authorization",
+                    "openai.com",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_GLOB", "Authorization", "evil.com", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_GLOB",
+                    "Authorization",
+                    "evil.com",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
     }
@@ -3316,6 +3586,7 @@ mod tests {
                     "PH_DECEPTIVE",
                     "Authorization",
                     "api.openai.com.evil.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3327,6 +3598,7 @@ mod tests {
                     "PH_DECEPTIVE",
                     "Authorization",
                     "api-openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3338,6 +3610,7 @@ mod tests {
                     "PH_DECEPTIVE",
                     "Authorization",
                     "evil-api.openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3349,6 +3622,7 @@ mod tests {
                     "PH_DECEPTIVE",
                     "Authorization",
                     "xapi.openai.com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -3377,13 +3651,19 @@ mod tests {
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_IP", "Authorization", "104.18.7.192", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH_IP",
+                    "Authorization",
+                    "104.18.7.192",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_err()
         );
         assert!(
             manager
                 .policy
-                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4", ANY_REQUEST)
+                .substitute_secrets_in_text("PH_IP", "Authorization", "1.2.3.4", 443, ANY_REQUEST)
                 .is_err()
         );
     }
@@ -3414,6 +3694,7 @@ mod tests {
                     "PH_CASE",
                     "Authorization",
                     "API.OPENAI.COM",
+                    443,
                     ANY_REQUEST
                 )
                 .is_ok()
@@ -3425,6 +3706,7 @@ mod tests {
                     "PH_CASE",
                     "Authorization",
                     "Api.OpenAI.Com",
+                    443,
                     ANY_REQUEST
                 )
                 .is_ok()
@@ -3454,6 +3736,7 @@ mod tests {
             "Bearer some-other-token",
             "Authorization",
             "evil.com",
+            443,
             ANY_REQUEST,
         );
         assert!(result.is_ok());
@@ -3472,10 +3755,10 @@ mod tests {
         let tls_handle = 2_u32;
         manager
             .connection_hosts
-            .insert(tcp_handle, "example.com".to_string());
+            .insert(tcp_handle, ("example.com".to_string(), 443));
         manager.http_states.insert(
             tcp_handle,
-            manager.policy.request_framer("example.com", false),
+            manager.policy.request_framer("example.com", 443, false),
         );
 
         // Simulate what tls_upgrade now does: carry over host, clean up old state
@@ -3487,7 +3770,7 @@ mod tests {
         // New TLS handle should have the host mapping
         assert_eq!(
             manager.connection_hosts.get(&tls_handle),
-            Some(&"example.com".to_string())
+            Some(&("example.com".to_string(), 443))
         );
         // Old TCP handle should be cleaned up
         assert!(!manager.connection_hosts.contains_key(&tcp_handle));
@@ -3517,7 +3800,7 @@ mod tests {
         let handle = 1_u32;
         manager
             .connection_hosts
-            .insert(handle, "api.example.com".to_string());
+            .insert(handle, ("api.example.com".to_string(), 443));
 
         // Create a large header block with many headers and a secret at the end
         let mut large_headers = String::from("GET /api HTTP/1.1\r\n");
@@ -3541,9 +3824,11 @@ mod tests {
         );
 
         // Substitute headers
-        let result = manager
-            .policy
-            .substitute_http_headers(large_headers.as_bytes(), &manager.connection_hosts[&handle]);
+        let result = manager.policy.substitute_http_headers(
+            large_headers.as_bytes(),
+            &manager.connection_hosts[&handle].0,
+            443,
+        );
         assert!(result.is_ok(), "Large header substitution should succeed");
 
         let substituted = String::from_utf8(result.unwrap()).unwrap();
@@ -3584,7 +3869,7 @@ mod tests {
         let tcp_handle = 1_u32;
         manager
             .connection_hosts
-            .insert(tcp_handle, "evil.com".to_string());
+            .insert(tcp_handle, ("evil.com".to_string(), 443));
 
         // Simulate: TLS upgrade with SNI="api.openai.com" (the allowed host)
         // In real code, tls_upgrade would copy the host from tcp to tls handle.
@@ -3597,9 +3882,11 @@ mod tests {
 
         // Now try to substitute secrets - should fail because connection_hosts has "evil.com"
         let headers = b"GET /api HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer PLACEHOLDER_SNI\r\n\r\n";
-        let result = manager
-            .policy
-            .substitute_http_headers(headers, &manager.connection_hosts[&tls_handle]);
+        let result = manager.policy.substitute_http_headers(
+            headers,
+            &manager.connection_hosts[&tls_handle].0,
+            443,
+        );
 
         assert!(
             result.is_err(),
@@ -3629,7 +3916,7 @@ mod tests {
         let handle = 1_u32;
         manager
             .connection_hosts
-            .insert(handle, "evil.com".to_string());
+            .insert(handle, ("evil.com".to_string(), 443));
 
         // Create large headers with the secret
         let mut large_headers = String::from("POST /steal HTTP/1.1\r\n");
@@ -3646,9 +3933,11 @@ mod tests {
         large_headers.push_str("\r\n");
 
         // Should fail because host is not authorized for this secret
-        let result = manager
-            .policy
-            .substitute_http_headers(large_headers.as_bytes(), &manager.connection_hosts[&handle]);
+        let result = manager.policy.substitute_http_headers(
+            large_headers.as_bytes(),
+            &manager.connection_hosts[&handle].0,
+            443,
+        );
         assert!(
             result.is_err(),
             "Secret substitution should fail for unauthorized host even with large headers"
@@ -3677,11 +3966,11 @@ mod tests {
         let h2 = manager.alloc_handle();
         manager
             .connection_hosts
-            .insert(h1, "a.example.com".to_string());
+            .insert(h1, ("a.example.com".to_string(), 443));
         manager
             .connection_hosts
-            .insert(h2, "b.example.com".to_string());
-        let framer = |host| manager.policy.request_framer(host, false);
+            .insert(h2, ("b.example.com".to_string(), 443));
+        let framer = |host| manager.policy.request_framer(host, 443, false);
         let (f1, f2) = (framer("a.example.com"), framer("b.example.com"));
         manager.http_states.insert(h1, f1);
         manager.http_states.insert(h2, f2);
@@ -3954,7 +4243,7 @@ mod tests {
         .unwrap();
         manager
             .connection_hosts
-            .insert(1, "api.example.com".to_string());
+            .insert(1, ("api.example.com".to_string(), 443));
         manager
     }
 
@@ -4162,7 +4451,7 @@ mod tests {
         }
 
         let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
-        m.connection_hosts.insert(2, "www.github.com".into());
+        m.connection_hosts.insert(2, ("www.github.com".into(), 443));
         let upgrade = b"GET /ok HTTP/1.1\r\nHost: www.github.com\r\nUpgrade: websocket\r\n\r\n";
         assert!(m.process_write_data(2, upgrade).is_ok());
         assert!(m.process_write_data(2, b"\x81\x05hello").is_err());
@@ -4356,24 +4645,33 @@ mod tests {
             "evil.example",
             "evil.example.",
         ] {
-            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+            assert!(
+                m.policy.check_host(host, 443).is_err(),
+                "{host} got through"
+            );
         }
-        assert!(m.policy.check_host("example.com.").is_ok());
+        assert!(m.policy.check_host("example.com.", 443).is_ok());
 
         let config = NetConfig::default()
             .allow_host("api.example.com")
             .allow_host("*.github.com");
         let m = ConnectionManager::new(config, HashMap::new()).unwrap();
         for host in ["api.example.com.", "API.github.com."] {
-            assert!(m.policy.check_host(host).is_ok(), "{host} refused");
+            assert!(m.policy.check_host(host, 443).is_ok(), "{host} refused");
         }
-        assert!(m.policy.check_host("example.com.").is_err());
+        assert!(m.policy.check_host("example.com.", 443).is_err());
 
         // Secrets go to their allowed hosts with or without the dot.
         let m = framing_manager();
         assert!(
             m.policy
-                .substitute_secrets_in_text("PH", "authorization", "api.example.com.", ANY_REQUEST)
+                .substitute_secrets_in_text(
+                    "PH",
+                    "authorization",
+                    "api.example.com.",
+                    443,
+                    ANY_REQUEST
+                )
                 .is_ok()
         );
         assert!(
@@ -4382,6 +4680,7 @@ mod tests {
                     "PH",
                     "authorization",
                     "other.example.com.",
+                    443,
                     ANY_REQUEST
                 )
                 .is_err()
@@ -4433,7 +4732,10 @@ mod tests {
             "fe80::1%25eth0",
             "127.0.0.1%lo",
         ] {
-            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+            assert!(
+                m.policy.check_host(host, 443).is_err(),
+                "{host} got through"
+            );
         }
         for host in [
             "127.0.0.2",
@@ -4443,7 +4745,7 @@ mod tests {
             "1.2.3.4.5",
             "08.1.2.3",
         ] {
-            assert!(m.policy.check_host(host).is_ok(), "{host} refused");
+            assert!(m.policy.check_host(host, 443).is_ok(), "{host} refused");
         }
         for (host, ip) in [
             ("2130706433", "127.0.0.1"),
@@ -4482,7 +4784,10 @@ mod tests {
     #[test]
     fn degenerate_host_patterns_name_no_host() {
         for pattern in ["", ".", "*.", "[]", "[*.]"] {
-            assert!(!host_matches_pattern("example.com", pattern), "{pattern:?}");
+            assert!(
+                !host_matches_pattern("example.com", 443, pattern),
+                "{pattern:?}"
+            );
             for config in [
                 NetConfig::default().allow_host(pattern),
                 NetConfig::default().block_host(pattern),
@@ -4492,7 +4797,7 @@ mod tests {
                 assert!(config.validate().is_err(), "{pattern:?}");
             }
         }
-        assert!(host_matches_pattern("example.com", "*"));
+        assert!(host_matches_pattern("example.com", 443, "*"));
         assert!(NetConfig::default().allow_host("*").validate().is_ok());
     }
 
@@ -4511,13 +4816,16 @@ mod tests {
             "api.x.com",
             "api.x.com.",
         ] {
-            assert!(m.policy.check_host(host).is_err(), "{host} got through");
+            assert!(
+                m.policy.check_host(host, 443).is_err(),
+                "{host} got through"
+            );
         }
-        assert!(m.policy.check_host("internal.corp").is_ok());
+        assert!(m.policy.check_host("internal.corp", 443).is_ok());
 
         assert!(same_host("::1", "[::1]"));
-        assert!(host_matches_pattern("[::1]", "::1"));
-        assert!(host_matches_pattern("::1", "[::1]"));
+        assert!(host_matches_pattern("[::1]", 443, "::1"));
+        assert!(host_matches_pattern("::1", 443, "[::1]"));
 
         let config = NetConfig::default()
             .allow_host("svc.internal")
@@ -4655,7 +4963,8 @@ mod tests {
     #[test]
     fn http_rules_match_methods_and_paths() {
         let config = github_rules();
-        let check = |method, target| config.check_http_request("api.github.com", method, target);
+        let check =
+            |method, target| config.check_http_request("api.github.com", 443, method, target);
         for target in [
             "/repos/org/repo",
             "/repos/org/repo/",
@@ -4709,12 +5018,12 @@ mod tests {
         // Other hosts are unaffected; host names are normalized.
         assert!(
             config
-                .check_http_request("example.com", "DELETE", "/x")
+                .check_http_request("example.com", 443, "DELETE", "/x")
                 .is_ok()
         );
         assert!(
             config
-                .check_http_request("API.GitHub.com.", "DELETE", "/x")
+                .check_http_request("API.GitHub.com.", 443, "DELETE", "/x")
                 .is_err()
         );
     }
@@ -4726,7 +5035,7 @@ mod tests {
         let check = |rule: HttpRule, host, method, target| {
             NetConfig::permissive()
                 .allow_http(rule)
-                .check_http_request(host, method, target)
+                .check_http_request(host, 443, method, target)
                 .is_ok()
         };
         let h = "api.example.com";
@@ -4774,8 +5083,8 @@ mod tests {
     fn http_rules_see_every_request() {
         let new = || {
             let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
-            m.connection_hosts.insert(1, "api.github.com".into());
-            m.connection_hosts.insert(2, "www.github.com".into());
+            m.connection_hosts.insert(1, ("api.github.com".into(), 443));
+            m.connection_hosts.insert(2, ("www.github.com".into(), 443));
             m
         };
         for writes in [
@@ -4853,7 +5162,8 @@ mod tests {
         let config = NetConfig::permissive()
             .allow_http(HttpRule::new("dav.example.com").with_methods(["PROPFIND"]));
         let mut m = ConnectionManager::new(config, HashMap::new()).unwrap();
-        m.connection_hosts.insert(1, "dav.example.com".into());
+        m.connection_hosts
+            .insert(1, ("dav.example.com".into(), 443));
         let propfind = b"PROPFIND /files HTTP/1.1\r\nHost: dav.example.com\r\n\r\n";
         assert_eq!(m.process_write_data(1, propfind).unwrap(), propfind);
         assert!(
@@ -4874,7 +5184,7 @@ mod tests {
         );
         let check = |target| {
             config
-                .check_http_request("git.example.com", "GET", target)
+                .check_http_request("git.example.com", 443, "GET", target)
                 .is_ok()
         };
         assert!(check("/org/repo.git/info/refs?service=git-upload-pack"));
@@ -4883,7 +5193,8 @@ mod tests {
         ));
         // Through a connection: a refused push never reaches the server.
         let mut m = ConnectionManager::new(config.clone(), HashMap::new()).unwrap();
-        m.connection_hosts.insert(1, "git.example.com".into());
+        m.connection_hosts
+            .insert(1, ("git.example.com".into(), 443));
         let fetch = b"GET /org/repo.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: git.example.com\r\n\r\n";
         assert_eq!(frame(&mut m, &[fetch]), String::from_utf8_lossy(fetch));
         m.http_states.clear();
@@ -4912,7 +5223,7 @@ mod tests {
         let check = |queries: &[&str], target| {
             NetConfig::permissive()
                 .allow_http(HttpRule::new("h").with_queries(queries.iter().copied()))
-                .check_http_request("h", "GET", target)
+                .check_http_request("h", 443, "GET", target)
                 .is_ok()
         };
         // No queries means any query, as before queries could be set.
@@ -4942,7 +5253,9 @@ mod tests {
             assert!(err.contains("query pattern"), "{q}: {err}");
             // Nor does it match anything if checked anyway.
             assert!(
-                config(q).check_http_request("h", "GET", "/?a").is_err(),
+                config(q)
+                    .check_http_request("h", 443, "GET", "/?a")
+                    .is_err(),
                 "{q}"
             );
         }
@@ -4952,8 +5265,16 @@ mod tests {
         assert!(err.contains("can't be anchored"), "{err}");
         let commented = config("(?x) a = 1 # fetch\n");
         assert!(commented.validate().is_ok());
-        assert!(commented.check_http_request("h", "GET", "/?a=1").is_ok());
-        assert!(commented.check_http_request("h", "GET", "/?a=1&b").is_err());
+        assert!(
+            commented
+                .check_http_request("h", 443, "GET", "/?a=1")
+                .is_ok()
+        );
+        assert!(
+            commented
+                .check_http_request("h", 443, "GET", "/?a=1&b")
+                .is_err()
+        );
         // Patterns that would compile to something huge are refused.
         assert!(config(r"\pL{50}{50}").validate().is_err());
         let rule = HttpRule::new("h").with_queries(["a"]);
@@ -4978,8 +5299,8 @@ mod tests {
     #[test]
     fn http_rules_are_enforced_on_requests() {
         let mut m = ConnectionManager::new(github_rules(), HashMap::new()).unwrap();
-        m.connection_hosts.insert(1, "api.github.com".into());
-        m.connection_hosts.insert(2, "www.github.com".into());
+        m.connection_hosts.insert(1, ("api.github.com".into(), 443));
+        m.connection_hosts.insert(2, ("www.github.com".into(), 443));
 
         let ok = b"GET /repos/org/repo HTTP/1.1\r\nHost: api.github.com\r\n\r\n";
         assert_eq!(frame(&mut m, &[ok]), String::from_utf8_lossy(ok));
@@ -5464,7 +5785,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn masking_only_applies_to_secret_hosts() {
         let m = framing_manager();
-        let host = |h: &str| m.policy.read_masks(h);
+        let host = |h: &str| m.policy.read_masks(h, 443);
         assert_eq!(host("api.example.com"), masks(&["real"]));
         assert!(host("echo.example.net").is_empty());
         // Nor on a connection whose requests don't get values substituted:
@@ -5473,7 +5794,7 @@ mod tests {
             Arc::new(NetPolicy::new(NetConfig::permissive(), m.policy.secrets.clone()).unwrap());
         assert!(
             plain
-                .request_framer("api.example.com", false)
+                .request_framer("api.example.com", 443, false)
                 .response_masker()
                 .masker
                 .is_none()
