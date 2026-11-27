@@ -47,6 +47,9 @@ message ServerMessage {
     // A change the run made to a writable mount, for the client to apply.
     // All of a run's come after its code finishes, before ExecuteResult.
     FsChange fs_change = 6;
+    // A path the code used on a mount with report_access. All of a run's
+    // come after its FsChanges, before ExecuteResult.
+    FsAccess fs_access = 7;
   }
 }
 
@@ -258,7 +261,8 @@ message Mount {
   // writes fail with ENOSPC. Renaming a directory the client served is
   // EXDEV, which code that moves trees (shutil.move, mv) handles by
   // copying. Changes are against what the run saw: a file the client
-  // changed mid-run isn't noticed. Times aren't reported.
+  // changed mid-run isn't noticed. Times aren't reported. To apply them
+  // only if what the code depended on is unchanged, use report_access.
   bool writable = 2;
 
   // The most this writable mount's changes may hold, for a client whose
@@ -276,6 +280,49 @@ message Mount {
   // deleting what the run wrote gives its space back. Only for a writable
   // mount (INVALID_ARGUMENT otherwise).
   optional uint64 max_write_bytes = 3;
+  // Report the paths the code used on this mount, as FsAccess messages
+  // after its FsChanges and before the ExecuteResult, when FsChanges would
+  // be sent: for a failed run too, not for a cancelled or suspended one.
+  // Only the code's own use counts, wherever it was answered from (the
+  // run's cache, a listing's inline content, a fetched block): not the
+  // server's lookups to place the code's writes, nor what the code reads
+  // back from them. The server's --max-mount-access-entries bounds the
+  // paths reported per run, across its mounts; past it,
+  // ExecuteResult.fs_accesses_truncated is set and the client must treat
+  // everything it served as used.
+  bool report_access = 4;
+}
+
+// A path the code used on a mount with report_access, once per path with
+// its strongest use. A path whose lookup the client refused with an error
+// other than NOT_FOUND or NOT_A_DIRECTORY isn't reported: refuse a path
+// consistently, or treat its refusal as a change.
+message FsAccess {
+  // The mount's path, as in ExecuteRequest.mounts.
+  string mount = 1;
+  // Relative to the mount, like FsChange.path: "" is the mount itself.
+  string path = 2;
+  Kind kind = 3;
+  // The FsMetadata.version the code saw for the path: the file's for READ
+  // and STATED, the directory's for LISTED (empty if the run had no
+  // metadata of its own for it, as when only listing the mount itself).
+  // Empty for MISSING, and when the client sent none. If the client's
+  // answers gave it different versions mid-run, the first.
+  string version = 4;
+
+  // How the code used the path, weakest first; the strongest wins.
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // Looked up and not found. Only if the code never saw it exist.
+    KIND_MISSING = 1;
+    // Used its metadata (kind, size, modification time): a stat or an
+    // existence check, including those an open makes.
+    KIND_STATED = 2;
+    // Read the directory's entries: their names and kinds.
+    KIND_LISTED = 3;
+    // Read the file's contents, or part of them.
+    KIND_READ = 4;
+  }
 }
 
 // A change a run made to a writable mount. Apply them in the order they
@@ -325,6 +372,10 @@ message FsRequest {
     // Bytes of the file `path`: answer with FsResponse.data.
     FsRead read = 6;
   }
+  // W3C traceparent of the server's span for this operation, so the client
+  // can make its handling a child of it, as CallbackRequest.trace_context.
+  // Empty when tracing is not configured.
+  string trace_context = 7;
 }
 
 message FsStat {}
@@ -384,6 +435,10 @@ message FsMetadata {
   uint64 size = 2;
   // Last modified, in seconds since the Unix epoch. Unset: the epoch.
   optional double modified = 3;
+  // An opaque token for this version of the file or directory, such as a
+  // content hash, echoed in FsAccess.version. The server doesn't interpret
+  // it. Counts towards the run's transfer limit like the rest.
+  optional string version = 4;
 }
 
 message FsListing {
@@ -890,6 +945,14 @@ message ExecuteResult {
 
   // How many FsChange messages came before this, for writable mounts.
   uint32 fs_changes = 18;
+
+  // How many FsAccess messages came before this, for mounts with
+  // report_access.
+  uint32 fs_accesses = 19;
+  // The run used more paths than the server's --max-mount-access-entries:
+  // the FsAccess messages are incomplete, so treat everything served to
+  // the run as used.
+  bool fs_accesses_truncated = 20;
 }
 
 // Why an execution failed, when success is false.

@@ -1041,6 +1041,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                 // Fail anything still asking the client, and free the cache.
                 if let Some(mounts) = &mounts {
                     mounts.close();
+                    metrics::histogram!("eryx_mount_requests_per_execution")
+                        .record(f64::from(mounts.requests()));
                 }
 
                 match result_msg {
@@ -1055,6 +1057,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                             && !skipped.contains(&result_msg.failure_kind)
                         {
                             send_mount_changes(mounts, &server_tx_result, &mut result_msg).await;
+                            send_mount_accesses(mounts, &server_tx_result, &mut result_msg).await;
                         }
                         let msg = ServerMessage {
                             message: Some(server_message::Message::ExecuteResult(Box::new(
@@ -1133,6 +1136,33 @@ async fn send_mount_changes(
             return;
         }
         result.fs_changes += 1;
+    }
+}
+
+/// Send what the run used on its `report_access` mounts as `FsAccess`
+/// messages, counting them in `result`
+async fn send_mount_accesses(
+    mounts: &crate::mounts::Mounts,
+    server_tx: &mpsc::Sender<ServerMessage>,
+    result: &mut ExecuteResult,
+) {
+    if !mounts.report_access() {
+        return;
+    }
+    let (accesses, truncated) = mounts.accesses();
+    metrics::histogram!("eryx_mount_accesses_reported").record(accesses.len() as f64);
+    if truncated {
+        metrics::counter!("eryx_mount_access_reports_truncated_total").increment(1);
+    }
+    result.fs_accesses_truncated = truncated;
+    for access in accesses {
+        let msg = ServerMessage {
+            message: Some(server_message::Message::FsAccess(access)),
+        };
+        if server_tx.send(msg).await.is_err() {
+            return;
+        }
+        result.fs_accesses += 1;
     }
 }
 
@@ -1812,6 +1842,8 @@ async fn execute_with_session(
                 exit_code: (params.language == eryx::Language::Shell).then_some(0),
                 // Counted as they're sent, after the execution
                 fs_changes: 0,
+                fs_accesses: 0,
+                fs_accesses_truncated: false,
             }
         }
         Err(e) => {
@@ -1872,6 +1904,8 @@ async fn execute_with_session(
                     _ => None,
                 },
                 fs_changes: 0,
+                fs_accesses: 0,
+                fs_accesses_truncated: false,
             }
         }
     }
