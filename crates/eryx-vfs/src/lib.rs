@@ -63,7 +63,7 @@ pub use scrubbing::{
 };
 pub use storage::{
     ArcStorage, DEFAULT_MAX_BYTES, DirEntry, ENTRY_OVERHEAD_BYTES, InMemorySnapshot,
-    InMemoryStorage, MAX_ENTRIES, Metadata, VfsStorage,
+    InMemoryStorage, MAX_ENTRIES, Metadata, SharedLimit, VfsStorage,
 };
 pub use wasi_impl::{VfsCtx, VfsState};
 
