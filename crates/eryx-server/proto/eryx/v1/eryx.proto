@@ -537,6 +537,39 @@ message CallbackDeclaration {
 
   // Parameter definitions for this callback.
   repeated ParameterDeclaration parameters = 3;
+
+  // Make this a command callback: in the shell it runs as a real command,
+  // with its arguments as given (no parsing into parameters) and its stdin,
+  // and its result is the command's stdout, stderr and exit status, which
+  // pipes, redirects, `$(...)` and `$?` see as for any other command. It
+  // runs wherever a command does in the shell (nested `sh -c`/`bash -c`,
+  // `xargs`, `env`, `timeout`), but not from a host command that spawns
+  // commands itself (git's hooks). It may take the name of a registered
+  // command, which it replaces. `parameters` must be empty.
+  //
+  // CallbackRequest.arguments_json is then
+  // `{"args": ["a", "--b", "c"], "stdin": "<base64>"}`: the arguments after
+  // the command's name, and everything it read from stdin (empty when
+  // nothing is piped or redirected into it). The shell reads all of stdin
+  // before sending the request, up to 8 MiB; past that the command fails
+  // (exit 1) without a request. Like ssh, it so consumes input it may not
+  // need: in a `while read` loop, give it `< /dev/null`.
+  //
+  // CallbackResponse.json_result must be
+  // `{"stdout": "<base64>", "stderr": "<base64>", "exit_code": 0}` (each key
+  // optional, defaulting to empty or 0, and null reads as empty; base64 is
+  // standard with padding, which is how Go's encoding/json encodes []byte), with stdout and stderr
+  // together at most 8 MiB. The shell keeps exit_code's low 8 bits. An error
+  // response fails the command with exit status 1 and the message on stderr;
+  // a CLI that ran and failed should be a json_result with its exit code.
+  // Suspension, timeouts, invocation limits and journaling are as for any
+  // callback: a journal entry's args_json and value are these two objects,
+  // input and output in full, so they count towards the result message's
+  // size.
+  //
+  // In Python and JavaScript it's an ordinary callback taking `args` and
+  // `stdin` and returning the result object.
+  bool command = 4;
 }
 
 // Declaration of a single parameter for a callback.

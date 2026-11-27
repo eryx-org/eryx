@@ -772,6 +772,7 @@ async fn failed_runs_report_and_suspended_ones_dont() {
     let code = "open('/mnt/repo/README.md').read()\nawait approve()";
     let mut request = mounted(Language::Python, code, true);
     request.callbacks = vec![CallbackDeclaration {
+        command: false,
         name: "approve".into(),
         ..Default::default()
     }];

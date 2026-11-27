@@ -829,6 +829,129 @@ async fn shell_results_carry_the_exit_code() {
     assert_eq!(python.exit_code, None);
 }
 
+/// A command callback (#1241) runs as a real command in the shell: the
+/// client gets its arguments as given and its stdin, and its stdout, stderr
+/// and exit code are the command's, here through a pipe, `$(...)` and a
+/// nested `bash -c`. A declaration with parameters is refused.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn shell_command_callbacks_run_as_commands() {
+    use eryx_server::proto::eryx::v1::{CallbackResponse, Language};
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(2);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(4, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+    let declaration = CallbackDeclaration {
+        name: "hostcli".to_string(),
+        description: "A CLI on the host".to_string(),
+        command: true,
+        ..Default::default()
+    };
+    let request = ExecuteRequest {
+        code: r#"
+echo in | hostcli a --b c --json | tr a-z A-Z
+v=$(hostcli --exit 3 2>/dev/null); echo "v=$v s=$?"
+bash -c 'hostcli nested'
+"#
+        .to_string(),
+        language: Language::Shell as i32,
+        callbacks: vec![declaration.clone()],
+        ..Default::default()
+    };
+
+    let mut client = EryxClient::new(channel.clone());
+    let (tx, rx) = mpsc::channel(16);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(request))),
+    })
+    .await
+    .unwrap();
+    let mut stream = client
+        .execute(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut requests = Vec::new();
+    let result = loop {
+        let msg = stream.message().await.unwrap().expect("a result");
+        match msg.message {
+            Some(server_message::Message::CallbackRequest(req)) => {
+                assert_eq!(req.name, "hostcli");
+                requests.push(req.arguments_json.clone());
+                let input: serde_json::Value = serde_json::from_str(&req.arguments_json).unwrap();
+                let input = eryx::CommandInput::from_value(input).unwrap();
+                let exit_code = if input.args.first().is_some_and(|a| a == "--exit") {
+                    3
+                } else {
+                    0
+                };
+                let mut stdout = input.args.join(" ").into_bytes();
+                stdout.extend_from_slice(b"|");
+                stdout.extend_from_slice(&input.stdin);
+                let output = eryx::CommandOutput {
+                    stdout,
+                    stderr: b"note\n".to_vec(),
+                    exit_code,
+                };
+                tx.send(ClientMessage {
+                    message: Some(client_message::Message::CallbackResponse(
+                        CallbackResponse {
+                            request_id: req.request_id,
+                            outcome: 0,
+                            result: Some(callback_response::Result::JsonResult(
+                                output.into_value().unwrap().to_string(),
+                            )),
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            }
+            Some(server_message::Message::ExecuteResult(result)) => break *result,
+            _ => {}
+        }
+    };
+    assert!(result.success, "{}", result.error);
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "A --B C --JSON|IN\nv=--exit 3| s=3\nnested|"
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stderr), "note\nnote\n");
+    assert_eq!(
+        requests[0],
+        r#"{"args":["a","--b","c","--json"],"stdin":"aW4K"}"#
+    );
+
+    let refused = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "true".to_string(),
+            language: Language::Shell as i32,
+            callbacks: vec![CallbackDeclaration {
+                parameters: vec![ParameterDeclaration {
+                    name: "x".to_string(),
+                    json_type: "string".to_string(),
+                    ..Default::default()
+                }],
+                ..declaration
+            }],
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{refused}");
+}
+
 /// `allowed_commands` narrows one shell request's commands: set, only those
 /// run and others exit 127; set but empty, none run; unset, all do. Python
 /// requests can't set it.
@@ -1361,6 +1484,7 @@ print(f"got: {result}")
 "#
                 .to_string(),
                 callbacks: vec![CallbackDeclaration {
+                    command: false,
                     name: "echo".to_string(),
                     description: "Echoes the message back".to_string(),
                     parameters: vec![ParameterDeclaration {
@@ -1524,6 +1648,7 @@ except Exception as e:
 "#
                 .to_string(),
                 callbacks: vec![CallbackDeclaration {
+                    command: false,
                     name: "failing_op".to_string(),
                     description: "Always fails".to_string(),
                     parameters: vec![],
@@ -2034,6 +2159,7 @@ print(f"alpha: {result}")
 "#
                     .to_string(),
                     callbacks: vec![CallbackDeclaration {
+                        command: false,
                         name: "alpha".to_string(),
                         description: "Alpha callback".to_string(),
                         parameters: vec![ParameterDeclaration {
@@ -2118,6 +2244,7 @@ print(f"beta: {result}")
 "#
                     .to_string(),
                     callbacks: vec![CallbackDeclaration {
+                        command: false,
                         name: "beta".to_string(),
                         description: "Beta callback".to_string(),
                         parameters: vec![ParameterDeclaration {
@@ -2213,6 +2340,7 @@ print(f"path={result['path']}")
 "#
                 .to_string(),
                 callbacks: vec![CallbackDeclaration {
+                    command: false,
                     name: "get_data".to_string(),
                     description: "Returns data with special characters".to_string(),
                     parameters: vec![],
@@ -2450,6 +2578,7 @@ async fn execute_custom_result_variable_with_state_restore() {
 /// Build the `echo` callback declaration used by the replay tests.
 fn echo_declaration() -> CallbackDeclaration {
     CallbackDeclaration {
+        command: false,
         name: "echo".to_string(),
         description: "Echoes the message back".to_string(),
         parameters: vec![ParameterDeclaration {
@@ -2607,6 +2736,7 @@ c = await marker(message="after-suspend")
 print("should not reach here")
 "#;
     let approve_decl = CallbackDeclaration {
+        command: false,
         name: "approve".to_string(),
         description: "Requires approval".to_string(),
         parameters: vec![ParameterDeclaration {
@@ -2617,6 +2747,7 @@ print("should not reach here")
         }],
     };
     let marker_decl = CallbackDeclaration {
+        command: false,
         name: "marker".to_string(),
         description: "Must never be dispatched after suspension".to_string(),
         parameters: vec![ParameterDeclaration {
@@ -2719,6 +2850,7 @@ b = await approve(amount=100)
 print("should not reach here")
 "#;
     let approve_decl = CallbackDeclaration {
+        command: false,
         name: "approve".to_string(),
         description: "Requires approval".to_string(),
         parameters: vec![ParameterDeclaration {
@@ -2811,6 +2943,7 @@ b = await approve(amount=100)
 print("should not reach here")
 "#;
     let approve_decl = CallbackDeclaration {
+        command: false,
         name: "approve".to_string(),
         description: "Requires approval".to_string(),
         parameters: vec![ParameterDeclaration {
@@ -3099,6 +3232,7 @@ async fn globals_collide_with_the_callback_namespace() {
         code: "print(get_time, type(tools).__name__)".to_string(),
         globals: globals.to_string(),
         callbacks: vec![CallbackDeclaration {
+            command: false,
             name: "get_time".to_string(),
             ..Default::default()
         }],
@@ -3306,6 +3440,7 @@ async fn invalid_request_inputs_are_rejected() {
         },
         ExecuteRequest {
             callbacks: vec![CallbackDeclaration {
+                command: false,
                 name: "not-an-identifier".to_string(),
                 ..Default::default()
             }],

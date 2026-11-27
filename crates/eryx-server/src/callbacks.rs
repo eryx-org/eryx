@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use eryx::CancellationToken;
-use eryx::{CallbackError, DynamicCallback};
+use eryx::{CallbackError, CommandCallback, CommandOutput, DynamicCallback};
 use tokio::sync::{mpsc, oneshot};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
@@ -59,163 +59,30 @@ pub fn build_callbacks(
     declarations
         .iter()
         .map(|decl| {
-            let tx = grpc_tx.clone();
-            let pending = Arc::clone(&pending);
-            let inbound_closed = inbound_closed.clone();
-            let name = decl.name.clone();
-
+            let client = Client {
+                tx: grpc_tx.clone(),
+                pending: Arc::clone(&pending),
+                inbound_closed: inbound_closed.clone(),
+                name: decl.name.clone(),
+            };
+            if decl.command {
+                return Box::new(CommandCallback::new(
+                    decl.name.clone(),
+                    decl.description.clone(),
+                    move |input| {
+                        let client = client.clone();
+                        Box::pin(async move {
+                            CommandOutput::from_value(client.call(input.to_value()).await?)
+                        })
+                    },
+                )) as Box<dyn eryx::Callback>;
+            }
             let mut builder = DynamicCallback::builder(
                 decl.name.clone(),
                 decl.description.clone(),
                 move |args| {
-                    let tx = tx.clone();
-                    let pending = Arc::clone(&pending);
-                    let inbound_closed = inbound_closed.clone();
-                    let name = name.clone();
-
-                    Box::pin(async move {
-                        let started = Instant::now();
-                        let request_id = Uuid::new_v4().to_string();
-                        let arguments_json = serde_json::to_string(&args)
-                            .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?;
-
-                        if inbound_closed.is_cancelled() {
-                            tracing::warn!(
-                                callback_name = %name,
-                                "callback invoked after the client stopped sending"
-                            );
-                            return Err(CallbackError::ExecutionFailed(CLIENT_CLOSED.to_string()));
-                        }
-
-                        tracing::info!(
-                            callback_name = %name,
-                            %request_id,
-                            args_len = arguments_json.len(),
-                            "callback invoked"
-                        );
-
-                        // Create oneshot channel for the response.
-                        let (resp_tx, resp_rx) = oneshot::channel();
-                        pending.insert(request_id.clone(), resp_tx);
-
-                        // Capture the current span's trace context so the Go
-                        // client can create child spans for callback handling.
-                        let trace_context = {
-                            let cx = tracing::Span::current().context();
-                            let mut fields = HashMap::new();
-                            opentelemetry::global::get_text_map_propagator(|propagator| {
-                                propagator.inject_context(&cx, &mut fields);
-                            });
-                            fields.remove("traceparent").unwrap_or_default()
-                        };
-
-                        // Send the callback request to the Go client.
-                        let msg = ServerMessage {
-                            message: Some(server_message::Message::CallbackRequest(
-                                CallbackRequest {
-                                    request_id: request_id.clone(),
-                                    name: name.clone(),
-                                    arguments_json,
-                                    trace_context,
-                                },
-                            )),
-                        };
-
-                        tx.send(msg).await.map_err(|e| {
-                            let elapsed_ms = started.elapsed().as_millis() as u64;
-                            tracing::warn!(
-                                callback_name = %name,
-                                %request_id,
-                                error = %e,
-                                waiting_ms = elapsed_ms,
-                                "gRPC response channel closed"
-                            );
-                            CallbackError::ExecutionFailed(
-                                "gRPC response channel closed".to_string(),
-                            )
-                        })?;
-
-                        // Wait for the Go client to respond. `biased` so a
-                        // response delivered just before the client stopped
-                        // sending still wins.
-                        let result = tokio::select! {
-                            biased;
-                            result = resp_rx => result,
-                            () = inbound_closed.cancelled() => {
-                                pending.remove(&request_id);
-                                tracing::warn!(
-                                    callback_name = %name,
-                                    %request_id,
-                                    "client stopped sending before responding to callback"
-                                );
-                                return Err(CallbackError::ExecutionFailed(
-                                    CLIENT_CLOSED.to_string(),
-                                ));
-                            }
-                        };
-                        let result = result.map_err(|e| {
-                            let elapsed_ms = started.elapsed().as_millis() as u64;
-                            tracing::warn!(
-                                callback_name = %name,
-                                %request_id,
-                                error = %e,
-                                waiting_ms = elapsed_ms,
-                                "callback response channel dropped"
-                            );
-                            CallbackError::ExecutionFailed(
-                                "callback response channel dropped".to_string(),
-                            )
-                        })?;
-
-                        let duration_ms = started.elapsed().as_millis() as u64;
-
-                        if duration_ms > 5000 {
-                            tracing::warn!(
-                                callback_name = %name,
-                                %request_id,
-                                duration_ms,
-                                "slow callback: round-trip exceeded 5s"
-                            );
-                        }
-
-                        // Clean up the pending entry (already removed by dispatch).
-                        match result {
-                            CallbackResult::Ok(ref json_str) => {
-                                tracing::debug!(
-                                    callback_name = %name,
-                                    %request_id,
-                                    duration_ms,
-                                    success = true,
-                                    "callback response received"
-                                );
-                                serde_json::from_str(json_str).map_err(|e| {
-                                    CallbackError::ExecutionFailed(format!(
-                                        "invalid callback result JSON: {e}"
-                                    ))
-                                })
-                            }
-                            CallbackResult::Err(err) => {
-                                tracing::debug!(
-                                    callback_name = %name,
-                                    %request_id,
-                                    duration_ms,
-                                    success = false,
-                                    error = %err.chars().take(200).collect::<String>(),
-                                    "callback response received"
-                                );
-                                Err(CallbackError::ExecutionFailed(err))
-                            }
-                            CallbackResult::Suspend(reason) => {
-                                tracing::info!(
-                                    callback_name = %name,
-                                    %request_id,
-                                    duration_ms,
-                                    "callback requested suspension"
-                                );
-                                Err(CallbackError::Suspend(reason))
-                            }
-                        }
-                    })
+                    let client = client.clone();
+                    Box::pin(async move { client.call(args).await })
                 },
             );
 
@@ -234,6 +101,161 @@ pub fn build_callbacks(
         .collect()
 }
 
+/// Where one declared callback's requests go, and their responses come from.
+#[derive(Clone)]
+struct Client {
+    tx: mpsc::Sender<ServerMessage>,
+    pending: PendingCallbacks,
+    inbound_closed: CancellationToken,
+    name: String,
+}
+
+impl Client {
+    /// Send the client a request to run the callback with `args`, and wait
+    /// for its response.
+    async fn call(&self, args: serde_json::Value) -> Result<serde_json::Value, CallbackError> {
+        let Self {
+            tx,
+            pending,
+            inbound_closed,
+            name,
+        } = self;
+        let started = Instant::now();
+        let request_id = Uuid::new_v4().to_string();
+        let arguments_json = serde_json::to_string(&args)
+            .map_err(|e| CallbackError::ExecutionFailed(e.to_string()))?;
+
+        if inbound_closed.is_cancelled() {
+            tracing::warn!(
+                callback_name = %name,
+                "callback invoked after the client stopped sending"
+            );
+            return Err(CallbackError::ExecutionFailed(CLIENT_CLOSED.to_string()));
+        }
+
+        tracing::info!(
+            callback_name = %name,
+            %request_id,
+            args_len = arguments_json.len(),
+            "callback invoked"
+        );
+
+        // Create oneshot channel for the response.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        pending.insert(request_id.clone(), resp_tx);
+
+        // Capture the current span's trace context so the Go
+        // client can create child spans for callback handling.
+        let trace_context = {
+            let cx = tracing::Span::current().context();
+            let mut fields = HashMap::new();
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&cx, &mut fields);
+            });
+            fields.remove("traceparent").unwrap_or_default()
+        };
+
+        // Send the callback request to the Go client.
+        let msg = ServerMessage {
+            message: Some(server_message::Message::CallbackRequest(CallbackRequest {
+                request_id: request_id.clone(),
+                name: name.clone(),
+                arguments_json,
+                trace_context,
+            })),
+        };
+
+        tx.send(msg).await.map_err(|e| {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            tracing::warn!(
+                callback_name = %name,
+                %request_id,
+                error = %e,
+                waiting_ms = elapsed_ms,
+                "gRPC response channel closed"
+            );
+            CallbackError::ExecutionFailed("gRPC response channel closed".to_string())
+        })?;
+
+        // Wait for the Go client to respond. `biased` so a
+        // response delivered just before the client stopped
+        // sending still wins.
+        let result = tokio::select! {
+            biased;
+            result = resp_rx => result,
+            () = inbound_closed.cancelled() => {
+                pending.remove(&request_id);
+                tracing::warn!(
+                    callback_name = %name,
+                    %request_id,
+                    "client stopped sending before responding to callback"
+                );
+                return Err(CallbackError::ExecutionFailed(
+                    CLIENT_CLOSED.to_string(),
+                ));
+            }
+        };
+        let result = result.map_err(|e| {
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            tracing::warn!(
+                callback_name = %name,
+                %request_id,
+                error = %e,
+                waiting_ms = elapsed_ms,
+                "callback response channel dropped"
+            );
+            CallbackError::ExecutionFailed("callback response channel dropped".to_string())
+        })?;
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        if duration_ms > 5000 {
+            tracing::warn!(
+                callback_name = %name,
+                %request_id,
+                duration_ms,
+                "slow callback: round-trip exceeded 5s"
+            );
+        }
+
+        // Clean up the pending entry (already removed by dispatch).
+        match result {
+            CallbackResult::Ok(ref json_str) => {
+                tracing::debug!(
+                    callback_name = %name,
+                    %request_id,
+                    duration_ms,
+                    success = true,
+                    "callback response received"
+                );
+                serde_json::from_str(json_str).map_err(|e| {
+                    CallbackError::ExecutionFailed(format!("invalid callback result JSON: {e}"))
+                })
+            }
+            CallbackResult::Err(err) => {
+                tracing::debug!(
+                    callback_name = %name,
+                    %request_id,
+                    duration_ms,
+                    success = false,
+                    error = %err.chars().take(200).collect::<String>(),
+                    "callback response received"
+                );
+                Err(CallbackError::ExecutionFailed(err))
+            }
+            CallbackResult::Suspend(reason) => {
+                tracing::info!(
+                    callback_name = %name,
+                    %request_id,
+                    duration_ms,
+                    "callback requested suspension"
+                );
+                Err(CallbackError::Suspend(reason))
+            }
+        }
+    }
+}
+
 /// Validate callback declarations before they are registered.
 ///
 /// Each name must be an identifier or a dot-separated path of identifiers
@@ -249,6 +271,12 @@ pub fn validate_declarations(declarations: &[CallbackDeclaration]) -> Result<(),
             return Err(format!(
                 "invalid callback name {:?}: must be an identifier or dot-separated \
                  identifiers ([A-Za-z_][A-Za-z0-9_]*)",
+                decl.name
+            ));
+        }
+        if decl.command && !decl.parameters.is_empty() {
+            return Err(format!(
+                "command callback {:?} can't declare parameters: it takes its arguments as given",
                 decl.name
             ));
         }
@@ -288,6 +316,7 @@ mod tests {
 
     fn make_echo_declaration() -> CallbackDeclaration {
         CallbackDeclaration {
+            command: false,
             name: "echo".to_string(),
             description: "Echoes the input".to_string(),
             parameters: vec![ParameterDeclaration {
@@ -307,6 +336,7 @@ mod tests {
         let decls = vec![
             make_echo_declaration(),
             CallbackDeclaration {
+                command: false,
                 name: "noop".to_string(),
                 description: "Does nothing".to_string(),
                 parameters: vec![],

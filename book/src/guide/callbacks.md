@@ -121,7 +121,7 @@ Callback names must be unique: building a sandbox with two callbacks of the same
 A guest installs each callback under its name (for a dotted name like `http.get`, under its first part, `http`), and keeps what it already has, so a callback named like something of the guest's could only be called through `invoke("name")`. Building such a sandbox fails instead, naming the callback and what it collides with:
 
 - **JavaScript:** the guest's globals (`fetch`, `crypto`, `URL`, `setTimeout`, `console`, `require`, `invoke`, the built-ins like `JSON` and `Map`, ...), including as a dotted name's first part (`fetch.get`, `crypto.*`).
-- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke`, `grep`, `env`, `xargs`, `chmod`, `kill`, `timeout`, `sh` and `bash`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide.
+- **Shell:** the builtins (`echo`, `cd`, `test`, `read`, ..., and eryx's `invoke`, `grep`, `env`, `xargs`, `chmod`, `kill`, `timeout`, `sh` and `bash`), the reserved words (`time`, `select`, `function`, `[[`, ...), which are parsed as syntax, and the sandbox's commands (the embedded coreutils, `with_command` ones), which a callback of the same name would hide (a [command callback](#command-callbacks) may take a command's name, and replaces it).
 - **Python:** the builtins (`print`, `list`, `open`, ...) and the names the guest defines (`invoke`, `list_callbacks`, `asyncio`, `json`, ...), including as a dotted name's first part (`json.dumps`).
 
 In JavaScript, `process` is reserved even in a sandbox without secrets, where the guest only defines it when there are some.
@@ -363,7 +363,7 @@ forecast=$(weather London | grep -i rain)
   object argument, the object is passed as the arguments as is. `invoke` also
   reaches names under a prefix callback (`invoke ns.tool --x 1`).
 - **`NAME --help`:** prints the callback's description and its arguments.
-- **stdin:** not read.
+- **stdin:** not read. A [command callback](#command-callbacks) reads it.
 
 The result prints as a line on stdout: a string as raw text, anything else
 other than `null` as compact JSON, and `null` as nothing.
@@ -380,6 +380,106 @@ Exit statuses:
 A callback that suspends (see [Replay and Suspension](#replay-and-suspension))
 stops the whole script, whatever surrounds the call: `approve || true` doesn't
 swallow it.
+
+### Command Callbacks
+
+A command callback is a callback the shell runs as a real command, for a CLI
+that has to run on the host (one that needs the host's credentials, say). It
+gets its arguments exactly as the shell expanded them, with no parsing into
+parameters, and everything on its stdin. It returns stdout bytes, stderr bytes
+and an exit code, which the shell treats like any other command's: pipes in and
+out, redirects, `$(...)`, `$?` and `set -e` all work.
+
+```bash
+mycli get dashboards --json -o wide
+cat query.json | mycli run -f -
+count=$(mycli list | wc -l)
+mycli check || echo "check failed with $?"
+bash -c 'mycli version'
+```
+
+It runs wherever a command does in the shell: in nested `sh -c` and `bash -c`
+shells and under `xargs`, `env` and `timeout`. A host command that runs
+commands itself (git's hooks and aliases) can't reach it. It may take the name
+of a registered command, which it replaces; builtin names are still refused.
+
+<!-- langtabs-start -->
+
+```rust,ignore,no_test
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+use eryx::{CallbackError, CommandCallback, CommandOutput};
+
+let mycli = CommandCallback::new("mycli", "The host's mycli", |input| {
+    Box::pin(async move {
+        // Blocking, for brevity: use tokio::process in real code.
+        let failed = |e: std::io::Error| CallbackError::ExecutionFailed(e.to_string());
+        let mut child = Command::new("mycli")
+            .args(&input.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(failed)?;
+        // Feed stdin from another thread, so a CLI that writes as it reads
+        // doesn't fill its output pipes while this waits on its input.
+        let mut stdin = child.stdin.take().unwrap();
+        let feed = std::thread::spawn(move || stdin.write_all(&input.stdin));
+        let out = child.wait_with_output().map_err(failed)?;
+        let _ = feed.join();
+        Ok(CommandOutput {
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.status.code().unwrap_or(1),
+        })
+    })
+});
+let sandbox = eryx::Sandbox::embedded().shell().with_callback(mycli).build()?;
+```
+
+```python,no_test
+import subprocess
+import eryx
+
+def mycli(args: list[str], stdin: bytes):
+    return subprocess.run(["mycli", *args], input=stdin, capture_output=True)
+
+sandbox = eryx.Sandbox(
+    language="shell",
+    callbacks=[{"name": "mycli", "fn": mycli, "command": True}],
+)
+```
+
+<!-- langtabs-end -->
+
+In Python, the function is called as `fn(args, stdin)` and returns a
+`subprocess.CompletedProcess` or a dict with optional `stdout` and `stderr`
+(bytes or str) and `exit_code`. `@registry.callback(command=True)` and
+`registry.add(fn, command=True)` declare one too. Over gRPC, set
+`CallbackDeclaration.command`: the request's `arguments_json` is
+`{"args": [...], "stdin": "<base64>"}` and the response's `json_result` is
+`{"stdout": "<base64>", "stderr": "<base64>", "exit_code": 0}` (Go's
+`encoding/json` encodes and decodes `[]byte` fields this way).
+
+Limits:
+
+- **stdin:** read to its end before the call, up to 8 MiB; more fails the
+  command (exit 1) without calling it. Like `ssh`, it so consumes input it may
+  not need: in a `while read` loop, give it `< /dev/null`.
+- **Output:** written once the callback returns, up to 8 MiB of stdout and
+  stderr together; more fails the command (exit 1) with nothing written.
+- **Errors:** a callback error fails the command with exit 1 and `NAME: message`
+  on stderr. A CLI that ran and failed should return its exit code instead.
+- Callback timeouts, invocation limits, suspension and replay apply as to any
+  callback. A journal entry's arguments are the `{"args", "stdin"}` object and
+  its value the result object, so a replayed command gets the same output for
+  the same arguments and input. Those carry the input and output in full, and
+  a journal comes back in one gRPC message, so a script that suspends after
+  passing many MiB through command callbacks can outgrow the server's message
+  size limit.
+
+In Python and JavaScript a command callback is an ordinary callback taking
+`args` and `stdin` and returning the result object.
 
 ## Alternative APIs
 

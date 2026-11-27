@@ -851,7 +851,7 @@ impl Sandbox {
         crate::reserved::check(
             self.executor.language(),
             map.keys().map(String::as_str),
-            self.executor.commands().registered_names(),
+            commands_not_replaced(&map, self.executor.commands().registered_names()),
         )?;
         self.callbacks = Arc::new(map);
         Ok(())
@@ -1409,6 +1409,19 @@ fn insert_callback(
     } else {
         callbacks.insert(name.to_string(), callback);
     }
+}
+
+/// The registered commands a callback may not share a name with: all but
+/// those a command callback replaces.
+fn commands_not_replaced<'a>(
+    callbacks: &'a HashMap<String, Arc<dyn Callback>>,
+    commands: impl Iterator<Item = &'a str>,
+) -> impl Iterator<Item = &'a str> {
+    commands.filter(|name| {
+        !callbacks
+            .get(*name)
+            .is_some_and(|cb| crate::command_callback::is_command(cb.as_ref()))
+    })
 }
 
 /// Fail if [`insert_callback`] saw a name registered twice.
@@ -3714,7 +3727,7 @@ impl<L: GuestLanguage> SandboxBuilder<L, state::Has> {
         crate::reserved::check(
             L::LANGUAGE,
             self.callbacks.keys().map(String::as_str),
-            commands.registered_names(),
+            commands_not_replaced(&self.callbacks, commands.registered_names()),
         )?;
 
         // Apply the configured result-capture variable name, and hand the

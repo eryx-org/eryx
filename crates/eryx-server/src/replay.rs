@@ -227,7 +227,21 @@ impl JournalSigner {
                 feed(state);
             }
         }
-        let mut names: Vec<&str> = binding.callbacks.iter().map(|c| c.name.as_str()).collect();
+        // A command callback's name is fed with a suffix no name can have,
+        // so a journal doesn't replay into a callback set that declares one
+        // of its callbacks with the other kind; ordinary callbacks' names are
+        // fed as they always were.
+        let mut names: Vec<String> = binding
+            .callbacks
+            .iter()
+            .map(|c| {
+                if c.command {
+                    format!("{}\0command", c.name)
+                } else {
+                    c.name.clone()
+                }
+            })
+            .collect();
         names.sort_unstable();
         feed(&(names.len() as u64).to_le_bytes());
         for name in names {
@@ -463,6 +477,17 @@ mod tests {
         assert!(signer.verify(&journal, with(&ba)), "order must not matter");
         assert!(!signer.verify(&journal, with(&ac)));
         assert!(!signer.verify(&journal, with(&ab[..1])));
+        let command_b = [
+            decl("a"),
+            pb::CallbackDeclaration {
+                command: true,
+                ..decl("b")
+            },
+        ];
+        assert!(
+            !signer.verify(&journal, with(&command_b)),
+            "a command callback is not the ordinary callback of its name"
+        );
     }
 
     #[test]

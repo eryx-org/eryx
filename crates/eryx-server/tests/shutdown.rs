@@ -83,6 +83,7 @@ async fn drain_active_call(signal: &str) {
             ExecuteRequest {
                 code: "print(await wait_for_release())".into(),
                 callbacks: vec![CallbackDeclaration {
+                    command: false,
                     name: "wait_for_release".into(),
                     description: "Wait for the test to release execution".into(),
                     ..Default::default()

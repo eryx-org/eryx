@@ -46,6 +46,9 @@ pub struct CallbackDef {
     pub description: String,
     /// The parameters schema, if the host sent one.
     pub schema: Option<Value>,
+    /// Whether it's a command callback, which takes its arguments as given
+    /// (see [`crate::command`]) rather than parsed here.
+    pub command: bool,
 }
 
 /// A parsed command line: the call to make, or help to print.
@@ -296,6 +299,7 @@ mod tests {
         CallbackDef {
             description: "test".into(),
             schema: Some(schema),
+            command: false,
         }
     }
 
