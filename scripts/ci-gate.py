@@ -6,7 +6,12 @@ from the GitHub pull request files API, and writes one GITHUB_OUTPUT
 line per group (`windows=true` ...) plus `platform_oses`, the JSON list of
 runners for the platform-check matrix.
 
-Best-effort and fail-open: with no ANTHROPIC_API_KEY (fork PRs), on any API
+Authenticates with workload identity federation: the workflow writes a
+GitHub OIDC token to ANTHROPIC_IDENTITY_TOKEN_FILE and the SDK exchanges it
+(with ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_ORGANIZATION_ID) for a
+short-lived API token, so no API key is stored in the repo.
+
+Best-effort and fail-open: with no credentials (fork PRs), on any API
 error, a refusal or an unparseable answer, every group runs. Pushes to main
 never call this and run everything, so a wrong skip surfaces there.
 
@@ -104,8 +109,12 @@ def describe(entry: dict) -> str:
 
 def decide(files: list[str]) -> tuple[dict[str, bool], str]:
     run_all = {g: True for g in GROUPS}
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return run_all, "No ANTHROPIC_API_KEY (fork PR?): running everything."
+    token_file = os.environ.get("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
+    has_federation = os.environ.get("ANTHROPIC_FEDERATION_RULE_ID") and (
+        os.path.isfile(token_file) and os.path.getsize(token_file) > 0
+    )
+    if not (has_federation or os.environ.get("ANTHROPIC_API_KEY")):
+        return run_all, "No Anthropic credentials (fork PR?): running everything."
     if not files:
         return run_all, "No changed files listed: running everything."
     if len(files) > MAX_FILES:
@@ -159,6 +168,9 @@ def main() -> None:
     summary += ["", "Add the `ci:full` label to run every group."]
     with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/stderr"), "a") as f:
         f.write("\n".join(summary) + "\n")
+    # The log too: the API exposes job logs but not job summaries.
+    print(reason)
+    print(", ".join(out))
 
 
 if __name__ == "__main__":

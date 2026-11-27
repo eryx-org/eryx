@@ -73,6 +73,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
+      # The CI gate's GitHub OIDC token, which Anthropic exchanges for a
+      # short-lived API token (workload identity federation): no API key is
+      # stored. GitHub doesn't issue these to fork pull requests.
+      id-token: write
     outputs:
       # Whether to run the whole suite. PRs into multi-guest run a fast
       # subset (lint, fmt, Linux tests and what they need, feature checks);
@@ -227,12 +231,22 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Not secrets: the federation rule (in the Anthropic Console) is
+          # what grants access, and only to this repo's pull request runs.
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_IDENTITY_TOKEN_FILE: ${{ runner.temp }}/gha-oidc-jwt
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           python3 -m venv "$RUNNER_TEMP/gate"
-          "$RUNNER_TEMP/gate/bin/pip" install --quiet --disable-pip-version-check anthropic==2.14.0
+          "$RUNNER_TEMP/gate/bin/pip" install --quiet --disable-pip-version-check \
+            --require-hashes -r scripts/ci-gate-requirements.txt
+          if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+              | jq -r .value > "$ANTHROPIC_IDENTITY_TOKEN_FILE"
+          fi
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate \
             --jq '.[] | {filename, status, additions, deletions, patch}' \
             | "$RUNNER_TEMP/gate/bin/python" scripts/ci-gate.py
