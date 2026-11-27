@@ -18,9 +18,8 @@ repository = "https://github.com/eryx-org/eryx"
 authors = ["Ben Sully <ben.sully88@gmail.com>"]
 
 [workspace.dependencies]
-# Sorted alphabetically by `cargo rail unify`, which sorts unconditionally
-# since 0.21 (the unify.sort_dependencies opt-out is gone). Purpose notes
-# therefore ride on the dependency itself rather than sitting above a block
+# Kept sorted alphabetically (cargo-rail used to enforce it). Purpose notes
+# ride on the dependency itself rather than sitting above a block
 # — a header only stays true until the next dependency sorts underneath it.
 # Self-explanatory crates are left unannotated.
 anyhow = "1.0"
@@ -163,6 +162,14 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 # Note: unsafe_code lint is handled per-crate in lib.rs, not at workspace level.
 # The eryx crate uses `forbid(unsafe_code)` by default, relaxed to `deny` when
 # the `embedded` feature is enabled.
+
+# Cargo's own lints (Rust 1.100). Warn by default; the Lint job sets
+# CARGO_BUILD_WARNINGS=deny so CI fails on them. unused_dependencies only
+# fires for the selected packages and targets, so it misses some.
+[workspace.lints.cargo]
+unused_dependencies = "warn"
+unused_workspace_dependencies = "warn"
+missing_lints_inheritance = "warn"
 
 [workspace.lints.clippy]
 all = "warn"

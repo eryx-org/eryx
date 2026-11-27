@@ -14,9 +14,10 @@ on:
     - cron: '0 6 * * 1'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A new push to a pull request supersedes its old run; main runs finish.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only pull request runs share a group: a new push supersedes the old run.
+  # Every other run gets its own group, so none is cancelled or replaced.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

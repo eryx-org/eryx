@@ -14,7 +14,15 @@
   // Rust toolchain, wasmtime, and Docker bumps are deliberate — keep them
   // reviewable rather than firehosing PRs.
   prConcurrentLimit: 10,
-  prHourlyLimit: 4,
+  // Two an hour, so Monday's batch doesn't land on the runners all at once.
+  prHourlyLimit: 2,
+
+  // Weekly, with the lockfile maintenance below. Every Renovate PR runs all
+  // of CI and its merge runs it again on main (~550 runner-minutes on a
+  // 20-runner free plan), and each Cargo.lock change invalidates the build
+  // caches. Daily PRs (~30 a week in Nov 2026) kept the runners queued and
+  // the caches cold. The Dependency Dashboard can still start one early.
+  schedule: ["before 6am on monday"],
 
   // Refresh Cargo.lock / uv.lock / package-lock weekly.
   lockFileMaintenance: {
@@ -35,6 +43,26 @@
   },
 
   packageRules: [
+    // ------------------------------------------------------------------
+    // One PR per ecosystem for the week's minor and patch bumps. These come
+    // first so the lockstep groups below, which also set groupName, win.
+    // ------------------------------------------------------------------
+    {
+      matchCategories: ["rust"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "Rust crates (non-major)",
+    },
+    {
+      matchCategories: ["js"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "npm packages (non-major)",
+    },
+    {
+      matchCategories: ["python"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "Python packages (non-major)",
+    },
+
     // ------------------------------------------------------------------
     // Internal / path dependencies — never bump these.
     // (Belt-and-suspenders: Renovate skips path deps, but the workspace

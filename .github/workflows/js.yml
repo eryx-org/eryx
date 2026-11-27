@@ -82,13 +82,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # All of Cargo.lock would bust these keys on every lock-only bump; see the script.
+      - name: Hash the Cargo.lock entries the runtimes build from
+        id: lock
+        run: |
+          echo "python=$(scripts/lock-closure-hash.py eryx-guest-python eryx-runtime)" >> "$GITHUB_OUTPUT"
+          echo "javascript=$(scripts/lock-closure-hash.py eryx-guest-js eryx-runtime)" >> "$GITHUB_OUTPUT"
+
       - name: Cache WASM runtime
         id: wasm-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             crates/eryx-runtime/runtime-python.wasm
-          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          key: wasm-runtime-v3-${{ hashFiles('crates/eryx-guest-python/src/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/eryx-guest-python/Cargo.toml', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/src/**', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}-${{ steps.lock.outputs.python }}
 
       - name: Touch cached WASM
         if: steps.wasm-cache.outputs.cache-hit == 'true'
@@ -103,7 +110,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: crates/eryx-runtime/runtime-javascript.wasm
-          key: wasm-runtime-javascript-wasm-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.lock', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          key: wasm-runtime-javascript-wasm-v1-${{ hashFiles('crates/eryx-guest-js/**', 'crates/eryx-guest-python/clock_stubs.c', 'crates/wit-dylib-ffi/**', 'crates/eryx-runtime/build.rs', 'crates/eryx-runtime/wit/**', 'crates/eryx-runtime/libs/*.zst', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}-${{ steps.lock.outputs.javascript }}
 
       - name: Cache shell runtime
         id: wasm-cache-shell
