@@ -138,8 +138,10 @@ jobs:
               - '.config/rail.toml'
             server:
               - 'crates/eryx-server/**'
+              - '**/.dockerignore'
             dockerfile:
               - 'crates/eryx-server/Dockerfile'
+              - '**/.dockerignore'
             python:
               - 'crates/eryx-python/**'
               # pyeryx depends on it for the exceptions it shares
