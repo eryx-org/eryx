@@ -101,6 +101,17 @@ jobs:
       bundler: ${{ steps.filter.outputs.bundler }}
       shell: ${{ steps.filter.outputs.shell }}
       notices: ${{ steps.filter.outputs.notices }}
+      # What scripts/ci-gate.py (Claude) decided the PR needs, for the
+      # optional groups below. Empty unless it ran on a PR, and jobs check
+      # `!= 'false'`, so pushes, a skipped or failed gate and anything it
+      # didn't answer run.
+      gate-windows: ${{ steps.gate.outputs.windows }}
+      gate-macos: ${{ steps.gate.outputs.macos }}
+      gate-docker: ${{ steps.gate.outputs.docker }}
+      gate-feature-combinations: ${{ steps.gate.outputs.feature_combinations }}
+      gate-examples: ${{ steps.gate.outputs.examples }}
+      gate-book: ${{ steps.gate.outputs.book }}
+      platform-oses: ${{ steps.gate.outputs.platform_oses || '["windows-latest", "macos-latest"]' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,6 +213,29 @@ jobs:
               # The toolchain whose standard library the notices list.
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
+
+      # Best-effort: Claude picks which optional job groups (Windows, macOS,
+      # Docker, feature combinations, examples, book) this PR can affect, from
+      # its changed paths. Lint, Test and the Linux Python tests always run,
+      # pushes to main run everything, and any failure runs everything. The
+      # job summary shows the decision; the `ci:full` label skips the gate.
+      - name: Ask Claude which optional jobs this PR needs
+        id: gate
+        if: >-
+          github.event_name == 'pull_request'
+          && !contains(github.event.pull_request.labels.*.name, 'ci:full')
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/gate"
+          "$RUNNER_TEMP/gate/bin/pip" install --quiet --disable-pip-version-check anthropic==2.14.0
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate \
+            --jq '.[] | {filename, status, additions, deletions, patch}' \
+            | "$RUNNER_TEMP/gate/bin/python" scripts/ci-gate.py
 
   # Third-party notices (#837): every shipped crate's licence is one
   # about.toml accepts, and every vendored non-Rust input has an entry in
@@ -1147,9 +1181,11 @@ jobs:
       needs.changes.outputs.full == 'true'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true')
+      && needs.changes.outputs.platform-oses != '[]'
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        # Both, unless the CI gate in `changes` dropped one.
+        os: ${{ fromJSON(needs.changes.outputs.platform-oses) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1326,6 +1362,7 @@ jobs:
       needs.changes.outputs.heavy == 'true'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true')
+      && needs.changes.outputs.gate-feature-combinations != 'false'
     env:
       MISE_DISABLE_TOOLS: ""
     steps:
@@ -1387,6 +1424,7 @@ jobs:
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.examples == 'true')
+      && needs.changes.outputs.gate-examples != 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1544,6 +1582,7 @@ jobs:
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true')
+      && needs.changes.outputs.gate-windows != 'false'
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1649,6 +1688,7 @@ jobs:
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.python == 'true')
+      && needs.changes.outputs.gate-macos != 'false'
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -1817,6 +1857,7 @@ jobs:
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.book == 'true'
       || needs.changes.outputs.python == 'true')
+      && needs.changes.outputs.gate-book != 'false'
     env:
       # The release profile uses codegen-units = 1 for shipped artifacts, which
       # makes LLVM single-threaded on the eryx crate. These builds only feed
@@ -2180,6 +2221,7 @@ jobs:
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'))
+      && needs.changes.outputs.gate-docker != 'false'
     permissions:
       contents: read
     env:
@@ -2302,6 +2344,7 @@ jobs:
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
       || needs.changes.outputs.server == 'true'))
+      && needs.changes.outputs.gate-docker != 'false'
     permissions:
       contents: read
     env:
