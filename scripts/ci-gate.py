@@ -141,7 +141,10 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str]:
         groups = "\n".join(f"- {g}: {d}" for g, d in GROUPS.items())
         response = client.beta.messages.create(
             model=MODEL,
-            max_tokens=8000,
+            # Answers use ~150 tokens, thinking included. With the diff cap above
+            # this bounds a call at ~25k in + 2k out: about $0.07 on Sonnet 5.5.
+            # Hitting it stops with max_tokens, which runs everything.
+            max_tokens=2000,
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
             output_config={
