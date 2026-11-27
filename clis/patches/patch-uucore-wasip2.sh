@@ -63,3 +63,61 @@ else
     }
     echo "patch-uucore-wasip2: display_permissions shows devices on WASI in $fs"
 fi
+
+# ---------------------------------------------------------------------------
+# Show what `ls -l` can know about permissions on WASI.
+#
+# WASI's stat has no permission bits, so std's `readonly()` is always true
+# and the non-unix display_permissions printed `r-xr-xr-x` for every file,
+# even ones the run can write: agents read that as "can't write here". A
+# file's writability on WASI comes from its mount, which `access(W_OK)`
+# reports, so show the modes a file or directory would have on an ordinary
+# filesystem: rw-r--r-- and rwxr-xr-x if writable, r--r--r-- and r-xr-xr-x
+# if not, and devices as rw-rw-rw-. Idempotent.
+# ---------------------------------------------------------------------------
+display=src/uu/ls/src/display.rs
+[ -f "$display" ] || { echo "patch-uucore-wasip2: $display not found (wrong dir?)" >&2; exit 1; }
+if grep -q 'eryx: modes on WASI' "$fs"; then
+    echo "patch-uucore-wasip2: wasi_permissions already patched"
+else
+    cat >> "$fs" <<'EOF'
+
+// eryx: modes on WASI
+#[cfg(target_os = "wasi")]
+/// The permissions to show for the file at `path` on WASI, which has no file
+/// modes: for a file or directory, those of a writable one if `access(W_OK)`
+/// allows writing it, else those of a read-only one. Devices (/dev/null and
+/// the like) are writable; a symlink keeps what it had.
+pub fn wasi_permissions(metadata: &fs::Metadata, path: &Path) -> Option<&'static str> {
+    use std::os::wasi::ffi::OsStrExt;
+    use std::os::wasi::fs::FileTypeExt;
+    let file_type = metadata.file_type();
+    if file_type.is_char_device() || file_type.is_block_device() {
+        return Some("rw-rw-rw-");
+    }
+    if !metadata.is_dir() && !metadata.is_file() {
+        return None;
+    }
+    let writable = std::ffi::CString::new(path.as_os_str().as_bytes())
+        // SAFETY: a valid C string, which access only reads.
+        .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0);
+    Some(match (metadata.is_dir(), writable) {
+        (true, true) => "rwxr-xr-x",
+        (true, false) => "r-xr-xr-x",
+        (false, true) => "rw-r--r--",
+        (false, false) => "r--r--r--",
+    })
+}
+EOF
+    echo "patch-uucore-wasip2: wasi_permissions added to $fs"
+fi
+if grep -q 'eryx: modes on WASI' "$display"; then
+    echo "patch-uucore-wasip2: ls modes already patched"
+else
+    perl -0pi -e 's/\Q            .extend(display_permissions(md, true).as_bytes());\E/            \/\/ eryx: modes on WASI\n            .extend({\n                let mut permissions = display_permissions(md, true);\n                #[cfg(target_os = "wasi")]\n                if let Some(wasi) = uucore::fs::wasi_permissions(md, item.path()) {\n                    permissions.replace_range(1.., wasi);\n                }\n                permissions\n            }.as_bytes());/' "$display"
+    grep -q 'eryx: modes on WASI' "$display" || {
+        echo "patch-uucore-wasip2: ERROR — failed to patch modes in $display" >&2
+        exit 1
+    }
+    echo "patch-uucore-wasip2: ls shows modes from access(W_OK) on WASI in $display"
+fi
