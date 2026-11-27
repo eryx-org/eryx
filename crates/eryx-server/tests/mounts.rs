@@ -1031,3 +1031,41 @@ print(dirs, files)
     );
     assert_eq!(lists(&asked), [""], "{asked:?}");
 }
+
+/// WASI has no file modes, so what a run can write is what `access(W_OK)`
+/// says: its mount's writability, which `ls -l` shows as the modes it would
+/// have on an ordinary filesystem
+#[tokio::test]
+async fn access_follows_the_mounts_writability() {
+    let channel = start_server().await;
+    let code = r"
+import os
+print([os.access(p, os.W_OK) for p in ['/mnt/repo', '/mnt/repo/README.md', '/mnt/repo/src', '/tmp']])
+";
+    let (result, _) = run(channel.clone(), Language::Python, code).await;
+    assert_eq!(stdout(&result), "[False, False, False, True]\n");
+    let (result, _) = run_writable(channel, Language::Python, code).await;
+    assert_eq!(stdout(&result), "[True, True, True, True]\n");
+}
+
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn ls_shows_the_mounts_writability() {
+    let channel = start_server().await;
+    let code = "ls -ld /dev/null /mnt/repo /mnt/repo/README.md /tmp | cut -c1-10";
+    let (result, _) = run(channel.clone(), Language::Shell, code).await;
+    assert_eq!(
+        stdout(&result),
+        "crw-rw-rw-\ndr-xr-xr-x\n-r--r--r--\ndrwxr-xr-x\n"
+    );
+    let (result, _) = run_writable(channel.clone(), Language::Shell, code).await;
+    assert_eq!(
+        stdout(&result),
+        "crw-rw-rw-\ndrwxr-xr-x\n-rw-r--r--\ndrwxr-xr-x\n"
+    );
+
+    // Checking each entry's writability costs no more file operations
+    let (_, plain) = run(channel.clone(), Language::Shell, "ls /mnt/repo").await;
+    let (_, long) = run(channel, Language::Shell, "ls -l /mnt/repo").await;
+    assert_eq!(long, plain);
+}

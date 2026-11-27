@@ -91,6 +91,18 @@ fn requested_file_perms(flags: types::DescriptorFlags) -> FilePerms {
     perms
 }
 
+/// The descriptor flags a directory with `perms` reports.
+fn dir_flags(perms: DirPerms) -> types::DescriptorFlags {
+    let mut flags = types::DescriptorFlags::empty();
+    if perms.contains(DirPerms::READ) {
+        flags |= types::DescriptorFlags::READ;
+    }
+    if perms.contains(DirPerms::MUTATE) {
+        flags |= types::DescriptorFlags::MUTATE_DIRECTORY;
+    }
+    flags
+}
+
 /// Convert VFS metadata to hybrid WASI DescriptorStat.
 fn vfs_metadata_to_stat(meta: &crate::storage::Metadata) -> types::DescriptorStat {
     let dtype = if meta.is_dir {
@@ -602,6 +614,11 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
         let mut flags = types::DescriptorFlags::empty();
 
         match descriptor {
+            // A directory's flags are its own permissions, as in wasmtime:
+            // libc's `access(W_OK)` checks MUTATE_DIRECTORY on the preopen
+            HybridDescriptor::Vfs(vfs_desc) if vfs_desc.is_dir => {
+                flags |= dir_flags(vfs_desc.dir_perms);
+            }
             HybridDescriptor::Vfs(vfs_desc) => {
                 if vfs_desc.file_perms.contains(FilePerms::READ) {
                     flags |= types::DescriptorFlags::READ;
@@ -610,14 +627,7 @@ impl<S: VfsStorage + Clone + 'static> HybridVfsState<'_, S> {
                     flags |= types::DescriptorFlags::WRITE;
                 }
             }
-            HybridDescriptor::RealDir { dir, .. } => {
-                if dir.file_perms.contains(FilePerms::READ) {
-                    flags |= types::DescriptorFlags::READ;
-                }
-                if dir.file_perms.contains(FilePerms::WRITE) {
-                    flags |= types::DescriptorFlags::WRITE;
-                }
-            }
+            HybridDescriptor::RealDir { dir, .. } => flags |= dir_flags(dir.dir_perms),
             HybridDescriptor::RealFile { file, .. } => {
                 if file.readable {
                     flags |= types::DescriptorFlags::READ;

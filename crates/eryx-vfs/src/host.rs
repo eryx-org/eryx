@@ -118,6 +118,17 @@ impl<S: VfsStorage + Clone + 'static> types::HostDescriptor for VfsState<'_, S> 
     ) -> VfsFsResult<types::DescriptorFlags> {
         let descriptor = self.table.get(&fd)?;
         let mut flags = types::DescriptorFlags::empty();
+        // A directory's flags are its own permissions, as in wasmtime:
+        // libc's `access(W_OK)` checks MUTATE_DIRECTORY on the preopen
+        if descriptor.is_dir {
+            if descriptor.dir_perms.contains(DirPerms::READ) {
+                flags |= types::DescriptorFlags::READ;
+            }
+            if descriptor.dir_perms.contains(DirPerms::MUTATE) {
+                flags |= types::DescriptorFlags::MUTATE_DIRECTORY;
+            }
+            return Ok(flags);
+        }
         if descriptor.file_perms.contains(FilePerms::READ) {
             flags |= types::DescriptorFlags::READ;
         }
