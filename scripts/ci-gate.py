@@ -30,14 +30,17 @@ import os
 import re
 import sys
 
-MODEL = "claude-sonnet-5-5"
-# $ per million input/output tokens, for the cost note. A refusal fallback can
-# answer on another model; one not listed here reports tokens only.
-PRICES = {"claude-sonnet-5-5": (2.0, 10.0), "claude-sonnet-5": (2.0, 10.0)}
+# Haiku matched Sonnet 5.5's decisions on past PRs (or ran more when unsure)
+# at about a tenth of the cost, ~$0.001 a run. It has no server-side refusal
+# fallback; a refusal runs everything.
+MODEL = "claude-haiku-5-5"
+# $ per million input/output tokens (prompts under 100K), for the cost note.
+# A model not listed here reports tokens only.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50)}
 # More files than this and the PR is broad enough to just run everything.
 MAX_FILES = 300
 # Diff lines sent per file and in total; past these the model sees counts only.
-MAX_PATCH_LINES = 150
+MAX_PATCH_LINES = 400
 MAX_TOTAL_PATCH_LINES = 2000
 
 # Group -> what its jobs check. The model sees these descriptions.
@@ -158,14 +161,12 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str, str]:
 
         client = anthropic.Anthropic(timeout=120, max_retries=2)
         groups = "\n".join(f"- {g}: {d}" for g, d in GROUPS.items())
-        response = client.beta.messages.create(
+        response = client.messages.create(
             model=MODEL,
-            # Answers use ~150 tokens, thinking included. With the diff cap above
-            # this bounds a call at ~25k in + 2k out: about $0.07 on Sonnet 5.5.
+            # Haiku uses up to ~1.5k tokens, thinking included. With the diff cap
+            # above this bounds a call at ~40k in + 4k out: under $0.01.
             # Hitting it stops with max_tokens, which runs everything.
-            max_tokens=2000,
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+            max_tokens=4000,
             output_config={
                 "effort": "low",
                 "format": {"type": "json_schema", "schema": SCHEMA},
