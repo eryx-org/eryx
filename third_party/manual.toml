@@ -336,7 +336,7 @@ version = "wasi-sdk-34 (2e6fb9d8)"
 license = "Apache-2.0 WITH LLVM-exception AND Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND CC0-1.0"
 url = "https://github.com/WebAssembly/wasi-libc/tree/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13"
 # The wasi-libc in Rust's self-contained wasm32-wasip2/p3 sysroots, which the
-# artifacts built with the pinned stable toolchain link. Rust 1.100.0 builds
+# artifacts built with the pinned stable toolchain link. Rust 1.100.1 builds
 # those targets with wasi-sdk-34 (src/ci/docker/host-x86_64/dist-various-2/
 # Dockerfile at its tag), whose src/wasi-libc is at the commit above; its
 # libc.a reports clang 23.1.0-wasi-sdk (llvm 895aa2c8). Only musl's COPYRIGHT
@@ -351,7 +351,7 @@ files = [
     "third_party/licenses/wasi-libc-cloudlibc-LICENSE",
     "third_party/licenses/wasi-libc-musl-fts-COPYING",
 ]
-rust_toolchain = "1.100.0"
+rust_toolchain = "1.100.1"
 sysroot_strings = { paths = [
     "lib/rustlib/wasm32-wasip2/lib/self-contained/libc.a",
     "lib/rustlib/wasm32-wasip3/lib/self-contained/libc.a",
@@ -360,9 +360,9 @@ artifacts = ["runtime-shell", "eryx-bundler", "coreutils"]
 
 [[component]]
 name = "The Rust standard library"
-version = "1.100.0 (0ef1bc38)"
+version = "1.100.1 (20ddd017)"
 license = "(MIT OR Apache-2.0) AND Unicode-3.0"
-url = "https://github.com/rust-lang/rust/tree/1.100.0"
+url = "https://github.com/rust-lang/rust/tree/1.100.1"
 # The project's own licence texts for std, core, alloc and the rest of
 # library/, and Unicode-3.0 for core's Unicode tables
 # (library/core/src/unicode/unicode_data.rs, per the project's REUSE.toml);
@@ -374,7 +374,7 @@ files = [
     "third_party/licenses/rust-LICENSE-APACHE",
     "third_party/licenses/rust-Unicode-3.0.txt",
 ]
-rust_toolchain = "1.100.0"
+rust_toolchain = "1.100.1"
 artifacts = ["host", "runtime-shell", "eryx-bundler", "coreutils"]
 
 [[component]]
@@ -383,7 +383,7 @@ version = "nightly-2026-10-21 (19833af7)"
 license = "(MIT OR Apache-2.0) AND Unicode-3.0"
 url = "https://github.com/rust-lang/rust/tree/19833af7224424e8b53e288097d56b6af43d5bcf"
 # The guests' std, built from source with -Z build-std. Same licence texts
-# (and REUSE.toml annotations) as 1.100.0's, checked when the pin was set.
+# (and REUSE.toml annotations) as 1.100.1's, checked when the pin was set.
 files = [
     "third_party/licenses/rust-COPYRIGHT",
     "third_party/licenses/rust-LICENSE-MIT",
