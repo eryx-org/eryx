@@ -253,12 +253,29 @@ message Mount {
   // (`.git/hooks`, build scripts, `.env`).
   //
   // Writing part of a file fetches it whole first. The changes may hold up
-  // to the server's --max-mount-write-bytes (64 MiB by default), past which
+  // to the server's --max-mount-write-bytes (64 MiB by default), all
+  // writable mounts together, or this mount's max_write_bytes, past which
   // writes fail with ENOSPC. Renaming a directory the client served is
   // EXDEV, which code that moves trees (shutil.move, mv) handles by
   // copying. Changes are against what the run saw: a file the client
   // changed mid-run isn't noticed. Times aren't reported.
   bool writable = 2;
+
+  // The most this writable mount's changes may hold, for a client whose
+  // storage has less room than the server allows, such as a user's
+  // remaining quota. Past it, writes fail with ENOSPC when they're made, as
+  // they do past --max-mount-write-bytes, which it can lower but never
+  // raise: the mount gets the smaller of the two, and the run's writable
+  // mounts still share the server's limit. Unset means the server's limit;
+  // 0 lets the code read and delete files but not write any.
+  //
+  // It's counted the way the server counts its limit: a file's new
+  // contents (a file the code changes is held whole), plus its path and 64
+  // bytes for each file and directory made; reading, deleting a file the
+  // client served and the mount's own directory cost nothing, and
+  // deleting what the run wrote gives its space back. Only for a writable
+  // mount (INVALID_ARGUMENT otherwise).
+  optional uint64 max_write_bytes = 3;
 }
 
 // A change a run made to a writable mount. Apply them in the order they

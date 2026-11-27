@@ -16,7 +16,9 @@
 //! A writable mount (`Mount.writable`) is an [`OverlayStorage`] over its
 //! `RemoteStorage`: the client's files stay as they are, the run's writes stay
 //! on the server, and when the run ends [`Mounts::changes`] lists them for the
-//! client to apply.
+//! client to apply. Each writable mount has its own upper layer, bounded by
+//! its `max_write_bytes` if it has one, and they share the server's
+//! [`MountLimits::max_write_bytes`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -25,8 +27,8 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use eryx::vfs::{
-    DirEntry, InMemoryStorage, Metadata, OverlayChange, OverlayStorage, VfsError, VfsResult,
-    VfsStorage,
+    DirEntry, InMemoryStorage, Metadata, OverlayChange, OverlayStorage, SharedLimit, VfsError,
+    VfsResult, VfsStorage,
 };
 use eryx::{CancellationToken, VolumeMount};
 use futures::FutureExt;
@@ -80,7 +82,8 @@ pub struct MountLimits {
     pub max_listing_bytes: u64,
     /// Entries in one directory's listing.
     pub max_dir_entries: usize,
-    /// Host memory a run's changes to its writable mounts may hold.
+    /// Host memory a run's changes to its writable mounts may hold, all
+    /// together; a mount's `max_write_bytes` can lower its own.
     pub max_write_bytes: u64,
 }
 
@@ -97,6 +100,16 @@ impl Default for MountLimits {
             max_write_bytes: 64 * 1024 * 1024,
         }
     }
+}
+
+/// What an upper layer charges for a mount's directory and those above it,
+/// which the run's writes don't pay for
+fn root_charge(path: &str) -> u64 {
+    let probe = Arc::new(SharedLimit::new(u64::MAX));
+    let storage = InMemoryStorage::with_max_bytes(u64::MAX).with_shared_limit(Arc::clone(&probe));
+    // Fails only for a path `check` refuses
+    let _ = storage.mkdir_sync(path);
+    probe.used()
 }
 
 /// `a` is `b` or inside it
@@ -215,6 +228,11 @@ pub fn check(mounts: &[Mount], max_mounts: usize, roots: &MountRoots) -> Result<
         if !roots.allow(path) {
             return Err(format!("mount path {path:?} must be {roots}"));
         }
+        if mount.max_write_bytes.is_some() && !mount.writable {
+            return Err(format!(
+                "mount {path:?} has max_write_bytes but isn't writable"
+            ));
+        }
         if let Some(other) = mounts[..i]
             .iter()
             .find(|m| inside(path, &m.path) || inside(&m.path, path))
@@ -318,26 +336,38 @@ impl Mounts {
             received: AtomicUsize::new(0),
             cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
         });
-        // Made only for a request with writable mounts, as it charges their
-        // directories to the limit
-        let upper = defs
+        // Each mount's directory is charged to its own upper layer, so the
+        // shared limit grows by them all: the run's writes don't pay for them
+        let roots: u64 = defs
             .iter()
-            .any(|d| d.writable)
-            .then(|| Arc::new(InMemoryStorage::with_max_bytes(limits.max_write_bytes)));
+            .filter(|d| d.writable)
+            .map(|d| root_charge(&d.path))
+            .sum();
+        let shared = Arc::new(SharedLimit::new(
+            limits.max_write_bytes.saturating_add(roots),
+        ));
         let mounts = defs
             .iter()
             .map(|def| {
-                let overlay = match &upper {
-                    Some(upper) if def.writable => {
-                        let lower = Arc::new(RemoteStorage {
-                            mount: def.path.clone(),
-                            remote: Arc::clone(&remote),
-                        });
-                        let upper = Arc::clone(upper);
-                        let overlay = OverlayStorage::new(&def.path, lower, upper);
-                        Some(Arc::new(overlay?))
-                    }
-                    _ => None,
+                let overlay = if def.writable {
+                    let lower = Arc::new(RemoteStorage {
+                        mount: def.path.clone(),
+                        remote: Arc::clone(&remote),
+                    });
+                    // The mount's own directory is free, so a budget of 0
+                    // still mounts it
+                    let max = def
+                        .max_write_bytes
+                        .map_or(limits.max_write_bytes, |budget| {
+                            budget.min(limits.max_write_bytes)
+                        })
+                        .saturating_add(root_charge(&def.path));
+                    let upper =
+                        InMemoryStorage::with_max_bytes(max).with_shared_limit(Arc::clone(&shared));
+                    let overlay = OverlayStorage::new(&def.path, lower, Arc::new(upper));
+                    Some(Arc::new(overlay?))
+                } else {
+                    None
                 };
                 Ok((def.path.clone(), overlay))
             })
@@ -951,6 +981,7 @@ impl VfsStorage for RemoteStorage {
 mod tests {
     use super::*;
     use crate::proto::eryx::v1::{FsEntry, FsError, FsListing};
+    use eryx::vfs::ENTRY_OVERHEAD_BYTES;
 
     fn defs(paths: &[&str]) -> Vec<Mount> {
         paths
@@ -1349,25 +1380,11 @@ mod tests {
         assert!(cache.reserve(CACHE_BYTES + 1).is_err());
     }
 
-    /// A writable mount's changes are relative to it, and a big file comes
-    /// in chunks
-    #[tokio::test]
-    async fn changes_are_relative_and_chunked() {
+    /// `defs`' mounts, served by a client with nothing in it
+    fn empty_mounts(defs: &[Mount], limits: MountLimits) -> Arc<Mounts> {
         let (tx, mut rx) = mpsc::channel(16);
-        let def = Mount {
-            path: "/mnt/m".into(),
-            writable: true,
-        };
-        let mounts = Arc::new(
-            Mounts::new(
-                &[def],
-                MountLimits::default(),
-                tx.downgrade(),
-                CancellationToken::new(),
-            )
-            .unwrap(),
-        );
-        // A client with nothing in it
+        let mounts =
+            Arc::new(Mounts::new(defs, limits, tx.downgrade(), CancellationToken::new()).unwrap());
         let answers = Arc::clone(&mounts);
         tokio::spawn(async move {
             let _tx = tx;
@@ -1381,6 +1398,86 @@ mod tests {
                 });
             }
         });
+        mounts
+    }
+
+    fn writable(path: &str, max_write_bytes: Option<u64>) -> Mount {
+        Mount {
+            path: path.into(),
+            writable: true,
+            max_write_bytes,
+        }
+    }
+
+    /// The charge for a mount's directory is what its upper layer charges
+    #[test]
+    fn root_charge_is_what_the_upper_layer_charges() {
+        for path in ["/mnt/a", "/workspace", "/mnt/x/yy/zzz"] {
+            let charge = root_charge(path);
+            assert!(
+                InMemoryStorage::with_max_bytes(charge)
+                    .mkdir_sync(path)
+                    .is_ok()
+            );
+            assert!(
+                InMemoryStorage::with_max_bytes(charge - 1)
+                    .mkdir_sync(path)
+                    .is_err()
+            );
+        }
+    }
+
+    /// Each mount has its own budget, and they all share the server's limit
+    #[tokio::test]
+    async fn mounts_have_their_own_budgets_within_the_servers() {
+        let limits = MountLimits {
+            max_write_bytes: 10_000,
+            ..MountLimits::default()
+        };
+        let defs = [
+            writable("/mnt/a", Some(1000)),
+            writable("/mnt/b", None),
+            writable("/mnt/c", Some(0)),
+        ];
+        let mounts = empty_mounts(&defs, limits);
+        let overlay = |i: usize| Arc::clone(mounts.mounts[i].1.as_ref().unwrap());
+        let quota = |r: VfsResult<()>| matches!(r, Err(VfsError::QuotaExceeded(_)));
+        let (a, b, c) = (overlay(0), overlay(1), overlay(2));
+
+        assert!(quota(a.write("/mnt/a/f", &[0; 1000]).await));
+        a.write("/mnt/a/f", &[0; 800]).await.unwrap();
+        assert!(quota(c.write("/mnt/c/f", b"").await));
+        assert!(quota(c.mkdir("/mnt/c/d").await));
+        // b has the server's limit, less what a holds; the mounts'
+        // directories are free
+        let cost = |len: u64| len + "/mnt/b/f".len() as u64 + ENTRY_OVERHEAD_BYTES;
+        let a_holds = cost(800);
+        let fits = |len: u64| cost(len) + a_holds <= 10_000;
+        assert!(fits(9056) && !fits(9057));
+        assert!(quota(b.write("/mnt/b/f", &[0; 9057]).await));
+        b.write("/mnt/b/f", &[0; 9056]).await.unwrap();
+        a.delete("/mnt/a/f").await.unwrap();
+        b.write("/mnt/b/f", &[0; 9928]).await.unwrap();
+        assert!(quota(b.write("/mnt/b/f", &[0; 9929]).await));
+
+        // A server limit of 0 still mounts them all
+        let limits = MountLimits {
+            max_write_bytes: 0,
+            ..MountLimits::default()
+        };
+        let defs: Vec<_> = (0..8)
+            .map(|i| writable(&format!("/mnt/{i}"), None))
+            .collect();
+        let mounts = empty_mounts(&defs, limits);
+        let overlay = mounts.mounts[7].1.as_ref().unwrap();
+        assert!(quota(overlay.write("/mnt/7/f", b"").await));
+    }
+
+    /// A writable mount's changes are relative to it, and a big file comes
+    /// in chunks
+    #[tokio::test]
+    async fn changes_are_relative_and_chunked() {
+        let mounts = empty_mounts(&[writable("/mnt/m", None)], MountLimits::default());
         let overlay = mounts.mounts[0].1.as_ref().unwrap();
         let data: Vec<u8> = (0..CHUNK * 2 + 10).map(|i| (i % 251) as u8).collect();
         overlay.write("/mnt/m/f", &data).await.unwrap();
