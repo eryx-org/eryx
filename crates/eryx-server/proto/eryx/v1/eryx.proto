@@ -557,13 +557,15 @@ message CallbackDeclaration {
   //
   // CallbackResponse.json_result must be
   // `{"stdout": "<base64>", "stderr": "<base64>", "exit_code": 0}` (each key
-  // optional, defaulting to empty or 0; base64 is standard with padding,
-  // which is how Go's encoding/json encodes []byte), with stdout and stderr
+  // optional, defaulting to empty or 0, and null reads as empty; base64 is
+  // standard with padding, which is how Go's encoding/json encodes []byte), with stdout and stderr
   // together at most 8 MiB. The shell keeps exit_code's low 8 bits. An error
   // response fails the command with exit status 1 and the message on stderr;
   // a CLI that ran and failed should be a json_result with its exit code.
   // Suspension, timeouts, invocation limits and journaling are as for any
-  // callback: a journal entry's args_json and value are these two objects.
+  // callback: a journal entry's args_json and value are these two objects,
+  // input and output in full, so they count towards the result message's
+  // size.
   //
   // In Python and JavaScript it's an ordinary callback taking `args` and
   // `stdin` and returning the result object.

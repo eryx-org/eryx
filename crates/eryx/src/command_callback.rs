@@ -262,7 +262,8 @@ impl Callback for CommandCallback {
     }
 }
 
-/// Bytes as standard base64 with padding.
+/// Bytes as standard base64 with padding; `null` reads as empty, as Go's
+/// `encoding/json` writes a nil `[]byte`.
 mod b64 {
     use base64::Engine as _;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -272,7 +273,9 @@ mod b64 {
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        let text = String::deserialize(d)?;
+        let Some(text) = Option::<String>::deserialize(d)? else {
+            return Ok(Vec::new());
+        };
         base64::engine::general_purpose::STANDARD
             .decode(text)
             .map_err(serde::de::Error::custom)
@@ -315,6 +318,11 @@ mod tests {
         );
         assert_eq!(CommandOutput::from_value(value).unwrap(), out);
         assert!(CommandOutput::from_value(json!({"exitCode": 1})).is_err());
+        // Go's encoding/json writes a nil []byte as null.
+        assert_eq!(
+            CommandOutput::from_value(json!({"stdout": null, "stderr": null})).unwrap(),
+            CommandOutput::default()
+        );
     }
 
     #[test]

@@ -110,7 +110,7 @@ async fn read_stdin<SE: ShellExtensions>(
 fn decode_result(json: &str) -> Option<(Vec<u8>, Vec<u8>, i32)> {
     let value: Value = serde_json::from_str(json).ok()?;
     let bytes = |key| match value.get(key) {
-        None => Some(Vec::new()),
+        None | Some(Value::Null) => Some(Vec::new()),
         Some(v) => decode(v.as_str()?),
     };
     let code = match value.get("exit_code") {
@@ -197,6 +197,10 @@ mod tests {
             Some((b"hi".to_vec(), vec![], 3))
         );
         assert_eq!(decode_result("{}"), Some((vec![], vec![], 0)));
+        assert_eq!(
+            decode_result(r#"{"stdout":null,"stderr":null}"#),
+            Some((vec![], vec![], 0))
+        );
         assert_eq!(decode_result(r#"{"stdout":1}"#), None);
     }
 }

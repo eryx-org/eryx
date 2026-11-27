@@ -421,8 +421,12 @@ let mycli = CommandCallback::new("mycli", "The host's mycli", |input| {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(failed)?;
-        child.stdin.take().unwrap().write_all(&input.stdin).map_err(failed)?;
+        // Feed stdin from another thread, so a CLI that writes as it reads
+        // doesn't fill its output pipes while this waits on its input.
+        let mut stdin = child.stdin.take().unwrap();
+        let feed = std::thread::spawn(move || stdin.write_all(&input.stdin));
         let out = child.wait_with_output().map_err(failed)?;
+        let _ = feed.join();
         Ok(CommandOutput {
             stdout: out.stdout,
             stderr: out.stderr,
@@ -469,7 +473,10 @@ Limits:
 - Callback timeouts, invocation limits, suspension and replay apply as to any
   callback. A journal entry's arguments are the `{"args", "stdin"}` object and
   its value the result object, so a replayed command gets the same output for
-  the same arguments and input.
+  the same arguments and input. Those carry the input and output in full, and
+  a journal comes back in one gRPC message, so a script that suspends after
+  passing many MiB through command callbacks can outgrow the server's message
+  size limit.
 
 In Python and JavaScript a command callback is an ordinary callback taking
 `args` and `stdin` and returning the result object.
