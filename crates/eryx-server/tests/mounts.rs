@@ -37,63 +37,55 @@ fn tree() -> Vec<(&'static str, Vec<u8>)> {
 
 /// Answer one `FsRequest` from `tree`.
 fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
-    let files = tree();
+    let files: Vec<(String, Vec<u8>)> = tree().into_iter().map(|(p, c)| (p.into(), c)).collect();
+    answer_from(&files, op, path, &|_| false)
+}
+
+/// A file's metadata, with the version a client might attach: here just the
+/// path
+fn meta(p: &str, c: &[u8]) -> FsMetadata {
+    FsMetadata {
+        is_dir: false,
+        size: c.len() as u64,
+        modified: Some(1_700_000_000.0),
+        version: Some(format!("v:{p}")),
+    }
+}
+
+/// A directory's metadata, versioned like [`meta`]
+fn dir(p: &str) -> FsMetadata {
+    FsMetadata {
+        is_dir: true,
+        version: Some(format!("v:{p}/")),
+        ..FsMetadata::default()
+    }
+}
+
+/// Answer one `FsRequest` from `files`, nesting the listings of the
+/// subdirectories `nest` takes in a listing's answer.
+fn answer_from(
+    files: &[(String, Vec<u8>)],
+    op: fs_request::Op,
+    path: &str,
+    nest: &dyn Fn(&str) -> bool,
+) -> fs_response::Result {
     let file = files.iter().find(|(p, _)| *p == path);
     let is_dir = path.is_empty()
         || files
             .iter()
             .any(|(p, _)| p.starts_with(&format!("{path}/")));
-    // The version a client might attach, here just the path
-    let meta = |p: &str, c: &[u8]| FsMetadata {
-        is_dir: false,
-        size: c.len() as u64,
-        modified: Some(1_700_000_000.0),
-        version: Some(format!("v:{p}")),
-    };
-    let dir = |p: &str| FsMetadata {
-        is_dir: true,
-        version: Some(format!("v:{p}/")),
-        ..FsMetadata::default()
-    };
     let error = |code: FsErrorCode| {
         fs_response::Result::Error(FsError {
             code: code.into(),
             message: String::new(),
         })
     };
-    match (op, file) {
+    match (op, file.map(|(p, c)| (p.as_str(), c))) {
         (_, Some(("private/key", _))) => error(FsErrorCode::PermissionDenied),
         (fs_request::Op::Stat(_), Some((p, c))) => fs_response::Result::Stat(meta(p, c)),
         (fs_request::Op::Stat(_), None) if is_dir => fs_response::Result::Stat(dir(path)),
         (fs_request::Op::List(_), None) if is_dir => {
-            let prefix = if path.is_empty() {
-                String::new()
-            } else {
-                format!("{path}/")
-            };
-            let mut entries: Vec<FsEntry> = Vec::new();
-            for (p, c) in &files {
-                let Some(rest) = p.strip_prefix(&prefix) else {
-                    continue;
-                };
-                match rest.split_once('/') {
-                    Some((sub, _)) if !entries.iter().any(|e| e.name == sub) => {
-                        entries.push(FsEntry {
-                            name: sub.into(),
-                            metadata: Some(dir(&format!("{prefix}{sub}"))),
-                            content: None,
-                        });
-                    }
-                    Some(_) => {}
-                    None => entries.push(FsEntry {
-                        name: rest.into(),
-                        metadata: Some(meta(p, c)),
-                        // Small files come with the listing
-                        content: (c.len() < 64).then(|| c.clone()),
-                    }),
-                }
-            }
-            fs_response::Result::Listing(FsListing { entries })
+            fs_response::Result::Listing(list(files, path, nest))
         }
         (fs_request::Op::List(_), Some(_)) => error(FsErrorCode::NotADirectory),
         (fs_request::Op::Read(read), Some((_, c))) => {
@@ -104,6 +96,42 @@ fn answer(op: fs_request::Op, path: &str) -> fs_response::Result {
         (fs_request::Op::Read(_), None) if is_dir => error(FsErrorCode::IsADirectory),
         _ => error(FsErrorCode::NotFound),
     }
+}
+
+/// The listing of the directory `path` in `files`, with the listings of the
+/// subdirectories `nest` takes nested in it.
+fn list(files: &[(String, Vec<u8>)], path: &str, nest: &dyn Fn(&str) -> bool) -> FsListing {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    let mut entries: Vec<FsEntry> = Vec::new();
+    for (p, c) in files {
+        let Some(rest) = p.strip_prefix(&prefix) else {
+            continue;
+        };
+        match rest.split_once('/') {
+            Some((sub, _)) if !entries.iter().any(|e| e.name == sub) => {
+                let sub_path = format!("{prefix}{sub}");
+                entries.push(FsEntry {
+                    name: sub.into(),
+                    metadata: Some(dir(&sub_path)),
+                    content: None,
+                    listing: nest(&sub_path).then(|| list(files, &sub_path, nest)),
+                });
+            }
+            Some(_) => {}
+            None => entries.push(FsEntry {
+                name: rest.into(),
+                metadata: Some(meta(p, c)),
+                // Small files come with the listing
+                content: (c.len() < 64).then(|| c.clone()),
+                listing: None,
+            }),
+        }
+    }
+    FsListing { entries }
 }
 
 async fn start_server() -> Channel {
@@ -187,6 +215,15 @@ async fn run_request(channel: Channel, request: ExecuteRequest) -> (ExecuteResul
 async fn exchange(
     channel: Channel,
     request: ExecuteRequest,
+) -> (ExecuteResult, usize, Vec<FsChange>, Vec<FsAccess>) {
+    exchange_with(channel, request, &|op, path| answer(op, path)).await
+}
+
+/// [`exchange`], answering the server's file operations with `answer`.
+async fn exchange_with(
+    channel: Channel,
+    request: ExecuteRequest,
+    answer: &(dyn Fn(fs_request::Op, &str) -> fs_response::Result + Sync),
 ) -> (ExecuteResult, usize, Vec<FsChange>, Vec<FsAccess>) {
     let mut client = EryxClient::new(channel);
     let (tx, rx) = mpsc::channel(16);
@@ -889,4 +926,267 @@ except OSError as e:
     let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(status.message().contains("writable"), "{status:?}");
+}
+
+// ============================================================================
+// Nested listings (`FsEntry.listing`)
+// ============================================================================
+
+/// `dirs` directories `d0`..., each with `subdirs` directories `e0`... of
+/// two small files, and a file of their own.
+fn wide_tree(dirs: usize, subdirs: usize) -> Vec<(String, Vec<u8>)> {
+    let mut files = vec![("top.txt".to_string(), b"top".to_vec())];
+    for d in 0..dirs {
+        files.push((format!("d{d}/own.txt"), format!("own {d}").into_bytes()));
+        for e in 0..subdirs {
+            for x in 0..2 {
+                let path = format!("d{d}/e{e}/x{x}.txt");
+                files.push((path.clone(), path.into_bytes()));
+            }
+        }
+    }
+    files
+}
+
+/// What a client asked for, as `list <path>`, `stat <path>` or `read <path>`.
+type Asked = std::sync::Mutex<Vec<String>>;
+
+/// Run `request`, answering from `files` and nesting the listings `nest`
+/// takes: the result, what was asked for, and the changes.
+async fn run_nested(
+    channel: Channel,
+    request: ExecuteRequest,
+    files: &[(String, Vec<u8>)],
+    nest: &(dyn Fn(&str) -> bool + Sync),
+) -> (ExecuteResult, Vec<String>, Vec<FsChange>) {
+    let asked = Asked::default();
+    let answer = |op: fs_request::Op, path: &str| {
+        let kind = match &op {
+            fs_request::Op::Stat(_) => "stat",
+            fs_request::Op::List(_) => "list",
+            fs_request::Op::Read(_) => "read",
+        };
+        asked.lock().unwrap().push(format!("{kind} {path}"));
+        answer_from(files, op, path, nest)
+    };
+    let (result, _, changes, _) = exchange_with(channel, request, &answer).await;
+    (result, asked.into_inner().unwrap(), changes)
+}
+
+fn lists(asked: &[String]) -> Vec<&str> {
+    asked
+        .iter()
+        .filter_map(|a| a.strip_prefix("list "))
+        .collect()
+}
+
+const WALK: &str = r"
+import os
+for root, dirs, files in sorted(os.walk('/mnt/repo')):
+    dirs.sort()
+    for name in sorted(files):
+        path = os.path.join(root, name)
+        print(path, os.path.getsize(path), open(path).read())
+";
+
+/// A client that nests every listing in the root's answers a whole walk,
+/// stats and reads included, with one request
+#[tokio::test]
+async fn python_walks_nested_listings_with_one_request() {
+    let channel = start_server().await;
+    let files = wide_tree(3, 2);
+    let request = || mounted(Language::Python, WALK, false);
+    let (flat, flat_asked, _) = run_nested(channel.clone(), request(), &files, &|_| false).await;
+    let (nested, asked, _) = run_nested(channel, request(), &files, &|_| true).await;
+    assert_eq!(stdout(&nested), stdout(&flat));
+    assert!(stdout(&nested).contains("/mnt/repo/d2/e1/x1.txt 12 d2/e1/x1.txt\n"));
+    assert_eq!(lists(&flat_asked).len(), 1 + 3 + 3 * 2, "{flat_asked:?}");
+    assert_eq!(lists(&asked), [""], "{asked:?}");
+    assert!(
+        asked.len() <= 2,
+        "the listing, and the mount's stat: {asked:?}"
+    );
+}
+
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn ls_r_walks_nested_listings_with_one_request() {
+    let channel = start_server().await;
+    let files = wide_tree(3, 2);
+    let request = || mounted(Language::Shell, "ls -R /mnt/repo", false);
+    let (flat, flat_asked, _) = run_nested(channel.clone(), request(), &files, &|_| false).await;
+    let (nested, asked, _) = run_nested(channel, request(), &files, &|_| true).await;
+    assert_eq!(stdout(&nested), stdout(&flat));
+    assert!(stdout(&nested).contains("/mnt/repo/d1/e0:\nx0.txt\nx1.txt\n"));
+    assert_eq!(lists(&flat_asked).len(), 10, "{flat_asked:?}");
+    assert_eq!(lists(&asked), [""], "{asked:?}");
+}
+
+/// Directories the client leaves out are listed with requests of their own
+#[tokio::test]
+async fn a_partly_nested_tree_asks_for_the_rest() {
+    let channel = start_server().await;
+    let files = wide_tree(3, 2);
+    let request = mounted(Language::Python, WALK, false);
+    // Everything but d1 and what's in it
+    let nest = |p: &str| p != "d1" && !p.starts_with("d1/");
+    let (result, asked, _) = run_nested(channel, request, &files, &nest).await;
+    assert!(stdout(&result).contains("/mnt/repo/d1/e1/x0.txt 12 d1/e1/x0.txt\n"));
+    let mut listed = lists(&asked);
+    listed.sort_unstable();
+    assert_eq!(listed, ["", "d1", "d1/e0", "d1/e1"]);
+}
+
+/// Nested entries count towards the per-directory entries and the listing
+/// bytes: past either, the answer fails as a top-level listing would
+#[tokio::test]
+async fn nested_listings_count_towards_the_listing_limits() {
+    let code = r"
+import os
+try:
+    os.listdir('/mnt/repo')
+    print('listed')
+except OSError:
+    print('limited')
+";
+    let files = wide_tree(1, 4);
+    for (mounts, nested) in [
+        // The root and d0 have two entries; d0/e* has four (d0 has five)
+        (
+            eryx_server::mounts::MountLimits {
+                max_dir_entries: 4,
+                ..Default::default()
+            },
+            "limited",
+        ),
+        // The root alone fits, the tree doesn't
+        (
+            eryx_server::mounts::MountLimits {
+                max_listing_bytes: 400,
+                ..Default::default()
+            },
+            "limited",
+        ),
+    ] {
+        let limits = eryx_server::service::ServerLimits {
+            mounts,
+            ..Default::default()
+        };
+        let channel = start_server_with(limits).await;
+        let request = || mounted(Language::Python, code, false);
+        let (flat, ..) = run_nested(channel.clone(), request(), &files, &|_| false).await;
+        assert_eq!(stdout(&flat), "listed\n", "{mounts:?}");
+        let (result, ..) = run_nested(channel, request(), &files, &|_| true).await;
+        assert_eq!(stdout(&result), format!("{nested}\n"), "{mounts:?}");
+    }
+}
+
+/// A malformed nested listing fails the listing it came in, and the run
+/// goes on
+#[tokio::test]
+async fn a_malformed_nested_listing_fails_its_answer() {
+    let channel = start_server().await;
+    let code = r"
+import os
+try:
+    os.listdir('/mnt/repo')
+except OSError:
+    print('refused')
+print(open('/mnt/repo/README.md').read(), end='')
+";
+    let answer = |op: fs_request::Op, path: &str| match (&op, path) {
+        (fs_request::Op::List(_), "") => {
+            let mut listing = list(&tree_files(), "", &|_| false);
+            // A listing on a file
+            let readme = listing.entries.iter_mut().find(|e| e.name == "README.md");
+            readme.unwrap().listing = Some(FsListing::default());
+            fs_response::Result::Listing(listing)
+        }
+        _ => answer(op, path),
+    };
+    let request = mounted(Language::Python, code, false);
+    let (result, ..) = exchange_with(channel, request, &answer).await;
+    assert_eq!(stdout(&result), "refused\nhello mounts\n");
+}
+
+fn tree_files() -> Vec<(String, Vec<u8>)> {
+    tree().into_iter().map(|(p, c)| (p.into(), c)).collect()
+}
+
+/// A writable mount's overlay merges nested listings as it does fetched
+/// ones, deletions included. (Before the root is listed, nothing nested is
+/// known: changes made first look their paths up with requests.)
+#[tokio::test]
+async fn a_writable_mount_merges_nested_listings() {
+    let channel = start_server().await;
+    let code = r"
+import os, shutil
+list(os.walk('/mnt/repo'))
+open('/mnt/repo/d0/e0/new.txt', 'w').write('new')
+os.remove('/mnt/repo/d0/e1/x0.txt')
+shutil.rmtree('/mnt/repo/d1')
+print(sorted(os.listdir('/mnt/repo')))
+print(sorted(os.listdir('/mnt/repo/d0/e0')), sorted(os.listdir('/mnt/repo/d0/e1')))
+print(sum(len(f) for _, _, f in os.walk('/mnt/repo')))
+";
+    let files = wide_tree(2, 2);
+    let request = mounted(Language::Python, code, true);
+    let (result, asked, changes) = run_nested(channel, request, &files, &|_| true).await;
+    assert_eq!(
+        stdout(&result),
+        "['d0', 'top.txt']\n\
+         ['new.txt', 'x0.txt', 'x1.txt'] ['x1.txt']\n\
+         6\n"
+    );
+    assert_eq!(lists(&asked), [""], "{asked:?}");
+    let mut changes: Vec<String> = changes
+        .into_iter()
+        .map(|c| match c.change.unwrap() {
+            fs_change::Change::Remove(_) => format!("remove {}", c.path),
+            fs_change::Change::Mkdir(_) => format!("mkdir {}", c.path),
+            fs_change::Change::Write(w) => {
+                format!("write {} {}", c.path, String::from_utf8_lossy(&w.data))
+            }
+        })
+        .collect();
+    changes.sort_unstable();
+    let mut want = vec![
+        "remove d0/e1/x0.txt".to_string(),
+        "remove d1".into(),
+        "write d0/e0/new.txt new".into(),
+    ];
+    for path in ["d1/own.txt", "d1/e0", "d1/e1"].into_iter().chain([
+        "d1/e0/x0.txt",
+        "d1/e0/x1.txt",
+        "d1/e1/x0.txt",
+        "d1/e1/x1.txt",
+    ]) {
+        want.push(format!("remove {path}"));
+    }
+    want.sort_unstable();
+    assert_eq!(changes, want);
+}
+
+/// One answer is one operation however many listings it nests, so a tree
+/// of more directories than --max-mount-ops can be walked
+#[tokio::test]
+async fn a_nested_answer_is_one_operation() {
+    let channel = start_server().await;
+    let files = wide_tree(40, 30);
+    let code = r"
+import os
+dirs = files = 0
+for root, ds, fs in os.walk('/mnt/repo'):
+    dirs += 1
+    for name in fs:
+        files += len(open(os.path.join(root, name), 'rb').read()) > 0
+print(dirs, files)
+";
+    let request = mounted(Language::Python, code, false);
+    let (result, asked, _) = run_nested(channel, request, &files, &|_| true).await;
+    assert_eq!(
+        stdout(&result),
+        format!("{} {}\n", 1 + 40 + 40 * 30, files.len())
+    );
+    assert_eq!(lists(&asked), [""], "{asked:?}");
 }
