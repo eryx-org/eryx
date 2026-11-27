@@ -9,8 +9,9 @@
 # - python-build.yml: every pyeryx wheel, the sdist and the companion wheels,
 #   smoke-tested on Linux, macOS and Windows;
 # - js-build.yml: the npm package;
-# plus both eryx-server images, built in the Dockerfile's from-source mode
-# (RUNTIME_SOURCE=default) and checked to serve every language they include.
+# plus both eryx-server images, for amd64 and arm64, built in the Dockerfile's
+# from-source mode (RUNTIME_SOURCE=default) and checked to serve every
+# language they include.
 #
 # Nothing is pushed, uploaded to a release or published to a registry: every
 # job only has `contents: read`. It runs on pull requests that change one of
@@ -74,18 +75,28 @@ jobs:
     uses: ./.github/workflows/js-build.yml
 
   docker:
-    name: Docker (${{ matrix.variant }})
-    runs-on: ubuntu-latest
+    name: Docker (${{ matrix.variant }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     # python-build.yml builds the runtimes (runtime-build.yml) first.
     needs: python
     strategy:
       fail-fast: false
       matrix:
+        variant: [python-only, all-languages]
+        arch: [amd64, arm64]
         include:
           - variant: python-only
             languages: python
           - variant: all-languages
             languages: python,javascript,shell
+          - arch: amd64
+            runner: ubuntu-latest
+            cpu-features: x86-64-v2
+          # Native, as ci.yml builds it. aarch64 has no psABI presets, so
+          # "baseline" is the portable setting.
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            cpu-features: baseline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,7 +117,7 @@ jobs:
           build-args: |
             RUNTIME_SOURCE=default
             ERYX_LANGUAGES=${{ matrix.languages }}
-            ERYX_CPU_FEATURES=x86-64-v2
+            ERYX_CPU_FEATURES=${{ matrix.cpu-features }}
           push: false
           load: true
           tags: eryx-server:${{ matrix.variant }}
@@ -114,9 +125,10 @@ jobs:
       - name: Report image size
         env:
           VARIANT: ${{ matrix.variant }}
+          ARCH: ${{ matrix.arch }}
         run: |
           size=$(docker image inspect "eryx-server:$VARIANT" | jq '.[0].Size')
-          echo "$VARIANT image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "$VARIANT $ARCH image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Each language the image includes runs, and the others are refused.
       - name: Execute each language

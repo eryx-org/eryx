@@ -130,10 +130,15 @@ COPY --from=runtime /build/crates/eryx-runtime/*.cwasm crates/eryx-runtime/
 # `javascript` and `shell`), so a Python-only image embeds no other runtime.
 # The sources are touched first, and the mount locked, as in the precompile
 # stage (#876).
+# On arm64, jemalloc (when the server uses it) gets 64 KiB pages: it fixes
+# its page size at build time, and 64 KiB runs on 4K, 16K and 64K-page
+# kernels alike, where the 4K default fails on the larger ones.
 ARG ERYX_LANGUAGES
+ARG TARGETARCH
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,id=eryx-server-target,sharing=locked,target=/build/target \
-  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  if [ "$TARGETARCH" = arm64 ]; then export JEMALLOC_SYS_WITH_LG_PAGE=16; fi \
+  && find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
   && features= && for lang in ${ERYX_LANGUAGES//,/ }; do \
   [ "$lang" = python ] || features+=",eryx-server/$lang"; \
   done \
