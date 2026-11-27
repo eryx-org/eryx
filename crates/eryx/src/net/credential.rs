@@ -278,6 +278,15 @@ impl Credential {
         self
     }
 
+    /// The name of the first header it sets. Every valid credential sets at
+    /// least one (one with none fails [`validate`](Self::validate), and
+    /// gives `""` here).
+    #[deprecated(note = "a credential can set several headers; use header_names")]
+    #[must_use]
+    pub fn header_name(&self) -> &str {
+        self.header_names().next().unwrap_or_default()
+    }
+
     /// The names of the headers it sets.
     pub fn header_names(&self) -> impl Iterator<Item = &str> {
         self.headers.iter().map(|(name, _)| name.as_str())
@@ -587,6 +596,19 @@ mod tests {
         assert!(!format!("{both:?}").contains("a1"));
         assert!(both.sets("x-id-token") && !both.sets("cookie"));
         assert!(both.overlaps(&Credential::bearer("other")));
+    }
+
+    /// The deprecated single-header accessor names the first header.
+    #[test]
+    #[expect(deprecated, reason = "tests the deprecated shim")]
+    fn header_name_is_the_first_header() {
+        assert_eq!(Credential::bearer("s").header_name(), "Authorization");
+        let both = Credential::headers([("X-Access-Token", "a"), ("X-Other", "b")]);
+        assert_eq!(both.header_name(), "X-Access-Token");
+        assert_eq!(
+            Credential::headers(Vec::<(String, String)>::new()).header_name(),
+            ""
+        );
     }
 
     #[test]
