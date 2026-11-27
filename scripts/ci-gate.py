@@ -31,6 +31,9 @@ import re
 import sys
 
 MODEL = "claude-sonnet-5-5"
+# $ per million input/output tokens, for the cost note. A refusal fallback can
+# answer on another model; one not listed here reports tokens only.
+PRICES = {"claude-sonnet-5-5": (2.0, 10.0), "claude-sonnet-5": (2.0, 10.0)}
 # More files than this and the PR is broad enough to just run everything.
 MAX_FILES = 300
 # Diff lines sent per file and in total; past these the model sees counts only.
@@ -125,20 +128,30 @@ def describe(entry: dict, budget: list[int]) -> str:
     return line
 
 
-def decide(files: list[str]) -> tuple[dict[str, bool], str]:
+def usage_note(response) -> str:
+    """`model, N in / M out, $X` for the decision's annotation."""
+    u = response.usage
+    note = f"{response.model}, {u.input_tokens} in / {u.output_tokens} out"
+    if price := PRICES.get(response.model):
+        note += f", ${(u.input_tokens * price[0] + u.output_tokens * price[1]) / 1e6:.4f}"
+    return note
+
+
+def decide(files: list[str]) -> tuple[dict[str, bool], str, str]:
+    """Returns the decision, its reason, and the call's usage ("" if none)."""
     run_all = {g: True for g in GROUPS}
     token_file = os.environ.get("ANTHROPIC_IDENTITY_TOKEN_FILE", "")
     has_federation = os.environ.get("ANTHROPIC_FEDERATION_RULE_ID") and (
         os.path.isfile(token_file) and os.path.getsize(token_file) > 0
     )
     if not (has_federation or os.environ.get("ANTHROPIC_API_KEY")):
-        return run_all, "No Anthropic credentials (fork PR?): running everything."
+        return run_all, "No Anthropic credentials (fork PR?): running everything.", ""
     if os.environ.get("OTHER_CI_RUNS") == "0":
-        return run_all, "No other CI runs in progress or queued: running everything."
+        return run_all, "No other CI runs in progress or queued: running everything.", ""
     if not files:
-        return run_all, "No changed files listed: running everything."
+        return run_all, "No changed files listed: running everything.", ""
     if len(files) > MAX_FILES:
-        return run_all, f"{len(files)} files changed: running everything."
+        return run_all, f"{len(files)} files changed: running everything.", ""
 
     try:
         import anthropic
@@ -168,19 +181,20 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str]:
                 }
             ],
         )
+        usage = usage_note(response)
         if response.stop_reason != "end_turn":
-            return run_all, f"Model stopped with {response.stop_reason}: running everything."
+            return run_all, f"Model stopped with {response.stop_reason}: running everything.", usage
         text = next(b.text for b in response.content if b.type == "text")
         answer = json.loads(text)
-        return {g: bool(answer[g]) for g in GROUPS}, answer["reason"]
+        return {g: bool(answer[g]) for g in GROUPS}, answer["reason"], usage
     except Exception as e:  # noqa: BLE001 - every failure fails open
-        return run_all, f"Gate failed ({type(e).__name__}: {e}): running everything."
+        return run_all, f"Gate failed ({type(e).__name__}: {e}): running everything.", ""
 
 
 def main() -> None:
     budget = [MAX_TOTAL_PATCH_LINES]
     files = [describe(json.loads(line), budget) for line in sys.stdin if line.strip()]
-    decision, reason = decide(files)
+    decision, reason, usage = decide(files)
 
     oses = [os_ for g, os_ in (("windows", "windows-latest"), ("macos", "macos-latest")) if decision[g]]
     out = [f"{g}={str(v).lower()}" for g, v in decision.items()]
@@ -188,13 +202,24 @@ def main() -> None:
     with open(os.environ.get("GITHUB_OUTPUT", "/dev/stdout"), "a") as f:
         f.write("\n".join(out) + "\n")
 
-    summary = ["### CI gate", "", reason, "", "| group | runs |", "|---|---|"]
+    summary = ["### CI gate", "", reason, ""]
+    if usage:
+        summary += [f"Claude call: {usage}", ""]
+    summary += ["| group | runs |", "|---|---|"]
     summary += [f"| {g} | {'yes' if v else '**skipped**'} |" for g, v in decision.items()]
     summary += ["", "Add the `ci:full` label to run every group."]
     with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/stderr"), "a") as f:
         f.write("\n".join(summary) + "\n")
-    # The log too: the API exposes job logs but not job summaries.
-    print(reason)
+    # An annotation on the run and the PR's checks, and the log (the API
+    # exposes logs, not summaries).
+    skipped = [g for g, v in decision.items() if not v]
+    note = f"Skipped {', '.join(skipped)}." if skipped else "Running every group."
+    if usage:
+        note += f" Claude call: {usage}."
+    note += f" {reason}"
+    # Workflow-command escaping for the message: %, CR and LF.
+    note = note.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::notice title=CI gate::{note}")
     print(", ".join(out))
 
 
