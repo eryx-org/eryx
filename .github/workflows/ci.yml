@@ -86,6 +86,11 @@ jobs:
       heavy: ${{ !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-') && !contains(github.event.pull_request.labels.*.name, 'ready-to-release')) }}
       core: ${{ steps.filter.outputs.core }}
       server: ${{ steps.filter.outputs.server }}
+      # crates/eryx-server/ beyond its Dockerfile: what Lint and Test build.
+      # A Dockerfile-only change runs the Docker jobs (via `server`) and not
+      # Lint or Test.
+      server-code: ${{ steps.filter.outputs.server_count != steps.filter.outputs.dockerfile_count }}
+      stdlib: ${{ steps.filter.outputs.stdlib }}
       python: ${{ steps.filter.outputs.python }}
       python-sdk: ${{ steps.filter.outputs.python-sdk }}
       typescript-sdk: ${{ steps.filter.outputs.typescript-sdk }}
@@ -133,6 +138,8 @@ jobs:
               - '.config/rail.toml'
             server:
               - 'crates/eryx-server/**'
+            dockerfile:
+              - 'crates/eryx-server/Dockerfile'
             python:
               - 'crates/eryx-python/**'
               # pyeryx depends on it for the exceptions it shares
@@ -174,6 +181,11 @@ jobs:
               - 'crates/eryx/tests/pack.rs'
               - 'crates/eryx/tests/js_environment.rs'
               - 'crates/eryx/tests/fixtures/**'
+              - '.github/workflows/ci.yml'
+            # What the Stdlib bytecode check reads.
+            stdlib:
+              - 'crates/eryx/python-stdlib.tar.*'
+              - 'scripts/compile-stdlib.sh'
               - '.github/workflows/ci.yml'
             # What the third-party notices are made from (#837).
             notices:
@@ -259,9 +271,9 @@ jobs:
   # read-only, so Python can't cache it). Fail if it drifts from the sources.
   stdlib-bytecode:
     name: Stdlib bytecode
-    # Cheap (no Rust build), so it runs on every change, including edits to
-    # the script itself, which the `core` path filter doesn't cover.
     runs-on: ubuntu-latest
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.stdlib == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -810,7 +822,7 @@ jobs:
       needs.changes.outputs.heavy == 'true'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server-code == 'true')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -880,7 +892,7 @@ jobs:
       needs.changes.outputs.heavy == 'true'
       && (github.event_name == 'push'
       || needs.changes.outputs.core == 'true'
-      || needs.changes.outputs.server == 'true')
+      || needs.changes.outputs.server-code == 'true')
     permissions:
       contents: read # to check out the repository
       packages: read # to pull eryx-org/eryx-commands' published gh and git below

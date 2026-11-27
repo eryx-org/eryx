@@ -54,31 +54,93 @@ permissions:
   contents: read
 
 jobs:
+  # Which parts of the dry run a pull request's changes can affect. Manual
+  # runs do every part.
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      wheels: ${{ github.event_name != 'pull_request' || steps.filter.outputs.wheels == 'true' }}
+      js: ${{ github.event_name != 'pull_request' || steps.filter.outputs.js == 'true' }}
+      docker: ${{ github.event_name != 'pull_request' || steps.filter.outputs.docker == 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            # Every path in `on.pull_request.paths` but the Dockerfile and
+            # js-build.yml.
+            wheels:
+              - .github/workflows/release-dry-run.yml
+              - .github/workflows/runtime-build.yml
+              - .github/workflows/python-build.yml
+              - crates/eryx-python/pyproject.toml
+              - crates/eryx-python/runtimes/**
+              - scripts/check-wheel-notices.py
+              - scripts/sync-runtime-versions.sh
+              - scripts/notices.py
+              - clis/coreutils.toml
+              - clis/patches/**
+              - third_party/**
+              - about.toml
+              - mise.toml
+            # The npm package bundles coreutils.
+            js:
+              - .github/workflows/release-dry-run.yml
+              - .github/workflows/js-build.yml
+              - clis/coreutils.toml
+              - clis/patches/**
+              - mise.toml
+            # The images, and the runtime-assets they're built from (made by
+            # runtime-build.yml, called from python-build.yml). The notices
+            # don't go into the images.
+            docker:
+              - .github/workflows/release-dry-run.yml
+              - .github/workflows/runtime-build.yml
+              - .github/workflows/python-build.yml
+              - crates/eryx-server/Dockerfile
+              - clis/coreutils.toml
+              - clis/patches/**
+              - mise.toml
+
   # PRs into multi-guest skip the dry run (the lean subset, as in ci.yml),
   # and so does the release PR until it has the ready-to-release label (see
   # ci.yml); PRs into main and manual runs do it all. Docker needs `python`,
-  # so it's skipped with it.
+  # so it's skipped with it; when only Docker's inputs changed, `python`
+  # builds just the runtimes Docker needs.
   python:
     name: Python
+    needs: changes
     if: >-
       github.base_ref != 'multi-guest'
       && !(startsWith(github.head_ref, 'release-plz-')
       && !contains(github.event.pull_request.labels.*.name, 'ready-to-release'))
+      && (needs.changes.outputs.wheels == 'true' || needs.changes.outputs.docker == 'true')
     uses: ./.github/workflows/python-build.yml
+    with:
+      runtimes-only: ${{ needs.changes.outputs.wheels != 'true' }}
 
   js:
     name: JavaScript
+    needs: changes
     if: >-
       github.base_ref != 'multi-guest'
       && !(startsWith(github.head_ref, 'release-plz-')
       && !contains(github.event.pull_request.labels.*.name, 'ready-to-release'))
+      && needs.changes.outputs.js == 'true'
     uses: ./.github/workflows/js-build.yml
 
   docker:
     name: Docker (${{ matrix.variant }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     # python-build.yml builds the runtimes (runtime-build.yml) first.
-    needs: python
+    needs: [changes, python]
+    if: needs.changes.outputs.docker == 'true'
     strategy:
       fail-fast: false
       matrix:
