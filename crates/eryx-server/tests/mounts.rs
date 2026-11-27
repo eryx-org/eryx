@@ -189,6 +189,7 @@ async fn run(channel: Channel, language: Language, code: &str) -> (ExecuteResult
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
             writable: false,
+            max_write_bytes: None,
         }],
         ..Default::default()
     };
@@ -318,6 +319,7 @@ except OSError:
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
             writable: false,
+            max_write_bytes: None,
         }],
         ..Default::default()
     };
@@ -390,6 +392,7 @@ async fn the_operators_mount_root_applies() {
         mounts: vec![Mount {
             path: path.into(),
             writable: false,
+            max_write_bytes: None,
         }],
         ..Default::default()
     };
@@ -405,6 +408,7 @@ async fn the_operators_mount_root_applies() {
         mounts: vec![Mount {
             path: "/workspace".into(),
             writable: true,
+            max_write_bytes: None,
         }],
         ..Default::default()
     };
@@ -456,6 +460,7 @@ async fn the_operators_mount_limits_apply() {
     let two = ["/mnt/a", "/mnt/b"].map(|path| Mount {
         path: path.into(),
         writable: false,
+        max_write_bytes: None,
     });
     tx.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(
@@ -501,6 +506,7 @@ async fn run_writable(
         mounts: vec![Mount {
             path: "/mnt/repo".into(),
             writable: true,
+            max_write_bytes: None,
         }],
         ..Default::default()
     };
@@ -612,6 +618,7 @@ async fn bad_mounts_are_refused() {
                 mounts: vec![Mount {
                     path: "/etc".into(),
                     writable: false,
+                    max_write_bytes: None,
                 }],
                 ..Default::default()
             },
@@ -622,6 +629,131 @@ async fn bad_mounts_are_refused() {
     let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(status.message().contains("/mnt/"), "{status:?}");
+}
+
+/// Run `code` with `tree` mounted writable at `/mnt/repo` with a write
+/// budget of `budget`, returning its output and changes
+async fn run_budgeted(channel: Channel, budget: u64, code: &str) -> (ExecuteResult, Vec<FsChange>) {
+    let request = ExecuteRequest {
+        code: code.to_string(),
+        mounts: vec![Mount {
+            path: "/mnt/repo".into(),
+            writable: true,
+            max_write_bytes: Some(budget),
+        }],
+        ..Default::default()
+    };
+    let (result, _, changes) = exchange(channel, request).await;
+    (result, changes)
+}
+
+/// A mount's write budget fails writes past it when they're made, but its
+/// files stay readable and deletable. As with the server's limit, a
+/// positional write fails with ENOSPC and a write through a stream with EIO
+/// (see `vfs_correctness`).
+#[tokio::test]
+async fn a_mounts_write_budget_applies() {
+    let channel = start_server().await;
+    let code = r"
+import errno, os
+def write(path, data, mode='w'):
+    try:
+        with open(path, mode) as f:
+            f.write(data)
+        print('wrote', path)
+    except OSError as e:
+        print('full', path, errno.errorcode[e.errno])
+write('/mnt/repo/a.txt', 'x' * 600)
+write('/mnt/repo/b.txt', 'x' * 600)
+fd = os.open('/mnt/repo/c.bin', os.O_CREAT | os.O_WRONLY)
+try:
+    os.pwrite(fd, b'x' * 600, 0)
+except OSError as e:
+    print('full', errno.errorcode[e.errno])
+os.close(fd)
+os.remove('/mnt/repo/c.bin')
+# Writing part of a file the client served copies it whole
+write('/mnt/repo/big.bin', b'y', 'r+b')
+print(open('/mnt/repo/README.md').read(), end='')
+# Deleting what the run wrote gives its space back
+os.remove('/mnt/repo/a.txt')
+write('/mnt/repo/b.txt', 'x' * 600)
+os.remove('/mnt/repo/src/main.py')
+";
+    let (result, changes) = run_budgeted(channel.clone(), 1000, code).await;
+    assert_eq!(
+        stdout(&result),
+        "wrote /mnt/repo/a.txt\n\
+         full /mnt/repo/b.txt EIO\n\
+         full ENOSPC\n\
+         full /mnt/repo/big.bin EIO\n\
+         hello mounts\n\
+         wrote /mnt/repo/b.txt\n"
+    );
+    let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["src/main.py", "b.txt"]);
+
+    // With nothing left, the code still reads and deletes, and deleting what
+    // it wrote gives the space back
+    let code = r"
+import errno, os
+print(open('/mnt/repo/README.md').read(), end='')
+for write in [lambda: open('/mnt/repo/new.txt', 'w'), lambda: os.mkdir('/mnt/repo/d')]:
+    try:
+        write()
+    except OSError as e:
+        print('full', errno.errorcode[e.errno])
+os.remove('/mnt/repo/big.bin')
+";
+    let (result, changes) = run_budgeted(channel.clone(), 0, code).await;
+    assert_eq!(stdout(&result), "hello mounts\nfull ENOSPC\nfull ENOSPC\n");
+    let paths: Vec<_> = changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["big.bin"]);
+}
+
+/// A budget can't raise the server's limit
+#[tokio::test]
+async fn a_write_budget_only_lowers_the_servers_limit() {
+    let limits = eryx_server::service::ServerLimits {
+        mounts: eryx_server::mounts::MountLimits {
+            max_write_bytes: 4096,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let channel = start_server_with(limits).await;
+    let code = r"
+import errno
+try:
+    with open('/mnt/repo/large.txt', 'w') as f:
+        f.write('x' * 8192)
+except OSError as e:
+    print('full', errno.errorcode[e.errno])
+";
+    let (result, _) = run_budgeted(channel.clone(), 1 << 30, code).await;
+    assert_eq!(stdout(&result), "full EIO\n");
+
+    // And it's only for writable mounts
+    let mut client = EryxClient::new(channel);
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(ClientMessage {
+        message: Some(client_message::Message::ExecuteRequest(Box::new(
+            ExecuteRequest {
+                code: "print(1)".into(),
+                mounts: vec![Mount {
+                    path: "/mnt/repo".into(),
+                    writable: false,
+                    max_write_bytes: Some(1),
+                }],
+                ..Default::default()
+            },
+        ))),
+    })
+    .await
+    .unwrap();
+    let status = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("writable"), "{status:?}");
 }
 
 // ============================================================================
