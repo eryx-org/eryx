@@ -552,7 +552,8 @@ fn pop_command_args(cx: &mut EryxCall) -> (Vec<String>, Vec<(String, String)>, S
 
 /// Run the job queue dry, unless `process.exit` stops the command first.
 fn drain(ctx: &Ctx<'_>) {
-    while crate::command::exit_requested().is_none() && ctx.execute_pending_job() {}
+    // `Err`: a job threw and the rest are still queued, so go on.
+    while crate::command::exit_requested().is_none() && ctx.drain_jobs().is_err() {}
 }
 
 /// What a Component Model event means for the suspended `execute`.
@@ -681,7 +682,7 @@ fn cancel<'js>(ctx: &Ctx<'js>, hooks: &Object<'js>) -> u32 {
             eprintln!("eryx-js: failed to reject a cancelled invoke: {e}");
         }
     }
-    while ctx.execute_pending_job() {}
+    while ctx.drain_jobs().is_err() {}
     finish(hooks, Err(CANCELLED.to_string()))
 }
 
