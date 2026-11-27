@@ -208,6 +208,10 @@ impl<S: VfsStorage> VfsStorage for ScrubbingStorage<S> {
         self.inner.stat(path).await
     }
 
+    async fn identity(&self, path: &str) -> VfsResult<Metadata> {
+        self.inner.identity(path).await
+    }
+
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
         self.inner.mkdir(path).await
     }

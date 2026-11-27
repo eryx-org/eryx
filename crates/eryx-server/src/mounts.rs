@@ -19,6 +19,11 @@
 //! client to apply. Each writable mount has its own upper layer, bounded by
 //! its `max_write_bytes` if it has one, and they share the server's
 //! [`MountLimits::max_write_bytes`].
+//!
+//! A mount with `Mount.report_access` also records what the guest used on
+//! it, for [`Mounts::accesses`]. That's recorded where the guest's operations
+//! reach the client's storage (see `Guest`), so the cache's answers count
+//! and the overlay's own lookups don't.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -35,14 +40,16 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use prost::Message as _;
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument as _;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 /// A block of a file's data, shared by the reads that need it
 type Bytes = Arc<Vec<u8>>;
 
 use crate::proto::eryx::v1::{
-    FsChange, FsEntry, FsErrorCode, FsList, FsListing, FsMetadata, FsMkdir, FsRead, FsRemove,
-    FsRequest, FsResponse, FsStat, FsWrite, Mount, ServerMessage, fs_change, fs_request,
-    fs_response, server_message,
+    FsAccess, FsChange, FsEntry, FsErrorCode, FsList, FsListing, FsMetadata, FsMkdir, FsRead,
+    FsRemove, FsRequest, FsResponse, FsStat, FsWrite, Mount, ServerMessage, fs_access, fs_change,
+    fs_request, fs_response, server_message,
 };
 
 /// The largest `FsWrite` chunk of a changed file
@@ -89,6 +96,8 @@ pub struct MountLimits {
     /// Host memory a run's changes to its writable mounts may hold, all
     /// together; a mount's `max_write_bytes` can lower its own.
     pub max_write_bytes: u64,
+    /// Paths a run's `report_access` mounts may report, all together.
+    pub max_access_entries: usize,
 }
 
 impl Default for MountLimits {
@@ -102,6 +111,7 @@ impl Default for MountLimits {
             max_listing_bytes: 16 * 1024 * 1024,
             max_dir_entries: 10_000,
             max_write_bytes: 64 * 1024 * 1024,
+            max_access_entries: 10_000,
         }
     }
 }
@@ -258,6 +268,8 @@ struct Stat {
     size: u64,
     /// Seconds since the Unix epoch
     modified: Option<f64>,
+    /// The client's token for it, reported back in [`FsAccess`]
+    version: Option<String>,
 }
 
 impl From<FsMetadata> for Stat {
@@ -266,6 +278,7 @@ impl From<FsMetadata> for Stat {
             is_dir: m.is_dir,
             size: if m.is_dir { 0 } else { m.size },
             modified: m.modified,
+            version: m.version,
         }
     }
 }
@@ -312,8 +325,9 @@ fn fetched<T: Clone + Send + Sync + 'static>(value: T) -> Fetch<T> {
 /// the client's answers to
 pub struct Mounts {
     remote: Arc<Remote>,
-    /// Each mount's path, and its overlay if it's writable
-    mounts: Vec<(String, Option<Arc<OverlayStorage>>)>,
+    /// Each mount's path, its overlay if it's writable, and whether it
+    /// reports what the guest used
+    mounts: Vec<(String, Option<Arc<OverlayStorage>>, bool)>,
 }
 
 impl Mounts {
@@ -339,6 +353,7 @@ impl Mounts {
             ops: AtomicU32::new(0),
             received: AtomicUsize::new(0),
             cache: Mutex::new(Cache::new(limits.max_cache_bytes)),
+            accesses: Mutex::default(),
         });
         // Each mount's directory is charged to its own upper layer, so the
         // shared limit grows by them all: the run's writes don't pay for them
@@ -357,6 +372,7 @@ impl Mounts {
                     let lower = Arc::new(RemoteStorage {
                         mount: def.path.clone(),
                         remote: Arc::clone(&remote),
+                        report: def.report_access,
                     });
                     // The mount's own directory is free, so a budget of 0
                     // still mounts it
@@ -373,7 +389,7 @@ impl Mounts {
                 } else {
                     None
                 };
-                Ok((def.path.clone(), overlay))
+                Ok((def.path.clone(), overlay, def.report_access))
             })
             .collect::<VfsResult<_>>()?;
         Ok(Self { remote, mounts })
@@ -383,19 +399,57 @@ impl Mounts {
     pub fn volumes(&self) -> Vec<VolumeMount> {
         self.mounts
             .iter()
-            .map(|(path, overlay)| match overlay {
-                Some(overlay) => {
-                    VolumeMount::storage(path.clone(), Arc::clone(overlay) as Arc<dyn VfsStorage>)
-                }
-                None => {
-                    let storage = RemoteStorage {
+            .map(|(path, overlay, report)| {
+                let storage: Arc<dyn VfsStorage> = match overlay {
+                    Some(overlay) => Arc::clone(overlay) as _,
+                    None => Arc::new(RemoteStorage {
                         mount: path.clone(),
                         remote: Arc::clone(&self.remote),
-                    };
-                    VolumeMount::read_only_storage(path.clone(), Arc::new(storage))
+                        report: *report,
+                    }),
+                };
+                let report = report.then(|| Report {
+                    remote: Arc::clone(&self.remote),
+                    mount: path.clone(),
+                });
+                let storage: Arc<dyn VfsStorage> = Arc::new(Guest(storage, report));
+                if overlay.is_some() {
+                    VolumeMount::storage(path.clone(), storage)
+                } else {
+                    VolumeMount::read_only_storage(path.clone(), storage)
                 }
             })
             .collect()
+    }
+
+    /// How many `FsRequest`s the run sent its client
+    pub fn requests(&self) -> u32 {
+        self.remote
+            .ops
+            .load(Ordering::Relaxed)
+            .min(self.remote.limits.max_ops)
+    }
+
+    /// Whether any mount has `report_access`
+    pub fn report_access(&self) -> bool {
+        self.mounts.iter().any(|(_, _, report)| *report)
+    }
+
+    /// The paths the guest used on mounts with `report_access`, by mount and
+    /// path, and whether there were more than `max_access_entries`
+    pub fn accesses(&self) -> (Vec<FsAccess>, bool) {
+        let log = lock(&self.remote.accesses);
+        let accesses = log
+            .paths
+            .iter()
+            .map(|((mount, path), (kind, version))| FsAccess {
+                mount: mount.clone(),
+                path: path.clone(),
+                kind: *kind as i32,
+                version: version.clone(),
+            })
+            .collect();
+        (accesses, log.truncated)
     }
 
     /// What the run changed in its writable mounts, in the order to apply
@@ -407,7 +461,7 @@ impl Mounts {
     /// If an overlay's changes can't be read.
     pub async fn changes(&self) -> VfsResult<Vec<FsChange>> {
         let mut changes = Vec::new();
-        for (mount, overlay) in &self.mounts {
+        for (mount, overlay, _) in &self.mounts {
             let Some(overlay) = overlay else { continue };
             let change = |path: &str, change| FsChange {
                 mount: mount.clone(),
@@ -463,6 +517,7 @@ impl Mounts {
         let received = self.remote.received.fetch_add(len, Ordering::Relaxed) + len;
         let max = self.remote.limits.max_transfer_bytes;
         let answer = if received > max {
+            limit_hit("transfer_bytes");
             Err(Failure::Other(format!(
                 "the client sent more than {} MiB",
                 max >> 20
@@ -487,7 +542,11 @@ impl Mounts {
 
 impl std::fmt::Debug for Mounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let paths: Vec<_> = self.mounts.iter().map(|(p, o)| (p, o.is_some())).collect();
+        let paths: Vec<_> = self
+            .mounts
+            .iter()
+            .map(|(p, o, _)| (p, o.is_some()))
+            .collect();
         f.debug_struct("Mounts").field("mounts", &paths).finish()
     }
 }
@@ -517,6 +576,16 @@ struct Remote {
     /// Bytes of `FsResponse`s the client has sent
     received: AtomicUsize,
     cache: Mutex<Cache>,
+    accesses: Mutex<Accesses>,
+}
+
+/// What the guest used on the mounts that report it
+#[derive(Default)]
+struct Accesses {
+    /// By mount and relative path: the strongest use, and the version seen
+    paths: BTreeMap<(String, String), (fs_access::Kind, String)>,
+    /// Paths weren't recorded, past `max_access_entries`
+    truncated: bool,
 }
 
 /// What a run has learned from the client, by guest path
@@ -713,13 +782,21 @@ fn check_listings(
     while let Some((dir, mut entries)) = todo.pop() {
         let nested = !dirs.is_empty();
         if entries.len() > limits.max_dir_entries {
+            limit_hit("dir_entries");
             let failure = Failure::Other(format!(
                 "a directory can have at most {} entries",
                 limits.max_dir_entries
             ));
             return Err(Rejection::TooManyEntries.fail(nested, failure));
         }
-        let names: u64 = entries.iter().map(|e| e.name.len() as u64).sum();
+        // Names and versions, each held for the run
+        let names: u64 = entries
+            .iter()
+            .map(|e| {
+                let version = e.metadata.as_ref().and_then(|m| m.version.as_ref());
+                (e.name.len() + version.map_or(0, String::len)) as u64
+            })
+            .sum();
         let path = if nested {
             NESTED_BYTES + dir.len() as u64
         } else {
@@ -727,6 +804,7 @@ fn check_listings(
         };
         bytes += path + names + ENTRY_BYTES * entries.len() as u64;
         if cache.listed + bytes > limits.max_listing_bytes {
+            limit_hit("listing_bytes");
             let failure = Failure::Other(format!(
                 "the mounts' listings can hold at most {} MiB",
                 limits.max_listing_bytes >> 20
@@ -796,6 +874,31 @@ impl Remote {
         }
     }
 
+    /// Record that the guest used `rel` on `mount` as `kind`, keeping the
+    /// strongest use (the enum's order) and the first version seen: if the
+    /// client's answers changed mid-run, the first is the one the client
+    /// will find has changed since
+    fn saw(&self, mount: &str, rel: &str, kind: fs_access::Kind, version: Option<&str>) {
+        let mut log = lock(&self.accesses);
+        let log = &mut *log;
+        let key = (mount.to_string(), rel.to_string());
+        let entry = (kind, version.unwrap_or_default().to_string());
+        let full = log.paths.len() >= self.limits.max_access_entries;
+        match log.paths.entry(key) {
+            std::collections::btree_map::Entry::Occupied(mut old) => {
+                let old = old.get_mut();
+                old.0 = old.0.max(kind);
+                if old.1.is_empty() {
+                    old.1 = entry.1;
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(_) if full => log.truncated = true,
+            std::collections::btree_map::Entry::Vacant(new) => {
+                new.insert(entry);
+            }
+        }
+    }
+
     /// Ask the client for `op` on `path` (relative to `mount`) and wait for
     /// its answer
     fn request(
@@ -806,6 +909,22 @@ impl Remote {
     ) -> BoxFuture<'static, Answer> {
         let remote = Arc::clone(self);
         let (mount, path) = (mount.to_string(), path.to_string());
+        let kind = match op {
+            fs_request::Op::Stat(_) => "stat",
+            fs_request::Op::List(_) => "list",
+            fs_request::Op::Read(_) => "read",
+        };
+        // A child of the guest's operation, whose context the client gets
+        let span = tracing::info_span!("fs_request", op = kind, error = tracing::field::Empty);
+        let trace_context = {
+            let cx = span.context();
+            let mut fields = HashMap::new();
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&cx, &mut fields);
+            });
+            fields.remove("traceparent").unwrap_or_default()
+        };
+        let request_span = span.clone();
         async move {
             if remote.closed.is_cancelled() {
                 return Err(gone());
@@ -824,6 +943,7 @@ impl Remote {
                     mount,
                     path,
                     op: Some(op),
+                    trace_context,
                 })),
             };
             if requests.send(message).await.is_err() {
@@ -831,11 +951,17 @@ impl Remote {
                 return Err(gone());
             }
             drop(requests);
+            let sent = std::time::Instant::now();
             let answer = tokio::select! {
-                answer = rx => answer.map_err(|_| gone())??,
+                answer = rx => answer.map_err(|_| gone()),
                 () = remote.closed.cancelled() => return Err(gone()),
             };
-            match answer {
+            // Only answers the client sent count: not the run giving up
+            if answer.is_ok() {
+                metrics::histogram!("eryx_mount_request_duration_seconds", "op" => kind)
+                    .record(sent.elapsed().as_secs_f64());
+            }
+            match answer?? {
                 fs_response::Result::Error(error) => Err(match error.code() {
                     FsErrorCode::NotFound => Failure::NotFound,
                     FsErrorCode::NotADirectory => Failure::NotDirectory,
@@ -846,6 +972,12 @@ impl Remote {
                 answer => Ok(answer),
             }
         }
+        .inspect(move |answer| {
+            if let Err(failure) = answer {
+                request_span.record("error", tracing::field::debug(failure));
+            }
+        })
+        .instrument(span)
         .boxed()
     }
 }
@@ -854,7 +986,21 @@ fn gone() -> Failure {
     Failure::Other("the client can no longer answer".to_string())
 }
 
+/// Count an operation refused at one of the `MountLimits`, by a fixed name
+fn limit_hit(limit: &'static str) {
+    metrics::counter!("eryx_mount_limit_hits_total", "limit" => limit).increment(1);
+}
+
+/// Count a lookup the run's cache answered (or joined) without a new
+/// `FsRequest`, or one that needed it
+fn cache_lookup(op: &'static str, hit: bool) {
+    let result = if hit { "hit" } else { "miss" };
+    metrics::counter!("eryx_mount_cache_lookups_total", "op" => op, "result" => result)
+        .increment(1);
+}
+
 fn too_many_ops(max: u32) -> Failure {
+    limit_hit("ops");
     Failure::Other(format!(
         "a run can make at most {max} file operations on its mounts"
     ))
@@ -869,26 +1015,265 @@ fn wrong_answer(wanted: &str) -> Failure {
 // Storage
 // ============================================================================
 
+/// `path` relative to the mount at `mount`, refusing `.` and `..`
+fn relative<'a>(mount: &str, path: &'a str) -> VfsResult<&'a str> {
+    let rest = path
+        .strip_prefix(mount)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        .ok_or_else(|| VfsError::InvalidPath(path.to_string()))?
+        .trim_matches('/');
+    if rest.split('/').any(|c| c == "." || c == "..") {
+        return Err(VfsError::InvalidPath(path.to_string()));
+    }
+    Ok(rest)
+}
+
 /// One mount's storage: asks the client, through its run's cache
 struct RemoteStorage {
     /// The mount's guest path
     mount: String,
     remote: Arc<Remote>,
+    /// Record the guest's use of it (`Mount.report_access`)
+    report: bool,
+}
+
+/// A guest operation that reads a mount, so its storage can tell the
+/// guest's use of a path from an overlay's own lookups
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Use {
+    Read,
+    Stat,
+    List,
+    /// [`VfsStorage::identity`]: only a miss is the guest's use
+    Identity,
+}
+
+/// The guest's operation in progress on a mount
+struct GuestOp {
+    op: Use,
+    path: String,
+    /// The client's storage found `path` missing during it
+    missing: std::cell::Cell<bool>,
+}
+
+tokio::task_local! {
+    static GUEST: GuestOp;
+}
+
+/// Where a reporting mount's [`Guest`] records what the guest found missing
+struct Report {
+    remote: Arc<Remote>,
+    mount: String,
+}
+
+/// Count a write refused at `max_write_bytes`
+fn quota<T>(result: VfsResult<T>) -> VfsResult<T> {
+    if let Err(VfsError::QuotaExceeded(_)) = &result {
+        limit_hit("write_bytes");
+    }
+    result
+}
+
+/// The storage the guest sees for a mount: counts the writes
+/// `max_write_bytes` refuses, and runs each of the guest's reads, stats and
+/// listings in [`GUEST`], for the [`RemoteStorage`] below (directly, or
+/// under an overlay) to record if the mount reports access. A writable
+/// mount's overlay also looks up the client's files to place the
+/// guest's writes, copy files up and check renames; those run outside
+/// [`GUEST`], or for another path, and aren't recorded. Nor is what the
+/// overlay answers from its upper layer, as the client's storage never
+/// sees it.
+///
+/// A path is missing to the guest when its operation fails as not found and
+/// the client's storage found it missing too: not when the overlay hid it
+/// (the guest deleted it), nor when the overlay's probe of the client's
+/// storage failed but the guest's operation didn't (a directory the guest
+/// made).
+struct Guest(Arc<dyn VfsStorage>, Option<Report>);
+
+impl Guest {
+    /// Run the guest's `op` on `path`, recording it as missing if `missed`
+    /// says its result is a miss and the client's storage found it missing
+    async fn reading<T>(
+        &self,
+        op: Use,
+        path: &str,
+        run: impl Future<Output = VfsResult<T>> + Send,
+        missed: impl FnOnce(&VfsResult<T>) -> bool,
+    ) -> VfsResult<T> {
+        let guest = GuestOp {
+            op,
+            path: path.into(),
+            missing: std::cell::Cell::new(false),
+        };
+        let (result, missing) = GUEST
+            .scope(guest, async {
+                let result = run.await;
+                (result, GUEST.with(|g| g.missing.get()))
+            })
+            .await;
+        if missing
+            && missed(&result)
+            && let Some(report) = &self.1
+            && let Ok(rel) = relative(&report.mount, path)
+        {
+            report
+                .remote
+                .saw(&report.mount, rel, fs_access::Kind::Missing, None);
+        }
+        result
+    }
+}
+
+/// The result is a failure that says the path isn't there
+fn not_found<T>(result: &VfsResult<T>) -> bool {
+    matches!(
+        result,
+        Err(VfsError::NotFound(_) | VfsError::NotDirectory(_))
+    )
+}
+
+#[async_trait]
+impl VfsStorage for Guest {
+    async fn read(&self, path: &str) -> VfsResult<Vec<u8>> {
+        self.reading(Use::Read, path, self.0.read(path), not_found)
+            .await
+    }
+
+    async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
+        let read = self.0.read_at(path, offset, len);
+        self.reading(Use::Read, path, read, not_found).await
+    }
+
+    async fn write(&self, path: &str, data: &[u8]) -> VfsResult<()> {
+        quota(self.0.write(path, data).await)
+    }
+
+    async fn write_at(&self, path: &str, offset: u64, data: &[u8]) -> VfsResult<()> {
+        quota(self.0.write_at(path, offset, data).await)
+    }
+
+    async fn append(&self, path: &str, data: &[u8]) -> VfsResult<u64> {
+        quota(self.0.append(path, data).await)
+    }
+
+    async fn create_file(&self, path: &str, exclusive: bool) -> VfsResult<bool> {
+        quota(self.0.create_file(path, exclusive).await)
+    }
+
+    async fn set_size(&self, path: &str, size: u64) -> VfsResult<()> {
+        quota(self.0.set_size(path, size).await)
+    }
+
+    async fn delete(&self, path: &str) -> VfsResult<()> {
+        self.0.delete(path).await
+    }
+
+    async fn exists(&self, path: &str) -> VfsResult<bool> {
+        let exists = self.0.exists(path);
+        let missed = |r: &VfsResult<bool>| matches!(r, Ok(false)) || not_found(r);
+        self.reading(Use::Stat, path, exists, missed).await
+    }
+
+    async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
+        self.reading(Use::List, path, self.0.list(path), not_found)
+            .await
+    }
+
+    async fn stat(&self, path: &str) -> VfsResult<Metadata> {
+        self.reading(Use::Stat, path, self.0.stat(path), not_found)
+            .await
+    }
+
+    async fn identity(&self, path: &str) -> VfsResult<Metadata> {
+        let identity = self.0.identity(path);
+        self.reading(Use::Identity, path, identity, not_found).await
+    }
+
+    async fn mkdir(&self, path: &str) -> VfsResult<()> {
+        quota(self.0.mkdir(path).await)
+    }
+
+    async fn rmdir(&self, path: &str) -> VfsResult<()> {
+        self.0.rmdir(path).await
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> VfsResult<()> {
+        quota(self.0.rename(from, to).await)
+    }
+
+    async fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> VfsResult<()> {
+        quota(self.0.set_times(path, accessed, modified).await)
+    }
+
+    fn mkdir_sync(&self, path: &str) -> VfsResult<()> {
+        self.0.mkdir_sync(path)
+    }
 }
 
 impl RemoteStorage {
     /// `path` relative to the mount, refusing `.` and `..` (eryx resolves
     /// them first, but the client shouldn't have to trust that)
     fn relative<'a>(&self, path: &'a str) -> VfsResult<&'a str> {
-        let rest = path
-            .strip_prefix(self.mount.as_str())
-            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-            .ok_or_else(|| VfsError::InvalidPath(path.to_string()))?
-            .trim_matches('/');
-        if rest.split('/').any(|c| c == "." || c == "..") {
-            return Err(VfsError::InvalidPath(path.to_string()));
+        relative(&self.mount, path)
+    }
+
+    /// Record the guest's use of `path` as `kind`, if this is the guest's
+    /// operation on it ([`GUEST`]) and one that reads it as `kind` does. A
+    /// read's own stat, or an overlay's lookup of another path, isn't. A
+    /// miss is only noted, for [`Guest`] to record if the guest's operation
+    /// fails as one.
+    fn saw(&self, path: &str, kind: fs_access::Kind, version: Option<&str>) {
+        if !self.report {
+            return;
         }
-        Ok(rest)
+        let guest = GUEST.try_with(|g| {
+            g.path == path
+                && match kind {
+                    // The guest's operation decides, by how it ends
+                    fs_access::Kind::Missing => {
+                        g.missing.set(true);
+                        false
+                    }
+                    fs_access::Kind::Read => g.op == Use::Read,
+                    fs_access::Kind::Stated => g.op == Use::Stat,
+                    fs_access::Kind::Listed => g.op == Use::List,
+                    fs_access::Kind::Unspecified => false,
+                }
+        });
+        if guest == Ok(true)
+            && let Ok(rel) = self.relative(path)
+        {
+            self.remote.saw(&self.mount, rel, kind, version);
+        }
+    }
+
+    /// Record a failure that means the guest found `path` missing
+    fn saw_err(&self, path: &str, err: &VfsError) {
+        if matches!(err, VfsError::NotFound(_) | VfsError::NotDirectory(_)) {
+            self.saw(path, fs_access::Kind::Missing, None);
+        }
+    }
+
+    /// The version the run has for `path`'s metadata, without asking
+    fn known_version(&self, path: &str) -> Option<String> {
+        let key = self.key(self.relative(path).ok()?);
+        let cache = lock(&self.remote.cache);
+        if let Some((parent, name)) = key.rsplit_once('/')
+            && let Some(Ok(listing)) = cache.lists.get(parent).and_then(|l| l.peek())
+            && let Some(stat) = listing.get(name)
+        {
+            return stat.version.clone();
+        }
+        match cache.stats.get(&key)?.peek()? {
+            Ok(stat) => stat.version.clone(),
+            Err(_) => None,
+        }
     }
 
     /// `path`'s directory listing, fetched once per run
@@ -898,11 +1283,15 @@ impl RemoteStorage {
         let fetch = {
             let mut cache = lock(&self.remote.cache);
             match cache.lists.get(&key) {
-                Some(fetch) => fetch.clone(),
+                Some(fetch) => {
+                    cache_lookup("list", true);
+                    fetch.clone()
+                }
                 None => {
                     if let Some(failure) = self.remote.refusal() {
                         return Err(failure.into_vfs(path));
                     }
+                    cache_lookup("list", false);
                     let fetch = self.fetch_listing(&key, rel);
                     cache.lists.insert(key, fetch.clone());
                     fetch
@@ -946,16 +1335,17 @@ impl RemoteStorage {
             if let Some((parent, name)) = key.rsplit_once('/')
                 && let Some(Ok(listing)) = cache.lists.get(parent).and_then(|l| l.peek())
             {
+                cache_lookup("stat", true);
                 return listing
                     .get(name)
                     .cloned()
                     .ok_or_else(|| VfsError::NotFound(path.to_string()));
             }
-            if !cache.stats.contains_key(&key)
-                && let Some(failure) = self.remote.refusal()
-            {
+            let cached = cache.stats.contains_key(&key);
+            if !cached && let Some(failure) = self.remote.refusal() {
                 return Err(failure.into_vfs(path));
             }
+            cache_lookup("stat", cached);
             let stat = cache.stats.entry(key).or_insert_with(|| {
                 let request =
                     self.remote
@@ -980,12 +1370,16 @@ impl RemoteStorage {
         let key = (self.key(rel), index);
         let mut cache = lock(&self.remote.cache);
         if let Some(fetch) = cache.blocks.get(&key) {
+            cache_lookup("read", true);
             return Ok(fetch.clone());
         }
         if let Some(failure) = self.remote.refusal() {
             return Err(failure);
         }
-        cache.reserve(size)?;
+        cache
+            .reserve(size)
+            .inspect_err(|_| limit_hit("cache_bytes"))?;
+        cache_lookup("read", false);
         let op = fs_request::Op::Read(FsRead {
             offset: index * BLOCK_SIZE,
             len: size,
@@ -1046,12 +1440,17 @@ impl VfsStorage for RemoteStorage {
     /// Reads the blocks covering the range, up to the size the file had when
     /// it was first stat'd in this run, and at most [`MAX_READ`]
     async fn read_at(&self, path: &str, offset: u64, len: u64) -> VfsResult<Vec<u8>> {
-        let file = self.stat_remote(path).await?;
+        let file = self
+            .stat_remote(path)
+            .await
+            .inspect_err(|e| self.saw_err(path, e))?;
         if file.is_dir {
             return Err(VfsError::NotFile(path.to_string()));
         }
         let end = offset.saturating_add(len.min(MAX_READ)).min(file.size);
         if offset >= end {
+            // Reading at the end still depends on the file's size
+            self.saw(path, fs_access::Kind::Read, file.version.as_deref());
             return Ok(Vec::new());
         }
         let rel = self.relative(path)?;
@@ -1075,6 +1474,7 @@ impl VfsStorage for RemoteStorage {
                 break;
             }
         }
+        self.saw(path, fs_access::Kind::Read, file.version.as_deref());
         Ok(data)
     }
 
@@ -1095,7 +1495,7 @@ impl VfsStorage for RemoteStorage {
     }
 
     async fn exists(&self, path: &str) -> VfsResult<bool> {
-        match self.stat_remote(path).await {
+        match self.stat(path).await {
             Ok(_) => Ok(true),
             Err(VfsError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
@@ -1103,7 +1503,12 @@ impl VfsStorage for RemoteStorage {
     }
 
     async fn list(&self, path: &str) -> VfsResult<Vec<DirEntry>> {
-        let listing = self.listing(path).await?;
+        let listing = self
+            .listing(path)
+            .await
+            .inspect_err(|e| self.saw_err(path, e))?;
+        let version = self.known_version(path);
+        self.saw(path, fs_access::Kind::Listed, version.as_deref());
         Ok(listing
             .iter()
             .map(|(name, stat)| DirEntry {
@@ -1114,7 +1519,12 @@ impl VfsStorage for RemoteStorage {
     }
 
     async fn stat(&self, path: &str) -> VfsResult<Metadata> {
-        Ok(metadata(&self.stat_remote(path).await?))
+        let stat = self
+            .stat_remote(path)
+            .await
+            .inspect_err(|e| self.saw_err(path, e))?;
+        self.saw(path, fs_access::Kind::Stated, stat.version.as_deref());
+        Ok(metadata(&stat))
     }
 
     async fn mkdir(&self, path: &str) -> VfsResult<()> {
@@ -1264,6 +1674,7 @@ mod tests {
         let storage = RemoteStorage {
             mount: "/mnt/m".into(),
             remote: Arc::clone(&mounts.remote),
+            report: false,
         };
         (storage, mounts, rx, tx, closed)
     }
@@ -1280,13 +1691,29 @@ mod tests {
             is_dir: false,
             size: size as u64,
             modified: Some(1.0),
+            version: None,
         }
     }
 
     /// A fake client serving `files` (path → contents), counting the
     /// requests it gets
     fn serve(files: Vec<(&'static str, &'static [u8])>) -> (RemoteStorage, Arc<AtomicUsize>) {
-        let (storage, mounts, mut rx, tx, _closed) = mount();
+        let (storage, mounts, rx, tx, _closed) = mount();
+        let count = client(mounts, rx, tx, files);
+        (storage, count)
+    }
+
+    /// Answer `rx`'s requests from `files`, each file's version its path
+    fn client(
+        mounts: Arc<Mounts>,
+        mut rx: mpsc::Receiver<ServerMessage>,
+        tx: mpsc::Sender<ServerMessage>,
+        files: Vec<(&'static str, &'static [u8])>,
+    ) -> Arc<AtomicUsize> {
+        let file = |path: &str, size| FsMetadata {
+            version: Some(path.to_string()),
+            ..file(size)
+        };
         let count = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&count);
         tokio::spawn(async move {
@@ -1299,8 +1726,8 @@ mod tests {
                     p.is_empty() || files.iter().any(|(f, _)| f.starts_with(&format!("{p}/")))
                 };
                 let result = match (req.op.unwrap(), file_at) {
-                    (fs_request::Op::Stat(_), Some((_, c))) => {
-                        fs_response::Result::Stat(file(c.len()))
+                    (fs_request::Op::Stat(_), Some((p, c))) => {
+                        fs_response::Result::Stat(file(p, c.len()))
                     }
                     (fs_request::Op::Stat(_), None) if is_dir(&req.path) => {
                         fs_response::Result::Stat(FsMetadata {
@@ -1320,7 +1747,7 @@ mod tests {
                                 let name = f.strip_prefix(&prefix)?;
                                 (!name.contains('/')).then(|| FsEntry {
                                     name: name.into(),
-                                    metadata: Some(file(c.len())),
+                                    metadata: Some(file(f, c.len())),
                                     content: (c.len() <= 4).then(|| c.to_vec()),
                                     listing: None,
                                 })
@@ -1344,7 +1771,164 @@ mod tests {
                 });
             }
         });
-        (storage, count)
+        count
+    }
+
+    /// A mount at `/mnt/m` reporting access, as the guest sees it, served
+    /// from `files`, and its run's mounts
+    fn reporting(
+        writable: bool,
+        limits: MountLimits,
+        files: Vec<(&'static str, &'static [u8])>,
+    ) -> (Arc<dyn VfsStorage>, Arc<Mounts>) {
+        let (tx, rx) = mpsc::channel(16);
+        let def = Mount {
+            path: "/mnt/m".into(),
+            writable,
+            report_access: true,
+            ..Mount::default()
+        };
+        let mounts = Mounts::new(&[def], limits, tx.downgrade(), CancellationToken::new());
+        let mounts = Arc::new(mounts.unwrap());
+        client(Arc::clone(&mounts), rx, tx, files);
+        let eryx::VolumeSource::Storage(storage) = mounts.volumes().remove(0).source else {
+            panic!("not a storage volume");
+        };
+        (Arc::new(storage), mounts)
+    }
+
+    fn accesses(mounts: &Mounts) -> Vec<(String, fs_access::Kind, String)> {
+        let (accesses, truncated) = mounts.accesses();
+        assert!(!truncated);
+        accesses
+            .into_iter()
+            .map(|a| {
+                assert_eq!(a.mount, "/mnt/m");
+                {
+                    let kind = a.kind();
+                    (a.path, kind, a.version)
+                }
+            })
+            .collect()
+    }
+
+    fn seen(path: &str, kind: fs_access::Kind, version: &str) -> (String, fs_access::Kind, String) {
+        (path.into(), kind, version.into())
+    }
+
+    /// What the guest used is reported, wherever it was answered from, and
+    /// only that: not the files a listing brought, nor a read's own stat
+    #[tokio::test]
+    async fn the_guests_use_is_reported() {
+        use fs_access::Kind::{Listed, Missing, Read, Stated};
+        let files = vec![
+            ("a.txt", &b"abc"[..]),
+            ("b.txt", b"bcd"),
+            ("dir/c.txt", b"cde"),
+        ];
+        let (storage, mounts) = reporting(false, MountLimits::default(), files);
+        assert!(storage.exists("/mnt/m/dir").await.unwrap());
+        storage.list("/mnt/m").await.unwrap();
+        // An entry's identity, as reading a directory asks, isn't a use
+        storage.identity("/mnt/m/b.txt").await.unwrap();
+        // From the listing's inline content, without a round trip
+        assert_eq!(storage.read("/mnt/m/a.txt").await.unwrap(), b"abc");
+        storage.stat("/mnt/m/dir/c.txt").await.unwrap();
+        assert!(!storage.exists("/mnt/m/nope").await.unwrap());
+        assert!(storage.read("/mnt/m/gone").await.is_err());
+        // A stat after a read stays a read
+        storage.stat("/mnt/m/a.txt").await.unwrap();
+        assert_eq!(
+            accesses(&mounts),
+            [
+                seen("", Listed, ""),
+                seen("a.txt", Read, "a.txt"),
+                seen("dir", Stated, ""),
+                seen("dir/c.txt", Stated, "dir/c.txt"),
+                seen("gone", Missing, ""),
+                seen("nope", Missing, ""),
+            ]
+        );
+    }
+
+    /// On a writable mount, the overlay's own lookups and copy-ups aren't the
+    /// guest's use, nor is reading back what it wrote
+    #[tokio::test]
+    async fn the_overlays_own_lookups_arent_reported() {
+        use fs_access::Kind::{Read, Stated};
+        let files = vec![
+            ("a.txt", &b"abc"[..]),
+            ("dir/b.txt", b"bcd"),
+            ("c.txt", b"x"),
+        ];
+        let (storage, mounts) = reporting(true, MountLimits::default(), files);
+        // A partial write copies a.txt up, reading it whole
+        storage.write_at("/mnt/m/a.txt", 3, b"!").await.unwrap();
+        assert_eq!(storage.read("/mnt/m/a.txt").await.unwrap(), b"abc!");
+        storage.write("/mnt/m/dir/new.txt", b"n").await.unwrap();
+        storage.read("/mnt/m/dir/new.txt").await.unwrap();
+        storage.delete("/mnt/m/c.txt").await.unwrap();
+        assert!(!storage.exists("/mnt/m/c.txt").await.unwrap());
+        storage
+            .rename("/mnt/m/dir/b.txt", "/mnt/m/b.txt")
+            .await
+            .unwrap();
+        // The overlay probes the client for a directory the guest made, and
+        // finds nothing there, but the guest's listing succeeds
+        storage.mkdir("/mnt/m/made").await.unwrap();
+        assert!(storage.list("/mnt/m/made").await.unwrap().is_empty());
+        assert!(accesses(&mounts).is_empty(), "{:?}", accesses(&mounts));
+
+        // The client's files still count when the guest reads them
+        let files = vec![("a.txt", &b"abc"[..]), ("b.txt", b"bcd")];
+        let (storage, mounts) = reporting(true, MountLimits::default(), files);
+        storage.read("/mnt/m/a.txt").await.unwrap();
+        storage.stat("/mnt/m/b.txt").await.unwrap();
+        assert_eq!(
+            accesses(&mounts),
+            [seen("a.txt", Read, "a.txt"), seen("b.txt", Stated, "b.txt")]
+        );
+    }
+
+    /// A stronger use keeps the first version seen (the client's answers
+    /// changed mid-run if they differ), or takes one if there was none
+    #[test]
+    fn the_first_version_seen_is_kept() {
+        use fs_access::Kind::{Listed, Read, Stated};
+        let (_storage, mounts, _rx, _tx, _closed) = mount();
+        let remote = &mounts.remote;
+        remote.saw("/mnt/m", "f", Stated, Some("v1"));
+        remote.saw("/mnt/m", "f", Read, Some("v2"));
+        remote.saw("/mnt/m", "d", Listed, None);
+        remote.saw("/mnt/m", "d", Stated, Some("d1"));
+        assert_eq!(
+            accesses(&mounts),
+            [seen("d", Listed, "d1"), seen("f", Read, "v1")]
+        );
+    }
+
+    /// Nothing is recorded for a mount that doesn't ask, and past the limit
+    /// new paths aren't, though known ones still get stronger
+    #[tokio::test]
+    async fn the_access_report_is_opt_in_and_bounded() {
+        let (storage, count) = serve(vec![("a.txt", b"abc")]);
+        storage.read("/mnt/m/a.txt").await.unwrap();
+        assert!(count.load(Ordering::Relaxed) > 0);
+        assert!(lock(&storage.remote.accesses).paths.is_empty());
+
+        let limits = MountLimits {
+            max_access_entries: 1,
+            ..MountLimits::default()
+        };
+        let files = vec![("a.txt", &b"abc"[..]), ("b.txt", b"bcd")];
+        let (storage, mounts) = reporting(false, limits, files);
+        storage.stat("/mnt/m/a.txt").await.unwrap();
+        storage.stat("/mnt/m/b.txt").await.unwrap();
+        storage.read("/mnt/m/a.txt").await.unwrap();
+        let (accesses, truncated) = mounts.accesses();
+        assert!(truncated);
+        assert_eq!(accesses.len(), 1);
+        assert_eq!(accesses[0].kind(), fs_access::Kind::Read);
     }
 
     static BIG: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
@@ -1802,6 +2386,7 @@ mod tests {
             is_dir: false,
             size: 0,
             modified: Some(1e19),
+            version: None,
         };
         assert_eq!(metadata(&stat).modified, SystemTime::UNIX_EPOCH);
     }
@@ -1850,6 +2435,7 @@ mod tests {
             path: path.into(),
             writable: true,
             max_write_bytes,
+            ..Mount::default()
         }
     }
 

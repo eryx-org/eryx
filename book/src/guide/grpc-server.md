@@ -63,6 +63,7 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--max-mount-listing-bytes` | `ERYX_MAX_MOUNT_LISTING_BYTES` | `16777216` (16 MiB) | Most host memory one execution's directory listings may hold, kept for the execution. |
 | `--max-mount-dir-entries` | `ERYX_MAX_MOUNT_DIR_ENTRIES` | `10000` | Most entries one directory's listing may have. |
 | `--max-mount-write-bytes` | `ERYX_MAX_MOUNT_WRITE_BYTES` | `67108864` (64 MiB) | Most host memory one execution's changes to its [writable mounts](#writable-mounts) may hold, all together; past it, writes fail with `ENOSPC`. A mount's `max_write_bytes` can lower it for that mount. |
+| `--max-mount-access-entries` | `ERYX_MAX_MOUNT_ACCESS_ENTRIES` | `10000` | Most paths one execution [reports as used](#reporting-what-the-code-used) on its mounts, all together; past it, the report is marked truncated. |
 | `--allow-plaintext-secrets` | `ERYX_ALLOW_PLAINTEXT_SECRETS` | *(off)* | Let requests set `network_config.allow_plaintext_secrets`, which sends real secret values over unencrypted connections. Off by default: such requests are rejected with `INVALID_ARGUMENT`, so secrets are only substituted over TLS. See [Plain HTTP](./secrets.md#plain-http). |
 | `--shell-command` | `ERYX_SHELL_COMMANDS` (`;`-separated) | *(none)* | A shell command, `NAME[,NAME...]=PATH[@sha256:<hex>]`: a `.wasm` or `.cwasm` file, the `.wasm` optionally pinned to its digest. Repeatable; empty entries and an empty variable mean none. See [Commands from a registry](#commands-from-a-registry) and [External Commands](./sandboxes.md#external-commands). |
 | `--shell-command-tunnels` | `ERYX_SHELL_COMMAND_TUNNELS` (`,`-separated) | *(none)* | Let a `--shell-command` name open blind `CONNECT` tunnels through the child proxy (no secret substitution, no HTTP rules). A request can turn it off (`commands`), not on. |
@@ -217,7 +218,7 @@ If the client disconnects, the server cancels the in-flight execution, including
 
 | `FsRequest.op` | Answer with |
 |----------------|-------------|
-| `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch). |
+| `stat` | `stat`: an `FsMetadata` (`is_dir`, `size`, `modified` in seconds since the epoch, and an optional opaque `version`, which the server only [reports back](#reporting-what-the-code-used)). |
 | `list` | `listing`: the directory's entries, each with its metadata. Put a small file's whole contents in its entry's `content`: the server keeps those up to 64 KiB, so reading a tree of small files costs one round trip per directory, or one in all with [nested listings](#nested-listings). |
 | `read` | `data`: up to `len` bytes of the file from `offset`, fewer at its end. |
 
@@ -257,7 +258,26 @@ With `writable: true`, the code can change a mount, but the client's files are n
 - Writing part of a file fetches it whole first; replacing it, or truncating it to nothing (`open(path, 'w')`), doesn't. The changes may hold up to `--max-mount-write-bytes`, all writable mounts together, past which writes fail with `ENOSPC`.
 - A mount's `max_write_bytes` gives it a smaller budget, for storage with less room than the server allows, such as a user's remaining quota. Writes past it fail when they're made, as past the server's limit, rather than leaving the client to refuse the changes at the end. It can only lower the server's limit, never raise it, and the run's writable mounts still share `--max-mount-write-bytes`. It's counted the same way: each file's new contents plus its path and 64 bytes for each file and directory made. Reading, deleting a file the client served, and the mount's own directory cost nothing, and deleting what the run wrote gives its space back, so with `max_write_bytes: 0` the code can still read and delete but not write. It's for writable mounts only.
 - Renaming a file works. Renaming a directory the client served fails with `EXDEV`, which `shutil.move` and `mv` handle by copying; one the code made itself renames.
-- Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported.
+- Changes are against what the run saw: a file the client changed mid-run isn't noticed. Times aren't reported. To apply them only if what the code depended on hasn't changed since, have the run report what it used.
+
+### Reporting what the code used
+
+A client that applies a writable mount's changes with optimistic concurrency needs to know what the code depended on, and what it served isn't that: a listing brings every entry's metadata, and often small files' contents, whether the code uses them or not. With `report_access: true` on a mount, the server reports the paths the code used on it, as `FsAccess` messages after the `FsChange`s and before the `ExecuteResult`, whose `fs_accesses` counts them. They come when `FsChange`s would: for a failed run too, not for a cancelled or suspended one. A read-only mount can report too.
+
+Each path comes once, with its strongest use (`path` is relative to `mount`, as in `FsChange`):
+
+| `FsAccess.kind` | The code |
+|-----------------|----------|
+| `KIND_READ` | Read the file's contents, or part of them. |
+| `KIND_LISTED` | Read the directory's entries: their names and kinds. |
+| `KIND_STATED` | Used its metadata: a stat or an existence check, including those an open makes, or a program such as `ls` that stats each entry it lists. |
+| `KIND_MISSING` | Looked it up and didn't find it, and never saw it exist. |
+
+`version` is the `FsMetadata.version` the client sent for the path, as the code saw it: give each file and directory one, such as a content hash or revision, and refuse the changes if any reported path's version is different now, or a `KIND_MISSING` path exists. A directory listed but not stat'd itself, such as the mount, has no version reported.
+
+- Only the code's own use counts, wherever the server answered it from: its cache, a listing's inline `content`, a fetched block. A listing with inline files reports the directory as listed, not its files as read, until the code opens them.
+- The server's own lookups don't count: to place the code's writes, copy a file up before a partial write, or check a rename. Nor does what the code reads back from its own writes, or a path after it deleted it: those are in the `FsChange`s.
+- Past `--max-mount-access-entries` paths, all mounts together, `ExecuteResult.fs_accesses_truncated` is set and the report is incomplete: treat everything served to the run as used.
 
 ## Reading the result
 
@@ -380,8 +400,17 @@ This matters for [secrets](./secrets.md): a `SecretConfig.value` is transmitted 
 
 ## Observability
 
-- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, execution counters/histograms, and counters of [nested listings](#nested-listings).
-- **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span.
+- **Metrics** — a Prometheus exporter serves `/metrics` on `--metrics-addr`, exposing pool gauges (in-use/available/total/max), acquisition and creation counters, execution counters/histograms, and counters of [nested listings](#nested-listings). For [mounts](#mounts):
+
+  | Metric | Type | Labels | What |
+  |--------|------|--------|------|
+  | `eryx_mount_request_duration_seconds` | histogram | `op`: `stat`, `list`, `read` | An `FsRequest`'s round trip, from sending it to the client's answer. |
+  | `eryx_mount_requests_per_execution` | histogram | | `FsRequest`s each execution with mounts sent. |
+  | `eryx_mount_cache_lookups_total` | counter | `op`: `stat`, `list`, `read`; `result`: `hit`, `miss` | Lookups the run's cache answered, or joined a request already made for, and those that needed a new `FsRequest`. A stat answered from its parent's listing is a hit. |
+  | `eryx_mount_limit_hits_total` | counter | `limit`: `ops`, `transfer_bytes`, `cache_bytes`, `listing_bytes`, `dir_entries`, `write_bytes` | Operations refused at a [`--max-mount*` limit](#running-the-server). `listing_bytes` and `dir_entries` count a whole answer that's over the limit: if a nested listing in it is what overflowed, that is also counted as a rejected nested listing, by its own reason. |
+  | `eryx_mount_accesses_reported` | histogram | | Paths each run [reported as used](#reporting-what-the-code-used), for requests with `report_access`. |
+  | `eryx_mount_access_reports_truncated_total` | counter | | Access reports cut short by `--max-mount-access-entries`. |
+- **Tracing** — the server reads the W3C `traceparent`/`tracestate` headers from incoming gRPC metadata, so its spans become children of the caller's trace. When a callback is dispatched, `CallbackRequest.trace_context` carries a `traceparent` so the client can link its callback-handling spans back to the server-side span. Each `FsRequest` has a server-side `fs_request` span (with its `op`, and the failure as `error`), and its `trace_context` carries that span's `traceparent` the same way.
 
 ## Next Steps
 
