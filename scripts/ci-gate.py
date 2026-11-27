@@ -15,10 +15,10 @@ Best-effort and fail-open: with no credentials (fork PRs), on any API
 error, a refusal or an unparseable answer, every group runs. Pushes to main
 never call this and run everything, so a wrong skip surfaces there.
 
-Only file paths, line counts and, for lock files, the packages whose
-versions changed are sent, not the diff or the PR text: they are what the
-decision needs, and the PR title and body are free text anyone opening a PR
-controls.
+It sends each changed file's path, line counts and diff (capped; lock files
+are reduced to the packages whose versions changed), but not the PR title or
+body. Only same-repo PRs get an OIDC token, so the diff comes from someone
+with write access, and a wrong skip still fails on main.
 """
 
 import json
@@ -26,9 +26,12 @@ import os
 import re
 import sys
 
-MODEL = "claude-opus-5-5"
+MODEL = "claude-sonnet-5-5"
 # More files than this and the PR is broad enough to just run everything.
 MAX_FILES = 300
+# Diff lines sent per file and in total; past these the model sees counts only.
+MAX_PATCH_LINES = 150
+MAX_TOTAL_PATCH_LINES = 2000
 
 # Group -> what its jobs check. The model sees these descriptions.
 GROUPS = {
@@ -62,8 +65,12 @@ Linux jobs would not. Skip a group when the change can't reach it: for \
 example, guest wasm code, the server, the book, SDKs or JS bindings can't break a \
 Windows or macOS host build, and a dependency bump in Cargo.lock only matters \
 to a platform group if the crate has platform-specific code (filesystem, \
-processes, networking, native libraries, cfg(windows)/cfg(unix)). Run a group \
-when unsure. A main-branch run executes everything afterwards, so a wrong skip \
+processes, networking, native libraries, cfg(windows)/cfg(unix)). Changes \
+to CI workflow files (.github/) only need a group when they change what that \
+group's own jobs execute (their steps, runner, toolchain or build commands); \
+edits to triggers, job conditions, path filters, caching or other jobs don't. \
+Judge from the diffs, not just the file names. Run a group when the diff \
+leaves it genuinely unclear. A main-branch run executes everything afterwards, so a wrong skip \
 is caught there, but costs a broken main.
 
 Groups:
@@ -87,11 +94,18 @@ VERSION = re.compile(r'^([-+])\s*version = "([^"]+)"')
 NODE = re.compile(r'^([-+])\s*"node_modules/([^"]+)"')
 
 
-def describe(entry: dict) -> str:
-    """One line per changed file; lock files also list the packages that moved."""
+def describe(entry: dict, budget: list[int]) -> str:
+    """One entry per changed file: its diff (within `budget`), or for lock
+    files the packages that moved."""
     line = f"{entry['status']} +{entry['additions']}/-{entry['deletions']} {entry['filename']}"
     if not entry["filename"].endswith(LOCK_FILES):
-        return line
+        patch = (entry.get("patch") or "").splitlines()
+        if not patch:
+            return line
+        if len(patch) > MAX_PATCH_LINES or len(patch) > budget[0]:
+            return line + "\n    (diff too large to include)"
+        budget[0] -= len(patch)
+        return line + "\n```diff\n" + "\n".join(patch) + "\n```"
     moved, name = set(), None
     for raw in (entry.get("patch") or "").splitlines():
         # The package name is usually an unchanged context line above the
@@ -138,8 +152,9 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str]:
             messages=[
                 {
                     "role": "user",
-                    "content": "Changed files (status +added/-deleted path; for lock files, "
-                    "the package versions removed (-) and added (+)):\n"
+                    "content": "Changed files (status +added/-deleted path), each with "
+                    "its diff, or for lock files the package versions removed (-) "
+                    "and added (+):\n\n"
                     + "\n".join(files),
                 }
             ],
@@ -154,7 +169,8 @@ def decide(files: list[str]) -> tuple[dict[str, bool], str]:
 
 
 def main() -> None:
-    files = [describe(json.loads(line)) for line in sys.stdin if line.strip()]
+    budget = [MAX_TOTAL_PATCH_LINES]
+    files = [describe(json.loads(line), budget) for line in sys.stdin if line.strip()]
     decision, reason = decide(files)
 
     oses = [os_ for g, os_ in (("windows", "windows-latest"), ("macos", "macos-latest")) if decision[g]]
