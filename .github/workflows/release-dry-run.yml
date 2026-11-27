@@ -36,6 +36,7 @@ on:
       - .github/workflows/python-build.yml
       - .github/workflows/js-build.yml
       - crates/eryx-server/Dockerfile
+      - '**/.dockerignore'
       # The wheels' metadata and licence files, and their notices check.
       - crates/eryx-python/pyproject.toml
       - crates/eryx-python/runtimes/**
@@ -77,8 +78,8 @@ jobs:
         id: filter
         with:
           filters: |
-            # Every path in `on.pull_request.paths` but the Dockerfile and
-            # js-build.yml.
+            # Every path in `on.pull_request.paths` but the Dockerfile,
+            # .dockerignore and js-build.yml.
             wheels:
               - .github/workflows/release-dry-run.yml
               - .github/workflows/runtime-build.yml
@@ -108,6 +109,7 @@ jobs:
               - .github/workflows/runtime-build.yml
               - .github/workflows/python-build.yml
               - crates/eryx-server/Dockerfile
+              - '**/.dockerignore'
               - clis/coreutils.toml
               - clis/patches/**
               - mise.toml
