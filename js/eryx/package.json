@@ -75,7 +75,7 @@
     "interpreter"
   ],
   "dependencies": {
-    "@bytecodealliance/preview2-shim": "^0.31.0",
+    "@bytecodealliance/preview2-shim": "^0.32.0",
     "@eryx-org/eryx-run": "^0.2.0"
   }
 }
