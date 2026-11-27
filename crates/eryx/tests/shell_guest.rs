@@ -994,6 +994,7 @@ async fn python3_writes_large_output_whole() {
              python3 -c \"import sys; sys.stdout.write({lines})\" | md5sum\n\
              python3 -c \"print({lines}, end='')\" > /tmp/o.txt; md5sum < /tmp/o.txt\n\
              python3 -c \"import sys; sys.stdout.buffer.write(({lines}).encode())\" | md5sum\n\
+             python3 -c \"import sys; sys.__stdout__.write({lines})\" | md5sum\n\
              python3 -c \"import sys; sys.stderr.write({lines}); print('out')\" 2>/tmp/e.txt\n\
              md5sum < /tmp/e.txt",
         ))
@@ -1002,7 +1003,7 @@ async fn python3_writes_large_output_whole() {
     let stdout = out.stdout_utf8().unwrap();
     let mut sums = stdout.lines().filter(|l| *l != "out");
     let seq = sums.next().unwrap();
-    assert_eq!(sums.clone().count(), 4, "{stdout}");
+    assert_eq!(sums.clone().count(), 5, "{stdout}");
     assert!(sums.all(|sum| sum == seq), "{stdout}");
     assert!(stdout.contains("out\n"), "{stdout}");
     assert!(

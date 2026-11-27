@@ -1446,6 +1446,7 @@ _eryx_old_stdout = _sys.stdout
 _eryx_old_stderr = _sys.stderr
 
 import _io
+import errno as _errno
 class _EryxFullWriteIO(_io.FileIO):
     '''An fd whose write() writes everything, as a blocking write to a pipe does.
 
@@ -1458,7 +1459,10 @@ class _EryxFullWriteIO(_io.FileIO):
         with memoryview(b) as view, view.cast('B') as data:
             done = 0
             while done < len(data):
-                done += super().write(data[done:])
+                written = super().write(data[done:])
+                if not written:  # None: a non-blocking fd is full
+                    raise BlockingIOError(_errno.EAGAIN, 'write would block', done)
+                done += written
             return done
 
 def _eryx_command_stream(fd, like):
@@ -1788,7 +1792,8 @@ def _eryx_run_command(argv, env, cwd):
     import os
     if not _eryx_site_packages_added:
         _eryx_add_site_packages()
-    _sys.stdout, _sys.stderr = _eryx_command_stdout, _eryx_command_stderr
+    _sys.stdout = _sys.__stdout__ = _eryx_command_stdout
+    _sys.stderr = _sys.__stderr__ = _eryx_command_stderr
     os.environ.clear()
     os.environ.update(env)
     _eryx_callback_code = 0
