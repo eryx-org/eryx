@@ -169,8 +169,23 @@ fn compiled(wasm: &[u8], dir: &Path) -> Result<Command, Error> {
         // SAFETY: this process compiled these bytes just now.
         return unsafe { Command::from_precompiled(&precompiled) };
     }
+    drop(precompiled);
+    release_freed_memory();
     // SAFETY: as above; this process just wrote it.
     unsafe { Command::from_precompiled_file(&cwasm) }
+}
+
+/// Hand the memory compiling freed back to the OS. Compiling a big command
+/// (gcx, 70 MB of wasm) frees over a gigabyte, which glibc's allocator
+/// otherwise keeps for the life of the process.
+#[cfg(any(feature = "embedded", feature = "preinit", feature = "env-pack"))]
+#[allow(unsafe_code)]
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap memory.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// Warn, once per load, that a command is compiled without the cache.

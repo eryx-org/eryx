@@ -42,6 +42,7 @@ hex = "0.4"
 hmac = "0.13"
 http = "1.5"           # request-target parsing
 ipnet = "2"
+libc = "0.2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 opentelemetry = "0.33"
