@@ -5,8 +5,8 @@
 # here, or can't be determined, fails it.
 #
 # Accepted licences, in order of preference. A dual-licensed crate gets the
-# first of its options listed here. Copyleft licences aren't listed, so these
-# crates get their permissive option (decided, #930):
+# first of its options listed here. Strong copyleft licences aren't listed, so
+# these crates get their permissive option (decided, #930):
 #   ittapi, ittapi-sys: GPL-2.0-only OR BSD-3-Clause -> BSD-3-Clause
 #   self_cell: Apache-2.0 OR GPL-2.0-only -> Apache-2.0
 #   r-efi: MIT OR Apache-2.0 OR LGPL-2.1-or-later -> MIT
@@ -14,6 +14,12 @@
 # About 89 crates ship no licence file with a copyright line, so their notices
 # are cargo-about's licence templates without one (ittapi is one). That's
 # accepted as is (#930): the template text is the licence they declare.
+#
+# MPL-2.0 is accepted, last, for unmodified dependencies: its copyleft covers
+# only the MPL files themselves, and the notices link each crate to its
+# source, which is what MPL-2.0 §3.2 asks of a binary distribution. A crate
+# eryx patches (vendors and modifies) under MPL-2.0 needs its modified files
+# published under MPL-2.0 too; that's a review decision, not covered here.
 accepted = [
     "MIT",
     "Apache-2.0",
@@ -30,6 +36,7 @@ accepted = [
     "MIT-0",
     "CC0-1.0",
     "Unlicense",
+    "MPL-2.0",
 ]
 # Only what ends up in a shipped artifact.
 ignore-build-dependencies = true
