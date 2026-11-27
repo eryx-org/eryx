@@ -20,7 +20,7 @@
 //!
 //! A mount with `Mount.report_access` also records what the guest used on
 //! it, for [`Mounts::accesses`]. That's recorded where the guest's operations
-//! reach the client's storage (see [`Guest`]), so the cache's answers count
+//! reach the client's storage (see `Guest`), so the cache's answers count
 //! and the overlay's own lookups don't.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
