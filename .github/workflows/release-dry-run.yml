@@ -92,11 +92,11 @@ jobs:
           - arch: amd64
             runner: ubuntu-latest
             cpu-features: x86-64-v2
-          # Native, as ci.yml builds it. aarch64 has no psABI presets, so
-          # "baseline" is the portable setting.
+          # Native, as ci.yml builds it. No cpu-features: an empty
+          # ERYX_CPU_FEATURES takes the Dockerfile's per-architecture default,
+          # "baseline" on arm64.
           - arch: arm64
             runner: ubuntu-26.04-arm
-            cpu-features: baseline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
