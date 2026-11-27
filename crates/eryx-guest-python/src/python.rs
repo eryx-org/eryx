@@ -1445,6 +1445,32 @@ _eryx_stderr = _EryxStreamingWriter(1)
 _eryx_old_stdout = _sys.stdout
 _eryx_old_stderr = _sys.stderr
 
+import _io
+class _EryxFullWriteIO(_io.FileIO):
+    '''An fd whose write() writes everything, as a blocking write to a pipe does.
+
+    A WASI write takes only what its stream has room for (a command's pipe
+    holds 64 KiB), and the unbuffered stdio pre-init leaves
+    (PYTHONUNBUFFERED) writes text straight to the fd, dropping the rest of
+    a short write.
+    '''
+    def write(self, b):
+        with memoryview(b) as view, view.cast('B') as data:
+            done = 0
+            while done < len(data):
+                done += super().write(data[done:])
+            return done
+
+def _eryx_command_stream(fd, like):
+    '''An unbuffered text stream on fd for commands, encoded like `like`.'''
+    return _io.TextIOWrapper(_EryxFullWriteIO(fd, 'w', closefd=False),
+                             encoding=like.encoding, errors=like.errors,
+                             write_through=True)
+
+# What commands write to: the real fds, not the execute capture.
+_eryx_command_stdout = _eryx_command_stream(1, _eryx_old_stdout)
+_eryx_command_stderr = _eryx_command_stream(2, _eryx_old_stderr)
+
 # User globals namespace, kept separate from the infrastructure's module globals
 # so _eryx_* names don't appear in it (they remain reachable via `import __main__`)
 _eryx_user_globals = {'__builtins__': __builtins__, '__name__': '__main__'}
@@ -1641,7 +1667,7 @@ _eryx_infra_globals = globals()
 class _EryxUsage(Exception):
     '''A command line python3 can't run: exits 2 with the message.'''
 
-# Flags with no effect here: unbuffered (the command flushes on exit), no
+# Flags with no effect here: unbuffered (a command's stdio already is), no
 # bytecode, quiet, and the isolation flags (there's nothing to isolate from).
 _ERYX_IGNORED_FLAGS = frozenset('uBIEsq')
 
@@ -1762,8 +1788,7 @@ def _eryx_run_command(argv, env, cwd):
     import os
     if not _eryx_site_packages_added:
         _eryx_add_site_packages()
-    # Commands write straight to the real fds, not the execute capture.
-    _sys.stdout, _sys.stderr = _eryx_old_stdout, _eryx_old_stderr
+    _sys.stdout, _sys.stderr = _eryx_command_stdout, _eryx_command_stderr
     os.environ.clear()
     os.environ.update(env)
     _eryx_callback_code = 0
