@@ -476,13 +476,46 @@ impl NetConfig {
 
     /// Check a request with `method` and request target `target` (as in the
     /// request line: a path, or an absolute URL) against the HTTP rules for
+    /// `host`, without knowing its port.
+    ///
+    /// Behaves as [`NetConfig::check_http_request_on_port`] does for rules
+    /// whose host pattern names no port. A request to a host that a rule
+    /// naming a port (`api.example.com:443`) matches is refused, since which
+    /// of the host's ports it's for is unknown.
+    ///
+    /// # Errors
+    ///
+    /// Describes the refused request.
+    #[deprecated(
+        note = "use check_http_request_on_port, which also matches HTTP rules that name a port; \
+                this will be removed in the next breaking release (eryx-org/eryx#1248)"
+    )]
+    pub fn check_http_request(&self, host: &str, method: &str, target: &str) -> Result<(), String> {
+        let names_port = |r: &&HttpRule| {
+            split_pattern_port(&r.host)
+                .and_then(|(_, port)| port)
+                .is_some_and(|port| host_matches_pattern(host, port, &r.host))
+        };
+        if self.http_rules.iter().any(|r| names_port(&r)) {
+            return Err(format!(
+                "an HTTP rule for {host} names a port: check the request with \
+                 check_http_request_on_port"
+            ));
+        }
+        // No rule naming a port matches the host, and port 0 is one no
+        // pattern can name, so only the rules without a port apply.
+        self.check_http_request_on_port(host, 0, method, target)
+    }
+
+    /// Check a request with `method` and request target `target` (as in the
+    /// request line: a path, or an absolute URL) against the HTTP rules for
     /// `host` on `port` (the port the connection was made to). A host no
     /// rule matches allows any request.
     ///
     /// # Errors
     ///
     /// Describes the refused request.
-    pub fn check_http_request(
+    pub fn check_http_request_on_port(
         &self,
         host: &str,
         port: u16,
@@ -801,9 +834,9 @@ impl NetConfig {
 ///             .with_methods(["GET", "POST"])
 ///             .with_paths(["/repos/org/repo"]),
 ///     );
-/// assert!(config.check_http_request("api.github.com", 443, "GET", "/repos/org/repo/issues?page=2").is_ok());
-/// assert!(config.check_http_request("api.github.com", 443, "DELETE", "/repos/org/repo").is_err());
-/// assert!(config.check_http_request("api.github.com", 443, "GET", "/repos/org/repo-evil").is_err());
+/// assert!(config.check_http_request_on_port("api.github.com", 443, "GET", "/repos/org/repo/issues?page=2").is_ok());
+/// assert!(config.check_http_request_on_port("api.github.com", 443, "DELETE", "/repos/org/repo").is_err());
+/// assert!(config.check_http_request_on_port("api.github.com", 443, "GET", "/repos/org/repo-evil").is_err());
 ///
 /// // Git fetches, but not pushes.
 /// let git = NetConfig::default().allow_host("git.example.com").allow_http(
@@ -812,7 +845,7 @@ impl NetConfig {
 ///         .with_paths(["/org/repo.git/info/refs"])
 ///         .with_queries(["service=git-upload-pack"]),
 /// );
-/// let check = |target| git.check_http_request("git.example.com", 443, "GET", target);
+/// let check = |target| git.check_http_request_on_port("git.example.com", 443, "GET", target);
 /// assert!(check("/org/repo.git/info/refs?service=git-upload-pack").is_ok());
 /// assert!(check("/org/repo.git/info/refs?service=git-receive-pack").is_err());
 /// ```
@@ -2383,8 +2416,8 @@ fn embedded_ipv4(ip: IpAddr) -> Option<IpAddr> {
 ///   port matches. A bare IPv6 address (`::1`) has no port.
 ///
 /// Both host sides are compared as [`normalize_host`] leaves them: ignoring
-/// case, one trailing dot and IPv6 brackets. A pattern whose port isn't one
-/// (`example.com:x`, `example.com:0`) matches nothing;
+/// case, one trailing dot and IPv6 brackets. A pattern whose port is out of
+/// range (`example.com:0`, `example.com:65536`) matches nothing;
 /// [`NetConfig::validate`] refuses it.
 fn host_matches_pattern(host: &str, port: u16, pattern: &str) -> bool {
     let Some((pattern, pattern_port)) = split_pattern_port(pattern) else {
@@ -2473,8 +2506,9 @@ fn is_valid_host_pattern(pattern: &str) -> bool {
 /// `pattern` split into its host pattern and the port it names, if any:
 /// `example.com:443` is `("example.com", Some(443))`, `[::1]:443` is
 /// `("[::1]", Some(443))`, and `example.com`, `[::1]` and a bare IPv6
-/// address (`::1`) have no port. `None` if what follows the `:` isn't a
-/// port from 1 to 65535.
+/// address (`::1`) have no port. Only digits after the `:` are a port, so a
+/// single-colon IPv6 glob such as `fe80:*` stays a host pattern. `None` if
+/// those digits aren't a port from 1 to 65535.
 fn split_pattern_port(pattern: &str) -> Option<(&str, Option<u16>)> {
     let (host, port) = if pattern.starts_with('[') {
         match pattern.rsplit_once("]:") {
@@ -2488,7 +2522,7 @@ fn split_pattern_port(pattern: &str) -> Option<(&str, Option<u16>)> {
         }
     };
     if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+        return Some((pattern, None));
     }
     port.parse::<u16>()
         .ok()
@@ -2704,7 +2738,12 @@ mod tests {
         assert!(host_matches_pattern("example.com", 8443, "example.com"));
         assert!(host_matches_pattern("::1", 8443, "::1"));
         assert!(host_matches_pattern("::1", 8443, "[::1]"));
-        // Something that isn't a port matches nothing.
+        // Only digits are a port: `fe80:*` is still a single-colon IPv6 glob,
+        // matching on every port.
+        assert!(host_matches_pattern("fe80::1", 8443, "fe80:*"));
+        assert!(!host_matches_pattern("fe81::1", 8443, "fe80:*"));
+        // Digits out of range, and other suffixes that aren't a port, match
+        // nothing.
         for pattern in [
             "example.com:",
             "example.com:0",
@@ -2724,13 +2763,7 @@ mod tests {
 
     #[test]
     fn host_patterns_with_invalid_ports_are_refused() {
-        for pattern in [
-            "example.com:",
-            "example.com:0",
-            "example.com:x",
-            "[::1]:",
-            ":443",
-        ] {
+        for pattern in ["example.com:0", "example.com:65536", "[::1]:0", ":443"] {
             let err = NetConfig::default()
                 .allow_host(pattern)
                 .validate()
@@ -2744,13 +2777,51 @@ mod tests {
             "*:443",
             "[::1]:443",
             "*.example.com:8443",
+            "[::1]:8080",
             "::1",
+            // Not a port, so a host pattern, as before.
+            "fe80:*",
         ] {
             assert!(
                 NetConfig::default().allow_host(pattern).validate().is_ok(),
                 "{pattern:?}"
             );
         }
+    }
+
+    /// The deprecated, port-less check applies rules without a port as
+    /// before, and refuses a request to a host a rule naming a port matches.
+    #[test]
+    #[allow(deprecated)]
+    fn the_port_less_http_check_refuses_hosts_with_port_rules() {
+        let config = NetConfig::default()
+            .allow_http(HttpRule::new("api.example.com").with_methods(["GET"]))
+            .allow_http(HttpRule::new("git.example.com:443").with_methods(["GET"]));
+
+        assert!(
+            config
+                .check_http_request("api.example.com", "GET", "/")
+                .is_ok()
+        );
+        assert!(
+            config
+                .check_http_request("api.example.com", "DELETE", "/")
+                .is_err()
+        );
+        assert!(
+            config
+                .check_http_request("other.example.com", "DELETE", "/")
+                .is_ok()
+        );
+        let err = config
+            .check_http_request("git.example.com", "GET", "/")
+            .unwrap_err();
+        assert!(err.contains("check_http_request_on_port"), "{err}");
+        assert!(
+            config
+                .check_http_request_on_port("git.example.com", 443, "GET", "/")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2805,7 +2876,7 @@ mod tests {
                     .with_paths(["/v1"]),
             );
         let check = |port, method, target| {
-            config.check_http_request("api.example.com", port, method, target)
+            config.check_http_request_on_port("api.example.com", port, method, target)
         };
         assert!(check(443, "GET", "/v1/x").is_ok());
         assert!(check(443, "DELETE", "/v1/x").is_err());
@@ -4996,8 +5067,9 @@ mod tests {
     #[test]
     fn http_rules_match_methods_and_paths() {
         let config = github_rules();
-        let check =
-            |method, target| config.check_http_request("api.github.com", 443, method, target);
+        let check = |method, target| {
+            config.check_http_request_on_port("api.github.com", 443, method, target)
+        };
         for target in [
             "/repos/org/repo",
             "/repos/org/repo/",
@@ -5051,12 +5123,12 @@ mod tests {
         // Other hosts are unaffected; host names are normalized.
         assert!(
             config
-                .check_http_request("example.com", 443, "DELETE", "/x")
+                .check_http_request_on_port("example.com", 443, "DELETE", "/x")
                 .is_ok()
         );
         assert!(
             config
-                .check_http_request("API.GitHub.com.", 443, "DELETE", "/x")
+                .check_http_request_on_port("API.GitHub.com.", 443, "DELETE", "/x")
                 .is_err()
         );
     }
@@ -5068,7 +5140,7 @@ mod tests {
         let check = |rule: HttpRule, host, method, target| {
             NetConfig::permissive()
                 .allow_http(rule)
-                .check_http_request(host, 443, method, target)
+                .check_http_request_on_port(host, 443, method, target)
                 .is_ok()
         };
         let h = "api.example.com";
@@ -5217,7 +5289,7 @@ mod tests {
         );
         let check = |target| {
             config
-                .check_http_request("git.example.com", 443, "GET", target)
+                .check_http_request_on_port("git.example.com", 443, "GET", target)
                 .is_ok()
         };
         assert!(check("/org/repo.git/info/refs?service=git-upload-pack"));
@@ -5256,7 +5328,7 @@ mod tests {
         let check = |queries: &[&str], target| {
             NetConfig::permissive()
                 .allow_http(HttpRule::new("h").with_queries(queries.iter().copied()))
-                .check_http_request("h", 443, "GET", target)
+                .check_http_request_on_port("h", 443, "GET", target)
                 .is_ok()
         };
         // No queries means any query, as before queries could be set.
@@ -5287,7 +5359,7 @@ mod tests {
             // Nor does it match anything if checked anyway.
             assert!(
                 config(q)
-                    .check_http_request("h", 443, "GET", "/?a")
+                    .check_http_request_on_port("h", 443, "GET", "/?a")
                     .is_err(),
                 "{q}"
             );
@@ -5300,12 +5372,12 @@ mod tests {
         assert!(commented.validate().is_ok());
         assert!(
             commented
-                .check_http_request("h", 443, "GET", "/?a=1")
+                .check_http_request_on_port("h", 443, "GET", "/?a=1")
                 .is_ok()
         );
         assert!(
             commented
-                .check_http_request("h", 443, "GET", "/?a=1&b")
+                .check_http_request_on_port("h", 443, "GET", "/?a=1&b")
                 .is_err()
         );
         // Patterns that would compile to something huge are refused.
