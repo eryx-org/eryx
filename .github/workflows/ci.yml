@@ -92,7 +92,7 @@ jobs:
       server: ${{ steps.filter.outputs.server }}
       # crates/eryx-server/ beyond its Dockerfile: what Lint and Test build.
       # A Dockerfile-only change runs the Docker jobs (via `server`) and not
-      # Lint or Test.
+      # Lint or Test. Relies on `dockerfile` matching a subset of `server`.
       server-code: ${{ steps.filter.outputs.server_count != steps.filter.outputs.dockerfile_count }}
       stdlib: ${{ steps.filter.outputs.stdlib }}
       python: ${{ steps.filter.outputs.python }}
