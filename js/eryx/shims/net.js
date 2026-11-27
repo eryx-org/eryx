@@ -189,9 +189,10 @@ function canonicalHost(host) {
 
 /**
  * Whether host pattern `pattern` ends in `:port`, as the Rust crate reads
- * it: `[v6]:port`, or exactly one `:` (a bare IPv6 address has more).
+ * it: `[v6]:digits`, or exactly one `:` followed by digits (a bare IPv6
+ * address has more colons, and `fe80:*` is a glob, not a port).
  */
-const hasPort = (pattern) => (pattern.startsWith("[") ? pattern.includes("]:") : /^[^:]*:[^:]*$/.test(pattern));
+const hasPort = (pattern) => /^(\[[^\]]*\]|[^:]*):\d+$/.test(pattern);
 
 /** Glob match with `*` wildcards, case-insensitive (like the Rust matcher). */
 function hostMatches(host, pattern) {

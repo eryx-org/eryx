@@ -483,7 +483,7 @@ impl NetPolicy {
             for policy in self.chain() {
                 policy
                     .config
-                    .check_http_request(host, port, method, target)
+                    .check_http_request_on_port(host, port, method, target)
                     .map_err(TcpError::NotPermitted)?;
             }
         }
