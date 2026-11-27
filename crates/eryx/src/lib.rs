@@ -76,6 +76,7 @@ pub mod callback_handler;
 #[cfg(not(feature = "unstable-internals"))]
 mod callback_handler;
 mod cancel;
+mod command_callback;
 #[cfg(feature = "embedded")]
 pub mod embedded;
 #[cfg(feature = "embedded-stdlib")]
@@ -135,6 +136,10 @@ pub mod preinit {
 pub use callback::{
     Callback, CallbackError, DynamicCallback, DynamicCallbackBuilder, NamespacedCallback,
     POSITIONAL_ARGS_KEY, PrefixCallback, PrefixHandler, TypedCallback, empty_schema,
+};
+pub use command_callback::{
+    COMMAND_SCHEMA_KEY, CommandCallback, CommandHandler, CommandInput, CommandOutput,
+    MAX_COMMAND_OUTPUT_BYTES, MAX_COMMAND_STDIN_BYTES, command_schema,
 };
 pub use error::{Error, ErrorKind};
 pub use language::Language;

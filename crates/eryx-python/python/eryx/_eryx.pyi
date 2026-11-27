@@ -121,6 +121,13 @@ class CallbackDict(TypedDict, total=False):
     schema: dict[str, Any]
     """Optional JSON Schema for parameters."""
 
+    command: bool
+    """Make it a command callback: in the shell it runs as a real command,
+    called as ``fn(args, stdin)`` with its arguments as given (``list[str]``)
+    and its stdin (``bytes``), returning a dict with optional ``stdout``,
+    ``stderr`` (bytes or str) and ``exit_code`` (int), or a
+    ``subprocess.CompletedProcess``. It takes no ``schema``."""
+
 
 @final
 class MCPManager:
@@ -216,6 +223,7 @@ class CallbackRegistry:
         name: Optional[str] = None,
         description: Optional[str] = None,
         schema: Optional[dict[str, Any]] = None,
+        command: bool = False,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator to register a callback function.
 
@@ -226,6 +234,7 @@ class CallbackRegistry:
             name: Optional name for the callback. Defaults to the function's __name__.
             description: Optional description. Defaults to the function's __doc__ or empty string.
             schema: Optional JSON Schema dict for parameters. Auto-inferred if not provided.
+            command: Make it a command callback (see ``CallbackDict.command``).
 
         Returns:
             A decorator that registers the function and returns it unchanged.
@@ -244,6 +253,7 @@ class CallbackRegistry:
         name: Optional[str] = None,
         description: Optional[str] = None,
         schema: Optional[dict[str, Any]] = None,
+        command: bool = False,
     ) -> None:
         """Add a callback directly without using the decorator pattern.
 
@@ -255,6 +265,7 @@ class CallbackRegistry:
             name: Optional name. Defaults to callable.__name__.
             description: Optional description. Defaults to callable.__doc__ or empty string.
             schema: Optional JSON Schema dict.
+            command: Make it a command callback (see ``CallbackDict.command``).
         """
         ...
 

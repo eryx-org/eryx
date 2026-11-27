@@ -251,3 +251,45 @@ def test_node_runs_as_a_command():
         "echo 'console.log(6 * 7)' | node; js -e 'process.exit(3)'; echo $?"
     )
     assert result.stdout == b"42\n3\n"
+
+
+def test_command_callbacks_get_argv_and_stdin(monkeypatch):
+    """A command callback (#1241) runs as a real command: its arguments as
+    given, its stdin, and its stdout, stderr and exit code."""
+    import subprocess
+
+    companion(monkeypatch)
+    seen = []
+
+    def hostcli(args, stdin):
+        seen.append((args, stdin))
+        stdout = stdin.upper() + b"|" + " ".join(args).encode()
+        return {"stdout": stdout, "stderr": "warn\n", "exit_code": 4}
+
+    registry = eryx.CallbackRegistry()
+
+    @registry.callback(command=True)
+    def shout(args, stdin):
+        return subprocess.CompletedProcess(args, 0, stdout=stdin.upper(), stderr=b"")
+
+    sandbox = eryx.Sandbox(
+        language="shell",
+        callbacks=[{"name": "hostcli", "fn": hostcli, "command": True}, registry],
+    )
+    result = sandbox.execute(
+        "echo hi | hostcli a --b --json | wc -c\n"
+        'hostcli x 2>/dev/null; echo " s=$?"\n'
+        "echo q | shout"
+    )
+    assert result.stdout == b"16\n|x s=4\nQ\n"
+    assert result.stderr == b"warn\n"
+    assert seen[0] == (["a", "--b", "--json"], b"hi\n")
+    assert [cb["command"] for cb in registry] == [True]
+
+
+def test_command_callbacks_take_no_schema():
+    with pytest.raises(ValueError, match="takes no schema"):
+        eryx.Sandbox(
+            language="shell",
+            callbacks=[{"name": "x", "fn": lambda a, s: {}, "command": True, "schema": {}}],
+        )

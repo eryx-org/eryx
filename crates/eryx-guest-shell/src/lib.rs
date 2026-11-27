@@ -10,7 +10,9 @@
 //!   `add --a 2 --b 3`, `add --json '{"a":2}'`, or `invoke add '{"a":2}'`,
 //!   with arguments typed by the callback's schema (see [`call`]). The result
 //!   goes to stdout, so `$(add 2 3 | ...)` composes like any other command.
-//!   Each call reports `callback_start` and `callback_end` trace events.
+//!   Each call reports `callback_start` and `callback_end` trace events. A
+//!   command callback instead gets its arguments as given and its stdin, and
+//!   returns stdout, stderr and an exit code (see [`command`]).
 //! - A non-zero exit status becomes an `execute-error` ("exit status N").
 //! - `snapshot-state` is brush's own serde form of the `Shell`, after a line
 //!   naming that format; restoring refuses any other format.
@@ -23,6 +25,7 @@
 
 mod call;
 mod chmod;
+mod command;
 mod env;
 mod grep;
 mod input;
@@ -237,15 +240,19 @@ fn register_builtins(shell: &mut Shell) {
             continue;
         }
         let schema = serde_json::from_str(&cb.parameters_schema_json).ok();
+        let command = command::is_command(schema.as_ref());
         defs.insert(
             cb.name.clone(),
             call::CallbackDef {
                 description: cb.description,
                 schema,
+                command,
             },
         );
         // Builtins (registered above) win over a callback of the same name,
-        // as functions win over both; `invoke NAME` still reaches it.
+        // as functions win over both; `invoke NAME` still reaches it. A
+        // callback wins over a host command of its name, which only a
+        // command callback may have (the host refuses the rest).
         shell
             .builtins_mut()
             .register_if_absent(cb.name, builtins::Registration::of::<InvokeCommand>());
@@ -793,6 +800,9 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
                 return Ok(ExecutionResult::new(127));
             }
         }
+        if def.as_ref().is_some_and(|d| d.command) {
+            return command::run(&context, name, args).await;
+        }
         // `invoke NAME '{...}'`: the object is the arguments, as is.
         let raw = match args {
             [json] if self.via_invoke => match serde_json::from_str(json) {
@@ -819,24 +829,11 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
                 return Ok(ExecutionResult::new(2));
             }
         };
-        // Trace events in the CPython and QuickJS guests' shape: the
-        // arguments are callback_start's context. Keys sorted, so equal
-        // arguments are equal text whatever order the flags came in: callback
-        // replay journals key on this text.
+        // Keys sorted, so equal arguments are equal text whatever order the
+        // flags came in: callback replay journals key on this text.
         let arguments = call::canonical(arguments).to_string();
-        report_trace(
-            0,
-            &serde_json::json!({ "type": "callback_start", "name": name }).to_string(),
-            &arguments,
-        );
-        // Sync builtin, async import: park on the call with waitable-set.wait.
-        let outcome = wit_bindgen::block_on(invoke(name.clone(), arguments));
-        let end = match &outcome {
-            Ok(_) => serde_json::json!({ "type": "callback_end", "name": name }),
-            Err(e) => serde_json::json!({ "type": "callback_end", "name": name, "error": e }),
-        };
-        report_trace(0, &end.to_string(), "");
-        match outcome {
+        let traced = arguments.clone();
+        match call_host(name, arguments, &traced) {
             Ok(out) => {
                 if let Some(text) = call::render(&out) {
                     writeln!(context.stdout(), "{text}")?;
@@ -849,6 +846,25 @@ impl<SE: ShellExtensions> builtins::Builtin<SE> for InvokeCommand {
             }
         }
     }
+}
+
+/// Call the host callback `name` with `arguments` (JSON), reporting
+/// `callback_start` and `callback_end` trace events in the CPython and QuickJS
+/// guests' shape, with `traced` as callback_start's context.
+pub(crate) fn call_host(name: &str, arguments: String, traced: &str) -> Result<String, String> {
+    report_trace(
+        0,
+        &serde_json::json!({ "type": "callback_start", "name": name }).to_string(),
+        traced,
+    );
+    // Sync builtin, async import: park on the call with waitable-set.wait.
+    let outcome = wit_bindgen::block_on(invoke(name.to_owned(), arguments));
+    let end = match &outcome {
+        Ok(_) => serde_json::json!({ "type": "callback_end", "name": name }),
+        Err(e) => serde_json::json!({ "type": "callback_end", "name": name, "error": e }),
+    };
+    report_trace(0, &end.to_string(), "");
+    outcome
 }
 
 #[cfg(test)]

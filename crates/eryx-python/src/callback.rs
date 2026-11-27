@@ -117,6 +117,10 @@ pub struct PythonCallback {
     schema: Schema,
     /// Whether this is an async Python function (coroutine function).
     is_async: bool,
+    /// Whether this is a command callback (see [`eryx::CommandCallback`]):
+    /// called as `fn(args, stdin)`, returning its stdout, stderr and exit
+    /// code.
+    command: bool,
 }
 
 impl std::fmt::Debug for PythonCallback {
@@ -126,6 +130,7 @@ impl std::fmt::Debug for PythonCallback {
             .field("description", &self.description)
             .field("schema", &self.schema)
             .field("is_async", &self.is_async)
+            .field("command", &self.command)
             .field("callable", &"<Python callable>")
             .finish()
     }
@@ -139,6 +144,7 @@ impl PythonCallback {
         callable: Py<PyAny>,
         schema: Schema,
         is_async: bool,
+        command: bool,
     ) -> Self {
         Self {
             name,
@@ -146,6 +152,7 @@ impl PythonCallback {
             callable,
             schema,
             is_async,
+            command,
         }
     }
 }
@@ -160,6 +167,9 @@ impl Callback for PythonCallback {
     }
 
     fn parameters_schema(&self) -> Schema {
+        if self.command {
+            return eryx::command_schema();
+        }
         self.schema.clone()
     }
 
@@ -170,6 +180,9 @@ impl Callback for PythonCallback {
         // Clone the Py<PyAny> by acquiring the GIL briefly
         let callable = Python::attach(|py| self.callable.clone_ref(py));
         let is_async = self.is_async;
+        if self.command {
+            return Box::pin(invoke_command(callable, is_async, args));
+        }
 
         Box::pin(async move {
             // Use spawn_blocking to avoid blocking the tokio runtime while holding the GIL.
@@ -215,6 +228,91 @@ impl Callback for PythonCallback {
             .map_err(|e| CallbackError::ExecutionFailed(format!("Callback task failed: {e}")))?
         })
     }
+}
+
+/// Run a command callback: `callable(args, stdin)`, whose result is a dict
+/// with optional `stdout`, `stderr` (bytes or str) and `exit_code`, or a
+/// `subprocess.CompletedProcess`.
+async fn invoke_command(
+    callable: Py<PyAny>,
+    is_async: bool,
+    args: Value,
+) -> Result<Value, CallbackError> {
+    let input = eryx::CommandInput::from_value(args)?;
+    let output = tokio::task::spawn_blocking(move || {
+        Python::attach(|py| {
+            let stdin = pyo3::types::PyBytes::new(py, &input.stdin);
+            let result = callable
+                .call1(py, (input.args, stdin))
+                .map_err(|e| format_python_error(py, e))?;
+            let result = if is_async {
+                run_coroutine(py, result.bind(py))?
+            } else {
+                result
+            };
+            command_output(result.bind(py))
+        })
+    })
+    .await
+    .map_err(|e| CallbackError::ExecutionFailed(format!("Callback task failed: {e}")))??;
+    output.into_value()
+}
+
+/// What a command callback returned, as a [`eryx::CommandOutput`].
+fn command_output(result: &Bound<'_, PyAny>) -> Result<eryx::CommandOutput, CallbackError> {
+    let bad = |what: String| {
+        CallbackError::ExecutionFailed(format!(
+            "a command callback returns a dict with stdout, stderr and exit_code, \
+             or a subprocess.CompletedProcess: {what}"
+        ))
+    };
+    let bytes = |value: Option<Bound<'_, PyAny>>, key: &str| -> Result<Vec<u8>, CallbackError> {
+        match value {
+            None => Ok(Vec::new()),
+            Some(v) if v.is_none() => Ok(Vec::new()),
+            Some(v) => match v.extract::<Vec<u8>>() {
+                Ok(b) if !v.is_instance_of::<pyo3::types::PyString>() => Ok(b),
+                _ => v
+                    .extract::<String>()
+                    .map(String::into_bytes)
+                    .map_err(|_| bad(format!("{key} must be bytes or str"))),
+            },
+        }
+    };
+    let code = |value: Option<Bound<'_, PyAny>>, key: &str| -> Result<i32, CallbackError> {
+        value
+            .map_or(Ok(0), |v| v.extract::<i32>())
+            .map_err(|_| bad(format!("{key} must be an int")))
+    };
+    if let Ok(dict) = result.cast::<PyDict>() {
+        for key in dict.keys() {
+            let key = key.to_string();
+            if !matches!(key.as_str(), "stdout" | "stderr" | "exit_code") {
+                return Err(bad(format!("unknown key {key:?}")));
+            }
+        }
+        let get = |key: &str| dict.get_item(key).ok().flatten();
+        return Ok(eryx::CommandOutput {
+            stdout: bytes(get("stdout"), "stdout")?,
+            stderr: bytes(get("stderr"), "stderr")?,
+            exit_code: code(get("exit_code"), "exit_code")?,
+        });
+    }
+    if result.hasattr("returncode").unwrap_or(false) {
+        let get = |key: &str| result.getattr(key).ok();
+        return Ok(eryx::CommandOutput {
+            stdout: bytes(get("stdout"), "stdout")?,
+            stderr: bytes(get("stderr"), "stderr")?,
+            exit_code: code(get("returncode"), "returncode")?,
+        });
+    }
+    Err(bad(format!(
+        "got {}",
+        result
+            .get_type()
+            .name()
+            .map_or_else(|_| "?".to_owned(), |n| n.to_string())
+    )))
 }
 
 /// Run a Python coroutine to completion using asyncio.run().
@@ -357,6 +455,8 @@ struct CallbackDef {
     schema: Option<Value>,
     /// Whether this is an async Python function.
     is_async: bool,
+    /// Whether this is a command callback.
+    command: bool,
 }
 
 impl Clone for CallbackDef {
@@ -367,6 +467,7 @@ impl Clone for CallbackDef {
             callable: self.callable.clone_ref(py),
             schema: self.schema.clone(),
             is_async: self.is_async,
+            command: self.command,
         })
     }
 }
@@ -393,6 +494,11 @@ impl CallbackRegistry {
     ///     name: Optional name for the callback. Defaults to the function's __name__.
     ///     description: Optional description. Defaults to the function's __doc__ or empty string.
     ///     schema: Optional JSON Schema dict for parameters. Auto-inferred if not provided.
+    ///     command: Make it a command callback: in the shell it runs as a real
+    ///         command, called as ``fn(args, stdin)`` with its arguments as
+    ///         given (a list of str) and its stdin (bytes), returning a dict
+    ///         with ``stdout``, ``stderr`` (bytes or str) and ``exit_code``,
+    ///         or a ``subprocess.CompletedProcess``. Takes no ``schema``.
     ///
     /// Returns:
     ///     A decorator that registers the function and returns it unchanged.
@@ -408,12 +514,13 @@ impl CallbackRegistry {
     ///         async with aiohttp.ClientSession() as session:
     ///             async with session.get(url) as resp:
     ///                 return {"status": resp.status}
-    #[pyo3(signature = (name=None, description=None, schema=None))]
+    #[pyo3(signature = (name=None, description=None, schema=None, command=false))]
     fn callback(
         slf: PyRefMut<'_, Self>,
         name: Option<String>,
         description: Option<String>,
         schema: Option<Bound<'_, PyAny>>,
+        command: bool,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
 
@@ -430,6 +537,7 @@ impl CallbackRegistry {
             name,
             description,
             schema: schema_value,
+            command,
         };
 
         Ok(decorator.into_pyobject(py)?.into_any().unbind())
@@ -448,7 +556,8 @@ impl CallbackRegistry {
     ///     name: Optional name. Defaults to fn.__name__.
     ///     description: Optional description. Defaults to fn.__doc__ or empty string.
     ///     schema: Optional JSON Schema dict.
-    #[pyo3(signature = (callable, *, name=None, description=None, schema=None))]
+    ///     command: Make it a command callback, as for ``callback()``.
+    #[pyo3(signature = (callable, *, name=None, description=None, schema=None, command=false))]
     fn add(
         &mut self,
         py: Python<'_>,
@@ -456,6 +565,7 @@ impl CallbackRegistry {
         name: Option<String>,
         description: Option<String>,
         schema: Option<Bound<'_, PyAny>>,
+        command: bool,
     ) -> PyResult<()> {
         // Convert schema from Python to JSON Value if provided
         let schema_value: Option<Value> = schema
@@ -463,7 +573,7 @@ impl CallbackRegistry {
             .transpose()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid schema: {e}")))?;
 
-        let def = create_callback_def(py, callable, name, description, schema_value)?;
+        let def = create_callback_def(py, callable, name, description, schema_value, command)?;
         self.insert(def);
         Ok(())
     }
@@ -504,6 +614,7 @@ struct DecoratorHelper {
     name: Option<String>,
     description: Option<String>,
     schema: Option<Value>,
+    command: bool,
 }
 
 #[pymethods]
@@ -518,6 +629,7 @@ impl DecoratorHelper {
             self.name.clone(),
             self.description.clone(),
             self.schema.clone(),
+            self.command,
         )?;
         registry.insert(def);
 
@@ -556,6 +668,9 @@ impl CallbackRegistryIter {
             })?;
             dict.set_item("schema", py_schema)?;
         }
+        if def.command {
+            dict.set_item("command", true)?;
+        }
 
         Ok(Some(dict.into_any().unbind()))
     }
@@ -568,6 +683,7 @@ fn create_callback_def(
     name: Option<String>,
     description: Option<String>,
     schema: Option<Value>,
+    command: bool,
 ) -> PyResult<CallbackDef> {
     // Get name from function if not provided
     let name = match name {
@@ -591,6 +707,7 @@ fn create_callback_def(
 
     // Auto-infer schema if not provided
     let schema: Option<Value> = match schema {
+        _ if command => command_without_schema(&name, schema)?,
         Some(s) => Some(s),
         None => infer_schema_or_warn(py, &callable, &name)?,
     };
@@ -604,7 +721,18 @@ fn create_callback_def(
         callable,
         schema,
         is_async,
+        command,
     })
+}
+
+/// A command callback's schema is fixed: refuse one given for it.
+fn command_without_schema(name: &str, schema: Option<Value>) -> PyResult<Option<Value>> {
+    match schema {
+        Some(_) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "command callback '{name}' takes no schema: it gets its arguments as given"
+        ))),
+        None => Ok(None),
+    }
 }
 
 /// Detect if a Python callable is an async function (coroutine function).
@@ -814,6 +942,7 @@ fn callback_def_to_python_callback(py: Python<'_>, def: &CallbackDef) -> PyResul
         def.callable.clone_ref(py),
         schema,
         def.is_async,
+        def.command,
     ))
 }
 
@@ -844,8 +973,16 @@ fn dict_to_python_callback(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult
         .transpose()
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid schema: {e}")))?;
 
+    // Optional: "command"
+    let command: bool = dict
+        .get_item("command")?
+        .map(|c| c.extract())
+        .transpose()?
+        .unwrap_or(false);
+
     // If no schema provided, try to infer from callable
     let schema_value: Option<Value> = match schema_value {
+        _ if command => command_without_schema(&name, schema_value)?,
         Some(s) => Some(s),
         None => infer_schema_or_warn(py, &callable, &name)?,
     };
@@ -867,5 +1004,6 @@ fn dict_to_python_callback(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult
         callable,
         schema,
         is_async,
+        command,
     ))
 }
