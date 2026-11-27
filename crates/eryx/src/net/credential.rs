@@ -274,9 +274,14 @@ impl Credential {
             .is_none_or(|commands| commands.iter().any(|c| c == name))
     }
 
-    /// Whether a connection to `host`, `over_tls` or not, may get it.
-    pub(super) fn for_connection(&self, host: &str, over_tls: bool) -> bool {
-        (over_tls || self.plaintext) && self.hosts.iter().any(|p| host_matches_pattern(host, p))
+    /// Whether a connection to `host` on `port`, `over_tls` or not, may get
+    /// it.
+    pub(super) fn for_connection(&self, host: &str, port: u16, over_tls: bool) -> bool {
+        (over_tls || self.plaintext)
+            && self
+                .hosts
+                .iter()
+                .any(|p| host_matches_pattern(host, port, p))
     }
 
     /// Whether a request for the decoded `path` (`None` if it has none or
@@ -483,10 +488,10 @@ mod tests {
             .for_hosts(["github.com"])
             .for_paths(["/org/"])
             .for_commands(["git"]);
-        assert!(c.for_connection("GitHub.com.", true));
-        assert!(!c.for_connection("github.com", false));
-        assert!(!c.for_connection("evil.com", true));
-        assert!(c.allow_plaintext().for_connection("github.com", false));
+        assert!(c.for_connection("GitHub.com.", 443, true));
+        assert!(!c.for_connection("github.com", 443, false));
+        assert!(!c.for_connection("evil.com", 443, true));
+        assert!(c.allow_plaintext().for_connection("github.com", 443, false));
         let c = Credential::bearer("s")
             .for_hosts(["github.com"])
             .for_paths(["/org/"])

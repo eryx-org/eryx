@@ -720,7 +720,7 @@ async fn route(shared: &Shared, client: &mut TcpStream) -> Result<(), ProxyError
         .into_stream();
     let framer = shared
         .policy
-        .request_framer(host, false)
+        .request_framer(host, port, false)
         .http_only(authority)
         .with_credentials(&shared.credentials);
     let mut first = head;
@@ -740,7 +740,7 @@ async fn connect(
     let upstream = policy.connect(host, port, shared.connect_timeout).await?;
 
     if shared.allow_tunnels {
-        if policy.has_http_rules(host) {
+        if policy.has_http_rules(host, port) {
             return Err(ProxyError::Refused(format!(
                 "{host} has HTTP rules, so it can't be tunnelled"
             )));
@@ -748,7 +748,7 @@ async fn connect(
         if shared
             .credentials
             .iter()
-            .any(|c| c.for_connection(host, true))
+            .any(|c| c.for_connection(host, port, true))
         {
             return Err(ProxyError::Refused(format!(
                 "{host} has a credential, so it can't be tunnelled"
@@ -818,7 +818,7 @@ async fn connect(
         ))));
     }
     let framer = policy
-        .request_framer(host, true)
+        .request_framer(host, port, true)
         .http_only(host_header(host, port, 443))
         .with_credentials(&shared.credentials);
     pump(shared, child, upstream, framer, Vec::new()).await

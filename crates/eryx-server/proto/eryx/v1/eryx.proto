@@ -627,6 +627,10 @@ message ResourceLimits {
 // Controls which hosts Python code can connect to and sets timeouts.
 message NetworkConfig {
   // Allowed host patterns (wildcards ok). Only checked when allow_all_hosts is false.
+  // Any host pattern in this message, a ChildNetwork's or a SecretConfig's
+  // may end in ":port" ("api.example.com:443", "*:443", "[::1]:8080") to
+  // match only connections to that port; without one it matches any port.
+  // A pattern whose port isn't 1-65535 is INVALID_ARGUMENT.
   repeated string allowed_hosts = 1;
   // Blocked host patterns. Checked before allowed. Empty = Rust defaults
   // (localhost and private-range host names); a non-empty list REPLACES the
@@ -713,7 +717,8 @@ message ChildNetwork {
 
 // HTTP requests allowed to the hosts matching a pattern.
 message HttpRule {
-  // Host pattern, as in allowed_hosts.
+  // Host pattern, as in allowed_hosts, so it may name a port: the rule then
+  // applies only to connections to that port.
   string host = 1;
   // Allowed methods, compared ignoring case. Empty = any method.
   repeated string methods = 2;
@@ -744,7 +749,9 @@ message SecretConfig {
   // The real secret value. Transmitted in plaintext over the gRPC connection —
   // callers must ensure the transport is secure (e.g. localhost, mTLS, or TLS).
   string value = 2;
-  // Hosts where this secret may be sent. Empty = falls back to NetworkConfig.allowed_hosts.
+  // Hosts where this secret may be sent, as NetworkConfig.allowed_hosts
+  // patterns: "api.example.com:443" sends it only to that port. Empty =
+  // falls back to NetworkConfig.allowed_hosts.
   repeated string allowed_hosts = 3;
   // The only HTTP header the real value may be sent in, compared ignoring
   // case. Empty = any header. A request with the placeholder in another

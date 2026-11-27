@@ -202,7 +202,8 @@ impl NetConfig {
     ///     connect_timeout_ms: Timeout for establishing connections. Must be greater than zero.
     ///     io_timeout_ms: Timeout for read/write operations. Must be greater than zero.
     ///     allow_all_hosts: When true, all non-blocked hosts are allowed (allowed_hosts is ignored).
-    ///     allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com").
+    ///     allowed_hosts: List of allowed host patterns (supports wildcards like "*.example.com",
+    ///         and a ":port" suffix like "api.example.com:443" to allow only that port).
     ///     blocked_hosts: List of blocked host patterns.
     ///     blocked_networks: CIDRs (e.g. "10.0.0.0/8") that a host's resolved
     ///         addresses must not fall in. Checked after DNS, so a public name
@@ -378,7 +379,8 @@ impl NetConfig {
 
     /// Add a host pattern to the allowed list.
     ///
-    /// Patterns support wildcards: `*.example.com`, `api.*.com`.
+    /// Patterns support wildcards: `*.example.com`, `api.*.com`, and a
+    /// `:port` suffix (`api.example.com:443`) to match only that port.
     /// Turns allow_all_hosts off, so only the allowed hosts can be reached.
     ///
     /// Returns self for method chaining.

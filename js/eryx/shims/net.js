@@ -118,7 +118,9 @@ function checkTimeout(name, value) {
  *
  * Throws a TypeError if a network is not a valid CIDR, maxConnections is
  * not a non-negative integer, a timeout is not greater than zero, or
- * httpRules (the Rust crate's method, path and query rules) are given.
+ * httpRules (the Rust crate's method, path and query rules) or a host
+ * pattern with a `:port` (which the Rust crate limits to that port) are
+ * given.
  *
  * @param {import("./net.js").NetConfig | null} netConfig
  * @returns {Policy | null}
@@ -128,6 +130,13 @@ function toPolicy(netConfig) {
   // Requests aren't parsed here, so rules couldn't be enforced.
   if (netConfig.httpRules?.length) {
     throw new TypeError("httpRules are not supported by the JavaScript host");
+  }
+  // Hosts are matched without their port here, so a pattern naming one
+  // couldn't be enforced either.
+  for (const pattern of [netConfig.allowedHosts, netConfig.blockedHosts, netConfig.internalHosts].flat()) {
+    if (pattern !== undefined && hasPort(pattern)) {
+      throw new TypeError(`host pattern ${JSON.stringify(pattern)} names a port, which the JavaScript host doesn't support`);
+    }
   }
   // Copies, so changing the caller's arrays later can't change the policy.
   const list = (xs, fallback) => Object.freeze([...(xs ?? fallback)]);
@@ -177,6 +186,13 @@ function canonicalHost(host) {
     return null;
   }
 }
+
+/**
+ * Whether host pattern `pattern` ends in `:port`, as the Rust crate reads
+ * it: `[v6]:digits`, or exactly one `:` followed by digits (a bare IPv6
+ * address has more colons, and `fe80:*` is a glob, not a port).
+ */
+const hasPort = (pattern) => /^(\[[^\]]*\]|[^:]*):\d+$/.test(pattern);
 
 /** Glob match with `*` wildcards, case-insensitive (like the Rust matcher). */
 function hostMatches(host, pattern) {
