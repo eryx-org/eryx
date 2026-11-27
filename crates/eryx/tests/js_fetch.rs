@@ -371,6 +371,55 @@ async fn fetch_in_a_session_with_secrets() {
     assert!(server.requests()[1].contains(&format!("x-key: {SECRET}\r\n")));
 }
 
+/// A credential for the script reaches `fetch`'s requests to its host with
+/// all its headers, replacing the script's own copies, and the script has
+/// nothing holding them.
+#[tokio::test]
+async fn fetch_gets_credentials_for_the_script() {
+    const ACCESS: &str = "access-token-0123456789";
+    const ID: &str = "id-token-9876543210";
+    let server = Server::start().await;
+    let sandbox = server.sandbox(server.net()).build().unwrap();
+    let options = eryx::ExecuteOptions::new().with_credential(
+        eryx::Credential::headers([
+            ("Authorization", format!("Bearer {ACCESS}")),
+            ("X-Id-Token", ID.to_string()),
+        ])
+        .for_hosts([HOST])
+        .for_script(),
+    );
+    let out = sandbox
+        .execute_with(
+            r"
+            const res = await fetch('https://api.test/json', {
+                headers: { authorization: 'Bearer guest', 'x-id-token': 'guest' },
+            });
+            console.log(res.status, typeof process);
+            console.log('access-token-0123456789');
+            ",
+            &options,
+        )
+        .await
+        .unwrap()
+        .stdout_text();
+    assert!(out.starts_with("200 "), "{out}");
+    assert!(
+        !out.contains(ACCESS) && !out.contains(ID) && out.contains("[REDACTED]"),
+        "{out}"
+    );
+    let requests = server.requests();
+    let head = requests[0].to_ascii_lowercase();
+    assert_eq!(head.matches("authorization:").count(), 1, "{head}");
+    assert_eq!(head.matches("x-id-token:").count(), 1, "{head}");
+    assert!(
+        requests[0].contains(&format!("Authorization: Bearer {ACCESS}\r\n"))
+            && requests[0].contains(&format!("X-Id-Token: {ID}\r\n"))
+            && !head.contains("guest"),
+        "{}",
+        requests[0]
+    );
+}
+
 /// `fetch` takes a `URL`, and still checks it with its own parser: a URL the
 /// WHATWG parser accepts but `fetch` can't use is refused, as before.
 #[tokio::test]

@@ -4527,3 +4527,313 @@ async fn invalid_child_networks_are_rejected() {
         assert!(status.message().contains(message), "{status:?}");
     }
 }
+
+/// `network_config.header_injections` add their headers to the guest's
+/// requests to their hosts, together, replacing the guest's own copies; the
+/// guest never sees the values (masked out of the echo, scrubbed from its
+/// output). Over plain HTTP (a local server, as TLS here would need a root
+/// the request can't give) they go only with `allow_plaintext_secrets`:
+/// without it the request is refused, never sent without them.
+#[tokio::test]
+async fn header_injections_reach_the_guests_requests() {
+    use eryx_server::proto::eryx::v1::{HeaderInjection, HttpHeader, HttpRule, NetworkConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const ACCESS: &str = "grpc-access-token-0123456789";
+    const ID: &str = "grpc-id-token-9876543210";
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(2, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+
+    for allow_plaintext_secrets in [true, false] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Echo each request head, close-delimited (masking changes its length).
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let server = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut buf = [0; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await;
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).into_owned());
+                let _ = sock.write_all(&head).await;
+            }
+        });
+        let code = format!(
+            "import urllib.request\n\
+             def get(path):\n\
+             \x20   req = urllib.request.Request(f'http://127.0.0.1:{port}{{path}}', headers={{'Authorization': 'Bearer guest'}})\n\
+             \x20   try:\n\
+             \x20       return urllib.request.urlopen(req, timeout=10).read().decode()\n\
+             \x20   except Exception as e:\n\
+             \x20       return f'error: {{e}}'\n\
+             print('api:', get('/api/x'))\n\
+             print('public:', get('/public'))\n\
+             print('leak: {ACCESS} {ID}')\n"
+        );
+        let result = execute_half_closed(
+            &mut client,
+            ExecuteRequest {
+                code,
+                network_config: Some(NetworkConfig {
+                    allowed_hosts: vec!["127.0.0.1".to_string()],
+                    blocked_hosts: vec!["blocked.invalid".to_string()],
+                    allowed_networks: vec!["127.0.0.0/8".to_string()],
+                    allow_plaintext_secrets,
+                    header_injections: vec![HeaderInjection {
+                        headers: vec![
+                            HttpHeader {
+                                name: "Authorization".to_string(),
+                                value: format!("Bearer {ACCESS}"),
+                            },
+                            HttpHeader {
+                                name: "X-Id-Token".to_string(),
+                                value: ID.to_string(),
+                            },
+                        ],
+                        hosts: vec![format!("127.0.0.1:{port}")],
+                        http_rules: vec![HttpRule {
+                            host: "127.0.0.1".to_string(),
+                            methods: vec!["GET".to_string()],
+                            paths: vec!["/api".to_string()],
+                            ..Default::default()
+                        }],
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "{}", result.error);
+        let stdout = result.stdout.to_lossy();
+        assert!(!stdout.contains(ACCESS) && !stdout.contains(ID), "{stdout}");
+        assert!(stdout.contains("leak: [REDACTED] [REDACTED]"), "{stdout}");
+
+        server.abort();
+        let received = seen.lock().unwrap().clone();
+        let api: Vec<_> = received
+            .iter()
+            .filter(|r| r.starts_with("GET /api/x "))
+            .collect();
+        let public: Vec<_> = received
+            .iter()
+            .filter(|r| r.starts_with("GET /public "))
+            .collect();
+        assert!(
+            public.len() == 1 && public[0].contains("Bearer guest") && !public[0].contains(ID),
+            "{received:?}"
+        );
+        if allow_plaintext_secrets {
+            assert_eq!(api.len(), 1, "{received:?}");
+            assert!(
+                api[0].contains(&format!("Authorization: Bearer {ACCESS}\r\n"))
+                    && api[0].contains(&format!("X-Id-Token: {ID}\r\n"))
+                    && !api[0].contains("guest"),
+                "{}",
+                api[0]
+            );
+            assert!(
+                stdout.contains("Authorization: [REDACTED]")
+                    && stdout.contains("X-Id-Token: [REDACTED]"),
+                "{stdout}"
+            );
+        } else {
+            assert!(api.is_empty(), "{received:?}");
+            assert!(
+                stdout.contains("api: error:") && stdout.contains("only sent over TLS"),
+                "{stdout}"
+            );
+        }
+    }
+}
+
+/// A header injection that can't be sent safely is INVALID_ARGUMENT, naming
+/// it but never its values, as is one in a narrow child network.
+#[tokio::test]
+async fn invalid_header_injections_are_rejected() {
+    use eryx_server::proto::eryx::v1::{
+        ChildNetwork, HeaderInjection, HttpHeader, NetworkConfig, child_network::Mode,
+    };
+
+    let mut client = EryxClient::new(start_server().await);
+    let header = |name: &str, value: &str| HttpHeader {
+        name: name.to_string(),
+        value: value.to_string(),
+    };
+    let injection = |headers, hosts: &[&str]| HeaderInjection {
+        headers,
+        hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+        http_rules: vec![],
+    };
+    let ok = || {
+        injection(
+            vec![header("X-Key", "secret-value-1")],
+            &["api.example.com"],
+        )
+    };
+    let request = |network_config| ExecuteRequest {
+        code: "pass".to_string(),
+        network_config: Some(network_config),
+        ..Default::default()
+    };
+    let with = |injections| NetworkConfig {
+        allow_all_hosts: true,
+        header_injections: injections,
+        ..Default::default()
+    };
+    for (network_config, why) in [
+        (
+            with(vec![injection(
+                vec![header("Host", "secret-value-1")],
+                &["api.example.com"],
+            )]),
+            "Host",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1\r\nX-Evil: 1")],
+                &["api.example.com"],
+            )]),
+            "control character",
+        ),
+        (
+            with(vec![injection(
+                vec![
+                    header("X-Key", "secret-value-1"),
+                    header("x-key", "secret-value-1"),
+                ],
+                &["api.example.com"],
+            )]),
+            "twice",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1")],
+                &[],
+            )]),
+            "no hosts",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1")],
+                &["*"],
+            )]),
+            "host pattern",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1")],
+                &["api.example.com:0"],
+            )]),
+            "host pattern",
+        ),
+        (
+            with(vec![injection(vec![], &["api.example.com"])]),
+            "no headers",
+        ),
+        (
+            with(vec![
+                ok(),
+                injection(vec![header("X-Key", "")], &["api.example.com"]),
+            ]),
+            "header_injections[1]",
+        ),
+        (
+            NetworkConfig {
+                allow_all_hosts: true,
+                child_network: Some(Box::new(ChildNetwork {
+                    mode: Mode::Narrow as i32,
+                    narrow: Some(Box::new(with(vec![ok()]))),
+                })),
+                ..Default::default()
+            },
+            "header_injections",
+        ),
+    ] {
+        let status = execute_half_closed(&mut client, request(network_config))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{why}: {status:?}"
+        );
+        assert!(status.message().contains(why), "{why}: {status:?}");
+        assert!(!status.message().contains("secret-value-1"), "{status:?}");
+    }
+}
+
+/// A shell request's header injections go to its commands too, each of
+/// which then gets a proxy of its own, whose password is scrubbed from the
+/// output like the values.
+#[cfg(feature = "shell")]
+#[tokio::test]
+async fn header_injections_reach_shell_commands_with_scrubbed_proxies() {
+    use eryx_server::proto::eryx::v1::{
+        ChildNetwork, HeaderInjection, HttpHeader, Language, NetworkConfig, child_network::Mode,
+    };
+
+    let create: eryx_server::service::PoolFactory = Arc::new(|| {
+        Box::pin(async {
+            let config = PoolConfig::default().with_max_size(1);
+            Ok(Arc::new(
+                SandboxPool::new(Sandbox::embedded().shell(), config).await?,
+            ))
+        })
+    });
+    let channel = start_server_with(2, |pool| {
+        EryxService::new(pool).with_lazy_pool(eryx::Language::Shell, create)
+    })
+    .await;
+    let result = execute_request(
+        channel,
+        ExecuteRequest {
+            code: "printenv HTTPS_PROXY; echo shell-secret-value-1".to_string(),
+            language: Language::Shell as i32,
+            network_config: Some(NetworkConfig {
+                allowed_hosts: vec!["api.example.com".to_string()],
+                child_network: Some(Box::new(ChildNetwork {
+                    mode: Mode::Inherit as i32,
+                    narrow: None,
+                })),
+                header_injections: vec![HeaderInjection {
+                    headers: vec![HttpHeader {
+                        name: "X-Key".to_string(),
+                        value: "shell-secret-value-1".to_string(),
+                    }],
+                    hosts: vec!["api.example.com".to_string()],
+                    http_rules: vec![],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{result:?}");
+    let stdout = result.stdout.to_lossy();
+    assert!(
+        stdout.starts_with("http://[REDACTED]@127.0.0.1:") && stdout.ends_with("\n[REDACTED]\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("eryx:"), "{stdout}");
+}

@@ -94,10 +94,14 @@ message ExecuteRequest {
   // Placeholder values are scrubbed from stdout/stderr by default.
   repeated SecretConfig secrets = 9;
 
-  // Disable placeholder scrubbing on stdout. Default: scrubbing is ON when secrets are present.
+  // Disable placeholder scrubbing on stdout. Default: scrubbing is ON when secrets
+  // or network_config.header_injections are present (their values are
+  // scrubbed too).
   bool disable_stdout_scrub = 10;
 
-  // Disable placeholder scrubbing on stderr. Default: scrubbing is ON when secrets are present.
+  // Disable placeholder scrubbing on stderr. Default: scrubbing is ON when secrets
+  // or network_config.header_injections are present (their values are
+  // scrubbed too).
   bool disable_stderr_scrub = 11;
 
   // Name of the variable captured from the script and returned in
@@ -643,6 +647,65 @@ message NetworkConfig {
   // Network for the shell's child processes (external commands). Absent =
   // none: children stay offline. See ChildNetwork.
   ChildNetwork child_network = 12;
+  // Headers the host adds to matching requests, which sandboxed code never
+  // sees and can't set: see HeaderInjection. A ChildNetwork's narrow config
+  // can't set them (INVALID_ARGUMENT).
+  repeated HeaderInjection header_injections = 13;
+}
+
+// Headers the host adds to every request matching `hosts` (and
+// `http_rules`): the guest's own (Python's sockets and HTTP clients,
+// JavaScript's fetch) and the shell's commands' through the child proxy.
+// The guest needs no placeholder, env var or config: code just calls the
+// URL, and the values never reach it (they're masked out of responses as
+// "[REDACTED]" and scrubbed from stdout, stderr, traces and errors).
+//
+// - Together: a matching request loses every header of these names it had
+//   (whatever their case) and gets all of `headers`, so the guest can't
+//   override them or send one without the others.
+// - Precedence: where two injections match one request and set a header in
+//   common, the first listed applies and the other doesn't at all.
+// - Where: only HTTP/1.1 over TLS the host terminates (the guest's TLS, or
+//   the child proxy's), or plain HTTP with allow_plaintext_secrets (which
+//   the server gates with --allow-plaintext-secrets). A connection to a
+//   matching host and port refuses anything else: other protocols, a
+//   request naming another host (Host header or absolute-form target),
+//   CONNECT and Upgrade (WebSockets), and over plain HTTP without
+//   allow_plaintext_secrets, a request an injection applies to. Blind
+//   tunnels (--shell-command-tunnels) to a matching host are refused.
+//   Responses on such a connection must come uncompressed (the request asks
+//   for Accept-Encoding: identity), and requests lose Range and If-Range.
+// - Redirects: the guest's client follows them itself, so each new request
+//   is matched again; a redirect to another host gets nothing.
+// - Requests network http_rules refuse are refused whole, injection or not.
+// - Secrets are substituted first; an injected header replaces any copy of
+//   it, placeholder or not.
+// - Masking only hides whole, verbatim echoes: don't inject for hosts that
+//   echo requests.
+message HeaderInjection {
+  // The headers to add: names valid HTTP tokens, set once each (ignoring
+  // case), not Host, Content-Length, Transfer-Encoding, Connection,
+  // Upgrade, TE, Trailer, Keep-Alive, Accept-Encoding or Proxy-*; values
+  // non-empty, without control characters (CR, LF, NUL). 16 KiB in all at
+  // most. At least one. Every value (and what follows a leading scheme, such
+  // as Bearer's token) is masked out of responses wherever it appears, so a
+  // short, non-secret value masks every copy of itself too.
+  repeated HttpHeader headers = 1;
+  // Host patterns the headers go to: an exact name ("api.example.com"), an
+  // IP address, or "*." and a name of two labels or more ("*.example.com",
+  // its subdomains only), each optionally with ":port" to match only that
+  // port ("api.example.com:443", "[::1]:8443"). No other "*". At least one.
+  repeated string hosts = 2;
+  // Only requests one of these matches (by host, method, path and query, as
+  // NetworkConfig.http_rules match), on top of `hosts`. Empty = every
+  // request to `hosts`.
+  repeated HttpRule http_rules = 3;
+}
+
+// One HTTP header.
+message HttpHeader {
+  string name = 1;
+  string value = 2;
 }
 
 // How a shell's child processes may reach the network. They connect through a

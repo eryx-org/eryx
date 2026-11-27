@@ -312,35 +312,84 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
 
 Alternatively, turn file scrubbing off for that sandbox (`scrub_files=False`, `.scrub_files(false)`), accepting that placeholders then persist in its files.
 
-## Credentials for Child Processes
+## Credentials
 
-A shell's commands can instead be given a
-[credential](./sandboxes.md#external-commands): a header the child proxy adds
-to their requests itself, so the sandbox never holds the secret at all. A few
-rules and limits worth knowing:
+Sandboxed code can instead be given a
+[credential](./sandboxes.md#external-commands): headers the host adds to its
+requests itself, so the sandbox never holds the secret at all, not even as a
+placeholder. A shell's commands get it through the child proxy, and with
+`for_script` so do the script's own requests (Python's sockets and HTTP
+clients, JavaScript's `fetch`). The code needs no env var or config: it just
+calls the URL.
+
+```rust,ignore
+// An access token and an ID token, which always travel together.
+let credential = Credential::headers([
+    ("Authorization", format!("Bearer {access_token}")),
+    ("X-Id-Token", id_token),
+])
+.for_hosts(["api.example.com:443"])
+.for_requests([HttpRule::new("api.example.com").with_paths(["/api/"])])
+.for_script();
+sandbox.execute_with(code, &ExecuteOptions::new().with_credential(credential)).await?;
+```
+
+Over gRPC, the same goes in `network_config.header_injections`: each a list
+of `headers`, the `hosts` they go to and optional `http_rules`, for the guest
+and every command (see [the gRPC server](./grpc-server.md#configuring-a-request)).
+A few rules and limits worth knowing:
+
+- **Together:** a request a credential applies to loses every header of its
+  names it had, whatever their case, and gets all of its headers, so the code
+  can't override them, double them or send one without the others.
+- **Scope:** `for_hosts` (required, ports allowed: `api.example.com:443`),
+  then `for_paths` and `for_requests` (methods, paths and queries, matched as
+  [HTTP rules](./networking.md#method-path-and-query-rules) match) narrow
+  it. A request the network's HTTP rules refuse is refused whole. Secrets
+  are substituted first; a header the credential sets replaces any copy,
+  placeholder or not.
+- **Redirects:** clients follow them with a new request, which is matched
+  again: a redirect to another host, or out of the credential's paths, gets
+  nothing.
 
 - **Precedence:** a credential given to one execution
   (`ExecuteOptions::with_credential`) wins over the sandbox's
   (`SandboxBuilder::with_credential`) where both apply to a request and set
-  the same header, so a per-request token overrides a sandbox-wide default.
-  Among one level's own, the first given wins.
+  a header in common, so a per-request token overrides a sandbox-wide
+  default; the other isn't applied at all, rather than in part. Among one
+  level's own (or `header_injections`), the first given wins.
+- **Only where the host can inspect:** over TLS the host does (the
+  script's, or the child proxy's), or plain HTTP with `allow_plaintext()`
+  (over gRPC, `allow_plaintext_secrets`). Anything else on a connection to
+  one of its hosts and ports is refused, never sent without the headers: a
+  plain-HTTP request it applies to, bytes that aren't an HTTP/1.1 request,
+  and a request naming another host (in `Host` or an absolute-form target).
+  Blind tunnels to its hosts are refused.
 - **Hosts:** `for_hosts` takes exact names (`api.github.com`), IP addresses,
   or `*.` and a name of two labels or more (`*.github.com`, its subdomains
-  only). Any other `*` (`*`, `*.*`, `github.com*`, `*github.com`) is refused,
-  since it could match a host the script controls, and so is `*.` and a
-  single label (`*.com`). Names are ASCII letters, digits, hyphens and dots:
-  write internationalized names in punycode (`xn--…`); a port, path or space
-  is refused rather than never matching. eryx doesn't carry the public suffix
-  list, so a wildcard under a public suffix (`*.co.uk`, `*.github.io`) is
-  accepted but matches names anyone can register: avoiding those is up to
-  you. Hosts aren't scoped by port: any port the network allows on a
+  only), each optionally with a port (`api.github.com:443`) to match only
+  that port. Any other `*` (`*`, `*.*`, `github.com*`, `*github.com`) is
+  refused, since it could match a host the script controls, and so is `*.`
+  and a single label (`*.com`). Names are ASCII letters, digits, hyphens and
+  dots: write internationalized names in punycode (`xn--…`); a path, space or
+  invalid port is refused rather than never matching. eryx doesn't carry the
+  public suffix list, so a wildcard under a public suffix (`*.co.uk`,
+  `*.github.io`) is accepted but matches names anyone can register: avoiding
+  those is up to you. Without a port, any port the network allows on a
   credential's host gets it.
+- **Headers:** names are HTTP tokens, each set once, and not `Host`,
+  `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`,
+  `Trailer`, `Keep-Alive`, `Accept-Encoding` or `Proxy-*`; values are
+  non-empty, with no control characters (CR, LF, NUL); 16 KiB in all. Errors
+  name the header, never its value.
 - **No upgrades:** a connection to a host a command's credential applies to
   refuses `Upgrade` and `CONNECT` requests, so those hosts can't be used for
   WebSockets (or `h2c` and other upgrades) by that command, and a `101`
   response ends the connection: what follows one isn't framed, so it
   couldn't be masked.
-- **Masking only hides whole, verbatim echoes.** A host that echoes request
+- **Masking only hides whole, verbatim echoes** of each value (and of what
+  follows its scheme, `Bearer`'s token or `Basic`'s payload, and the secret).
+  A host that echoes request
   headers can hand the credential back in a form masking doesn't see: re-escaped
   (JSON's `\/` for `/`), re-encoded, or in pieces (`Range` and `If-Range` are
   dropped from every request on a connection carrying a credential, but other
@@ -360,7 +409,7 @@ rules and limits worth knowing:
 3. **Combine with `NetConfig`** — Secrets require networking to be useful. Configure both together.
 4. **Use separate secrets per service** — Each secret should have its own allowed hosts list.
 5. **Don't disable scrubbing in production** — Scrubbing prevents accidental leakage through logs and output.
-6. **For child processes, prefer credentials** — a shell's commands (git, gh, curl) can authenticate with a [credential](./sandboxes.md#external-commands) the child proxy adds itself, so the sandbox never holds even the placeholder.
+6. **Prefer credentials** — a script's requests and a shell's commands (git, gh, curl) can authenticate with a [credential](#credentials) the host adds itself, so the sandbox never holds even the placeholder.
 
 ## Security Model
 

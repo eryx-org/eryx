@@ -144,11 +144,14 @@ impl ServerLimits {
     fn network_with_children(
         &self,
         mut nc: crate::proto::eryx::v1::NetworkConfig,
-    ) -> Result<(NetConfig, eryx::net::ChildNetwork), Status> {
+    ) -> Result<(NetConfig, eryx::net::ChildNetwork, Vec<eryx::Credential>), Status> {
         let child = *nc.child_network.take().unwrap_or_default();
+        let injections = std::mem::take(&mut nc.header_injections);
+        let plaintext = nc.allow_plaintext_secrets;
         let config = self.network(nc)?;
         let child = self.child_network("network_config.child_network", child)?;
-        Ok((config, child))
+        let credentials = header_injections(injections, plaintext)?;
+        Ok((config, child, credentials))
     }
 
     /// Parse a `ChildNetwork` (at `field`), its narrow config clamped to
@@ -164,8 +167,14 @@ impl ServerLimits {
             (Mode::None, None) => eryx::net::ChildNetwork::None,
             (Mode::Inherit, None) => eryx::net::ChildNetwork::Inherit,
             (Mode::Narrow, Some(narrow)) => {
-                if narrow.child_network.is_some() || narrow.allow_plaintext_secrets {
-                    return invalid("narrow can't set child_network or allow_plaintext_secrets");
+                if narrow.child_network.is_some()
+                    || narrow.allow_plaintext_secrets
+                    || !narrow.header_injections.is_empty()
+                {
+                    return invalid(
+                        "narrow can't set child_network, allow_plaintext_secrets or \
+                         header_injections",
+                    );
                 }
                 eryx::net::ChildNetwork::Narrow(Box::new(self.network(*narrow)?))
             }
@@ -652,12 +661,12 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
             .transpose()?;
 
         // Parse network config: present = networking enabled, absent = disabled.
-        let (net_config, child_network) = match execute_req.network_config {
+        let (net_config, child_network, credentials) = match execute_req.network_config {
             Some(nc) => {
-                let (config, child) = self.limits.network_with_children(nc)?;
-                (Some(config), child)
+                let (config, child, credentials) = self.limits.network_with_children(nc)?;
+                (Some(config), child, credentials)
             }
-            None => (None, eryx::net::ChildNetwork::None),
+            None => (None, eryx::net::ChildNetwork::None, Vec::new()),
         };
         if language != eryx::Language::Shell
             && !matches!(child_network, eryx::net::ChildNetwork::None)
@@ -769,7 +778,8 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         // The client's data as globals, after eryx's own preamble.
         preamble.push_str(&globals_preamble);
 
-        let has_secrets = !secrets.is_empty();
+        // Header injections' values are scrubbed like secrets' placeholders.
+        let has_secrets = !secrets.is_empty() || !credentials.is_empty();
         let scrub_stdout = has_secrets && !execute_req.disable_stdout_scrub;
         let scrub_stderr = has_secrets && !execute_req.disable_stderr_scrub;
 
@@ -1005,6 +1015,7 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
                     resource_limits,
                     net_config,
                     child_network,
+                    credentials,
                     secrets,
                     preamble,
                     scrub_stdout,
@@ -1206,6 +1217,34 @@ fn http_rule(r: crate::proto::eryx::v1::HttpRule) -> HttpRule {
         .with_queries(r.queries)
 }
 
+/// Parse `network_config.header_injections` into credentials for the guest
+/// and every child, sent over plain HTTP too with `plaintext`
+/// (`allow_plaintext_secrets`).
+fn header_injections(
+    injections: Vec<crate::proto::eryx::v1::HeaderInjection>,
+    plaintext: bool,
+) -> Result<Vec<eryx::Credential>, Status> {
+    injections
+        .into_iter()
+        .enumerate()
+        .map(|(i, injection)| {
+            let mut credential =
+                eryx::Credential::headers(injection.headers.into_iter().map(|h| (h.name, h.value)))
+                    .for_hosts(injection.hosts)
+                    .for_requests(injection.http_rules.into_iter().map(http_rule))
+                    .for_script();
+            if plaintext {
+                credential = credential.allow_plaintext();
+            }
+            // The errors name headers, never their values.
+            credential.validate().map_err(|e| {
+                Status::invalid_argument(format!("network_config.header_injections[{i}]: {e}"))
+            })?;
+            Ok(credential)
+        })
+        .collect()
+}
+
 /// Parse a `NetworkConfig` CIDR list, naming the field in the error.
 fn parse_networks(field: &str, cidrs: &[String]) -> Result<Vec<eryx::IpNet>, Status> {
     cidrs
@@ -1340,6 +1379,8 @@ struct SessionParams<'a> {
     net_config: Option<NetConfig>,
     /// The network for the shell's children, under `net_config`.
     child_network: eryx::net::ChildNetwork,
+    /// The request's header injections, for the guest and its children.
+    credentials: Vec<eryx::Credential>,
     secrets: HashMap<String, SecretConfig>,
     /// The secrets' placeholders, then (for Python) the builtins and
     /// sys.path setup.
@@ -1526,6 +1567,54 @@ async fn execute_with_session(
         };
     }
 
+    // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
+    let (net_tx, _net_handler, child_net) = if let Some(config) = params.net_config.clone() {
+        let (tx, rx) = mpsc::channel::<NetRequest>(32);
+        let allowed_hosts = config.allowed_hosts().len();
+        let max_connections = config.max_connections();
+        // Validated with the request, so this is only the policy's own
+        // guarantee; the handlers spawned above stop once their channels
+        // drop.
+        let net = ConnectionManager::new(config, params.secrets.clone()).and_then(|manager| {
+            let manager = manager.with_credentials(params.credentials.iter().cloned());
+            // The shell's children share the guest's connection and byte budget.
+            let child_net = manager.child_network(params.child_network.clone())?;
+            Ok((manager, child_net))
+        });
+        let (manager, child_net) = match net {
+            Ok(net) => net,
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid network config");
+                return ExecuteResult {
+                    success: false,
+                    error: format!("invalid network config: {e}"),
+                    failure_kind: FailureKind::SandboxError as i32,
+                    ..Default::default()
+                };
+            }
+        };
+        tracing::info!(allowed_hosts, max_connections, "network handler started");
+        let handler = tokio::spawn(async move {
+            let result = run_net_handler(rx, manager).await;
+            tracing::info!("network handler stopped");
+            result
+        });
+        (Some(tx), Some(handler), child_net)
+    } else {
+        (None, None, None)
+    };
+
+    // What output and traces are scrubbed of: the secrets' placeholders,
+    // the injected headers' values, and the passwords of the child proxies
+    // holding them.
+    let scrub = session.scrub_secrets(
+        &params.secrets,
+        &params.credentials,
+        params.allowed_commands.as_deref(),
+        &params.command_options,
+        child_net.as_ref(),
+    );
+
     // Set up callback handler channels (mirroring Sandbox::execute pattern).
     let (callback_tx, callback_rx) = mpsc::channel::<CallbackRequest>(32);
     let fuel_limit = params.resource_limits.max_fuel;
@@ -1543,7 +1632,7 @@ async fn execute_with_session(
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel::<TraceRequest>();
     let trace_relay = params.enable_tracing.then(|| {
         let trace_server_tx = server_tx.clone();
-        let trace_secrets = params.secrets.clone();
+        let trace_secrets = scrub.clone();
         tokio::spawn(async move {
             while let Some(req) = trace_rx.recv().await {
                 let msg = ServerMessage {
@@ -1566,7 +1655,7 @@ async fn execute_with_session(
     let output_scrub_stdout = params.scrub_stdout;
     let output_scrub_stderr = params.scrub_stderr;
     let output_secrets = if output_scrub_stdout || output_scrub_stderr {
-        Some(params.secrets.clone())
+        Some(scrub.clone())
     } else {
         None
     };
@@ -1607,42 +1696,6 @@ async fn execute_with_session(
         output
     });
 
-    // Spawn network handler if networking is enabled (mirrors Sandbox::execute pattern).
-    let (net_tx, _net_handler, child_net) = if let Some(config) = params.net_config.clone() {
-        let (tx, rx) = mpsc::channel::<NetRequest>(32);
-        let allowed_hosts = config.allowed_hosts().len();
-        let max_connections = config.max_connections();
-        // Validated with the request, so this is only the policy's own
-        // guarantee; the handlers spawned above stop once their channels
-        // drop.
-        let net = ConnectionManager::new(config, params.secrets.clone()).and_then(|manager| {
-            // The shell's children share the guest's connection and byte budget.
-            let child_net = manager.child_network(params.child_network.clone())?;
-            Ok((manager, child_net))
-        });
-        let (manager, child_net) = match net {
-            Ok(net) => net,
-            Err(e) => {
-                tracing::warn!(error = %e, "invalid network config");
-                return ExecuteResult {
-                    success: false,
-                    error: format!("invalid network config: {e}"),
-                    failure_kind: FailureKind::SandboxError as i32,
-                    ..Default::default()
-                };
-            }
-        };
-        tracing::info!(allowed_hosts, max_connections, "network handler started");
-        let handler = tokio::spawn(async move {
-            let result = run_net_handler(rx, manager).await;
-            tracing::info!("network handler stopped");
-            result
-        });
-        (Some(tx), Some(handler), child_net)
-    } else {
-        (None, None, None)
-    };
-
     let mut builder = session
         .execute(params.code)
         .with_preamble(params.preamble.as_str())
@@ -1668,6 +1721,9 @@ async fn execute_with_session(
     }
     for (name, options) in &params.command_options {
         builder = builder.with_command_options(name, options.clone());
+    }
+    for credential in &params.credentials {
+        builder = builder.with_credential(credential.clone());
     }
     let exec_result = builder.run().await;
 
@@ -1696,12 +1752,12 @@ async fn execute_with_session(
             Err(failed) => failed.output_truncated(),
         };
     let stdout = if params.scrub_stdout {
-        scrub_placeholders_bytes(&output.stdout, &params.secrets)
+        scrub_placeholders_bytes(&output.stdout, &scrub)
     } else {
         output.stdout
     };
     let stderr = if params.scrub_stderr {
-        scrub_placeholders_bytes(&output.stderr, &params.secrets)
+        scrub_placeholders_bytes(&output.stderr, &scrub)
     } else {
         output.stderr
     };
@@ -1803,11 +1859,11 @@ async fn execute_with_session(
                 (
                     exec_output
                         .result
-                        .map(|r| scrub_placeholders(&r, &params.secrets))
+                        .map(|r| scrub_placeholders(&r, &scrub))
                         .unwrap_or_default(),
                     exec_output
                         .result_error
-                        .map(|e| scrub_placeholders(&e, &params.secrets))
+                        .map(|e| scrub_placeholders(&e, &scrub))
                         .unwrap_or_default(),
                 )
             } else {
@@ -1866,7 +1922,7 @@ async fn execute_with_session(
             let error = if failure_kind == FailureKind::ScriptFailed {
                 String::new()
             } else {
-                scrub_placeholders(&e.to_string(), &params.secrets)
+                scrub_placeholders(&e.to_string(), &scrub)
             };
             ExecuteResult {
                 success: false,

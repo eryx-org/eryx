@@ -2971,6 +2971,51 @@ impl Executor {
         &self.credentials
     }
 
+    /// What an execution's output and traces are scrubbed of: `secrets`'
+    /// placeholders, the values of the credentials it may use (this
+    /// executor's and `extra`, the execution's own), in case one gets there
+    /// some way response masking misses, and the passwords of the child
+    /// proxies holding them (from `child_net`, the execution's): just those
+    /// of the commands the execution (`allowed`, `command_options`) may give
+    /// a credential to.
+    pub(crate) fn scrub_secrets(
+        &self,
+        secrets: &HashMap<String, crate::secrets::SecretConfig>,
+        extra: &[crate::net::Credential],
+        allowed: Option<&[String]>,
+        command_options: &HashMap<String, crate::process::CommandOptions>,
+        child_net: Option<&crate::net::ChildNetPolicy>,
+    ) -> HashMap<String, crate::secrets::SecretConfig> {
+        let mut scrubbed = secrets.clone();
+        let credentials: Vec<&crate::net::Credential> = self
+            .credentials()
+            .iter()
+            .map(|c| &**c)
+            .chain(extra)
+            .collect();
+        // The commands that may get a proxy of their own with a password.
+        let names = self
+            .commands()
+            .credentialed_names(allowed, command_options, &credentials);
+        let passwords = child_net.into_iter().flat_map(|net| {
+            names
+                .iter()
+                .flat_map(move |name| net.proxy_sensitive_values(name))
+        });
+        let values = credentials
+            .iter()
+            .flat_map(|c| c.sensitive_values())
+            .chain(passwords);
+        for (i, value) in values.enumerate() {
+            // Not a name a secret can have (names are env var names).
+            scrubbed.insert(
+                format!("eryx credential {i}"),
+                crate::secrets::SecretConfig::scrub_only(value),
+            );
+        }
+        scrubbed
+    }
+
     /// Get or create the global shared wasmtime Engine.
     ///
     /// The Engine is thread-safe and automatically shared across all `Executor`

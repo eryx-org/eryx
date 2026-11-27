@@ -745,11 +745,7 @@ async fn connect(
                 "{host} has HTTP rules, so it can't be tunnelled"
             )));
         }
-        if shared
-            .credentials
-            .iter()
-            .any(|c| c.for_connection(host, port, true))
-        {
+        if shared.credentials.iter().any(|c| c.for_host(host, port)) {
             return Err(ProxyError::Refused(format!(
                 "{host} has a credential, so it can't be tunnelled"
             )));
@@ -1618,7 +1614,9 @@ mod tests {
     }
 
     /// A credential goes only to its hosts and paths, over TLS (unless it
-    /// allows plaintext): other requests through the same proxy don't get it.
+    /// allows plaintext): other requests through the same proxy don't get
+    /// it, and a plain-HTTP request it applies to is refused rather than
+    /// sent without it.
     #[tokio::test]
     async fn credentials_stay_on_their_hosts_paths_and_transport() {
         let (port, cert, seen) = upstream(true).await;
@@ -1645,17 +1643,20 @@ mod tests {
             assert_eq!(received(&seen).contains(TOKEN), injected, "{host}{path}");
         }
 
-        // Plain HTTP doesn't get it.
+        // Plain HTTP doesn't get it: a request it applies to is refused,
+        // others go.
         let (port, _, seen) = upstream(false).await;
-        let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
         use base64::Engine as _;
         let auth = base64::prelude::BASE64_STANDARD.encode(proxy.userinfo().unwrap());
-        let request = format!(
-            "GET http://api.test:{port}/org/repo HTTP/1.1\r\nHost: api.test:{port}\r\n\
-             Proxy-Authorization: Basic {auth}\r\nConnection: close\r\n\r\n"
-        );
-        let response = exchange(&mut stream, request.as_bytes()).await;
-        assert!(response.contains(" 200 OK"), "{response}");
+        for (path, status) in [("/org/repo", " 403 "), ("/other", " 200 OK")] {
+            let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+            let request = format!(
+                "GET http://api.test:{port}{path} HTTP/1.1\r\nHost: api.test:{port}\r\n\
+                 Proxy-Authorization: Basic {auth}\r\nConnection: close\r\n\r\n"
+            );
+            let response = exchange(&mut stream, request.as_bytes()).await;
+            assert!(response.contains(status), "{path}: {response}");
+        }
         assert!(!received(&seen).contains(TOKEN));
         assert!(!received(&seen).contains("Proxy-Authorization"));
     }

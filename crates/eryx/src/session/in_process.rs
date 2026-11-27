@@ -385,8 +385,11 @@ async fn run_code(
     let (net_tx, net_handler, child_net) = match sandbox.net_config() {
         Some(config) => {
             let (tx, rx) = mpsc::channel::<NetRequest>(32);
+            let executor = sandbox.executor();
+            let credentials = executor.credentials().iter().map(|c| (**c).clone());
             let manager = ConnectionManager::new(config.clone(), sandbox.secrets().clone())
-                .map_err(ErrorKind::Initialization)?;
+                .map_err(ErrorKind::Initialization)?
+                .with_credentials(credentials);
             let child_net = manager
                 .child_network(sandbox.executor().child_network().clone())
                 .map_err(ErrorKind::Initialization)?;
