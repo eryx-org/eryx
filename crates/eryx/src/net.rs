@@ -523,8 +523,8 @@ impl NetConfig {
         }
     }
 
-    /// Fail if a secret has no host it could be sent to (see
-    /// [`NetConfig::secret_hosts`]), or one of its
+    /// Fail if a secret has an allowed host pattern that can't match, no host
+    /// it could be sent to (see [`NetConfig::secret_hosts`]), or one of its
     /// [HTTP rules](crate::SecretConfig::with_http_rules) can't match a
     /// request.
     ///
@@ -541,6 +541,16 @@ impl NetConfig {
         let mut secrets: Vec<_> = secrets.iter().collect();
         secrets.sort_by_key(|(name, _)| *name);
         for (name, secret) in secrets {
+            if let Some(pattern) = secret
+                .allowed_hosts
+                .iter()
+                .find(|p| !is_valid_host_pattern(p))
+            {
+                return Err(format!(
+                    "secret '{name}': allowed host {pattern:?} names no host once its trailing \
+                     dot is ignored, or has an invalid port"
+                ));
+            }
             if self.secret_hosts(secret).is_empty() {
                 return Err(format!(
                     "secret '{name}' has no allowed hosts: give it allowed_hosts, or list the \
@@ -2741,6 +2751,29 @@ mod tests {
                 "{pattern:?}"
             );
         }
+    }
+
+    #[test]
+    fn secret_hosts_with_invalid_ports_are_refused() {
+        let secret = |hosts: &[&str]| {
+            HashMap::from([(
+                "KEY".to_string(),
+                crate::secrets::SecretConfig::new(
+                    "v",
+                    hosts.iter().map(ToString::to_string).collect(),
+                ),
+            )])
+        };
+        let config = NetConfig::default();
+        let err = config
+            .check_secret_hosts(&secret(&["api.example.com:443", "api.example.com:0"]))
+            .unwrap_err();
+        assert!(err.contains("\"api.example.com:0\""), "{err}");
+        assert!(
+            config
+                .check_secret_hosts(&secret(&["api.example.com:443"]))
+                .is_ok()
+        );
     }
 
     #[test]
