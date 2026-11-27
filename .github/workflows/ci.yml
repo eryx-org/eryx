@@ -585,6 +585,7 @@ jobs:
             crates/eryx-runtime/runtime-shell.cwasm
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.wasm
             crates/eryx-runtime/coreutils.cwasm
             crates/eryx-runtime/coreutils-windows.cwasm
             crates/eryx-runtime/coreutils-macos.cwasm
@@ -595,8 +596,9 @@ jobs:
           # built for wasm32-wasip3. v4 -> v5: more async builtins (#816). v5 -> v6:
           # coreutils.cwasm carries its instance-metadata stamp (#942). v6 -> v7:
           # the guest-sources hash. v7 -> v8: the precompile example stamps
-          # coreutils.cwasm too (it never had, so v7's were unstamped).
-          key: wasm-runtime-shell-v8-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
+          # coreutils.cwasm too (it never had, so v7's were unstamped). v8 -> v9:
+          # coreutils.wasm too, which the arm64 Docker build precompiles.
+          key: wasm-runtime-shell-v9-${{ hashFiles('crates/eryx-guest-shell/**', 'crates/eryx-runtime/wit/**', 'clis/coreutils.toml', 'clis/patches/patch-uucore-wasip2.sh', 'crates/eryx-build/**', 'Cargo.toml', 'mise.toml', 'rust-toolchain.toml') }}
 
       - uses: ./.github/actions/setup-rust
         if: steps.wasm-cache.outputs.cache-hit != 'true'
@@ -657,6 +659,7 @@ jobs:
             crates/eryx-runtime/runtime-shell.cwasm
             crates/eryx-runtime/runtime-shell-windows.cwasm
             crates/eryx-runtime/runtime-shell-macos.cwasm
+            crates/eryx-runtime/coreutils.wasm
             crates/eryx-runtime/coreutils.cwasm
             crates/eryx-runtime/coreutils-windows.cwasm
             crates/eryx-runtime/coreutils-macos.cwasm
@@ -668,6 +671,7 @@ jobs:
           name: wasm-runtime-guest-shell
           path: |
             crates/eryx-runtime/runtime-shell*
+            crates/eryx-runtime/coreutils.wasm
             crates/eryx-runtime/coreutils*.cwasm
           retention-days: 1
 
@@ -2164,15 +2168,19 @@ jobs:
             exit 1
           fi
 
-  # Build Docker image for the gRPC server.
-  # Uses the pre-built runtime-python.cwasm from build-runtime-python to skip the
-  # expensive WASM precompilation step inside Docker. Only pushes on main.
-  # The Python-only server image (ERYX_LANGUAGES=python): built, never
-  # pushed, to check it still builds and to report its size, which should
-  # match the image before the JavaScript and shell guests.
+  # Build Docker images for the gRPC server, for linux/amd64 and linux/arm64,
+  # each natively on its own runner (QEMU is far too slow for these builds).
+  # amd64 uses the pre-built runtime-python.cwasm from build-runtime-python to
+  # skip the expensive WASM precompilation step inside Docker. Those cwasms are
+  # x86-64 only, so arm64 precompiles the runtime-<language>.wasm files from the
+  # same artifacts inside Docker (RUNTIME_SOURCE=default). Pull requests only
+  # build; main and release tags push each platform's image by digest, and
+  # docker-manifest tags the multi-platform image made from them.
+  # The Python-only server image (ERYX_LANGUAGES=python): reports its size,
+  # which should match the image before the JavaScript and shell guests.
   docker-python-only:
-    name: Docker (Python only)
-    runs-on: ubuntu-latest
+    name: Docker (Python only, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: [changes, build-runtime-python]
     if: >-
       needs.changes.outputs.full == 'true'
@@ -2182,6 +2190,23 @@ jobs:
       || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
+    env:
+      # Only main and release tags publish. ci.yml also runs on pushes to
+      # multi-guest (for its caches), which must build like a PR, not push.
+      PUBLISH: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            runtime-source: custom
+            cpu-features: x86-64-v2
+          # aarch64 has no psABI presets, so "baseline" is the portable setting.
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            runtime-source: default
+            cpu-features: baseline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2197,16 +2222,13 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        # Only main and release tags publish. ci.yml also runs on pushes to
-        # multi-guest (for its caches), which must build like a PR, not push.
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The same tags as the all-languages image (see the docker job), with
-      # this variant's suffix unless it gets the unsuffixed tags.
+      # For the image labels. The tags are docker-manifest's, which repeats this.
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -2221,36 +2243,57 @@ jobs:
             type=match,pattern=\d+.\d+.\d+,group=0
             type=match,pattern=\d+.\d+,group=0
 
+      # Pushing by digest needs a BuildKit builder, not the default docker driver.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: crates/eryx-server/Dockerfile
+          platforms: linux/${{ matrix.arch }}
           build-args: |
-            RUNTIME_SOURCE=custom
+            RUNTIME_SOURCE=${{ matrix.runtime-source }}
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
+            ERYX_CPU_FEATURES=${{ matrix.cpu-features }}
             ERYX_LANGUAGES=python
           # Push or load, never both: some BuildKit versions refuse the pair
-          # on the default docker driver (docker/build-push-action#727). The
-          # docker job only pushes too.
-          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
-          load: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
-          # The bare local tag is only for the size report. A push sends every
-          # tag, and a bare name means docker.io/library, which we can't push to.
-          tags: |
-            ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && 'eryx-server:python-only' || '' }}
-            ${{ steps.meta.outputs.tags }}
+          # (docker/build-push-action#727). The bare local tag is only for the
+          # size report.
+          tags: ${{ env.PUBLISH == 'true' && 'sd2k/eryx-server' || 'eryx-server:python-only' }}
+          outputs: ${{ env.PUBLISH == 'true' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
+          load: ${{ env.PUBLISH != 'true' }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Report image size
-        if: ${{ !(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
+        if: env.PUBLISH != 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           size=$(docker image inspect eryx-server:python-only | jq '.[0].Size')
-          echo "Python-only image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Python-only $ARCH image size: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Export digest
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-digest-python-only-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   docker:
-    name: Docker
-    runs-on: ubuntu-latest
+    name: Docker (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: [changes, build-runtime-python, build-runtime-javascript, build-runtime-shell, build-bundler]
     if: >-
       needs.changes.outputs.full == 'true'
@@ -2260,6 +2303,21 @@ jobs:
       || needs.changes.outputs.server == 'true'))
     permissions:
       contents: read
+    env:
+      # As in docker-python-only.
+      PUBLISH: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            runtime-source: custom
+            cpu-features: x86-64-v2
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+            runtime-source: default
+            cpu-features: baseline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2271,6 +2329,7 @@ jobs:
           name: wasm-runtime
           path: crates/
 
+      # The cwasms (amd64), or the .wasm files they're precompiled from (arm64).
       - name: Download guest runtimes
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -2282,25 +2341,20 @@ jobs:
         run: cp crates/eryx-runtime/runtime-python.cwasm crates/eryx-server/runtime-python.cwasm
 
       - name: Log in to Docker Hub
-        # Only main and release tags publish. ci.yml also runs on pushes to
-        # multi-guest (for its caches), which must build like a PR, not push.
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: sd2k
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # For the image labels. The tags are docker-manifest's, which repeats this.
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: sd2k/eryx-server
-          # The suffix, if any, is DOCKER_UNSUFFIXED_VARIANT's (see env).
           flavor: |
             suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != 'all-languages' && '-all' || '' }},onlatest=true
-          # On main: sha + branch + latest. On a release tag (eryx-v0.5.0):
-          # the version tags 0.5.0 and 0.5 (type=match strips the eryx-v prefix).
-          # latest stays tied to main and is not moved by tag builds.
           tags: |
             type=sha,prefix=
             type=ref,event=branch
@@ -2308,14 +2362,96 @@ jobs:
             type=match,pattern=\d+.\d+.\d+,group=0
             type=match,pattern=\d+.\d+,group=0
 
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
       - name: Build and push
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: crates/eryx-server/Dockerfile
+          platforms: linux/${{ matrix.arch }}
           build-args: |
-            RUNTIME_SOURCE=custom
+            RUNTIME_SOURCE=${{ matrix.runtime-source }}
             RUNTIME_CWASM=crates/eryx-server/runtime-python.cwasm
-          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
-          tags: ${{ steps.meta.outputs.tags }}
+            ERYX_CPU_FEATURES=${{ matrix.cpu-features }}
+          tags: ${{ env.PUBLISH == 'true' && 'sd2k/eryx-server' || '' }}
+          outputs: ${{ env.PUBLISH == 'true' && 'type=image,push-by-digest=true,name-canonical=true,push=true' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Export digest
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-digest-all-languages-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Tag each variant's multi-platform image, from the per-platform images the
+  # Docker jobs pushed by digest. It needs both jobs, so neither variant
+  # publishes unless every image of both built.
+  docker-manifest:
+    name: Docker manifest (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    needs: [docker, docker-python-only]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: python-only
+            suffix: -python
+          - variant: all-languages
+            suffix: -all
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: docker-digest-${{ matrix.variant }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: sd2k
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The same tags for both variants, with the variant's suffix unless
+      # DOCKER_UNSUFFIXED_VARIANT names it (see env). On main: sha + branch +
+      # latest. On a release tag (eryx-v0.5.0): the version tags 0.5.0 and 0.5
+      # (type=match strips the eryx-v prefix). latest stays tied to main and is
+      # not moved by tag builds.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: sd2k/eryx-server
+          flavor: |
+            suffix=${{ env.DOCKER_UNSUFFIXED_VARIANT != matrix.variant && matrix.suffix || '' }},onlatest=true
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=match,pattern=\d+.\d+.\d+,group=0
+            type=match,pattern=\d+.\d+,group=0
+
+      - name: Create and push the multi-platform image
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t tags < <(jq -r '.tags[] | "-t", .' <<<"$DOCKER_METADATA_OUTPUT_JSON")
+          digests=(*)
+          # One per platform.
+          [ "${#digests[@]}" -eq 2 ] || { echo "Expected 2 digests, got: ${digests[*]}"; exit 1; }
+          docker buildx imagetools create "${tags[@]}" "${digests[@]/#/sd2k/eryx-server@sha256:}"
