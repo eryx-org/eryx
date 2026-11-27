@@ -39,9 +39,9 @@ RUN mkdir -p crates/eryx-guest-python/tests/python-stdlib && \
   --strip-components=0
 
 # Build eryx-precompile and produce runtime-python.cwasm with preinit.
-# The x86-64-vN levels are x86-64 only; building this image on an arm64
-# host needs --build-arg ERYX_CPU_FEATURES=baseline, which pins the target
-# without enabling optional features (aarch64 has no psABI presets).
+# ERYX_CPU_FEATURES defaults by target: x86-64-v3 on amd64, and on arm64
+# "baseline", which pins the target without enabling optional features
+# (the x86-64-vN levels are x86-64 only; aarch64 has no psABI presets).
 #
 # The target cache mount outlives builds, and COPY keeps the build context's
 # mtimes, so sources can look older than cached artifacts built from other
@@ -50,17 +50,19 @@ RUN mkdir -p crates/eryx-guest-python/tests/python-stdlib && \
 # cache id: they build different packages with different features. The mount
 # is locked so that concurrent builds (e.g. from other worktrees) can't re-link
 # a binary between cargo building it and this RUN using it.
-ARG ERYX_CPU_FEATURES=x86-64-v3
+ARG ERYX_CPU_FEATURES
+ARG TARGETARCH
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
-  find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
+  cpu="${ERYX_CPU_FEATURES:-$([ "$TARGETARCH" = arm64 ] && echo baseline || echo x86-64-v3)}" \
+  && find Cargo.toml Cargo.lock crates -type f -exec touch {} + \
   && ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/runtime-python.wasm \
   --language python \
   --preinit \
   --stdlib crates/eryx-guest-python/tests/python-stdlib \
-  --cpu-features "${ERYX_CPU_FEATURES}" \
+  --cpu-features "$cpu" \
   --output crates/eryx-runtime/runtime-python.cwasm \
   --no-verify
 
@@ -72,13 +74,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ARG ERYX_LANGUAGES
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
   --mount=type=cache,id=eryx-precompile-target,sharing=locked,target=/build/target \
+  cpu="${ERYX_CPU_FEATURES:-$([ "$TARGETARCH" = arm64 ] && echo baseline || echo x86-64-v3)}"; \
   for lang in ${ERYX_LANGUAGES//,/ }; do \
   [ "$lang" = python ] && continue; \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   "crates/eryx-runtime/runtime-$lang.wasm" \
   --language "$lang" \
-  --cpu-features "${ERYX_CPU_FEATURES}" \
+  --cpu-features "$cpu" \
   --output "crates/eryx-runtime/runtime-$lang.cwasm" \
   --no-verify || exit 1; \
   done; \
@@ -86,7 +89,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
   ERYX_PRECOMPILE_BOOTSTRAP=1 \
   cargo run --release -p eryx-precompile -- compile \
   crates/eryx-runtime/coreutils.wasm \
-  --cpu-features "${ERYX_CPU_FEATURES}" \
+  --cpu-features "$cpu" \
   --output crates/eryx-runtime/coreutils.cwasm \
   --no-verify || exit 1;; \
   esac
