@@ -1228,9 +1228,23 @@ fn header_injections(
         .into_iter()
         .enumerate()
         .map(|(i, injection)| {
+            let field = format!("network_config.header_injections[{i}]");
+            if injection.http_rules.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "{field}.http_rules: at least one rule is required"
+                )));
+            }
+            // The rules are the scope: their hosts are the credential's,
+            // checked with its strict host syntax.
+            let mut hosts: Vec<String> = injection
+                .http_rules
+                .iter()
+                .map(|r| r.host.clone())
+                .collect();
+            hosts.dedup();
             let mut credential =
                 eryx::Credential::headers(injection.headers.into_iter().map(|h| (h.name, h.value)))
-                    .for_hosts(injection.hosts)
+                    .for_hosts(hosts)
                     .for_requests(injection.http_rules.into_iter().map(http_rule))
                     .stripping(injection.strip_headers)
                     .for_script();
@@ -1238,9 +1252,9 @@ fn header_injections(
                 credential = credential.allow_plaintext();
             }
             // The errors name headers, never their values.
-            credential.validate().map_err(|e| {
-                Status::invalid_argument(format!("network_config.header_injections[{i}]: {e}"))
-            })?;
+            credential
+                .validate()
+                .map_err(|e| Status::invalid_argument(format!("{field}: {e}")))?;
             Ok(credential)
         })
         .collect()

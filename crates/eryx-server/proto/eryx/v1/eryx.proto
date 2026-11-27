@@ -653,8 +653,7 @@ message NetworkConfig {
   repeated HeaderInjection header_injections = 13;
 }
 
-// Headers the host adds to every request matching `hosts` (and
-// `http_rules`): the guest's own (Python's sockets and HTTP clients,
+// Headers the host adds to every request one of `http_rules` matches: the guest's own (Python's sockets and HTTP clients,
 // JavaScript's fetch) and the shell's commands' through the child proxy.
 // The guest needs no placeholder, env var or config: code just calls the
 // URL, and the values never reach it (they're masked out of responses as
@@ -691,21 +690,22 @@ message HeaderInjection {
   // as Bearer's token) is masked out of responses wherever it appears, so a
   // short, non-secret value masks every copy of itself too.
   repeated HttpHeader headers = 1;
-  // Host patterns the headers go to: an exact name ("api.example.com"), an
-  // IP address, or "*." and a name of two labels or more ("*.example.com",
-  // its subdomains only), each optionally with ":port" to match only that
-  // port ("api.example.com:443", "[::1]:8443"). No other "*". At least one.
-  repeated string hosts = 2;
-  // Only requests one of these matches (by host, method, path and query, as
-  // NetworkConfig.http_rules match), on top of `hosts`. Empty = every
-  // request to `hosts`.
-  repeated HttpRule http_rules = 3;
+  // The requests the headers go to: one of these must match (by host,
+  // method, path and query, as NetworkConfig.http_rules match). A rule with
+  // only `host` set covers every request to that host. At least one. Each
+  // rule's host is stricter than elsewhere: an exact name
+  // ("api.example.com"), an IP address, or "*." and a name of two labels or
+  // more ("*.example.com", its subdomains only), each optionally with ":port"
+  // to match only that port ("api.example.com:443", "[::1]:8443"). No other
+  // "*" ("*" and "*:443" are refused), since it could match a host the guest
+  // controls.
+  repeated HttpRule http_rules = 2;
   // Header names dropped from every request this injection matches, without
   // being replaced: a header the server would act on alongside the injected
   // ones (an identity override, say), which the guest mustn't supply. Dropped
   // even where another injection's headers win. Same name rules as
   // `headers`.
-  repeated string strip_headers = 4;
+  repeated string strip_headers = 3;
 }
 
 // One HTTP header.

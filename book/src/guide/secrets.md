@@ -335,7 +335,9 @@ sandbox.execute_with(code, &ExecuteOptions::new().with_credential(credential)).a
 ```
 
 Over gRPC, the same goes in `network_config.header_injections`: each a list
-of `headers`, the `hosts` they go to and optional `http_rules`, for the guest
+of `headers`, the `http_rules` they go to (at least one; a rule naming only
+a host covers every request to it, and its host takes the strict syntax
+`for_hosts` does, below) and optional `strip_headers`, for the guest
 and every command (see [the gRPC server](./grpc-server.md#configuring-a-request)).
 A few rules and limits worth knowing:
 

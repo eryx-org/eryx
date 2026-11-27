@@ -4541,6 +4541,7 @@ async fn header_injections_reach_the_guests_requests() {
 
     const ACCESS: &str = "grpc-access-token-0123456789";
     const ID: &str = "grpc-id-token-9876543210";
+    const EVERY: &str = "grpc-every-request-55555";
     let limits = eryx_server::service::ServerLimits {
         allow_plaintext_secrets: true,
         ..Default::default()
@@ -4596,26 +4597,39 @@ async fn header_injections_reach_the_guests_requests() {
                     blocked_hosts: vec!["blocked.invalid".to_string()],
                     allowed_networks: vec!["127.0.0.0/8".to_string()],
                     allow_plaintext_secrets,
-                    header_injections: vec![HeaderInjection {
-                        headers: vec![
-                            HttpHeader {
-                                name: "Authorization".to_string(),
-                                value: format!("Bearer {ACCESS}"),
-                            },
-                            HttpHeader {
-                                name: "X-Id-Token".to_string(),
-                                value: ID.to_string(),
-                            },
-                        ],
-                        hosts: vec![format!("127.0.0.1:{port}")],
-                        strip_headers: vec!["X-Grafana-Id".to_string()],
-                        http_rules: vec![HttpRule {
-                            host: "127.0.0.1".to_string(),
-                            methods: vec!["GET".to_string()],
-                            paths: vec!["/api".to_string()],
+                    header_injections: vec![
+                        HeaderInjection {
+                            headers: vec![
+                                HttpHeader {
+                                    name: "Authorization".to_string(),
+                                    value: format!("Bearer {ACCESS}"),
+                                },
+                                HttpHeader {
+                                    name: "X-Id-Token".to_string(),
+                                    value: ID.to_string(),
+                                },
+                            ],
+                            strip_headers: vec!["X-Grafana-Id".to_string()],
+                            http_rules: vec![HttpRule {
+                                host: format!("127.0.0.1:{port}"),
+                                methods: vec!["GET".to_string()],
+                                paths: vec!["/api".to_string()],
+                                ..Default::default()
+                            }],
+                        },
+                        // A rule naming only a host covers every request to it.
+                        HeaderInjection {
+                            headers: vec![HttpHeader {
+                                name: "X-Every".to_string(),
+                                value: EVERY.to_string(),
+                            }],
+                            http_rules: vec![HttpRule {
+                                host: format!("127.0.0.1:{port}"),
+                                ..Default::default()
+                            }],
                             ..Default::default()
-                        }],
-                    }],
+                        },
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -4638,15 +4652,27 @@ async fn header_injections_reach_the_guests_requests() {
             .iter()
             .filter(|r| r.starts_with("GET /public "))
             .collect();
-        assert!(
-            public.len() == 1
-                && public[0].contains("Bearer guest")
-                && public[0].contains("guest-identity")
-                && !public[0].contains(ID),
-            "{received:?}"
-        );
         if allow_plaintext_secrets {
+            // Outside the first injection's rules: the guest's own headers
+            // stay, and only the host-wide injection is added.
+            assert!(
+                public.len() == 1
+                    && public[0].contains("Bearer guest")
+                    && public[0].contains("guest-identity")
+                    && !public[0].contains(ID),
+                "{received:?}"
+            );
+            assert!(
+                public[0].contains(&format!("X-Every: {EVERY}\r\n")),
+                "{}",
+                public[0]
+            );
             assert_eq!(api.len(), 1, "{received:?}");
+            assert!(
+                api[0].contains(&format!("X-Every: {EVERY}\r\n")),
+                "{}",
+                api[0]
+            );
             assert!(
                 api[0].contains(&format!("Authorization: Bearer {ACCESS}\r\n"))
                     && api[0].contains(&format!("X-Id-Token: {ID}\r\n"))
@@ -4661,9 +4687,14 @@ async fn header_injections_reach_the_guests_requests() {
                 "{stdout}"
             );
         } else {
-            assert!(api.is_empty(), "{received:?}");
+            // The host-wide injection covers /public too, so over plain HTTP
+            // both are refused: no request head reaches the server.
+            assert!(api.is_empty() && public.is_empty(), "{received:?}");
+            assert!(received.iter().all(String::is_empty), "{received:?}");
             assert!(
-                stdout.contains("api: error:") && stdout.contains("only sent over TLS"),
+                stdout.contains("api: error:")
+                    && stdout.contains("public: error:")
+                    && stdout.contains("only sent over TLS"),
                 "{stdout}"
             );
         }
@@ -4675,7 +4706,7 @@ async fn header_injections_reach_the_guests_requests() {
 #[tokio::test]
 async fn invalid_header_injections_are_rejected() {
     use eryx_server::proto::eryx::v1::{
-        ChildNetwork, HeaderInjection, HttpHeader, NetworkConfig, child_network::Mode,
+        ChildNetwork, HeaderInjection, HttpHeader, HttpRule, NetworkConfig, child_network::Mode,
     };
 
     let mut client = EryxClient::new(start_server().await);
@@ -4685,7 +4716,13 @@ async fn invalid_header_injections_are_rejected() {
     };
     let injection = |headers, hosts: &[&str]| HeaderInjection {
         headers,
-        hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+        http_rules: hosts
+            .iter()
+            .map(|h| HttpRule {
+                host: (*h).to_string(),
+                ..Default::default()
+            })
+            .collect(),
         ..Default::default()
     };
     let ok = || {
@@ -4734,7 +4771,21 @@ async fn invalid_header_injections_are_rejected() {
                 vec![header("X-Key", "secret-value-1")],
                 &[],
             )]),
-            "no hosts",
+            "http_rules: at least one rule",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1")],
+                &["*:443"],
+            )]),
+            "host pattern",
+        ),
+        (
+            with(vec![injection(
+                vec![header("X-Key", "secret-value-1")],
+                &["api.example.com", "*.com"],
+            )]),
+            "host pattern",
         ),
         (
             with(vec![injection(
@@ -4793,7 +4844,8 @@ async fn invalid_header_injections_are_rejected() {
 #[tokio::test]
 async fn header_injections_reach_shell_commands_with_scrubbed_proxies() {
     use eryx_server::proto::eryx::v1::{
-        ChildNetwork, HeaderInjection, HttpHeader, Language, NetworkConfig, child_network::Mode,
+        ChildNetwork, HeaderInjection, HttpHeader, HttpRule, Language, NetworkConfig,
+        child_network::Mode,
     };
 
     let create: eryx_server::service::PoolFactory = Arc::new(|| {
@@ -4824,7 +4876,10 @@ async fn header_injections_reach_shell_commands_with_scrubbed_proxies() {
                         name: "X-Key".to_string(),
                         value: "shell-secret-value-1".to_string(),
                     }],
-                    hosts: vec!["api.example.com".to_string()],
+                    http_rules: vec![HttpRule {
+                        host: "api.example.com".to_string(),
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 }],
                 ..Default::default()
