@@ -428,6 +428,12 @@ impl NetConfig {
     /// dot and IPv6 brackets. See [`HttpRule`] for how methods and paths
     /// match.
     ///
+    /// A deny rule ([`HttpRule::deny`]) refuses the requests it matches,
+    /// whatever any allow rule says. A host only deny rules match accepts
+    /// every request none of them matches (and, like any host with rules,
+    /// refuses a request whose target isn't a path or an absolute URL, or
+    /// whose path is ambiguous).
+    ///
     /// # Limitations
     ///
     /// Setting any rule stops WebSocket traffic after an `Upgrade`, `CONNECT`
@@ -523,18 +529,24 @@ impl NetConfig {
         target: &str,
     ) -> Result<(), String> {
         let host = normalize_host(host);
-        let mut rules = self
+        let rules: Vec<&HttpRule> = self
             .http_rules
             .iter()
             .filter(|r| host_matches_pattern(&host, port, &r.host))
-            .peekable();
-        if rules.peek().is_none() {
+            .collect();
+        if rules.is_empty() {
             return Ok(());
         }
-        if let Some(target) = request_target(target)
-            && rules.any(|r| r.allows(method, &target))
-        {
-            return Ok(());
+        if let Some(parsed) = request_target(target) {
+            if rules.iter().any(|r| r.deny && r.matches(method, &parsed)) {
+                return Err(format!(
+                    "request denied by HTTP rules for {host}: {method} {target}"
+                ));
+            }
+            let mut allows = rules.iter().filter(|r| !r.deny).peekable();
+            if allows.peek().is_none() || allows.any(|r| r.matches(method, &parsed)) {
+                return Ok(());
+            }
         }
         Err(format!(
             "request not allowed by HTTP rules for {host}: {method} {target}"
@@ -823,6 +835,15 @@ impl NetConfig {
 ///   parameters), an empty segment (`//`), an escaped `/` or `\`, or a
 ///   malformed escape never matches, nor does a target that isn't a path or
 ///   an absolute URL (`CONNECT`, `OPTIONS *`).
+/// - A deny rule ([`HttpRule::deny`]) refuses what it matches, and wins over
+///   every allow rule. It matches as above, except that its paths are
+///   compared ignoring ASCII case and `;` parameters (`/Admin;x/users`
+///   matches `/admin`), since some servers route paths that way, and a `*`
+///   segment matches any one whole segment: `/api/dashboards/*/permissions`
+///   matches `/api/dashboards/abc/permissions/x` but not
+///   `/api/dashboards/permissions`. (In an allow rule, `*` is just a
+///   character.) A request whose target can't be checked is refused, as
+///   with allow rules.
 ///
 /// ```
 /// use eryx::{HttpRule, NetConfig};
@@ -848,6 +869,19 @@ impl NetConfig {
 /// let check = |target| git.check_http_request_on_port("git.example.com", 443, "GET", target);
 /// assert!(check("/org/repo.git/info/refs?service=git-upload-pack").is_ok());
 /// assert!(check("/org/repo.git/info/refs?service=git-receive-pack").is_err());
+///
+/// // Reads anywhere but the admin API.
+/// let reads = NetConfig::default()
+///     .allow_host("grafana.example.com")
+///     .allow_http(HttpRule::new("grafana.example.com").with_methods(["GET"]))
+///     .allow_http(HttpRule::deny("grafana.example.com").with_paths(["/api/admin"]));
+/// let check = |method, target| {
+///     reads.check_http_request_on_port("grafana.example.com", 443, method, target)
+/// };
+/// assert!(check("GET", "/api/dashboards/uid/abc").is_ok());
+/// assert!(check("GET", "/api/admin/users").is_err());
+/// assert!(check("GET", "/API/Admin;x/users").is_err());
+/// assert!(check("POST", "/api/dashboards/db").is_err());
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRule {
@@ -855,6 +889,7 @@ pub struct HttpRule {
     methods: Vec<String>,
     paths: Vec<String>,
     queries: QueryPatterns,
+    deny: bool,
 }
 
 impl HttpRule {
@@ -868,7 +903,26 @@ impl HttpRule {
             methods: vec![],
             paths: vec![],
             queries: QueryPatterns::default(),
+            deny: false,
         }
+    }
+
+    /// A deny rule for hosts matching `host`: it refuses the requests it
+    /// matches, whatever allow rules say. It matches every request to those
+    /// hosts until narrowed, with the same methods as an allow rule; see
+    /// [`HttpRule`] for how its paths match.
+    #[must_use]
+    pub fn deny(host: impl Into<String>) -> Self {
+        Self {
+            deny: true,
+            ..Self::new(host)
+        }
+    }
+
+    /// Whether it's a deny rule; see [`HttpRule::deny`].
+    #[must_use]
+    pub fn is_deny(&self) -> bool {
+        self.deny
     }
 
     /// Only allow these methods.
@@ -932,12 +986,20 @@ impl HttpRule {
             .map_err(|e| format!("HTTP rule for {}: {e}", self.host))
     }
 
-    /// Whether this rule allows `method` on `target`.
-    fn allows(&self, method: &str, target: &RequestTarget) -> bool {
+    /// Whether this rule matches `method` on `target` by its methods, paths
+    /// and queries (not its host).
+    fn matches(&self, method: &str, target: &RequestTarget) -> bool {
         let method_ok =
             self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
-        let path_ok =
-            self.paths.is_empty() || self.paths.iter().any(|p| path_is_under(&target.path, p));
+        let path_ok = self.paths.is_empty()
+            || if self.deny {
+                let path = fold_path(&target.path);
+                self.paths
+                    .iter()
+                    .any(|p| deny_path_is_under(&path, &fold_path(p)))
+            } else {
+                self.paths.iter().any(|p| path_is_under(&target.path, p))
+            };
         method_ok && path_ok && self.queries.matches(&target.query)
     }
 }
@@ -1013,9 +1075,12 @@ impl PartialEq for QueryPatterns {
 
 impl Eq for QueryPatterns {}
 
-/// Whether a request to `host` on `port` matches one of `rules`, host included: the
-/// requests a secret's [HTTP rules](crate::SecretConfig::with_http_rules)
-/// allow it in. No rules matches any request.
+/// Whether `rules` let a request to `host` on `port` through, host
+/// included: the requests a secret's
+/// [HTTP rules](crate::SecretConfig::with_http_rules) allow it in. No deny
+/// rule may match it, and if there are allow rules, one must. No rules
+/// matches any request; once there are any, a target that can't be checked
+/// matches none.
 pub(crate) fn request_matches_rules(
     rules: &[HttpRule],
     host: &str,
@@ -1027,10 +1092,38 @@ pub(crate) fn request_matches_rules(
         return true;
     }
     request_target(target).is_some_and(|target| {
-        rules
-            .iter()
-            .any(|r| host_matches_pattern(host, port, &r.host) && r.allows(method, &target))
+        let matches =
+            |r: &HttpRule| host_matches_pattern(host, port, &r.host) && r.matches(method, &target);
+        let (deny, allow): (Vec<&HttpRule>, Vec<&HttpRule>) = rules.iter().partition(|r| r.deny);
+        !deny.into_iter().any(matches) && (allow.is_empty() || allow.into_iter().any(matches))
     })
+}
+
+/// `path` as a deny rule compares it: ASCII lowercase, without each
+/// segment's `;` parameters.
+fn fold_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| segment.split(';').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase()
+}
+
+/// [`path_is_under`], with each `*` segment of `prefix` matching any one
+/// whole segment: `/a/*/c` covers `/a/b/c` and `/a/b/c/d`, not `/a/c`.
+/// Both are folded ([`fold_path`]).
+fn deny_path_is_under(path: &str, prefix: &str) -> bool {
+    let path: Vec<&str> = path.split('/').collect();
+    let prefix: Vec<&str> = prefix.split('/').collect();
+    let last = prefix.len() - 1;
+    // A trailing `/` leaves an empty last segment: anything (even nothing,
+    // as `/a/` covers `/a/`) may follow.
+    path.len() >= prefix.len()
+        && prefix
+            .iter()
+            .zip(&path)
+            .enumerate()
+            .all(|(i, (p, s))| p == s || *p == "*" || (i == last && i > 0 && p.is_empty()))
 }
 
 /// Whether the decoded `path` is `prefix` or under it: `/a` covers `/a` and
@@ -2937,6 +3030,97 @@ mod tests {
         assert!(check(443, "DELETE", "/v1/x").is_err());
         assert!(check(443, "GET", "/v2").is_err());
         assert!(check(8443, "DELETE", "/v2").is_ok());
+    }
+
+    /// Deny rules win over allow rules, match like them but with paths
+    /// compared ignoring case and `;` parameters, and alone leave everything
+    /// else allowed.
+    #[test]
+    fn deny_rules_refuse_what_allow_rules_would_let_through() {
+        let config = NetConfig::default()
+            .allow_http(HttpRule::new("grafana.example.com").with_methods(["GET"]))
+            .allow_http(
+                HttpRule::deny("grafana.example.com")
+                    .with_paths(["/api/serviceaccounts", "/apis/secret.grafana.app/"]),
+            )
+            .allow_http(
+                HttpRule::deny("grafana.example.com")
+                    .with_methods(["get"])
+                    .with_paths(["/api/search"])
+                    .with_queries(["(.*&)?type=secret(&.*)?"]),
+            )
+            .allow_http(HttpRule::deny("deny-only.example.com").with_paths(["/admin"]))
+            .allow_http(
+                HttpRule::deny("grafana.example.com").with_paths(["/api/dashboards/*/permissions"]),
+            );
+        let check = |host, method, target| {
+            config
+                .check_http_request_on_port(host, 443, method, target)
+                .map_err(|e| e.contains("denied"))
+        };
+        let grafana = |target| check("grafana.example.com", "GET", target);
+        assert_eq!(grafana("/api/dashboards/uid/x"), Ok(()));
+        assert_eq!(grafana("/api/serviceaccounts-extra"), Ok(()));
+        assert_eq!(grafana("/api/search?query=x"), Ok(()));
+        assert_eq!(grafana("/api/dashboards/abc"), Ok(()));
+        assert_eq!(grafana("/api/dashboards/permissions"), Ok(()));
+        assert_eq!(grafana("/api/dashboards/a/b/permissions"), Ok(()));
+        assert_eq!(grafana("/api/dashboards/abc/permissionsx"), Ok(()));
+        for denied in [
+            "/api/serviceaccounts",
+            "/api/serviceaccounts/",
+            "/api/serviceaccounts/1/tokens",
+            "/API/ServiceAccounts",
+            "/api/serviceaccounts;x/1",
+            "/api/service%61ccounts",
+            "https://grafana.example.com/api/serviceaccounts",
+            "/apis/secret.grafana.app/v1/x",
+            "/api/search?type=secret",
+            "/api/search?q=1&type=secret",
+            "/api/dashboards/abc/permissions",
+            "/api/dashboards/abc/permissions/",
+            "/api/dashboards/abc/permissions/x",
+            "/API/Dashboards/abc;v=1/Permissions",
+            "/api/dashboards/*/permissions",
+        ] {
+            assert_eq!(grafana(denied), Err(true), "{denied}");
+        }
+        // Allow rules still apply; an unparsable target is refused.
+        assert_eq!(
+            check("grafana.example.com", "POST", "/api/dashboards"),
+            Err(false)
+        );
+        assert_eq!(grafana("/api/../api/serviceaccounts"), Err(false));
+        // Only deny rules: everything else is allowed, unparsable refused.
+        let deny_only = |method, target| check("deny-only.example.com", method, target);
+        assert_eq!(deny_only("DELETE", "/public"), Ok(()));
+        assert_eq!(deny_only("GET", "/admin/x"), Err(true));
+        assert_eq!(deny_only("GET", "/x/../admin"), Err(false));
+        assert_eq!(
+            deny_only("CONNECT", "deny-only.example.com:443"),
+            Err(false)
+        );
+        // Other hosts are unaffected.
+        assert_eq!(check("other.example.com", "GET", "/admin"), Ok(()));
+    }
+
+    /// A secret's deny rules keep it off the requests they match.
+    #[test]
+    fn secret_deny_rules() {
+        let rules = [
+            HttpRule::new("api.example.com").with_methods(["GET"]),
+            HttpRule::deny("api.example.com").with_paths(["/admin"]),
+        ];
+        let matches = |rules: &[HttpRule], method, target| {
+            request_matches_rules(rules, "api.example.com", 443, method, target)
+        };
+        assert!(matches(&rules, "GET", "/x"));
+        assert!(!matches(&rules, "GET", "/Admin/x"));
+        assert!(!matches(&rules, "POST", "/x"));
+        let deny_only = &rules[1..];
+        assert!(matches(deny_only, "POST", "/x"));
+        assert!(!matches(deny_only, "GET", "/admin"));
+        assert!(!matches(deny_only, "GET", "/a/../admin"));
     }
 
     #[test]

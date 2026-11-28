@@ -670,8 +670,9 @@ message NetworkConfig {
   // The server rejects a request that sets it with INVALID_ARGUMENT unless it
   // was started with --allow-plaintext-secrets.
   bool allow_plaintext_secrets = 10;
-  // Method and path rules for HTTP requests. A host matching any rule's host
-  // only accepts requests matching one of its rules; other hosts are
+  // Method and path rules for HTTP requests. A host matching any allow
+  // rule's host only accepts requests matching one of its allow rules, and
+  // no request a deny rule (HttpRule.deny) matches; other hosts are
   // unaffected. With any rule set, every request is parsed and checked
   // against the connected host and the hosts it names, ambiguous framing is
   // refused, and only HTTP/1.1 may be sent to a host with rules. See the
@@ -718,14 +719,16 @@ message HeaderInjection {
   // The headers to add: names valid HTTP tokens, set once each (ignoring
   // case), not Host, Content-Length, Transfer-Encoding, Connection,
   // Upgrade, TE, Trailer, Keep-Alive, Accept-Encoding or Proxy-*; values
-  // non-empty, without control characters (CR, LF, NUL). 16 KiB in all at
+  // non-empty, without control characters (CR, LF, NUL). 64 KiB in all at
   // most. At least one. Every value (and what follows a leading scheme, such
   // as Bearer's token) is masked out of responses wherever it appears, so a
   // short, non-secret value masks every copy of itself too.
   repeated HttpHeader headers = 1;
   // The requests the headers go to: one of these must match (by host,
-  // method, path and query, as NetworkConfig.http_rules match). A rule with
-  // only `host` set covers every request to that host. At least one. Each
+  // method, path and query, as NetworkConfig.http_rules match), and no deny
+  // rule may. A rule with only `host` set covers every request to that host.
+  // At least one allow rule; the allow rules' hosts are the hosts the
+  // injection is for. Each
   // rule's host is stricter than elsewhere: an exact name
   // ("api.example.com"), an IP address, or "*." and a name of two labels or
   // more ("*.example.com", its subdomains only), each optionally with ":port"
@@ -803,6 +806,18 @@ message HttpRule {
   // only that query; "(service=git-upload-pack)?" also matches none.
   // Empty = any query.
   repeated string queries = 4;
+  // Make this a deny rule: a request it matches (by host, methods, paths
+  // and queries, as above) is refused, whatever any other rule allows. Its
+  // paths are compared ignoring ASCII case and ";" parameters
+  // ("/API/Admin;x/users" matches "/api/admin"), since some servers route
+  // paths that way, and a "*" segment matches any one whole segment
+  // ("/api/dashboards/*/permissions" matches
+  // "/api/dashboards/abc/permissions/x"; in an allow rule "*" is just a
+  // character). A host only deny rules match accepts every request none
+  // of them matches whose target is a path or an absolute URL with an
+  // unambiguous path. In HeaderInjection.http_rules, a deny rule keeps the
+  // headers off the requests it matches.
+  bool deny = 5;
 }
 
 // A secret to inject into the sandbox environment.
@@ -829,9 +844,10 @@ message SecretConfig {
   // The only requests the real value may be sent in: a request must match
   // one of these rules (host, methods, paths and queries, matched as
   // NetworkConfig.http_rules are) as well as allowed_hosts, so a rule for
-  // a host outside allowed_hosts never matches. Empty = any
-  // request to an allowed host. A request with the placeholder that no rule
-  // matches is refused.
+  // a host outside allowed_hosts never matches, and no deny rule may match
+  // it. With only deny rules, every other request to an allowed host
+  // qualifies. Empty = any request to an allowed host. A request with the
+  // placeholder the rules don't let through is refused.
   repeated HttpRule http_rules = 5;
 }
 

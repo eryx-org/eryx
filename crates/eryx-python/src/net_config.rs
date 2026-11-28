@@ -100,6 +100,12 @@ pub struct NetConfig {
 /// `service=git-upload-pack` matches only that query, and
 /// `(service=git-upload-pack)?` also no query.
 ///
+/// A rule made with `deny=True` refuses the requests it matches, whatever
+/// other rules allow; its paths are compared ignoring ASCII case and `;`
+/// parameters, and a `*` segment matches any one whole segment
+/// (`/api/dashboards/*/permissions`). A host only deny rules match accepts
+/// every other request.
+///
 /// Example:
 ///     net = NetConfig(
 ///         allowed_hosts=["api.github.com"],
@@ -124,19 +130,27 @@ impl HttpRule {
     ///         or escapes).
     ///     queries: Allowed queries, as regular expressions matched against
     ///         the whole raw query; None or empty allows any.
+    ///     deny: Refuse the requests the rule matches instead of allowing
+    ///         them.
     ///
     /// Raises:
     ///     ValueError: If a path can't match any request, or a query
     ///         pattern isn't a valid regular expression.
     #[new]
-    #[pyo3(signature = (host, *, methods=None, paths=None, queries=None))]
+    #[pyo3(signature = (host, *, methods=None, paths=None, queries=None, deny=false))]
     fn new(
         host: String,
         methods: Option<Vec<String>>,
         paths: Option<Vec<String>>,
         queries: Option<Vec<String>>,
+        deny: bool,
     ) -> PyResult<Self> {
-        let rule = eryx::HttpRule::new(host)
+        let rule = if deny {
+            eryx::HttpRule::deny(host)
+        } else {
+            eryx::HttpRule::new(host)
+        };
+        let rule = rule
             .with_methods(methods.unwrap_or_default())
             .with_paths(paths.unwrap_or_default())
             .with_queries(queries.unwrap_or_default());
@@ -171,13 +185,20 @@ impl HttpRule {
         self.0.queries().to_vec()
     }
 
+    /// Whether it's a deny rule.
+    #[getter]
+    fn deny(&self) -> bool {
+        self.0.is_deny()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "HttpRule({:?}, methods={:?}, paths={:?}, queries={:?})",
+            "HttpRule({:?}, methods={:?}, paths={:?}, queries={:?}{})",
             self.0.host(),
             self.0.methods(),
             self.0.paths(),
-            self.0.queries()
+            self.0.queries(),
+            if self.0.is_deny() { ", deny=True" } else { "" }
         )
     }
 }

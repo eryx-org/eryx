@@ -1211,8 +1211,12 @@ const SYS_PATH_INJECT: &str = concat!(
 
 /// The [`HttpRule`] a request's `HttpRule` message describes.
 fn http_rule(r: crate::proto::eryx::v1::HttpRule) -> HttpRule {
-    HttpRule::new(r.host)
-        .with_methods(r.methods)
+    let rule = if r.deny {
+        HttpRule::deny(r.host)
+    } else {
+        HttpRule::new(r.host)
+    };
+    rule.with_methods(r.methods)
         .with_paths(r.paths)
         .with_queries(r.queries)
 }
@@ -1229,18 +1233,20 @@ fn header_injections(
         .enumerate()
         .map(|(i, injection)| {
             let field = format!("network_config.header_injections[{i}]");
-            if injection.http_rules.is_empty() {
-                return Err(Status::invalid_argument(format!(
-                    "{field}.http_rules: at least one rule is required"
-                )));
-            }
-            // The rules are the scope: their hosts are the credential's,
-            // checked with its strict host syntax.
+            // The allow rules are the scope: their hosts are the
+            // credential's, checked with its strict host syntax. Deny rules
+            // only narrow it.
             let mut hosts: Vec<String> = injection
                 .http_rules
                 .iter()
+                .filter(|r| !r.deny)
                 .map(|r| r.host.clone())
                 .collect();
+            if hosts.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "{field}.http_rules: at least one allow rule is required"
+                )));
+            }
             hosts.dedup();
             let mut credential =
                 eryx::Credential::headers(injection.headers.into_iter().map(|h| (h.name, h.value)))

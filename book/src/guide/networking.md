@@ -295,8 +295,46 @@ How requests match:
 A refused request is never sent: the write fails in the sandbox (an `OSError`
 in Python) and the connection's request can't continue.
 
+### Deny rules
+
+Allow rules can't leave a path out. To allow most of a host but not some
+endpoints, add deny rules: a request a deny rule matches is refused, whatever
+any allow rule says. This allows `GET` anywhere on a Grafana stack except its
+service account and access control APIs:
+
+```python
+config = eryx.NetConfig(
+    allowed_hosts=["grafana.example.com"],
+    http_rules=[
+        eryx.HttpRule("grafana.example.com", methods=["GET"]),
+        eryx.HttpRule(
+            "grafana.example.com",
+            paths=["/api/serviceaccounts", "/api/access-control"],
+            deny=True,
+        ),
+    ],
+)
+```
+
+From Rust, use `HttpRule::deny(host)` in place of `HttpRule::new(host)`; over
+gRPC, set `deny` on the `HttpRule`.
+
+A deny rule matches as an allow rule does, by host, methods, paths and
+queries, except that its paths are compared ignoring ASCII case and `;`
+parameters: `/API/ServiceAccounts;x/1` matches `/api/serviceaccounts`, since
+some servers route those to the same place. A `*` segment in a deny rule's
+path matches any one whole segment, such as an ID:
+`/api/dashboards/*/permissions` matches `/api/dashboards/abc/permissions` and
+anything under it, but not `/api/dashboards/permissions` or
+`/api/dashboards/a/b/permissions`. In an allow rule, `*` is just a character.
+A host only deny rules match
+accepts every request none of them matches, but, like any host with rules,
+still refuses a request whose target isn't a path or an absolute URL or whose
+path a server could resolve somewhere else, since the rules can't check it.
+
 A [secret](./secrets.md#limiting-where-a-secret-is-sent) can take the same
-rules to limit which requests its real value is substituted in.
+rules, deny rules included, to limit which requests its real value is
+substituted in.
 
 Once any rule is set, every connection's HTTP/1.1 requests are parsed and
 checked against both the connected host and every host the request names (its
