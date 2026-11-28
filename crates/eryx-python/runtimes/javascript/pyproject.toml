@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pyeryx-runtime-javascript"
 # Locked to pyeryx's version: a precompiled runtime only loads in the eryx
 # version that built it. Install it with `pip install pyeryx[javascript]`.
-version = "0.16.2"
+version = "0.16.3"
 description = "The precompiled JavaScript runtime for pyeryx, for one platform"
 readme = "README.md"
 requires-python = ">=3.10"

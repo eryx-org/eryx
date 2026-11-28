@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## `eryx-precompile` - [0.16.3](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.2...eryx-precompile-v0.16.3) - 2026-11-27
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx-build` - [0.16.3](https://github.com/eryx-org/eryx/compare/eryx-build-v0.16.2...eryx-build-v0.16.3) - 2026-11-27
+
+### Other
+- update Cargo.lock dependencies
+
+## `eryx` - [0.16.3](https://github.com/eryx-org/eryx/compare/eryx-v0.16.2...eryx-v0.16.3) - 2026-11-27
+
+### Added
+- *(eryx)* header injection, credentials the guest never sees ([#1243](https://github.com/eryx-org/eryx/pull/1243))
+- *(eryx)* let host patterns name a port ([#1238](https://github.com/eryx-org/eryx/pull/1238))
+- *(shell)* command callbacks that run as real commands ([#1244](https://github.com/eryx-org/eryx/pull/1244))
+- *(eryx-server)* per-mount write budget for writable mounts ([#1226](https://github.com/eryx-org/eryx/pull/1226))
+
+### Fixed
+- *(eryx)* give back what compiling a command freed ([#1235](https://github.com/eryx-org/eryx/pull/1235))
+- *(python)* write a command's whole output past a full pipe ([#1240](https://github.com/eryx-org/eryx/pull/1240))
+
+## `eryx-vfs` - [0.14.5](https://github.com/eryx-org/eryx/compare/eryx-vfs-v0.14.4...eryx-vfs-v0.14.5) - 2026-11-27
+
+### Added
+- *(eryx-server)* report mounted paths a run used, and observe mounts ([#1230](https://github.com/eryx-org/eryx/pull/1230))
+- *(eryx-server)* per-mount write budget for writable mounts ([#1226](https://github.com/eryx-org/eryx/pull/1226))
+
+### Fixed
+- *(eryx-vfs)* report directories' own permissions so access(W_OK) works ([#1233](https://github.com/eryx-org/eryx/pull/1233))
+
+## `eryx-runtime` - [0.16.3](https://github.com/eryx-org/eryx/compare/eryx-runtime-v0.16.2...eryx-runtime-v0.16.3) - 2026-11-27
+
+### Fixed
+- *(python)* write a command's whole output past a full pipe ([#1240](https://github.com/eryx-org/eryx/pull/1240))
+
 ## `eryx-precompile` - [0.16.2](https://github.com/eryx-org/eryx/compare/eryx-precompile-v0.16.1...eryx-precompile-v0.16.2) - 2026-11-25
 
 ### Other
