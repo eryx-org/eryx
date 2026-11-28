@@ -1556,6 +1556,60 @@ mod tests {
         assert!(response.contains("Authorization: [REDACTED]"), "{response}");
     }
 
+    /// A 20 KB token (the size of a real on-behalf-of access token) reaches
+    /// the server whole, and is masked out of the echo.
+    #[tokio::test]
+    async fn large_credentials_reach_the_server() {
+        let token = "t".repeat(20 * 1024);
+        let (port, cert, seen) = upstream(true).await;
+        let proxy = credential_proxy(
+            config(&cert),
+            &[Credential::bearer(&token).for_hosts(["api.test"])],
+            false,
+        );
+        let (stream, status) = connect_authorized(&proxy, &format!("api.test:{port}")).await;
+        assert!(status.contains(" 200 "), "{status}");
+        let mut tls = tls(&proxy, stream, "api.test").await;
+        let response = exchange(
+            &mut tls,
+            b"GET /user HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(received(&seen).contains(&format!("Authorization: Bearer {token}\r\n")));
+        assert!(response.contains(" 200 OK"), "{response}");
+        assert!(!response.contains(&token));
+    }
+
+    /// A deny rule refuses a child's request that an allow rule matches,
+    /// ignoring path case and `;` parameters, and lets the rest through.
+    #[tokio::test]
+    async fn deny_rules_apply_to_children() {
+        let (port, cert, seen) = upstream(true).await;
+        let config = config(&cert)
+            .allow_http(crate::HttpRule::new("api.test").with_methods(["GET"]))
+            .allow_http(crate::HttpRule::deny("api.test").with_paths(["/admin"]));
+        let proxy = proxy(config, ChildNetwork::Inherit, false);
+        for (path, allowed) in [
+            ("/public", true),
+            ("/admin", false),
+            ("/Admin;x/users", false),
+            ("/administrator", true),
+        ] {
+            let (stream, status) = connect_to(&proxy, &format!("api.test:{port}")).await;
+            assert!(status.contains(" 200 "), "{status}");
+            let mut tls = tls(&proxy, stream, "api.test").await;
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n");
+            let response = exchange(&mut tls, request.as_bytes()).await;
+            assert_eq!(response.contains(" 200 OK"), allowed, "{path}: {response}");
+            assert_eq!(
+                received(&seen).contains(&format!("GET {path} ")),
+                allowed,
+                "{path}"
+            );
+        }
+    }
+
     /// A proxy with credentials has a password derived from its child
     /// network's key and its command, known before it starts (so output can
     /// be scrubbed of it), different for each command and each execution,

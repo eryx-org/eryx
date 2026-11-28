@@ -335,9 +335,10 @@ sandbox.execute_with(code, &ExecuteOptions::new().with_credential(credential)).a
 ```
 
 Over gRPC, the same goes in `network_config.header_injections`: each a list
-of `headers`, the `http_rules` they go to (at least one; a rule naming only
-a host covers every request to it, and its host takes the strict syntax
-`for_hosts` does, below) and optional `strip_headers`, for the guest
+of `headers`, the `http_rules` they go to (at least one allow rule; a rule
+naming only a host covers every request to it, and its host takes the strict
+syntax `for_hosts` does, below; a [deny rule](./networking.md#deny-rules)
+keeps the headers off the requests it matches) and optional `strip_headers`, for the guest
 and every command (see [the gRPC server](./grpc-server.md#configuring-a-request)).
 A few rules and limits worth knowing:
 
@@ -387,7 +388,7 @@ A few rules and limits worth knowing:
 - **Headers:** names are HTTP tokens, each set once, and not `Host`,
   `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`,
   `Trailer`, `Keep-Alive`, `Accept-Encoding` or `Proxy-*`; values are
-  non-empty, with no control characters (CR, LF, NUL); 16 KiB in all. Errors
+  non-empty, with no control characters (CR, LF, NUL); 64 KiB in all. Errors
   name the header, never its value.
 - **No upgrades:** a connection to a host a command's credential applies to
   refuses `Upgrade` and `CONNECT` requests, so those hosts can't be used for

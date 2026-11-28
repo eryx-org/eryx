@@ -255,6 +255,9 @@ except OSError as e:
             ["page=[0-9]+"],
         )
         assert eryx.HttpRule("h").queries == []
+        assert not eryx.HttpRule("h").deny
+        denied = eryx.HttpRule("h", paths=["/admin"], deny=True)
+        assert denied.deny and "deny=True" in repr(denied)
         assert eryx.NetConfig().http_rules == []
         config = eryx.NetConfig(http_rules=[rule]).allow_http(eryx.HttpRule("example.com"))
         assert [r.host for r in config.http_rules] == ["api.github.com", "example.com"]

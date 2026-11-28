@@ -4061,6 +4061,7 @@ async fn secret_scope_limits_substitution() {
                 methods: vec!["GET".to_string()],
                 paths,
                 queries: vec!["service=git-upload-pack".to_string()],
+                ..Default::default()
             }],
         }],
         network_config: Some(NetworkConfig {
@@ -4301,6 +4302,7 @@ async fn http_rules_refuse_requests() {
             methods: vec!["GET".to_string()],
             paths,
             queries,
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -4836,6 +4838,139 @@ async fn header_injections_reach_the_guests_requests() {
     }
 }
 
+/// Deny rules refuse requests the allow rules would let through, in the
+/// network's rules (before anything is sent) and in a header injection's
+/// (which then leaves the request alone); and a 20 KB injected token, the
+/// size of a real on-behalf-of access token, reaches the server whole.
+#[tokio::test]
+async fn deny_rules_and_large_header_injections() {
+    use eryx_server::proto::eryx::v1::{HeaderInjection, HttpHeader, HttpRule, NetworkConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let token = "t".repeat(20 * 1024);
+    let limits = eryx_server::service::ServerLimits {
+        allow_plaintext_secrets: true,
+        ..Default::default()
+    };
+    let mut client = EryxClient::new(
+        start_server_with(1, |pool| EryxService::new(pool).with_limits(limits)).await,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let server = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let mut head = Vec::new();
+            let mut buf = [0; 4096];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await;
+            recorded
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&head).into_owned());
+            let _ = sock.write_all(&head).await;
+        }
+    });
+    let host = format!("127.0.0.1:{port}");
+    let rule = |deny: bool, methods: &[&str], paths: &[&str]| HttpRule {
+        host: host.clone(),
+        methods: methods.iter().map(ToString::to_string).collect(),
+        paths: paths.iter().map(ToString::to_string).collect(),
+        deny,
+        ..Default::default()
+    };
+    let code = format!(
+        "import urllib.request\n\
+         for path in ('/api/x', '/api/public', '/api/serviceaccounts/1', '/API/ServiceAccounts;x', '/api/dashboards/abc/permissions'):\n\
+         \x20   try:\n\
+         \x20       body = urllib.request.urlopen(f'http://127.0.0.1:{port}{{path}}', timeout=10).read().decode()\n\
+         \x20       print(path, 'ok', 'Bearer [REDACTED]' in body)\n\
+         \x20   except Exception as e:\n\
+         \x20       print(path, 'error', e)\n"
+    );
+    let result = execute_half_closed(
+        &mut client,
+        ExecuteRequest {
+            code,
+            network_config: Some(NetworkConfig {
+                allowed_hosts: vec!["127.0.0.1".to_string()],
+                blocked_hosts: vec!["blocked.invalid".to_string()],
+                allowed_networks: vec!["127.0.0.0/8".to_string()],
+                allow_plaintext_secrets: true,
+                http_rules: vec![
+                    rule(false, &["GET"], &[]),
+                    rule(
+                        true,
+                        &[],
+                        &["/api/serviceaccounts", "/api/dashboards/*/permissions"],
+                    ),
+                ],
+                header_injections: vec![HeaderInjection {
+                    headers: vec![HttpHeader {
+                        name: "Authorization".to_string(),
+                        value: format!("Bearer {token}"),
+                    }],
+                    http_rules: vec![
+                        rule(false, &[], &["/api"]),
+                        rule(true, &[], &["/api/public"]),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.success, "{}", result.error);
+    let stdout = result.stdout.to_lossy();
+    assert!(!stdout.contains(&token), "{stdout}");
+    assert!(stdout.contains("/api/x ok True"), "{stdout}");
+    assert!(stdout.contains("/api/public ok False"), "{stdout}");
+    assert!(stdout.contains("/api/serviceaccounts/1 error"), "{stdout}");
+    assert!(stdout.contains("/API/ServiceAccounts;x error"), "{stdout}");
+    assert!(
+        stdout.contains("/api/dashboards/abc/permissions error"),
+        "{stdout}"
+    );
+
+    server.abort();
+    let received = seen.lock().unwrap().clone();
+    let get = |path: &str| {
+        received
+            .iter()
+            .filter(|r| r.starts_with(&format!("GET {path} ")))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let api = get("/api/x");
+    assert!(
+        api.len() == 1 && api[0].contains(&format!("Authorization: Bearer {token}\r\n")),
+        "{received:?}"
+    );
+    let public = get("/api/public");
+    assert!(
+        public.len() == 1 && !public[0].contains("Authorization"),
+        "{received:?}"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|r| !r.to_ascii_lowercase().contains("serviceaccounts")
+                && !r.contains("permissions")),
+        "{received:?}"
+    );
+}
+
 /// A header injection that can't be sent safely is INVALID_ARGUMENT, naming
 /// it but never its values, as is one in a narrow child network.
 #[tokio::test]
@@ -4906,7 +5041,19 @@ async fn invalid_header_injections_are_rejected() {
                 vec![header("X-Key", "secret-value-1")],
                 &[],
             )]),
-            "http_rules: at least one rule",
+            "http_rules: at least one allow rule",
+        ),
+        (
+            with(vec![HeaderInjection {
+                headers: vec![header("X-Key", "secret-value-1")],
+                http_rules: vec![HttpRule {
+                    host: "api.example.com".to_string(),
+                    deny: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            "http_rules: at least one allow rule",
         ),
         (
             with(vec![injection(

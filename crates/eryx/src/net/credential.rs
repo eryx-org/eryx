@@ -20,7 +20,7 @@ use super::{
 const MASKED: &[u8] = b"[REDACTED]";
 
 /// The most bytes a credential's headers (names and values) may take.
-const MAX_HEADERS_LEN: usize = 16 * 1024;
+const MAX_HEADERS_LEN: usize = 64 * 1024;
 
 /// Headers a credential can't set: the ones that frame the request or route
 /// it, or that the proxy itself handles.
@@ -160,7 +160,7 @@ impl Credential {
 
     /// Several headers, each value a secret, added together or not at all
     /// (an access token and an ID token, say). Names must differ, ignoring
-    /// case, and the names and values together take at most 16 KiB. Every
+    /// case, and the names and values together take at most 64 KiB. Every
     /// value is masked out of responses wherever it appears, so a short,
     /// non-secret one (an org ID, say) masks every copy of itself too.
     #[must_use]
@@ -226,7 +226,10 @@ impl Credential {
     /// [`NetConfig::allow_http`](crate::NetConfig::allow_http) rules match.
     /// They apply on top of [`for_hosts`](Self::for_hosts) (and
     /// [`for_paths`](Self::for_paths)): a request has to be to one of its
-    /// hosts *and* match a rule. By default, every request to its hosts.
+    /// hosts *and* match a rule. A deny rule ([`HttpRule::deny`]) keeps it
+    /// off the requests it matches, whatever else matches; with only deny
+    /// rules, every other request to its hosts gets it. By default, every
+    /// request to its hosts.
     #[must_use]
     pub fn for_requests(mut self, rules: impl IntoIterator<Item = HttpRule>) -> Self {
         self.rules = rules.into_iter().collect();
@@ -329,7 +332,7 @@ impl Credential {
     /// Describes the first problem: no headers or hosts, a header name
     /// that isn't one or is reserved (`Host`, `Content-Length`,
     /// `Connection`, `Proxy-*`, ...), one set twice, an empty value or one
-    /// with a control character (CR, LF, NUL), headers over 16 KiB, a host
+    /// with a control character (CR, LF, NUL), headers over 64 KiB, a host
     /// pattern, path or rule that can't match, or no commands without the
     /// script.
     pub fn validate(&self) -> Result<(), String> {
@@ -658,7 +661,7 @@ mod tests {
                 "can't set",
             ),
             (
-                Credential::headers([("X-A", "a".repeat(16 * 1024))]),
+                Credential::headers([("X-A", "a".repeat(64 * 1024))]),
                 "over the",
             ),
             (

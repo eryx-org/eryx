@@ -479,6 +479,12 @@ class HttpRule:
     ``service=git-upload-pack`` matches only that query, and
     ``(service=git-upload-pack)?`` also no query.
 
+    A rule made with ``deny=True`` refuses the requests it matches, whatever
+    other rules allow; its paths are compared ignoring ASCII case and ``;``
+    parameters, and a ``*`` segment matches any one whole segment
+    (``/api/dashboards/*/permissions``). A host only deny rules match accepts
+    every other request.
+
     Example:
         net = NetConfig(
             allowed_hosts=["api.github.com"],
@@ -508,6 +514,11 @@ class HttpRule:
         """The allowed query patterns; empty allows any."""
         ...
 
+    @property
+    def deny(self) -> bool:
+        """Whether it's a deny rule."""
+        ...
+
     def __new__(
         cls,
         host: str,
@@ -515,6 +526,7 @@ class HttpRule:
         methods: Optional[Sequence[str]] = None,
         paths: Optional[Sequence[str]] = None,
         queries: Optional[Sequence[str]] = None,
+        deny: bool = False,
     ) -> HttpRule:
         """Create a rule for hosts matching ``host`` (same patterns as allowed_hosts).
 
@@ -526,6 +538,8 @@ class HttpRule:
                 query or escapes).
             queries: Allowed queries, as regular expressions matched against
                 the whole raw query; None or empty allows any.
+            deny: Refuse the requests the rule matches instead of allowing
+                them.
 
         Raises:
             ValueError: If a path can't match any request, or a query
