@@ -4892,7 +4892,7 @@ async fn deny_rules_and_large_header_injections() {
          for path in ('/api/x', '/api/public', '/api/serviceaccounts/1', '/API/ServiceAccounts;x', '/api/dashboards/abc/permissions'):\n\
          \x20   try:\n\
          \x20       body = urllib.request.urlopen(f'http://127.0.0.1:{port}{{path}}', timeout=10).read().decode()\n\
-         \x20       print(path, 'ok', 'Bearer [REDACTED]' in body)\n\
+         \x20       print(path, 'ok', 'Authorization: [REDACTED]' in body)\n\
          \x20   except Exception as e:\n\
          \x20       print(path, 'error', e)\n"
     );
